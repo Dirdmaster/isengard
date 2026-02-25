@@ -12,15 +12,13 @@ linters:
     - gocritic
     - misspell
     - revive
-    - exportloopref
+    - copyloopvar
 
 linters-settings:
   gocritic:
     enabled-tags:
       - diagnostic
       - style
-    disabled-checks:
-      - hugeParam
   revive:
     rules:
       - name: blank-imports
