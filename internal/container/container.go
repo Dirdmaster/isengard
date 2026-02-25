@@ -15,12 +15,13 @@ import (
 
 // Info holds the essential information about a running container.
 type Info struct {
-	ID      string
-	Name    string
-	Image   string
-	ImageID string
-	Labels  map[string]string
-	State   string
+	ID          string
+	Name        string
+	Image       string
+	ImageID     string
+	Labels      map[string]string
+	State       string
+	RepoDigests []string // from the image inspect, e.g. ["nginx@sha256:abc..."]
 }
 
 // ListRunning returns all running containers.
@@ -39,13 +40,22 @@ func ListRunning(ctx context.Context, cli *client.Client) ([]Info, error) {
 				name = name[1:]
 			}
 		}
+
+		// Get RepoDigests from the image inspect
+		var repoDigests []string
+		imgInspect, _, err := cli.ImageInspectWithRaw(ctx, c.ImageID)
+		if err == nil {
+			repoDigests = imgInspect.RepoDigests
+		}
+
 		result = append(result, Info{
-			ID:      c.ID,
-			Name:    name,
-			Image:   c.Image,
-			ImageID: c.ImageID,
-			Labels:  c.Labels,
-			State:   c.State,
+			ID:          c.ID,
+			Name:        name,
+			Image:       c.Image,
+			ImageID:     c.ImageID,
+			Labels:      c.Labels,
+			State:       c.State,
+			RepoDigests: repoDigests,
 		})
 	}
 

@@ -13,6 +13,7 @@ type Config struct {
 	Interval    time.Duration
 	RunOnce     bool
 	Cleanup     bool
+	WatchAll    bool
 	StopTimeout int
 	LogLevel    slog.Level
 }
@@ -20,9 +21,10 @@ type Config struct {
 // Load reads configuration from environment variables with sensible defaults.
 func Load() Config {
 	c := Config{
-		Interval:    5 * time.Minute,
+		Interval:    30 * time.Minute,
 		RunOnce:     false,
 		Cleanup:     true,
+		WatchAll:    true,
 		StopTimeout: 30,
 		LogLevel:    slog.LevelInfo,
 	}
@@ -40,6 +42,10 @@ func Load() Config {
 
 	if v := os.Getenv("ISENGARD_CLEANUP"); v != "" {
 		c.Cleanup, _ = strconv.ParseBool(v)
+	}
+
+	if v := os.Getenv("ISENGARD_WATCH_ALL"); v != "" {
+		c.WatchAll, _ = strconv.ParseBool(v)
 	}
 
 	if v := os.Getenv("ISENGARD_STOP_TIMEOUT"); v != "" {
