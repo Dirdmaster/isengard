@@ -1,0 +1,22 @@
+{
+  "name": "isengard-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev --port 7592",
+    "build": "nuxt generate",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "^5",
+    "@fontsource-variable/geist-mono": "^5",
+    "@phosphor-icons/vue": "^2.2.1",
+    "nuxt": "^3.17",
+    "vue": "^3.5",
+    "vue-router": "^4.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4"
+  }
+}

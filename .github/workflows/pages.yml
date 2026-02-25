@@ -1,0 +1,38 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: [www/**]
+  pull_request:
+    branches: [main]
+    paths: [www/**]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: www
+
+      - name: Build
+        run: npx nuxt generate
+        working-directory: www
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy www/.output/public --project-name=isengard

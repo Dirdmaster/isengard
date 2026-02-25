@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#1a1410"/>
+  <!-- Orthanc — four-peaked tower -->
+  <g stroke="#c8a050" fill="none" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Body -->
+    <path d="M11 27 L13 12 L16 9 L19 12 L21 27"/>
+    <!-- Four peaks -->
+    <path d="M13 12 L10 4"/>
+    <path d="M14.5 11 L13.5 6"/>
+    <path d="M17.5 11 L18.5 6"/>
+    <path d="M19 12 L22 4"/>
+  </g>
+  <!-- Eye -->
+  <ellipse cx="16" cy="15.5" rx="1.4" ry="0.7" fill="#c8a050" opacity="0.85"/>
+</svg>
