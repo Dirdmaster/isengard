@@ -8,7 +8,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
+	"github.com/muesli/termenv"
 
 	"github.com/docker-watcher/isengard/internal/config"
 	"github.com/docker-watcher/isengard/internal/docker"
@@ -17,6 +19,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	// Force color output (Docker containers have no TTY)
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
 	// Setup pretty logging via charmbracelet/log
 	logger := log.NewWithOptions(os.Stdout, log.Options{
