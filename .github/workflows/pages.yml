@@ -18,16 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      - uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm install
+        run: bun install
         working-directory: www
 
       - name: Build
-        run: npx nuxt generate
+        run: bun run build
         working-directory: www
 
       - name: Deploy to Cloudflare Pages
