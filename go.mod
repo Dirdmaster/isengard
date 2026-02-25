@@ -1,4 +1,4 @@
-module github.com/docker-watcher/isengard
+module github.com/dirdmaster/isengard
 
 go 1.25.0
 
