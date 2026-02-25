@@ -1,0 +1,158 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
+)
+
+// ContainerInfo holds the essential information about a running container.
+type ContainerInfo struct {
+	ID      string
+	Name    string
+	Image   string
+	ImageID string
+	Labels  map[string]string
+	State   string
+}
+
+// ListRunningContainers returns all running containers.
+func ListRunningContainers(ctx context.Context, cli *client.Client) ([]ContainerInfo, error) {
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: false})
+	if err != nil {
+		return nil, fmt.Errorf("listing containers: %w", err)
+	}
+
+	var result []ContainerInfo
+	for _, c := range containers {
+		name := ""
+		if len(c.Names) > 0 {
+			name = c.Names[0]
+			if len(name) > 0 && name[0] == '/' {
+				name = name[1:]
+			}
+		}
+		result = append(result, ContainerInfo{
+			ID:      c.ID,
+			Name:    name,
+			Image:   c.Image,
+			ImageID: c.ImageID,
+			Labels:  c.Labels,
+			State:   c.State,
+		})
+	}
+
+	return result, nil
+}
+
+// RecreateContainer stops, removes, and recreates a container with the same
+// config but a new image. Returns the new container ID.
+func RecreateContainer(ctx context.Context, cli *client.Client, containerID string, newImageID string, stopTimeout int) (string, error) {
+	// 1. Inspect the current container to capture full config
+	inspect, err := cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", fmt.Errorf("inspecting container: %w", err)
+	}
+
+	containerName := inspect.Name
+	if len(containerName) > 0 && containerName[0] == '/' {
+		containerName = containerName[1:]
+	}
+
+	slog.Debug("captured container config",
+		"container", containerName,
+		"old_image", inspect.Config.Image,
+	)
+
+	// 2. Stop the container
+	timeout := stopTimeout
+	stopOpts := container.StopOptions{Timeout: &timeout}
+	if err := cli.ContainerStop(ctx, containerID, stopOpts); err != nil {
+		slog.Warn("error stopping container, forcing remove", "container", containerName, "error", err)
+	}
+
+	// 3. Remove the container
+	if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
+		return "", fmt.Errorf("removing container %s: %w", containerName, err)
+	}
+
+	// 4. Build new container config from inspected state
+	config := inspect.Config
+	config.Image = newImageID
+
+	hostConfig := inspect.HostConfig
+
+	// Convert Mounts back to proper mount configuration
+	if len(inspect.Mounts) > 0 && len(hostConfig.Mounts) == 0 {
+		hostConfig.Mounts = convertMounts(inspect.Mounts)
+	}
+
+	// 5. Prepare networking config — connect to the first network during create
+	var networkingConfig *network.NetworkingConfig
+	additionalNetworks := map[string]*network.EndpointSettings{}
+
+	if inspect.NetworkSettings != nil && len(inspect.NetworkSettings.Networks) > 0 {
+		first := true
+		for netName, netSettings := range inspect.NetworkSettings.Networks {
+			epSettings := &network.EndpointSettings{
+				Aliases: netSettings.Aliases,
+			}
+			if netSettings.IPAMConfig != nil {
+				epSettings.IPAMConfig = &network.EndpointIPAMConfig{
+					IPv4Address: netSettings.IPAMConfig.IPv4Address,
+				}
+			}
+			if first {
+				networkingConfig = &network.NetworkingConfig{
+					EndpointsConfig: map[string]*network.EndpointSettings{
+						netName: epSettings,
+					},
+				}
+				first = false
+			} else {
+				additionalNetworks[netName] = epSettings
+			}
+		}
+	}
+
+	// 6. Create the new container
+	createResp, err := cli.ContainerCreate(ctx, config, hostConfig, networkingConfig, nil, containerName)
+	if err != nil {
+		return "", fmt.Errorf("creating container %s: %w", containerName, err)
+	}
+
+	// 7. Connect additional networks
+	for netName, epSettings := range additionalNetworks {
+		if err := cli.NetworkConnect(ctx, netName, createResp.ID, epSettings); err != nil {
+			slog.Warn("failed to connect network", "container", containerName, "network", netName, "error", err)
+		}
+	}
+
+	// 8. Start the new container
+	if err := cli.ContainerStart(ctx, createResp.ID, container.StartOptions{}); err != nil {
+		return "", fmt.Errorf("starting container %s: %w", containerName, err)
+	}
+
+	return createResp.ID, nil
+}
+
+// convertMounts converts docker inspect mount points back to mount.Mount format.
+func convertMounts(mountPoints []types.MountPoint) []mount.Mount {
+	var mounts []mount.Mount
+	for _, mp := range mountPoints {
+		m := mount.Mount{
+			Type:     mount.Type(mp.Type),
+			Source:   mp.Source,
+			Target:   mp.Destination,
+			ReadOnly: !mp.RW,
+		}
+		mounts = append(mounts, m)
+	}
+	return mounts
+}
