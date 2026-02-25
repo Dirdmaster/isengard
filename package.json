@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "postinstall": "lefthook install"
+  },
+  "devDependencies": {
+    "lefthook": "^1"
+  }
+}
