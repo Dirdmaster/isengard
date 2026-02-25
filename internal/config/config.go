@@ -1,4 +1,5 @@
-package main
+// Package config handles Isengard configuration from environment variables.
+package config
 
 import (
 	"log/slog"
@@ -16,8 +17,8 @@ type Config struct {
 	LogLevel    slog.Level
 }
 
-// LoadConfig reads configuration from environment variables with sensible defaults.
-func LoadConfig() Config {
+// Load reads configuration from environment variables with sensible defaults.
+func Load() Config {
 	c := Config{
 		Interval:    5 * time.Minute,
 		RunOnce:     false,

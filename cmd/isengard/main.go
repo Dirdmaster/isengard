@@ -7,10 +7,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/docker-watcher/isengard/internal/config"
+	"github.com/docker-watcher/isengard/internal/docker"
+	"github.com/docker-watcher/isengard/internal/updater"
 )
 
 func main() {
-	cfg := LoadConfig()
+	cfg := config.Load()
 
 	// Setup structured logging
 	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -26,7 +30,7 @@ func main() {
 	)
 
 	// Create Docker client
-	cli, err := NewDockerClient()
+	cli, err := docker.NewClient()
 	if err != nil {
 		slog.Error("failed to create Docker client", "error", err)
 		os.Exit(1)
@@ -44,9 +48,9 @@ func main() {
 		"containers", info.Containers,
 	)
 
-	updater := NewUpdater(cli, cfg)
+	u := updater.New(cli, cfg)
 
-	// Setup graceful shutdown
+	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -59,8 +63,8 @@ func main() {
 		cancel()
 	}()
 
-	// Run the first cycle immediately
-	runCycle(ctx, updater)
+	// Run first cycle immediately
+	runCycle(ctx, u)
 
 	if cfg.RunOnce {
 		slog.Info("run-once mode, exiting")
@@ -77,18 +81,17 @@ func main() {
 			slog.Info("shutting down")
 			return
 		case <-ticker.C:
-			runCycle(ctx, updater)
+			runCycle(ctx, u)
 		}
 	}
 }
 
-// runCycle executes a single update cycle with error handling.
-func runCycle(ctx context.Context, updater *Updater) {
+func runCycle(ctx context.Context, u *updater.Updater) {
 	if ctx.Err() != nil {
 		return
 	}
 
-	updated, err := updater.RunCycle(ctx)
+	updated, err := u.RunCycle(ctx)
 	if err != nil {
 		slog.Error("update cycle failed", "error", err)
 		return

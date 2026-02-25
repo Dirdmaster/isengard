@@ -1,4 +1,5 @@
-package main
+// Package container provides Docker container inspection, listing, and recreation.
+package container
 
 import (
 	"context"
@@ -6,14 +7,14 @@ import (
 	"log/slog"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 )
 
-// ContainerInfo holds the essential information about a running container.
-type ContainerInfo struct {
+// Info holds the essential information about a running container.
+type Info struct {
 	ID      string
 	Name    string
 	Image   string
@@ -22,14 +23,14 @@ type ContainerInfo struct {
 	State   string
 }
 
-// ListRunningContainers returns all running containers.
-func ListRunningContainers(ctx context.Context, cli *client.Client) ([]ContainerInfo, error) {
-	containers, err := cli.ContainerList(ctx, container.ListOptions{All: false})
+// ListRunning returns all running containers.
+func ListRunning(ctx context.Context, cli *client.Client) ([]Info, error) {
+	containers, err := cli.ContainerList(ctx, containertypes.ListOptions{All: false})
 	if err != nil {
 		return nil, fmt.Errorf("listing containers: %w", err)
 	}
 
-	var result []ContainerInfo
+	var result []Info
 	for _, c := range containers {
 		name := ""
 		if len(c.Names) > 0 {
@@ -38,7 +39,7 @@ func ListRunningContainers(ctx context.Context, cli *client.Client) ([]Container
 				name = name[1:]
 			}
 		}
-		result = append(result, ContainerInfo{
+		result = append(result, Info{
 			ID:      c.ID,
 			Name:    name,
 			Image:   c.Image,
@@ -51,10 +52,9 @@ func ListRunningContainers(ctx context.Context, cli *client.Client) ([]Container
 	return result, nil
 }
 
-// RecreateContainer stops, removes, and recreates a container with the same
-// config but a new image. Returns the new container ID.
-func RecreateContainer(ctx context.Context, cli *client.Client, containerID string, newImageID string, stopTimeout int) (string, error) {
-	// 1. Inspect the current container to capture full config
+// Recreate stops, removes, and recreates a container with the same config
+// but a new image. Returns the new container ID.
+func Recreate(ctx context.Context, cli *client.Client, containerID string, newImageID string, stopTimeout int) (string, error) {
 	inspect, err := cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", fmt.Errorf("inspecting container: %w", err)
@@ -70,30 +70,30 @@ func RecreateContainer(ctx context.Context, cli *client.Client, containerID stri
 		"old_image", inspect.Config.Image,
 	)
 
-	// 2. Stop the container
+	// Stop
 	timeout := stopTimeout
-	stopOpts := container.StopOptions{Timeout: &timeout}
+	stopOpts := containertypes.StopOptions{Timeout: &timeout}
 	if err := cli.ContainerStop(ctx, containerID, stopOpts); err != nil {
 		slog.Warn("error stopping container, forcing remove", "container", containerName, "error", err)
 	}
 
-	// 3. Remove the container
-	if err := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
+	// Remove
+	if err := cli.ContainerRemove(ctx, containerID, containertypes.RemoveOptions{Force: true}); err != nil {
 		return "", fmt.Errorf("removing container %s: %w", containerName, err)
 	}
 
-	// 4. Build new container config from inspected state
+	// Build new config
 	config := inspect.Config
 	config.Image = newImageID
 
 	hostConfig := inspect.HostConfig
 
-	// Convert Mounts back to proper mount configuration
+	// Convert mounts back to proper mount configuration
 	if len(inspect.Mounts) > 0 && len(hostConfig.Mounts) == 0 {
 		hostConfig.Mounts = convertMounts(inspect.Mounts)
 	}
 
-	// 5. Prepare networking config — connect to the first network during create
+	// Prepare networking — connect to the first network during create
 	var networkingConfig *network.NetworkingConfig
 	additionalNetworks := map[string]*network.EndpointSettings{}
 
@@ -121,21 +121,21 @@ func RecreateContainer(ctx context.Context, cli *client.Client, containerID stri
 		}
 	}
 
-	// 6. Create the new container
+	// Create
 	createResp, err := cli.ContainerCreate(ctx, config, hostConfig, networkingConfig, nil, containerName)
 	if err != nil {
 		return "", fmt.Errorf("creating container %s: %w", containerName, err)
 	}
 
-	// 7. Connect additional networks
+	// Connect additional networks
 	for netName, epSettings := range additionalNetworks {
 		if err := cli.NetworkConnect(ctx, netName, createResp.ID, epSettings); err != nil {
 			slog.Warn("failed to connect network", "container", containerName, "network", netName, "error", err)
 		}
 	}
 
-	// 8. Start the new container
-	if err := cli.ContainerStart(ctx, createResp.ID, container.StartOptions{}); err != nil {
+	// Start
+	if err := cli.ContainerStart(ctx, createResp.ID, containertypes.StartOptions{}); err != nil {
 		return "", fmt.Errorf("starting container %s: %w", containerName, err)
 	}
 

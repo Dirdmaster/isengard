@@ -1,4 +1,5 @@
-package main
+// Package docker provides Docker client helpers for image operations and auth.
+package docker
 
 import (
 	"context"
@@ -14,8 +15,8 @@ import (
 	"github.com/docker/docker/client"
 )
 
-// NewDockerClient creates a Docker client from environment defaults.
-func NewDockerClient() (*client.Client, error) {
+// NewClient creates a Docker client from environment defaults.
+func NewClient() (*client.Client, error) {
 	return client.NewClientWithOpts(
 		client.FromEnv,
 		client.WithAPIVersionNegotiation(),
@@ -27,9 +28,7 @@ func NewDockerClient() (*client.Client, error) {
 func PullImage(ctx context.Context, cli *client.Client, imageRef string) (string, error) {
 	opts := image.PullOptions{}
 
-	// Try to get auth for this registry
-	auth := getAuthForImage(imageRef)
-	if auth != "" {
+	if auth := authForImage(imageRef); auth != "" {
 		opts.RegistryAuth = auth
 	}
 
@@ -42,7 +41,6 @@ func PullImage(ctx context.Context, cli *client.Client, imageRef string) (string
 	// Consume the pull output (required to complete the pull)
 	_, _ = io.Copy(io.Discard, reader)
 
-	// Get the image ID after pull
 	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageRef)
 	if err != nil {
 		return "", err
@@ -51,16 +49,7 @@ func PullImage(ctx context.Context, cli *client.Client, imageRef string) (string
 	return inspect.ID, nil
 }
 
-// GetImageID returns the image ID for a given image reference.
-func GetImageID(ctx context.Context, cli *client.Client, imageRef string) (string, error) {
-	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageRef)
-	if err != nil {
-		return "", err
-	}
-	return inspect.ID, nil
-}
-
-// RemoveImage removes an image by ID, ignoring errors (image may be in use by other containers).
+// RemoveImage removes an image by ID, ignoring errors (image may be in use).
 func RemoveImage(ctx context.Context, cli *client.Client, imageID string) {
 	opts := image.RemoveOptions{PruneChildren: true}
 	_, err := cli.ImageRemove(ctx, imageID, opts)
@@ -71,7 +60,7 @@ func RemoveImage(ctx context.Context, cli *client.Client, imageID string) {
 	}
 }
 
-// dockerConfig represents the structure of ~/.docker/config.json
+// dockerConfig represents the structure of ~/.docker/config.json.
 type dockerConfig struct {
 	Auths map[string]dockerAuthEntry `json:"auths"`
 }
@@ -80,9 +69,9 @@ type dockerAuthEntry struct {
 	Auth string `json:"auth"`
 }
 
-// getAuthForImage reads ~/.docker/config.json and returns base64-encoded
+// authForImage reads ~/.docker/config.json and returns base64-encoded
 // registry auth for the given image reference, or empty string if not found.
-func getAuthForImage(imageRef string) string {
+func authForImage(imageRef string) string {
 	configPath := "/root/.docker/config.json"
 	if v := os.Getenv("DOCKER_CONFIG"); v != "" {
 		configPath = v + "/config.json"
@@ -98,10 +87,8 @@ func getAuthForImage(imageRef string) string {
 		return ""
 	}
 
-	// Extract registry from image reference
 	reg := extractRegistry(imageRef)
 
-	// Try exact match first, then common variants
 	candidates := []string{reg, "https://" + reg, "https://" + reg + "/v1/", "https://" + reg + "/v2/"}
 	for _, candidate := range candidates {
 		if entry, ok := cfg.Auths[candidate]; ok && entry.Auth != "" {
@@ -130,19 +117,20 @@ func getAuthForImage(imageRef string) string {
 // "ghcr.io/user/repo:tag" -> "ghcr.io"
 // "registry.example.com:5000/image" -> "registry.example.com:5000"
 func extractRegistry(imageRef string) string {
-	// Remove tag/digest
 	ref := imageRef
+
+	// Remove digest
 	if i := strings.LastIndex(ref, "@"); i >= 0 {
 		ref = ref[:i]
 	}
+	// Remove tag (only if after last slash — colons before slash are ports)
 	if i := strings.LastIndex(ref, ":"); i >= 0 {
-		// Only strip if after last slash (it's a tag, not a port)
 		if j := strings.LastIndex(ref, "/"); j < i {
 			ref = ref[:i]
 		}
 	}
 
-	// If no slash, it's a Docker Hub library image
+	// No slash = Docker Hub library image
 	if !strings.Contains(ref, "/") {
 		return "docker.io"
 	}
@@ -150,11 +138,11 @@ func extractRegistry(imageRef string) string {
 	parts := strings.SplitN(ref, "/", 2)
 	first := parts[0]
 
-	// Check if first part looks like a registry (has dots or colons, or is "localhost")
+	// Looks like a registry if it has dots, colons, or is "localhost"
 	if strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost" {
 		return first
 	}
 
-	// Otherwise it's a Docker Hub user image (e.g., "user/repo")
+	// Otherwise it's a Docker Hub user image
 	return "docker.io"
 }
