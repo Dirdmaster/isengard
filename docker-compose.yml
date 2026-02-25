@@ -1,0 +1,26 @@
+services:
+  # Isengard — watches and updates sibling containers
+  isengard:
+    build: .
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - ISENGARD_INTERVAL=30s
+      - ISENGARD_LOG_LEVEL=debug
+      - ISENGARD_CLEANUP=true
+
+  # Test container — uses an old nginx image that has updates available
+  nginx-test:
+    image: nginx:1.25-alpine
+    labels:
+      - "isengard.enable=true"
+    ports:
+      - "8080:80"
+
+  # Test container — opted out of updates
+  nginx-stable:
+    image: nginx:1.25-alpine
+    labels:
+      - "isengard.enable=false"
+    ports:
+      - "8081:80"
