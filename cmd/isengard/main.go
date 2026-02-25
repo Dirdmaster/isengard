@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/docker-watcher/isengard/internal/config"
 	"github.com/docker-watcher/isengard/internal/docker"
 	"github.com/docker-watcher/isengard/internal/updater"
@@ -16,11 +18,12 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Setup structured logging
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: cfg.LogLevel,
+	// Setup pretty logging via charmbracelet/log
+	logger := log.NewWithOptions(os.Stdout, log.Options{
+		Level:           log.Level(cfg.LogLevel),
+		ReportTimestamp: true,
 	})
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(logger))
 
 	slog.Info("starting isengard",
 		"interval", cfg.Interval,
