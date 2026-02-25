@@ -39,7 +39,7 @@ func PullImage(ctx context.Context, cli *client.Client, imageRef string) (string
 	// Consume the pull output (required to complete the pull)
 	_, _ = io.Copy(io.Discard, reader)
 
-	inspect, _, err := cli.ImageInspectWithRaw(ctx, imageRef)
+	inspect, err := cli.ImageInspect(ctx, imageRef)
 	if err != nil {
 		return "", err
 	}

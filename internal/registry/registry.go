@@ -125,7 +125,7 @@ func CheckDigest(imageRef string) (string, error) {
 	}
 
 	// First attempt: unauthenticated HEAD
-	req, err := http.NewRequest("HEAD", manifestURL, nil)
+	req, err := http.NewRequest("HEAD", manifestURL, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
 	}
@@ -167,7 +167,7 @@ func CheckDigest(imageRef string) (string, error) {
 		}
 
 		// Retry with Bearer token
-		req2, err := http.NewRequest("HEAD", manifestURL, nil)
+		req2, err := http.NewRequest("HEAD", manifestURL, http.NoBody)
 		if err != nil {
 			return "", fmt.Errorf("creating authenticated request: %w", err)
 		}
@@ -226,7 +226,7 @@ func exchangeToken(challenge string, ref ImageRef) (string, error) {
 		tokenURL += "scope=repository:" + ref.Repository + ":pull"
 	}
 
-	req, err := http.NewRequest("GET", tokenURL, nil)
+	req, err := http.NewRequest("GET", tokenURL, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("creating token request: %w", err)
 	}

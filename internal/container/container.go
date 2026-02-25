@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
@@ -40,13 +39,13 @@ func ListRunning(ctx context.Context, cli *client.Client) ([]Info, error) {
 		name := ""
 		if len(c.Names) > 0 {
 			name = c.Names[0]
-			if len(name) > 0 && name[0] == '/' {
+			if name != "" && name[0] == '/' {
 				name = name[1:]
 			}
 		}
 
 		var repoDigests []string
-		imgInspect, _, err := cli.ImageInspectWithRaw(ctx, c.ImageID)
+		imgInspect, err := cli.ImageInspect(ctx, c.ImageID)
 		if err == nil {
 			repoDigests = imgInspect.RepoDigests
 		}
@@ -67,14 +66,14 @@ func ListRunning(ctx context.Context, cli *client.Client) ([]Info, error) {
 
 // Recreate stops, removes, and recreates a container with the same config
 // but a new image. Returns the new container ID.
-func Recreate(ctx context.Context, cli *client.Client, containerID string, newImageID string, stopTimeout int) (string, error) {
+func Recreate(ctx context.Context, cli *client.Client, containerID, newImageID string, stopTimeout int) (string, error) {
 	inspect, err := cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", fmt.Errorf("inspecting container: %w", err)
 	}
 
 	containerName := inspect.Name
-	if len(containerName) > 0 && containerName[0] == '/' {
+	if containerName != "" && containerName[0] == '/' {
 		containerName = containerName[1:]
 	}
 
@@ -156,7 +155,7 @@ func Recreate(ctx context.Context, cli *client.Client, containerID string, newIm
 }
 
 // convertMounts converts docker inspect mount points back to mount.Mount format.
-func convertMounts(mountPoints []types.MountPoint) []mount.Mount {
+func convertMounts(mountPoints []containertypes.MountPoint) []mount.Mount {
 	var mounts []mount.Mount
 	for _, mp := range mountPoints {
 		m := mount.Mount{

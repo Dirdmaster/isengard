@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -17,6 +18,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg := config.Load()
 
 	// Setup pretty logging via charmbracelet/log
@@ -38,15 +46,13 @@ func main() {
 
 	cli, err := docker.NewClient()
 	if err != nil {
-		slog.Error("failed to create Docker client", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating Docker client: %w", err)
 	}
 	defer cli.Close()
 
 	info, err := cli.Info(context.Background())
 	if err != nil {
-		slog.Error("failed to connect to Docker", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("connecting to Docker: %w", err)
 	}
 	slog.Info("connected to Docker",
 		"version", info.ServerVersion,
@@ -55,7 +61,6 @@ func main() {
 
 	u := updater.New(cli, cfg)
 
-	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -68,15 +73,13 @@ func main() {
 		cancel()
 	}()
 
-	// Run first cycle immediately
 	runCycle(ctx, u)
 
 	if cfg.RunOnce {
 		slog.Info("run-once mode, exiting")
-		return
+		return nil
 	}
 
-	// Schedule subsequent cycles
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 
@@ -84,7 +87,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			slog.Info("shutting down")
-			return
+			return nil
 		case <-ticker.C:
 			runCycle(ctx, u)
 		}
