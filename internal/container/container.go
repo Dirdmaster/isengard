@@ -13,18 +13,22 @@ import (
 	"github.com/docker/docker/client"
 )
 
-// Info holds the essential information about a running container.
+// Info captures the subset of container state needed for update checks
+// and faithful recreation.
 type Info struct {
-	ID          string
-	Name        string
-	Image       string
-	ImageID     string
-	Labels      map[string]string
-	State       string
-	RepoDigests []string // from the image inspect, e.g. ["nginx@sha256:abc..."]
+	ID      string            // Docker container ID.
+	Name    string            // Container name without leading slash.
+	Image   string            // Image reference as specified at creation (e.g. "nginx:1.25").
+	ImageID string            // Resolved image ID (sha256:...).
+	Labels  map[string]string // Container labels, used for isengard.enable filtering.
+	State   string            // Docker state string (running, exited, etc.).
+	// RepoDigests from the image inspect, e.g. ["nginx@sha256:abc..."].
+	// Used for fast digest comparison against the remote registry.
+	RepoDigests []string
 }
 
-// ListRunning returns all running containers.
+// ListRunning returns all running containers, enriching each with
+// RepoDigests from an image inspect call for digest-based update checks.
 func ListRunning(ctx context.Context, cli *client.Client) ([]Info, error) {
 	containers, err := cli.ContainerList(ctx, containertypes.ListOptions{All: false})
 	if err != nil {
@@ -41,7 +45,6 @@ func ListRunning(ctx context.Context, cli *client.Client) ([]Info, error) {
 			}
 		}
 
-		// Get RepoDigests from the image inspect
 		var repoDigests []string
 		imgInspect, _, err := cli.ImageInspectWithRaw(ctx, c.ImageID)
 		if err == nil {

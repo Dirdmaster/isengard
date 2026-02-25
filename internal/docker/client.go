@@ -9,10 +9,11 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 
-	"github.com/docker-watcher/isengard/internal/registry"
+	"github.com/dirdmaster/isengard/internal/registry"
 )
 
-// NewClient creates a Docker client from environment defaults.
+// NewClient connects to the local Docker daemon using DOCKER_HOST
+// and related environment variables, with automatic API version negotiation.
 func NewClient() (*client.Client, error) {
 	return client.NewClientWithOpts(
 		client.FromEnv,

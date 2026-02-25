@@ -8,17 +8,26 @@ import (
 	"time"
 )
 
-// Config holds all Isengard configuration parsed from environment variables.
+// Config controls Isengard's runtime behavior.
+// All fields map to ISENGARD_* environment variables via [Load].
 type Config struct {
-	Interval    time.Duration
-	RunOnce     bool
-	Cleanup     bool
-	WatchAll    bool
+	// Interval between update check cycles (ISENGARD_INTERVAL, default 30m).
+	Interval time.Duration
+	// RunOnce exits after a single check cycle (ISENGARD_RUN_ONCE).
+	RunOnce bool
+	// Cleanup removes old images after a successful update (ISENGARD_CLEANUP, default true).
+	Cleanup bool
+	// WatchAll watches every container by default; when false, only containers
+	// labeled isengard.enable=true are watched (ISENGARD_WATCH_ALL, default true).
+	WatchAll bool
+	// StopTimeout is the grace period in seconds before force-killing a container (ISENGARD_STOP_TIMEOUT, default 30).
 	StopTimeout int
-	LogLevel    slog.Level
+	// LogLevel sets the minimum log severity (ISENGARD_LOG_LEVEL: debug, info, warn, error).
+	LogLevel slog.Level
 }
 
-// Load reads configuration from environment variables with sensible defaults.
+// Load populates a [Config] from ISENGARD_* environment variables,
+// falling back to defaults for any variable that is unset or invalid.
 func Load() Config {
 	c := Config{
 		Interval:    30 * time.Minute,

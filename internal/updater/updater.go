@@ -10,22 +10,24 @@ import (
 
 	"github.com/docker/docker/client"
 
-	"github.com/docker-watcher/isengard/internal/config"
-	"github.com/docker-watcher/isengard/internal/container"
-	"github.com/docker-watcher/isengard/internal/docker"
-	"github.com/docker-watcher/isengard/internal/registry"
+	"github.com/dirdmaster/isengard/internal/config"
+	"github.com/dirdmaster/isengard/internal/container"
+	"github.com/dirdmaster/isengard/internal/docker"
+	"github.com/dirdmaster/isengard/internal/registry"
 )
 
 const labelEnable = "isengard.enable"
 
-// Updater orchestrates the container update cycle.
+// Updater watches running containers for newer images and recreates them
+// in-place, preserving ports, volumes, networks, labels, and restart policies.
 type Updater struct {
 	cli    *client.Client
 	config config.Config
 	selfID string
 }
 
-// New creates a new Updater instance.
+// New configures an [Updater] and detects whether it is running inside
+// a container so it can exclude itself from update checks.
 func New(cli *client.Client, cfg config.Config) *Updater {
 	return &Updater{
 		cli:    cli,
