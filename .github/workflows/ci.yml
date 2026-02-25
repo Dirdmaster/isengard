@@ -16,7 +16,8 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
+          install-mode: goinstall
 
   build:
     runs-on: ubuntu-latest
