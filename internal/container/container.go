@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -105,6 +106,11 @@ func Recreate(ctx context.Context, cli *client.Client, containerID, newImageID s
 		hostConfig.Mounts = convertMounts(inspect.Mounts)
 	}
 
+	// Remove volume entries that are already covered by explicit mounts or
+	// binds. Without this, Docker rejects the create with "Duplicate mount
+	// point" when an image declares VOLUME paths that overlap with user mounts.
+	deduplicateVolumes(config, hostConfig)
+
 	// Prepare networking — connect to the first network during create
 	var networkingConfig *network.NetworkingConfig
 	additionalNetworks := map[string]*network.EndpointSettings{}
@@ -152,6 +158,36 @@ func Recreate(ctx context.Context, cli *client.Client, containerID, newImageID s
 	}
 
 	return createResp.ID, nil
+}
+
+// deduplicateVolumes removes entries from config.Volumes whose paths are
+// already covered by an explicit mount in hostConfig.Mounts or hostConfig.Binds.
+// This prevents "Duplicate mount point" errors when an image declares VOLUME
+// directives that overlap with user-specified mounts.
+func deduplicateVolumes(config *containertypes.Config, hostConfig *containertypes.HostConfig) {
+	if config.Volumes == nil {
+		return
+	}
+
+	covered := make(map[string]bool, len(hostConfig.Mounts)+len(hostConfig.Binds))
+
+	for _, m := range hostConfig.Mounts {
+		covered[m.Target] = true
+	}
+
+	// Binds use "source:dest" or "source:dest:opts" format.
+	for _, b := range hostConfig.Binds {
+		parts := strings.SplitN(b, ":", 3)
+		if len(parts) >= 2 {
+			covered[parts[1]] = true
+		}
+	}
+
+	for path := range config.Volumes {
+		if covered[path] {
+			delete(config.Volumes, path)
+		}
+	}
 }
 
 // convertMounts converts docker inspect mount points back to mount.Mount format.
