@@ -203,7 +203,7 @@ const envVars = [
             href="#features"
             class="inline-flex items-center gap-2 rounded-lg bg-amber px-5 py-2.5 text-sm font-medium text-bg transition-all hover:opacity-90"
           >
-            Start watching
+            Stay updated
             <PhArrowDown :size="14" weight="bold" />
           </a>
           <a
