@@ -52,6 +52,7 @@ const envVars = [
   { name: 'ISENGARD_CLEANUP', default: 'true', description: 'Remove old images after update' },
   { name: 'ISENGARD_STOP_TIMEOUT', default: '30', description: 'Seconds to wait for graceful stop' },
   { name: 'ISENGARD_LOG_LEVEL', default: 'info', description: 'debug, info, warn, error' },
+  { name: 'ISENGARD_SELF_UPDATE', default: 'false', description: 'Allow Isengard to update itself' },
 ]
 </script>
 

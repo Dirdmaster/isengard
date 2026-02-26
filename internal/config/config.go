@@ -24,6 +24,10 @@ type Config struct {
 	StopTimeout int
 	// LogLevel sets the minimum log severity (ISENGARD_LOG_LEVEL: debug, info, warn, error).
 	LogLevel slog.Level
+	// SelfUpdate allows Isengard to update its own container when a newer
+	// image is available (ISENGARD_SELF_UPDATE, default false).
+	// The self-update runs after all other containers have been processed.
+	SelfUpdate bool
 }
 
 // Load populates a [Config] from ISENGARD_* environment variables,
@@ -62,6 +66,10 @@ func Load() Config {
 		if err == nil && n > 0 {
 			c.StopTimeout = n
 		}
+	}
+
+	if v := os.Getenv("ISENGARD_SELF_UPDATE"); v != "" {
+		c.SelfUpdate, _ = strconv.ParseBool(v)
 	}
 
 	if v := os.Getenv("ISENGARD_LOG_LEVEL"); v != "" {
