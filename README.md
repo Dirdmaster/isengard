@@ -1,5 +1,11 @@
 # Isengard
 
+[![CI](https://img.shields.io/github/actions/workflow/status/dirdmaster/isengard/ci.yml?branch=main&label=CI&style=flat)](https://github.com/dirdmaster/isengard/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/github/actions/workflow/status/dirdmaster/isengard/docker.yml?label=Docker&style=flat)](https://github.com/dirdmaster/isengard/actions/workflows/docker.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/dirdmaster/isengard?style=flat)](https://go.dev)
+[![License](https://img.shields.io/github/license/dirdmaster/isengard?style=flat)](LICENSE)
+[![GHCR](https://img.shields.io/badge/ghcr.io-dirdmaster%2Fisengard-blue?style=flat)](https://ghcr.io/dirdmaster/isengard)
+
 Lightweight Docker container auto-updater. Watches running containers for newer images and recreates them in-place, preserving ports, volumes, networks, labels, and restart policies.
 
 ## Features
@@ -26,10 +32,6 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.docker/config.json:/root/.docker/config.json:ro
-    environment:
-      - ISENGARD_INTERVAL=30m
-      - ISENGARD_CLEANUP=true
 ```
 
 ## Configuration
@@ -63,14 +65,17 @@ labels:
 
 ## Private registries
 
-Mount your Docker credentials to pull from private registries:
+Isengard checks remote digests directly via the registry v2 API (~50ms per image). For private registries, mount your Docker credentials so Isengard can authenticate these requests:
 
 ```yaml
 volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
   - ~/.docker/config.json:/root/.docker/config.json:ro
 ```
 
-Isengard reads credentials from `~/.docker/config.json` and supports Docker Hub, GHCR, ECR, Quay, and self-hosted registries.
+Without the mount, digest checks on private images will fail and Isengard falls back to pulling through the Docker daemon (which uses the host's own auth). The fallback works fine but skips the fast digest check.
+
+Supports Docker Hub, GHCR, ECR, Quay, and self-hosted registries.
 
 ## How it works
 
@@ -91,6 +96,15 @@ Or build the Docker image:
 ```bash
 docker build -t isengard .
 ```
+
+## Contributing
+
+1. Fork and clone, then run `bun install` to set up git hooks via lefthook
+2. Make sure you have Go 1.25+ installed
+3. Lefthook handles `go fmt`, `go vet`, `golangci-lint`, and `go build` on pre-commit; tests run on pre-push
+4. Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`
+
+See [open issues](https://github.com/dirdmaster/isengard/issues) for things to work on.
 
 ## License
 
