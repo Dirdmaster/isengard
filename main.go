@@ -59,6 +59,8 @@ func run() error {
 		"containers", info.Containers,
 	)
 
+	checkDockerConfig()
+
 	u := updater.New(cli, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -91,6 +93,27 @@ func run() error {
 		case <-ticker.C:
 			runCycle(ctx, u)
 		}
+	}
+}
+
+// checkDockerConfig warns at startup if the Docker config path exists but is
+// a directory. This typically means Docker created it automatically when the
+// file was bind-mounted but did not exist on the host.
+func checkDockerConfig() {
+	configPath := "/root/.docker/config.json"
+	if v := os.Getenv("DOCKER_CONFIG"); v != "" {
+		configPath = v + "/config.json"
+	}
+
+	fi, err := os.Stat(configPath)
+	if err != nil {
+		return // does not exist, nothing to warn about
+	}
+	if fi.IsDir() {
+		slog.Warn("docker config path is a directory, not a file (private registry auth will not work)",
+			"path", configPath,
+			"hint", "remove the directory on the host and only mount config.json if the file exists",
+		)
 	}
 }
 
