@@ -51,9 +51,20 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 
 	slog.Info("starting update cycle", "containers_found", len(containers))
 
-	// Filter
+	// Filter — separate self from other candidates
 	var candidates []container.Info
+	var selfContainer *container.Info
 	for _, c := range containers {
+		if u.isSelf(c.ID) {
+			if u.config.SelfUpdate {
+				cc := c // copy for pointer stability
+				selfContainer = &cc
+				slog.Debug("found self, deferring update check", "container", c.Name)
+			} else {
+				slog.Debug("skipping self", "container", c.Name)
+			}
+			continue
+		}
 		if u.shouldSkip(c) {
 			continue
 		}
@@ -117,7 +128,48 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 		"failed", len(toUpdate)-updated,
 	)
 
+	// Self-update runs last, after all other containers are handled.
+	// This calls Recreate on our own container, which will kill this process.
+	// The new container starts from the updated image and takes over.
+	if selfContainer != nil {
+		if err := u.trySelfUpdate(ctx, *selfContainer); err != nil {
+			slog.Error("self-update failed", "error", err)
+		}
+		// If trySelfUpdate succeeded, we won't reach here — the process is dead.
+	}
+
 	return updated, nil
+}
+
+// trySelfUpdate checks if Isengard's own container has a newer image and
+// recreates it if so. This is the last operation in a cycle because Recreate
+// will stop and remove our own container, killing this process. The new
+// container starts from the updated image.
+func (u *Updater) trySelfUpdate(ctx context.Context, self container.Info) error {
+	needsUpdate, err := u.checkForUpdate(ctx, self)
+	if err != nil {
+		return fmt.Errorf("checking self for update: %w", err)
+	}
+
+	if !needsUpdate {
+		slog.Debug("self is up to date", "image", self.Image)
+		return nil
+	}
+
+	slog.Info("self-update available, recreating isengard",
+		"container", self.Name,
+		"image", self.Image,
+	)
+
+	_, err = container.Recreate(ctx, u.cli, self.ID, self.Image, u.config.StopTimeout)
+	if err != nil {
+		return fmt.Errorf("recreating self: %w", err)
+	}
+
+	// If we reach here, something unexpected happened — Recreate should have
+	// killed this process by stopping our container.
+	slog.Warn("self-update: process still running after recreate")
+	return nil
 }
 
 // checkForUpdate determines whether a container has a newer image available.
@@ -256,8 +308,9 @@ func extractLocalDigest(c container.Info) string {
 // isengard.enable=false. When WatchAll is false (opt-in mode): only containers
 // labeled isengard.enable=true are watched.
 func (u *Updater) shouldSkip(c container.Info) bool {
-	// Skip self
-	if c.ID == u.selfID {
+	// Skip self — detectSelfID may return a 12-char hostname (short ID)
+	// while c.ID is the full 64-char container ID, so check prefix too.
+	if u.isSelf(c.ID) {
 		slog.Debug("skipping self", "container", c.Name)
 		return true
 	}
@@ -285,6 +338,15 @@ func (u *Updater) shouldSkip(c container.Info) bool {
 	}
 	slog.Debug("skipping container (opt-in mode, not enabled)", "container", c.Name)
 	return true
+}
+
+// isSelf returns true if the given container ID matches Isengard's own container.
+// Handles both exact matches (full 64-char ID) and prefix matches (12-char hostname).
+func (u *Updater) isSelf(containerID string) bool {
+	if u.selfID == "" {
+		return false
+	}
+	return containerID == u.selfID || strings.HasPrefix(containerID, u.selfID)
 }
 
 // detectSelfID tries to detect our own container ID.
