@@ -14,10 +14,13 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,3 +62,12 @@ jobs:
           gh release create "${{ steps.next.outputs.version }}" \
             --title "${{ steps.next.outputs.version }}" \
             --generate-notes
+
+  docker:
+    needs: release
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    permissions:
+      contents: read
+      packages: write
