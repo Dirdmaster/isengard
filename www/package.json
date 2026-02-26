@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "nuxt dev --port 7592",
-    "build": "nuxt generate",
+    "generate:og": "bun run scripts/generate-og.ts",
+    "build": "bun run generate:og && nuxt generate",
     "preview": "nuxt preview"
   },
   "dependencies": {
@@ -16,7 +17,9 @@
     "vue-router": "^4.6"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4",
+    "satori": "^0.19.2",
     "tailwindcss": "^4"
   }
 }
