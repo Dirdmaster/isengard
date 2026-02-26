@@ -42,6 +42,7 @@ func run() error {
 		"run_once", cfg.RunOnce,
 		"cleanup", cfg.Cleanup,
 		"stop_timeout", cfg.StopTimeout,
+		"self_update", cfg.SelfUpdate,
 	)
 
 	cli, err := docker.NewClient()
