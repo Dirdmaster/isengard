@@ -46,6 +46,7 @@ All configuration is via environment variables.
 | `ISENGARD_CLEANUP` | `true` | Remove old images after a successful update |
 | `ISENGARD_STOP_TIMEOUT` | `30` | Seconds to wait for graceful container stop |
 | `ISENGARD_LOG_LEVEL` | `info` | Minimum log level: `debug`, `info`, `warn`, `error` |
+| `ISENGARD_SELF_UPDATE` | `false` | Allow Isengard to update its own container |
 
 ## Filtering containers
 
@@ -84,6 +85,12 @@ Supports Docker Hub, GHCR, ECR, Quay, and self-hosted registries.
 3. Compares the remote digest against the local image's `RepoDigests`
 4. If the digest differs, pulls the new image and recreates the container with the same configuration
 5. If the digest check fails (auth issues, unsupported registry), falls back to pull-and-compare by image ID
+
+## Self-update
+
+Set `ISENGARD_SELF_UPDATE=true` to let Isengard update its own container when a newer image is available. The self-update always runs last, after all other containers have been processed.
+
+When a new image is detected, Isengard recreates its own container using the same stop/remove/create/start sequence it uses for every other container. Use `restart: unless-stopped` in your compose file so Docker restarts the new container if needed.
 
 ## Building from source
 
