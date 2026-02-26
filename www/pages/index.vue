@@ -14,18 +14,25 @@ const copied = ref(false)
 const installCopied = ref(false)
 const scrolled = ref(false)
 
+let onScroll: (() => void) | undefined
+
 onMounted(() => {
-  const onScroll = () => { scrolled.value = window.scrollY > 20 }
+  onScroll = () => { scrolled.value = window.scrollY > 20 }
   window.addEventListener('scroll', onScroll, { passive: true })
-  onUnmounted(() => window.removeEventListener('scroll', onScroll))
+})
+
+onUnmounted(() => {
+  if (onScroll) window.removeEventListener('scroll', onScroll)
 })
 
 const installCommand = 'docker run -d -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/dirdmaster/isengard'
 
-function copyInstallCommand() {
-  navigator.clipboard.writeText(installCommand)
-  installCopied.value = true
-  setTimeout(() => (installCopied.value = false), 2000)
+const copyInstallCommand = async () => {
+  try {
+    await navigator.clipboard.writeText(installCommand)
+    installCopied.value = true
+    setTimeout(() => (installCopied.value = false), 2000)
+  } catch { /* clipboard unavailable */ }
 }
 
 const composeSnippet = `services:
@@ -39,9 +46,10 @@ const composeSnippet = `services:
       - ISENGARD_INTERVAL=30m
       - ISENGARD_CLEANUP=true`
 
-const composeLines = computed(() => {
-  return composeSnippet.split('\n').map((line) => {
-    // YAML key: value highlighting
+// Static YAML highlighting. composeSnippet is a hardcoded constant,
+// so the v-html usage below is safe from injection.
+const composeLines = computed(() =>
+  composeSnippet.split('\n').map((line) => {
     const commentMatch = line.match(/^(\s*)(#.*)$/)
     if (commentMatch) {
       return `${commentMatch[1]}<span class="yaml-comment">${commentMatch[2]}</span>`
@@ -49,26 +57,25 @@ const composeLines = computed(() => {
 
     const kvMatch = line.match(/^(\s*-?\s*)(\w[\w.]*):(.*)$/)
     if (kvMatch) {
-      const indent = kvMatch[1]
-      const key = kvMatch[2]
-      const value = kvMatch[3]
+      const [, indent, key, value] = kvMatch
       return `${indent}<span class="yaml-key">${key}</span>:<span class="yaml-value">${value}</span>`
     }
 
-    // List items with paths/values
     const listMatch = line.match(/^(\s*- )(.*)$/)
     if (listMatch) {
       return `${listMatch[1]}<span class="yaml-value">${listMatch[2]}</span>`
     }
 
     return `<span class="yaml-value">${line}</span>`
-  })
-})
+  }),
+)
 
-function copyToClipboard() {
-  navigator.clipboard.writeText(composeSnippet)
-  copied.value = true
-  setTimeout(() => (copied.value = false), 2000)
+const copyToClipboard = async () => {
+  try {
+    await navigator.clipboard.writeText(composeSnippet)
+    copied.value = true
+    setTimeout(() => (copied.value = false), 2000)
+  } catch { /* clipboard unavailable */ }
 }
 
 const features = [
@@ -110,7 +117,7 @@ const envVars = [
 
 <template>
   <div class="min-h-screen bg-bg font-sans text-text overflow-x-hidden pt-16">
-    <!-- Subtle atmospheric background — no gradients, just a soft warm vignette via box-shadow -->
+    <!-- Subtle atmospheric background -->
     <div
       class="pointer-events-none fixed inset-0"
       aria-hidden="true"
@@ -123,26 +130,10 @@ const envVars = [
       :class="scrolled ? 'border-border-subtle/50' : 'border-transparent'"
     >
       <div class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-        <a href="#" class="flex items-center gap-2.5 transition-colors hover:opacity-80">
-          <!-- Tower logo mark — Orthanc with 4 peaks -->
-          <svg
-            viewBox="0 0 24 32"
-            class="h-7 w-auto text-amber"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.1"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M8 28 L9.5 10 L12 7 L14.5 10 L16 28" />
-            <path d="M9.5 10 L7 3" />
-            <path d="M11 9 L10 4.5" />
-            <path d="M13 9 L14 4.5" />
-            <path d="M14.5 10 L17 3" />
-            <ellipse cx="12" cy="13.5" rx="1.2" ry="0.6" fill="currentColor" opacity="0.8" stroke="none" />
-          </svg>
+        <NuxtLink to="#" class="flex items-center gap-2.5 transition-colors hover:opacity-80">
+          <IsengardLogo class="text-amber" />
           <span class="text-sm font-medium tracking-wide text-text-muted">Isengard</span>
-        </a>
+        </NuxtLink>
         <a
           href="https://github.com/dirdmaster/isengard"
           target="_blank"
@@ -155,7 +146,7 @@ const envVars = [
       </div>
     </nav>
 
-    <!-- Hero — centered with install bar -->
+    <!-- Hero -->
     <section class="relative z-10 mx-auto max-w-5xl px-6 pt-16 pb-12 sm:pt-36 sm:pb-28">
       <div class="flex flex-col items-center text-center">
         <!-- Eyebrow -->
@@ -199,13 +190,13 @@ const envVars = [
           class="mb-0 sm:mb-12 flex flex-wrap items-center justify-center gap-4 animate-fade-up"
           style="animation-delay: 0.5s"
         >
-          <a
-            href="#features"
+          <NuxtLink
+            to="#features"
             class="inline-flex items-center gap-2 rounded-lg bg-amber px-5 py-2.5 text-sm font-medium text-bg transition-all hover:opacity-90"
           >
             Stay updated
             <PhArrowDown :size="14" weight="bold" />
-          </a>
+          </NuxtLink>
           <a
             href="https://github.com/dirdmaster/isengard"
             target="_blank"
@@ -217,7 +208,7 @@ const envVars = [
           </a>
         </div>
 
-        <!-- Install bar — hidden on mobile, compose snippet covers it -->
+        <!-- Install bar -->
         <div
           class="hidden sm:block animate-fade-up"
           style="animation-delay: 0.6s"
@@ -247,12 +238,11 @@ const envVars = [
     <section id="features" class="relative z-10 mx-auto max-w-5xl scroll-mt-20 px-6 py-16 sm:py-32">
       <div class="grid gap-4 sm:grid-cols-2">
         <div
-          v-for="(feature, i) in features"
-          :key="i"
+          v-for="feature in features"
+          :key="feature.title"
           class="group cursor-pointer rounded-xl border border-border-subtle bg-bg-raised/50 p-6 transition-all duration-300 hover:border-border hover:bg-bg-raised animate-fade-up"
-          :style="{ animationDelay: `${0.7 + i * 0.1}s` }"
+          :style="{ animationDelay: `${0.7 + features.indexOf(feature) * 0.1}s` }"
         >
-          <!--  -->
           <div
             class="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-amber-glow text-amber transition-colors duration-300 group-hover:bg-amber-glow-strong"
           >
@@ -296,7 +286,7 @@ const envVars = [
 
       <!-- Code block -->
       <div class="overflow-hidden rounded-xl border border-border-subtle bg-bg-raised/80">
-        <!-- Code header — filename only -->
+        <!-- Code header -->
         <div class="border-b border-border-subtle px-4 py-2.5">
           <span class="text-xs font-medium text-text-dim font-mono">docker-compose.yml</span>
         </div>
@@ -330,8 +320,8 @@ const envVars = [
             </thead>
             <tbody>
               <tr
-                v-for="(v, i) in envVars"
-                :key="i"
+                v-for="v in envVars"
+                :key="v.name"
                 class="border-b border-border-subtle last:border-0 transition-colors hover:bg-bg-raised/30"
               >
                 <td class="px-4 py-2.5">
@@ -371,21 +361,7 @@ const envVars = [
     <footer class="relative z-10 border-t border-border-subtle">
       <div class="mx-auto flex max-w-5xl items-center justify-between px-6 py-6">
         <div class="flex items-center gap-2.5 text-sm text-text-dim">
-          <svg
-            viewBox="0 0 24 32"
-            class="h-4 w-auto text-amber-dim"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.1"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M8 28 L9.5 10 L12 7 L14.5 10 L16 28" />
-            <path d="M9.5 10 L7 3" />
-            <path d="M11 9 L10 4.5" />
-            <path d="M13 9 L14 4.5" />
-            <path d="M14.5 10 L17 3" />
-          </svg>
+          <IsengardLogo size="sm" class="text-amber-dim" />
           <span>Isengard</span>
         </div>
         <a
