@@ -162,18 +162,18 @@ func (u *Updater) trySelfUpdate(ctx context.Context, self container.Info) error 
 		"image", self.Image,
 	)
 
-	// Use an independent context for the recreate call. When we stop our own
-	// container, Docker sends SIGTERM which cancels the parent ctx via the
-	// signal handler in main.go. The remove/create/start calls must survive.
+	// Use an independent context. RecreateSelf will rename us, create and
+	// start the replacement, then force-remove our container (killing this
+	// process). The replacement must already be running before we die.
 	recreateCtx := context.Background()
 
-	_, err = container.Recreate(recreateCtx, u.cli, self.ID, self.Image, u.config.StopTimeout)
+	_, err = container.RecreateSelf(recreateCtx, u.cli, self.ID, self.Image, u.config.StopTimeout)
 	if err != nil {
-		return fmt.Errorf("recreating self: %w", err)
+		return fmt.Errorf("self-update: %w", err)
 	}
 
-	// If we reach here, something unexpected happened — Recreate should have
-	// killed this process by stopping our container.
+	// If we reach here, something unexpected happened — RecreateSelf should
+	// have killed this process by force-removing our container.
 	slog.Warn("self-update: process still running after recreate")
 	return nil
 }
