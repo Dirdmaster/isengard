@@ -147,6 +147,21 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 // will stop and remove our own container, killing this process. The new
 // container starts from the updated image.
 func (u *Updater) trySelfUpdate(ctx context.Context, self container.Info) error {
+	// Docker's container list API may resolve Image to a sha256 ref when the
+	// local tag has been updated (e.g. a newer image was pulled or built with
+	// the same tag). Inspect the container to recover the original image
+	// reference stored in Config.Image, which preserves the tag.
+	if strings.HasPrefix(self.Image, "sha256:") {
+		inspect, err := u.cli.ContainerInspect(ctx, self.ID)
+		if err == nil && !strings.HasPrefix(inspect.Config.Image, "sha256:") {
+			slog.Debug("self-update: recovered image ref from config",
+				"was", self.Image[:19],
+				"now", inspect.Config.Image,
+			)
+			self.Image = inspect.Config.Image
+		}
+	}
+
 	needsUpdate, err := u.checkForUpdate(ctx, self)
 	if err != nil {
 		return fmt.Errorf("checking self for update: %w", err)
