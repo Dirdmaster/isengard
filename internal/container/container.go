@@ -106,9 +106,9 @@ func Recreate(ctx context.Context, cli *client.Client, containerID, newImageID s
 		hostConfig.Mounts = convertMounts(inspect.Mounts)
 	}
 
-	// Remove volume entries that are already covered by explicit mounts or
-	// binds. Without this, Docker rejects the create with "Duplicate mount
-	// point" when an image declares VOLUME paths that overlap with user mounts.
+	// Remove mounts/volumes that overlap with binds to prevent Docker from
+	// rejecting the create with "Duplicate mount point".
+	deduplicateMounts(hostConfig)
 	deduplicateVolumes(config, hostConfig)
 
 	// Prepare networking — connect to the first network during create
@@ -192,6 +192,7 @@ func RecreateSelf(ctx context.Context, cli *client.Client, containerID, newImage
 	if len(inspect.Mounts) > 0 && len(hostConfig.Mounts) == 0 {
 		hostConfig.Mounts = convertMounts(inspect.Mounts)
 	}
+	deduplicateMounts(hostConfig)
 	deduplicateVolumes(config, hostConfig)
 
 	// Prepare networking
@@ -289,6 +290,34 @@ func deduplicateVolumes(config *containertypes.Config, hostConfig *containertype
 			delete(config.Volumes, path)
 		}
 	}
+}
+
+// deduplicateMounts removes entries from hostConfig.Mounts whose target paths
+// are already covered by hostConfig.Binds. When Docker inspects a container,
+// bind mounts may appear in both HostConfig.Binds and the top-level Mounts
+// array. If convertMounts then populates HostConfig.Mounts from the inspect
+// Mounts, the same path ends up in both Binds and Mounts, causing Docker to
+// reject the create with "Duplicate mount point".
+func deduplicateMounts(hostConfig *containertypes.HostConfig) {
+	if len(hostConfig.Mounts) == 0 || len(hostConfig.Binds) == 0 {
+		return
+	}
+
+	bindTargets := make(map[string]bool, len(hostConfig.Binds))
+	for _, b := range hostConfig.Binds {
+		parts := strings.SplitN(b, ":", 3)
+		if len(parts) >= 2 {
+			bindTargets[parts[1]] = true
+		}
+	}
+
+	filtered := hostConfig.Mounts[:0]
+	for _, m := range hostConfig.Mounts {
+		if !bindTargets[m.Target] {
+			filtered = append(filtered, m)
+		}
+	}
+	hostConfig.Mounts = filtered
 }
 
 // convertMounts converts docker inspect mount points back to mount.Mount format.
