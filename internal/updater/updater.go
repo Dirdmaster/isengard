@@ -163,7 +163,12 @@ func (u *Updater) trySelfUpdate(ctx context.Context, self container.Info) error 
 		"image", self.Image,
 	)
 
-	_, err = container.Recreate(ctx, u.cli, self.ID, self.Image, u.config.StopTimeout)
+	// Use an independent context for the recreate call. When we stop our own
+	// container, Docker sends SIGTERM which cancels the parent ctx via the
+	// signal handler in main.go. The remove/create/start calls must survive.
+	recreateCtx := context.Background()
+
+	_, err = container.Recreate(recreateCtx, u.cli, self.ID, self.Image, u.config.StopTimeout)
 	if err != nil {
 		return fmt.Errorf("recreating self: %w", err)
 	}
