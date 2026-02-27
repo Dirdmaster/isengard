@@ -1,3 +1,6 @@
 node_modules/
 www/.nuxt/
 www/.output/
+www/dist/
+www/bun.lock
+.cachebust

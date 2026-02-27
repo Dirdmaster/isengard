@@ -2,12 +2,15 @@
 package updater
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 
 	"github.com/dirdmaster/isengard/internal/config"
@@ -16,7 +19,10 @@ import (
 	"github.com/dirdmaster/isengard/internal/registry"
 )
 
-const labelEnable = "isengard.enable"
+const (
+	labelEnable   = "isengard.enable"
+	oldSelfSuffix = "-old"
+)
 
 // Updater watches running containers for newer images and recreates them
 // in-place, preserving ports, volumes, networks, labels, and restart policies.
@@ -33,6 +39,46 @@ func New(cli *client.Client, cfg config.Config) *Updater {
 		cli:    cli,
 		config: cfg,
 		selfID: detectSelfID(),
+	}
+}
+
+// CleanupOldSelf removes any leftover container from a previous self-update.
+// During self-update, the old container is renamed to "{name}-old" before the
+// replacement is created. The force-remove at the end may not complete because
+// our process is killed. This method cleans up any such leftover on startup.
+func (u *Updater) CleanupOldSelf(ctx context.Context) {
+	if u.selfID == "" {
+		return
+	}
+
+	containers, err := container.ListRunning(ctx, u.cli)
+	if err != nil {
+		return
+	}
+
+	// Find our own name, then look for "{name}-old"
+	var selfName string
+	for _, c := range containers {
+		if u.isSelf(c.ID) {
+			selfName = c.Name
+			break
+		}
+	}
+	if selfName == "" {
+		return
+	}
+
+	oldName := selfName + oldSelfSuffix
+	for _, c := range containers {
+		if c.Name == oldName {
+			slog.Info("removing leftover container from previous self-update", "container", c.Name)
+			if err := u.cli.ContainerRemove(ctx, c.ID, containertypes.RemoveOptions{Force: true}); err != nil {
+				slog.Warn("failed to remove old self container", "container", c.Name, "error", err)
+			} else if u.config.Cleanup {
+				docker.RemoveImage(ctx, u.cli, c.ImageID)
+			}
+			return
+		}
 	}
 }
 
@@ -65,6 +111,13 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 			}
 			continue
 		}
+		// Skip leftover containers from a previous self-update. These are
+		// renamed to "{name}-old" during RecreateSelf and may still be
+		// running if the force-remove didn't complete before our process died.
+		if strings.HasSuffix(c.Name, oldSelfSuffix) && u.selfID != "" {
+			slog.Debug("skipping old self-update leftover", "container", c.Name)
+			continue
+		}
 		if u.shouldSkip(c) {
 			continue
 		}
@@ -90,43 +143,42 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 		}
 	}
 
-	if len(toUpdate) == 0 {
-		slog.Info("all containers up to date")
-		return 0, nil
-	}
-
-	slog.Info("updating containers", "count", len(toUpdate))
-
-	// Update sequentially
+	// Update containers that have newer images
 	updated := 0
-	for _, c := range toUpdate {
-		slog.Info("updating container", "container", c.Name, "image", c.Image)
+	if len(toUpdate) > 0 {
+		slog.Info("updating containers", "count", len(toUpdate))
 
-		newID, err := container.Recreate(ctx, u.cli, c.ID, c.Image, u.config.StopTimeout)
-		if err != nil {
-			slog.Error("failed to update container", "container", c.Name, "error", err)
-			continue
-		}
+		for _, c := range toUpdate {
+			slog.Info("updating container", "container", c.Name, "image", c.Image)
 
-		slog.Info("container updated",
-			"container", c.Name,
-			"old_id", c.ID[:12],
-			"new_id", newID[:12],
-		)
-		updated++
+			newID, err := container.Recreate(ctx, u.cli, c.ID, c.Image, u.config.StopTimeout)
+			if err != nil {
+				slog.Error("failed to update container", "container", c.Name, "error", err)
+				continue
+			}
 
-		if u.config.Cleanup {
-			if oldID, ok := oldImageIDs[c.ID]; ok {
-				docker.RemoveImage(ctx, u.cli, oldID)
+			slog.Info("container updated",
+				"container", c.Name,
+				"old_id", c.ID[:12],
+				"new_id", newID[:12],
+			)
+			updated++
+
+			if u.config.Cleanup {
+				if oldID, ok := oldImageIDs[c.ID]; ok {
+					docker.RemoveImage(ctx, u.cli, oldID)
+				}
 			}
 		}
-	}
 
-	slog.Info("update cycle complete",
-		"checked", len(candidates),
-		"updated", updated,
-		"failed", len(toUpdate)-updated,
-	)
+		slog.Info("update cycle complete",
+			"checked", len(candidates),
+			"updated", updated,
+			"failed", len(toUpdate)-updated,
+		)
+	} else {
+		slog.Info("all containers up to date")
+	}
 
 	// Self-update runs last, after all other containers are handled.
 	// This calls Recreate on our own container, which will kill this process.
@@ -146,6 +198,21 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 // will stop and remove our own container, killing this process. The new
 // container starts from the updated image.
 func (u *Updater) trySelfUpdate(ctx context.Context, self container.Info) error {
+	// Docker's container list API may resolve Image to a sha256 ref when the
+	// local tag has been updated (e.g. a newer image was pulled or built with
+	// the same tag). Inspect the container to recover the original image
+	// reference stored in Config.Image, which preserves the tag.
+	if strings.HasPrefix(self.Image, "sha256:") {
+		inspect, err := u.cli.ContainerInspect(ctx, self.ID)
+		if err == nil && !strings.HasPrefix(inspect.Config.Image, "sha256:") {
+			slog.Debug("self-update: recovered image ref from config",
+				"was", self.Image[:19],
+				"now", inspect.Config.Image,
+			)
+			self.Image = inspect.Config.Image
+		}
+	}
+
 	needsUpdate, err := u.checkForUpdate(ctx, self)
 	if err != nil {
 		return fmt.Errorf("checking self for update: %w", err)
@@ -161,13 +228,18 @@ func (u *Updater) trySelfUpdate(ctx context.Context, self container.Info) error 
 		"image", self.Image,
 	)
 
-	_, err = container.Recreate(ctx, u.cli, self.ID, self.Image, u.config.StopTimeout)
+	// Use an independent context. RecreateSelf will rename us, create and
+	// start the replacement, then force-remove our container (killing this
+	// process). The replacement must already be running before we die.
+	recreateCtx := context.Background()
+
+	_, err = container.RecreateSelf(recreateCtx, u.cli, self.ID, self.Image, u.config.StopTimeout)
 	if err != nil {
-		return fmt.Errorf("recreating self: %w", err)
+		return fmt.Errorf("self-update: %w", err)
 	}
 
-	// If we reach here, something unexpected happened — Recreate should have
-	// killed this process by stopping our container.
+	// If we reach here, something unexpected happened — RecreateSelf should
+	// have killed this process by force-removing our container.
 	slog.Warn("self-update: process still running after recreate")
 	return nil
 }
@@ -349,15 +421,22 @@ func (u *Updater) isSelf(containerID string) bool {
 	return containerID == u.selfID || strings.HasPrefix(containerID, u.selfID)
 }
 
+// containerIDPattern matches a 64-character lowercase hex string (Docker container ID).
+var containerIDPattern = regexp.MustCompile(`[a-f0-9]{64}`)
+
 // detectSelfID tries to detect our own container ID.
+// It tries three methods in order, returning the first successful result.
 func detectSelfID() string {
-	// Method 1: hostname is often the short container ID
+	// Method 1: hostname is often the short container ID.
+	// Docker sets it to the first 12 hex chars of the container ID by default,
+	// but docker compose overrides it to the service name, so we validate
+	// that the hostname is actually a hex string.
 	hostname, err := os.Hostname()
-	if err == nil && len(hostname) == 12 {
+	if err == nil && len(hostname) == 12 && isHex(hostname) {
 		return hostname
 	}
 
-	// Method 2: /proc/1/cpuset (Docker sets this to /docker/<id>)
+	// Method 2: /proc/1/cpuset contains /docker/<id> on cgroup v1.
 	data, err := os.ReadFile("/proc/1/cpuset")
 	if err == nil {
 		line := strings.TrimSpace(string(data))
@@ -366,5 +445,44 @@ func detectSelfID() string {
 		}
 	}
 
+	// Method 3: /proc/self/mountinfo contains the container ID in mount paths.
+	// Docker mounts per-container files (hostname, resolv.conf, etc.) from
+	// /var/lib/docker/containers/<id>/. This works on both cgroup v1 and v2.
+	if id := parseMountinfo("/proc/self/mountinfo"); id != "" {
+		return id
+	}
+
+	return ""
+}
+
+// isHex returns true if s contains only lowercase hexadecimal characters.
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// parseMountinfo reads a mountinfo file and extracts a Docker container ID
+// from mount source paths like /var/lib/docker/containers/<64-char-hex>/hostname.
+func parseMountinfo(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, "/docker/containers/") {
+			continue
+		}
+		if match := containerIDPattern.FindString(line); match != "" {
+			return match
+		}
+	}
 	return ""
 }

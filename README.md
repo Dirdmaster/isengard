@@ -92,6 +92,8 @@ Set `ISENGARD_SELF_UPDATE=true` to let Isengard update its own container when a 
 
 When a new image is detected, Isengard recreates its own container using the same stop/remove/create/start sequence it uses for every other container. Use `restart: unless-stopped` in your compose file so Docker restarts the new container if needed.
 
+Isengard identifies its own container using multiple detection methods that work across Docker Compose, Swarm, cgroup v1, and cgroup v2 environments. No extra labels or configuration are needed beyond enabling the flag.
+
 ## Building from source
 
 ```bash

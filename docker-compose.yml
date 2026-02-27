@@ -8,6 +8,7 @@ services:
       - ISENGARD_INTERVAL=30s
       - ISENGARD_LOG_LEVEL=debug
       - ISENGARD_CLEANUP=true
+      - ISENGARD_SELF_UPDATE=true
 
   # Test container — uses an old nginx image that has updates available
   nginx-test:
