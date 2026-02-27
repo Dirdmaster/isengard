@@ -92,43 +92,42 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 		}
 	}
 
-	if len(toUpdate) == 0 {
-		slog.Info("all containers up to date")
-		return 0, nil
-	}
-
-	slog.Info("updating containers", "count", len(toUpdate))
-
-	// Update sequentially
+	// Update containers that have newer images
 	updated := 0
-	for _, c := range toUpdate {
-		slog.Info("updating container", "container", c.Name, "image", c.Image)
+	if len(toUpdate) > 0 {
+		slog.Info("updating containers", "count", len(toUpdate))
 
-		newID, err := container.Recreate(ctx, u.cli, c.ID, c.Image, u.config.StopTimeout)
-		if err != nil {
-			slog.Error("failed to update container", "container", c.Name, "error", err)
-			continue
-		}
+		for _, c := range toUpdate {
+			slog.Info("updating container", "container", c.Name, "image", c.Image)
 
-		slog.Info("container updated",
-			"container", c.Name,
-			"old_id", c.ID[:12],
-			"new_id", newID[:12],
-		)
-		updated++
+			newID, err := container.Recreate(ctx, u.cli, c.ID, c.Image, u.config.StopTimeout)
+			if err != nil {
+				slog.Error("failed to update container", "container", c.Name, "error", err)
+				continue
+			}
 
-		if u.config.Cleanup {
-			if oldID, ok := oldImageIDs[c.ID]; ok {
-				docker.RemoveImage(ctx, u.cli, oldID)
+			slog.Info("container updated",
+				"container", c.Name,
+				"old_id", c.ID[:12],
+				"new_id", newID[:12],
+			)
+			updated++
+
+			if u.config.Cleanup {
+				if oldID, ok := oldImageIDs[c.ID]; ok {
+					docker.RemoveImage(ctx, u.cli, oldID)
+				}
 			}
 		}
-	}
 
-	slog.Info("update cycle complete",
-		"checked", len(candidates),
-		"updated", updated,
-		"failed", len(toUpdate)-updated,
-	)
+		slog.Info("update cycle complete",
+			"checked", len(candidates),
+			"updated", updated,
+			"failed", len(toUpdate)-updated,
+		)
+	} else {
+		slog.Info("all containers up to date")
+	}
 
 	// Self-update runs last, after all other containers are handled.
 	// This calls Recreate on our own container, which will kill this process.
