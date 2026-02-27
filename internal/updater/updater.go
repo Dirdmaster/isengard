@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 
 	"github.com/dirdmaster/isengard/internal/config"
@@ -18,7 +19,10 @@ import (
 	"github.com/dirdmaster/isengard/internal/registry"
 )
 
-const labelEnable = "isengard.enable"
+const (
+	labelEnable   = "isengard.enable"
+	oldSelfSuffix = "-old"
+)
 
 // Updater watches running containers for newer images and recreates them
 // in-place, preserving ports, volumes, networks, labels, and restart policies.
@@ -35,6 +39,48 @@ func New(cli *client.Client, cfg config.Config) *Updater {
 		cli:    cli,
 		config: cfg,
 		selfID: detectSelfID(),
+	}
+}
+
+// CleanupOldSelf removes any leftover container from a previous self-update.
+// During self-update, the old container is renamed to "{name}-old" before the
+// replacement is created. The force-remove at the end may not complete because
+// our process is killed. This method cleans up any such leftover on startup.
+func (u *Updater) CleanupOldSelf(ctx context.Context) {
+	if u.selfID == "" {
+		return
+	}
+
+	containers, err := container.ListRunning(ctx, u.cli)
+	if err != nil {
+		return
+	}
+
+	// Find our own name, then look for "{name}-old"
+	var selfName string
+	for _, c := range containers {
+		if u.isSelf(c.ID) {
+			selfName = c.Name
+			break
+		}
+	}
+	if selfName == "" {
+		return
+	}
+
+	oldName := selfName + oldSelfSuffix
+	for _, c := range containers {
+		if c.Name == oldName {
+			slog.Info("removing leftover container from previous self-update", "container", c.Name)
+			if err := u.cli.ContainerRemove(ctx, c.ID, containertypes.RemoveOptions{Force: true}); err != nil {
+				slog.Warn("failed to remove old self container", "container", c.Name, "error", err)
+			} else {
+				if u.config.Cleanup {
+					docker.RemoveImage(ctx, u.cli, c.ImageID)
+				}
+			}
+			return
+		}
 	}
 }
 
@@ -65,6 +111,13 @@ func (u *Updater) RunCycle(ctx context.Context) (int, error) {
 			} else {
 				slog.Debug("skipping self", "container", c.Name)
 			}
+			continue
+		}
+		// Skip leftover containers from a previous self-update. These are
+		// renamed to "{name}-old" during RecreateSelf and may still be
+		// running if the force-remove didn't complete before our process died.
+		if strings.HasSuffix(c.Name, oldSelfSuffix) && u.selfID != "" {
+			slog.Debug("skipping old self-update leftover", "container", c.Name)
 			continue
 		}
 		if u.shouldSkip(c) {

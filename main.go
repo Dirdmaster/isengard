@@ -63,6 +63,7 @@ func run() error {
 	checkDockerConfig()
 
 	u := updater.New(cli, cfg)
+	u.CleanupOldSelf(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
