@@ -2,10 +2,12 @@
 package updater
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/docker/docker/client"
@@ -349,15 +351,22 @@ func (u *Updater) isSelf(containerID string) bool {
 	return containerID == u.selfID || strings.HasPrefix(containerID, u.selfID)
 }
 
+// containerIDPattern matches a 64-character lowercase hex string (Docker container ID).
+var containerIDPattern = regexp.MustCompile(`[a-f0-9]{64}`)
+
 // detectSelfID tries to detect our own container ID.
+// It tries three methods in order, returning the first successful result.
 func detectSelfID() string {
-	// Method 1: hostname is often the short container ID
+	// Method 1: hostname is often the short container ID.
+	// Docker sets it to the first 12 hex chars of the container ID by default,
+	// but docker compose overrides it to the service name, so we validate
+	// that the hostname is actually a hex string.
 	hostname, err := os.Hostname()
-	if err == nil && len(hostname) == 12 {
+	if err == nil && len(hostname) == 12 && isHex(hostname) {
 		return hostname
 	}
 
-	// Method 2: /proc/1/cpuset (Docker sets this to /docker/<id>)
+	// Method 2: /proc/1/cpuset contains /docker/<id> on cgroup v1.
 	data, err := os.ReadFile("/proc/1/cpuset")
 	if err == nil {
 		line := strings.TrimSpace(string(data))
@@ -366,5 +375,44 @@ func detectSelfID() string {
 		}
 	}
 
+	// Method 3: /proc/self/mountinfo contains the container ID in mount paths.
+	// Docker mounts per-container files (hostname, resolv.conf, etc.) from
+	// /var/lib/docker/containers/<id>/. This works on both cgroup v1 and v2.
+	if id := parseMountinfo("/proc/self/mountinfo"); id != "" {
+		return id
+	}
+
+	return ""
+}
+
+// isHex returns true if s contains only lowercase hexadecimal characters.
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// parseMountinfo reads a mountinfo file and extracts a Docker container ID
+// from mount source paths like /var/lib/docker/containers/<64-char-hex>/hostname.
+func parseMountinfo(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, "/docker/containers/") {
+			continue
+		}
+		if match := containerIDPattern.FindString(line); match != "" {
+			return match
+		}
+	}
 	return ""
 }
