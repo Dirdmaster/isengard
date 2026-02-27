@@ -74,10 +74,8 @@ func (u *Updater) CleanupOldSelf(ctx context.Context) {
 			slog.Info("removing leftover container from previous self-update", "container", c.Name)
 			if err := u.cli.ContainerRemove(ctx, c.ID, containertypes.RemoveOptions{Force: true}); err != nil {
 				slog.Warn("failed to remove old self container", "container", c.Name, "error", err)
-			} else {
-				if u.config.Cleanup {
-					docker.RemoveImage(ctx, u.cli, c.ImageID)
-				}
+			} else if u.config.Cleanup {
+				docker.RemoveImage(ctx, u.cli, c.ImageID)
 			}
 			return
 		}
@@ -464,7 +462,7 @@ func isHex(s string) bool {
 			return false
 		}
 	}
-	return len(s) > 0
+	return s != ""
 }
 
 // parseMountinfo reads a mountinfo file and extracts a Docker container ID

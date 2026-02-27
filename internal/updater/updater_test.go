@@ -220,7 +220,7 @@ func TestParseMountinfo(t *testing.T) {
 			// Write mountinfo content to a temp file
 			dir := t.TempDir()
 			path := filepath.Join(dir, "mountinfo")
-			if err := os.WriteFile(path, []byte(tt.content), 0644); err != nil {
+			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
 				t.Fatal(err)
 			}
 

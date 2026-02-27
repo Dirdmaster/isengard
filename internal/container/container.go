@@ -167,7 +167,7 @@ func Recreate(ctx context.Context, cli *client.Client, containerID, newImageID s
 // function does: inspect -> rename self -> create replacement -> start
 // replacement -> force-remove self. This prevents the race where stopping
 // our own container kills the process before the replacement is created.
-func RecreateSelf(ctx context.Context, cli *client.Client, containerID, newImage string, stopTimeout int) (string, error) {
+func RecreateSelf(ctx context.Context, cli *client.Client, containerID, newImage string, _ int) (string, error) {
 	inspect, err := cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", fmt.Errorf("inspecting container: %w", err)
