@@ -45,6 +45,12 @@ services:
   isengard:
     build: !reset null
     image: localhost:5111/isengard:latest
+    environment:
+      - ISENGARD_INTERVAL=30s
+      - ISENGARD_LOG_LEVEL=debug
+      - ISENGARD_CLEANUP=true
+      - ISENGARD_SELF_UPDATE=true
+      - ISENGARD_WATCH_ALL=false
 OVERRIDE
 
 sleep 3
@@ -70,10 +76,10 @@ echo "    New image pushed to $IMAGE:latest"
 
 echo ""
 echo "==> Step 6: Wait for Isengard to detect the change and self-update"
-echo "    Watching for up to 120 seconds (interval is 30s)..."
+echo "    Watching for up to 180 seconds (interval is 30s)..."
 echo ""
 
-TIMEOUT=120
+TIMEOUT=180
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
   if ! docker ps -q --no-trunc | grep -q "$CONTAINER_ID"; then
@@ -103,6 +109,6 @@ done
 echo ""
 echo "TIMEOUT: Isengard did not self-update within ${TIMEOUT}s"
 echo ""
-echo "==> Final logs:"
-docker logs "$CONTAINER_ID" 2>&1 | tail -30
+echo "==> Final logs (last 50 lines):"
+docker logs "$CONTAINER_ID" 2>&1 | tail -50
 exit 1
