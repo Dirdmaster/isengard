@@ -1,0 +1,75 @@
+//! Compile-time plugin registration via the [`inventory`] crate.
+//!
+//! Each plugin crate calls `inventory::submit!(PluginRegistration { ... })` at
+//! module scope. The host enumerates them at startup by mode.
+
+use crate::context::HostMode;
+use crate::plugin::Plugin;
+
+/// Capabilities a plugin advertises. Used by the host to skip plugins that
+/// don't apply to its current mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    Agent,
+    Controller,
+}
+
+/// Compile-time plugin registration entry. Plugin crates submit one of these
+/// per plugin via [`inventory::submit!`].
+pub struct PluginRegistration {
+    pub name: &'static str,
+    pub capabilities: &'static [Capability],
+    /// Boxed-ed factory. Returns `Plugin` so callers don't need to know the
+    /// concrete type. The host downcasts when calling capability sub-traits.
+    pub constructor: fn() -> Box<dyn Plugin>,
+}
+
+inventory::collect!(PluginRegistration);
+
+/// Enumerate every registered plugin that advertises a capability matching the
+/// given mode.
+pub fn registrations_for(mode: HostMode) -> Vec<&'static PluginRegistration> {
+    let want = match mode {
+        HostMode::Agent => Capability::Agent,
+        HostMode::Controller => Capability::Controller,
+    };
+    inventory::iter::<PluginRegistration>()
+        .filter(|r| r.capabilities.contains(&want))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::tests::NoopPlugin;
+    use crate::plugin::Plugin;
+
+    inventory::submit! {
+        PluginRegistration {
+            name: "noop",
+            capabilities: &[Capability::Agent, Capability::Controller],
+            constructor: || Box::new(NoopPlugin) as Box<dyn Plugin>,
+        }
+    }
+
+    #[test]
+    fn noop_is_visible_to_agent_mode() {
+        let regs = registrations_for(HostMode::Agent);
+        assert!(regs.iter().any(|r| r.name == "noop"));
+    }
+
+    #[test]
+    fn noop_is_visible_to_controller_mode() {
+        let regs = registrations_for(HostMode::Controller);
+        assert!(regs.iter().any(|r| r.name == "noop"));
+    }
+
+    #[test]
+    fn registration_constructor_yields_a_working_plugin() {
+        let regs = registrations_for(HostMode::Agent);
+        let noop = regs.iter().find(|r| r.name == "noop").unwrap();
+        let plugin = (noop.constructor)();
+        assert_eq!(plugin.name(), "noop");
+        assert_eq!(plugin.version(), "0.0.0");
+    }
+}
