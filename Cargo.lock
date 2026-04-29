@@ -63,6 +63,14 @@ version = "0.1.0-alpha"
 [[package]]
 name = "isengard-agent"
 version = "0.1.0-alpha"
+dependencies = [
+ "anyhow",
+ "isengard-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "isengard-controller"
