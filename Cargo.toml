@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/isengard",
+    "crates/isengard-core",
+    "crates/isengard-controller",
+    "crates/isengard-agent",
+    "crates/isengard-proto",
+    "crates/isengard-plugins/updater",
+    "crates/isengard-plugins/dashboard",
+    "crates/isengard-plugins/notifier",
+]
+
+[workspace.package]
+version = "0.1.0-alpha"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Dirdmaster"]
+repository = "https://github.com/Dirdmaster/isengard"
+homepage = "https://isengard.app"
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1.42", features = ["full"] }
+async-trait = "0.1.83"
+
+# plugin registration
+inventory = "0.3.15"
+
+# serialization
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+
+# errors
+anyhow = "1.0.94"
+thiserror = "2.0.6"
+
+# CLI
+clap = { version = "4.5.23", features = ["derive", "env"] }
+
+# logging
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+
+# internal
+isengard-core = { path = "crates/isengard-core" }
+isengard-controller = { path = "crates/isengard-controller" }
+isengard-agent = { path = "crates/isengard-agent" }
+isengard-proto = { path = "crates/isengard-proto" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

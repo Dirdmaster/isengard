@@ -1,0 +1,11 @@
+[package]
+name = "isengard-plugin-notifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Isengard notifier plugin (populated in a later phase)"
+
+[dependencies]
