@@ -9,3 +9,9 @@ repository.workspace = true
 description = "Controller-mode runtime"
 
 [dependencies]
+anyhow.workspace = true
+isengard-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
