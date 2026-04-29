@@ -12,8 +12,12 @@ pub struct DevPlugin;
 
 #[async_trait]
 impl Plugin for DevPlugin {
-    fn name(&self) -> &'static str { "dev" }
-    fn version(&self) -> &'static str { "0.1.0-alpha" }
+    fn name(&self) -> &'static str {
+        "dev"
+    }
+    fn version(&self) -> &'static str {
+        "0.1.0-alpha"
+    }
 
     async fn init(&mut self, _ctx: &PluginContext) -> Result<()> {
         tracing::info!(plugin = "dev", "init");

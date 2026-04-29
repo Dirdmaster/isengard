@@ -41,8 +41,8 @@ pub fn registrations_for(mode: HostMode) -> Vec<&'static PluginRegistration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::tests::NoopPlugin;
     use crate::plugin::Plugin;
+    use crate::plugin::tests::NoopPlugin;
 
     inventory::submit! {
         PluginRegistration {

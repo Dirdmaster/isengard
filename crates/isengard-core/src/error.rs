@@ -58,7 +58,9 @@ mod tests {
 
     #[test]
     fn display_unknown_plugin() {
-        let err = CoreError::UnknownPlugin { name: "ghost".into() };
+        let err = CoreError::UnknownPlugin {
+            name: "ghost".into(),
+        };
         assert_eq!(err.to_string(), "no plugin registered with name ghost");
     }
 }

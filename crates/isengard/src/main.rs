@@ -11,7 +11,11 @@ use tracing_subscriber::EnvFilter;
 mod dev_plugin;
 
 #[derive(Debug, Parser)]
-#[command(name = "isengard", version, about = "Isengard container management platform")]
+#[command(
+    name = "isengard",
+    version,
+    about = "Isengard container management platform"
+)]
 struct Cli {
     /// Logging filter (e.g. "info", "debug,isengard=trace"). Read from
     /// `RUST_LOG` env var if not set.
@@ -44,11 +48,9 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let filter = cli
-        .log
-        .as_deref()
-        .map(EnvFilter::new)
-        .unwrap_or_else(|| EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")));
+    let filter = cli.log.as_deref().map(EnvFilter::new).unwrap_or_else(|| {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    });
     let use_ansi = std::io::stderr().is_terminal();
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -59,14 +61,16 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Controller { listen } => {
             tracing::info!(%listen, "controller mode");
-            isengard_controller::run_controller(isengard_controller::ControllerOptions::default()).await
+            isengard_controller::run_controller(isengard_controller::ControllerOptions::default())
+                .await
         }
         Command::Agent { controller } => {
             tracing::info!(?controller, "agent mode");
             isengard_agent::run_agent(isengard_agent::AgentOptions {
                 controller_url: controller,
                 ..Default::default()
-            }).await
+            })
+            .await
         }
     }
 }

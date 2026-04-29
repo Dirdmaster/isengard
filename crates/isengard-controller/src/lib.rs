@@ -2,7 +2,7 @@
 //! shutdown. Phase 1 minimum — no gRPC server, no inventory store.
 
 use anyhow::Result;
-use isengard_core::{registrations_for, HostMode, Plugin, PluginContext};
+use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
 use tracing::{info, instrument};
 
 /// Options for running the controller.
@@ -14,7 +14,9 @@ pub struct ControllerOptions {
 
 impl Default for ControllerOptions {
     fn default() -> Self {
-        Self { config: serde_json::Value::Object(Default::default()) }
+        Self {
+            config: serde_json::Value::Object(Default::default()),
+        }
     }
 }
 

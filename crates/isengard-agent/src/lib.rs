@@ -2,7 +2,7 @@
 //! shutdown. Phase 1 minimum — no gRPC client, no docker integration.
 
 use anyhow::Result;
-use isengard_core::{registrations_for, HostMode, Plugin, PluginContext};
+use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
 use tracing::{info, instrument};
 
 #[derive(Debug, Clone)]

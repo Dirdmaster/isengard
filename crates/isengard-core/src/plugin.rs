@@ -76,16 +76,28 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl Plugin for NoopPlugin {
-        fn name(&self) -> &'static str { "noop" }
-        fn version(&self) -> &'static str { "0.0.0" }
-        async fn init(&mut self, _ctx: &PluginContext) -> Result<()> { Ok(()) }
-        async fn start(&mut self, _ctx: &PluginContext) -> Result<()> { Ok(()) }
-        async fn stop(&mut self) -> Result<()> { Ok(()) }
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn version(&self) -> &'static str {
+            "0.0.0"
+        }
+        async fn init(&mut self, _ctx: &PluginContext) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&mut self, _ctx: &PluginContext) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[async_trait]
     impl AgentPlugin for NoopPlugin {
-        async fn run_cycle(&self, _ctx: &PluginContext) -> Result<()> { Ok(()) }
+        async fn run_cycle(&self, _ctx: &PluginContext) -> Result<()> {
+            Ok(())
+        }
     }
 
     impl ControllerPlugin for NoopPlugin {}
