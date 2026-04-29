@@ -1,5 +1,11 @@
 # Isengard
 
+> **Note (2026-04-29):** Isengard is being rewritten from the ground up as a container management platform — single binary with controller and agent modes, plugin model, multi-host support, web dashboard. The Rust rewrite is in progress on the `feat/platform-rewrite` branch. The Go implementation below remains the current stable release; it stays in [`legacy-go/`](./legacy-go/) on the rewrite branch as a reference. See [`docs/superpowers/specs/2026-04-29-platform-pivot-design.md`](./docs/superpowers/specs/2026-04-29-platform-pivot-design.md) for the design.
+
+---
+
+# Isengard
+
 [![CI](https://img.shields.io/github/actions/workflow/status/dirdmaster/isengard/ci.yml?branch=main&label=CI&style=flat)](https://github.com/dirdmaster/isengard/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/github/actions/workflow/status/dirdmaster/isengard/docker.yml?label=Docker&style=flat)](https://github.com/dirdmaster/isengard/actions/workflows/docker.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/dirdmaster/isengard?style=flat)](https://go.dev)
