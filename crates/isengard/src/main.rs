@@ -1,3 +1,62 @@
-fn main() {
-    println!("isengard: not yet wired up — see Task 9");
+//! Isengard binary entry point. Parses subcommand, sets up tracing, dispatches
+//! to either the controller or agent runner.
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Parser)]
+#[command(name = "isengard", version, about = "Isengard container management platform")]
+struct Cli {
+    /// Logging filter (e.g. "info", "debug,isengard=trace"). Read from
+    /// `RUST_LOG` env var if not set.
+    #[arg(long, global = true, env = "ISENGARD_LOG")]
+    log: Option<String>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run in controller mode: aggregates agent state, hosts the dashboard
+    /// and notifier plugins, distributes config.
+    Controller {
+        /// HTTP/gRPC listen address.
+        #[arg(long, env = "ISENGARD_LISTEN", default_value = "0.0.0.0:9417")]
+        listen: String,
+    },
+    /// Run in agent mode: registers with a controller, runs agent-side plugins
+    /// (updater).
+    Agent {
+        /// URL of the controller, e.g. `https://controller.example.com:9417`.
+        #[arg(long, env = "ISENGARD_CONTROLLER")]
+        controller: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    let filter = cli
+        .log
+        .as_deref()
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    match cli.command {
+        Command::Controller { listen } => {
+            tracing::info!(%listen, "controller mode");
+            isengard_controller::run_controller(isengard_controller::ControllerOptions::default()).await
+        }
+        Command::Agent { controller } => {
+            tracing::info!(?controller, "agent mode");
+            isengard_agent::run_agent(isengard_agent::AgentOptions {
+                controller_url: controller,
+                ..Default::default()
+            }).await
+        }
+    }
 }
