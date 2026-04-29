@@ -1,0 +1,4 @@
+# Allow up to 7 function arguments before warning (default is 7; explicit for visibility)
+too-many-arguments-threshold = 8
+# Allow Vec<u8> for byte buffers without warning
+allow-expect-in-tests = true

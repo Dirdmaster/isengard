@@ -4,3 +4,16 @@ www/.output/
 www/dist/
 www/bun.lock
 .cachebust
+
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+/.idea/
+/.vscode/
+*.iml
+
+# Local env
+.env
+.env.local
