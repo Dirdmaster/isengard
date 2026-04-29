@@ -2,38 +2,50 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**"]
   pull_request:
-    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  lint:
+  build-test:
+    name: build + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.64.8
-          install-mode: goinstall
+      - uses: actions/checkout@v4
 
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
-      - run: go build ./...
-      - run: go vet ./...
+          components: rustfmt, clippy
 
-  test:
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo nextest
+        run: cargo nextest run --workspace
+
+  deny:
+    name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - run: go test -race -v ./...
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
