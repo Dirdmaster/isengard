@@ -1,9 +1,14 @@
 //! Isengard binary entry point. Parses subcommand, sets up tracing, dispatches
 //! to either the controller or agent runner.
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+#[cfg(feature = "dev")]
+mod dev_plugin;
 
 #[derive(Debug, Parser)]
 #[command(name = "isengard", version, about = "Isengard container management platform")]
@@ -44,7 +49,12 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(EnvFilter::new)
         .unwrap_or_else(|| EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let use_ansi = std::io::stderr().is_terminal();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(use_ansi)
+        .init();
 
     match cli.command {
         Command::Controller { listen } => {
