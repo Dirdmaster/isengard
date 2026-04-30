@@ -104,11 +104,10 @@ async fn enroll_with_wrong_token_returns_unauthenticated() {
     let h = harness().await;
     let channel = channel_to(h.addr).await;
     let token: MetadataValue<_> = "Bearer not-the-right-token".parse().unwrap();
-    let mut client =
-        ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
-            req.metadata_mut().insert("authorization", token.clone());
-            Ok(req)
-        });
+    let mut client = ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
+        req.metadata_mut().insert("authorization", token.clone());
+        Ok(req)
+    });
 
     let err = client
         .enroll(sample_request())
@@ -122,11 +121,10 @@ async fn enroll_with_valid_token_returns_agent_id_and_heartbeat() {
     let h = harness().await;
     let channel = channel_to(h.addr).await;
     let token: MetadataValue<_> = format!("Bearer {TEST_TOKEN}").parse().unwrap();
-    let mut client =
-        ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
-            req.metadata_mut().insert("authorization", token.clone());
-            Ok(req)
-        });
+    let mut client = ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
+        req.metadata_mut().insert("authorization", token.clone());
+        Ok(req)
+    });
 
     let resp = client
         .enroll(sample_request())
@@ -143,11 +141,10 @@ async fn enroll_with_duplicate_fingerprint_returns_already_exists() {
     let h = harness().await;
     let channel = channel_to(h.addr).await;
     let token: MetadataValue<_> = format!("Bearer {TEST_TOKEN}").parse().unwrap();
-    let mut client =
-        ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
-            req.metadata_mut().insert("authorization", token.clone());
-            Ok(req)
-        });
+    let mut client = ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
+        req.metadata_mut().insert("authorization", token.clone());
+        Ok(req)
+    });
 
     let _first = client
         .enroll(sample_request())

@@ -80,8 +80,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     // Build the auth layer from the env var. Binary's main() already verified
     // it's set; if it's somehow missing here, fail loud rather than silently allow.
-    let token = std::env::var("ISENGARD_TOKEN")
-        .with_context(|| "ISENGARD_TOKEN env var must be set")?;
+    let token =
+        std::env::var("ISENGARD_TOKEN").with_context(|| "ISENGARD_TOKEN env var must be set")?;
     let auth_layer = crate::auth::TokenAuthLayer::new(token);
 
     let svc = ControllerServer::new(ControllerService::new(inventory));
