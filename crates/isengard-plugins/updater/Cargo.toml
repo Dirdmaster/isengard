@@ -12,6 +12,7 @@ description = "Auto-update plugin for Isengard — checks registry digests and r
 anyhow.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
+chrono.workspace = true
 inventory.workspace = true
 isengard-core.workspace = true
 serde.workspace = true

@@ -21,8 +21,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bollard::Docker;
 use bollard::container::ListContainersOptions;
+use chrono::Utc;
 use isengard_core::{
-    AgentPlugin, Capability, CoreError, Plugin, PluginContext, PluginRegistration, Result,
+    AgentPlugin, Capability, CoreError, Event, EventEmitter, Plugin, PluginContext,
+    PluginRegistration, Result,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -43,6 +45,7 @@ pub struct Updater {
     docker: Option<Docker>,
     registry: Option<Arc<RegistryClient>>,
     cycle_interval: Duration,
+    emitter: Option<Arc<dyn EventEmitter>>,
     cancel: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -53,6 +56,7 @@ impl Updater {
             docker: None,
             registry: None,
             cycle_interval: Duration::from_secs(DEFAULT_CYCLE_INTERVAL_SECS),
+            emitter: None,
             cancel: Arc::new(Notify::new()),
             task: None,
         }
@@ -85,9 +89,19 @@ fn start_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+async fn emit(emitter: Option<&Arc<dyn EventEmitter>>, event: Event) {
+    if let Some(e) = emitter {
+        e.emit(event).await;
+    }
+}
+
 /// One cycle of work. Filter candidates by `isengard.enable=true`, compare
 /// each one's local digest against its remote registry digest, classify, log.
-async fn do_cycle(docker: &Docker, registry: &RegistryClient) -> anyhow::Result<()> {
+async fn do_cycle(
+    docker: &Docker,
+    registry: &RegistryClient,
+    emitter: Option<&Arc<dyn EventEmitter>>,
+) -> anyhow::Result<()> {
     let opts = ListContainersOptions::<String> {
         all: false,
         ..Default::default()
@@ -182,8 +196,40 @@ async fn do_cycle(docker: &Docker, registry: &RegistryClient) -> anyhow::Result<
                     continue;
                 };
 
-                if let Err(e) = recreate::update_container(docker, container_id, &image_ref).await {
-                    warn!(container = %name, error = %e, "update failed");
+                match recreate::update_container(docker, container_id, &image_ref).await {
+                    Ok(()) => {
+                        emit(
+                            emitter,
+                            Event {
+                                kind: "update.success".into(),
+                                occurred_at: Utc::now(),
+                                summary: format!("updated {name} to {remote}"),
+                                container_name: Some(name.clone()),
+                                image: Some(image_str.to_string()),
+                                old_digest: Some(local.to_string()),
+                                new_digest: Some(remote.to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        warn!(container = %name, error = %err_str, "update failed");
+                        emit(
+                            emitter,
+                            Event {
+                                kind: "update.failed".into(),
+                                occurred_at: Utc::now(),
+                                summary: format!("update failed for {name}: {err_str}"),
+                                container_name: Some(name.clone()),
+                                image: Some(image_str.to_string()),
+                                error: Some(err_str),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    }
                 }
             }
             _ => {
@@ -197,6 +243,29 @@ async fn do_cycle(docker: &Docker, registry: &RegistryClient) -> anyhow::Result<
         candidates = candidates.len(),
         up_to_date, needs_update, unknown, "updater cycle complete"
     );
+
+    emit(
+        emitter,
+        Event {
+            kind: "update.checked".into(),
+            occurred_at: Utc::now(),
+            summary: format!(
+                "cycle: candidates={} up_to_date={} needs_update={} unknown={}",
+                candidates.len(),
+                up_to_date,
+                needs_update,
+                unknown
+            ),
+            metadata: serde_json::json!({
+                "candidates": candidates.len(),
+                "up_to_date": up_to_date,
+                "needs_update": needs_update,
+                "unknown": unknown,
+            }),
+            ..Default::default()
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -266,6 +335,13 @@ impl Plugin for Updater {
         }
 
         self.docker = Some(docker);
+
+        // Pick up the agent's EventEmitter (None if running on controller side
+        // or in a test that didn't wire one).
+        self.emitter = ctx.events.clone();
+        if self.emitter.is_some() {
+            info!("updater wired to event emitter");
+        }
         Ok(())
     }
 
@@ -278,6 +354,7 @@ impl Plugin for Updater {
             .registry
             .clone()
             .ok_or_else(|| start_err("updater started before init"))?;
+        let emitter = self.emitter.clone();
         let cancel = self.cancel.clone();
         let interval = self.cycle_interval;
 
@@ -290,7 +367,7 @@ impl Plugin for Updater {
                         break;
                     }
                     _ = ticker.tick() => {
-                        if let Err(e) = do_cycle(&docker, &registry).await {
+                        if let Err(e) = do_cycle(&docker, &registry, emitter.as_ref()).await {
                             // Don't crash the task on a single bad cycle; just log
                             // and try again next tick. Phase 3b adds retry policy.
                             warn!(error = %e, "updater cycle failed");
@@ -333,7 +410,7 @@ impl AgentPlugin for Updater {
             .registry
             .as_ref()
             .ok_or_else(|| init_err("run_cycle before init"))?;
-        do_cycle(docker, registry)
+        do_cycle(docker, registry, self.emitter.as_ref())
             .await
             .map_err(|e| init_err(format!("cycle failed: {e}")))
     }
@@ -353,4 +430,59 @@ inventory::submit! {
 fn _assert_send_sync() {
     fn assert<T: Send + Sync + 'static>() {}
     assert::<Updater>();
+}
+
+#[cfg(test)]
+mod emit_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Captures emitted events for assertion.
+    struct RecordingEmitter {
+        events: Mutex<Vec<Event>>,
+    }
+
+    impl RecordingEmitter {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshot(&self) -> Vec<Event> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl EventEmitter for RecordingEmitter {
+        async fn emit(&self, event: Event) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_helper_skips_when_emitter_none() {
+        // Should not panic — no emitter, no-op.
+        emit(None, Event::default()).await;
+    }
+
+    #[tokio::test]
+    async fn emit_helper_delivers_when_emitter_some() {
+        let recorder = Arc::new(RecordingEmitter::new());
+        let as_emitter: Arc<dyn EventEmitter> = recorder.clone();
+        emit(
+            Some(&as_emitter),
+            Event {
+                kind: "test.kind".into(),
+                summary: "hello".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let snap = recorder.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].kind, "test.kind");
+        assert_eq!(snap[0].summary, "hello");
+    }
 }
