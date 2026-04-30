@@ -94,9 +94,7 @@ impl Controller for ControllerService {
         let agent_id_str = match hello.payload {
             Some(isengard_proto::pb::agent_message::Payload::Hello(h)) => h.agent_id,
             _ => {
-                return Err(Status::invalid_argument(
-                    "first frame must be SyncHello",
-                ));
+                return Err(Status::invalid_argument("first frame must be SyncHello"));
             }
         };
 
@@ -142,11 +140,13 @@ impl Controller for ControllerService {
                         }
 
                         let ack = ControllerMessage {
-                            payload: Some(isengard_proto::pb::controller_message::Payload::HeartbeatAck(
-                                isengard_proto::pb::HeartbeatAck {
-                                    server_time_ms: (server_ts as u64) * 1000,
-                                },
-                            )),
+                            payload: Some(
+                                isengard_proto::pb::controller_message::Payload::HeartbeatAck(
+                                    isengard_proto::pb::HeartbeatAck {
+                                        server_time_ms: (server_ts as u64) * 1000,
+                                    },
+                                ),
+                            ),
                         };
                         if tx.send(Ok(ack)).await.is_err() {
                             // Client closed the receive side; stream is over.

@@ -19,9 +19,9 @@ use isengard_proto::pb::controller_client::ControllerClient;
 use isengard_proto::pb::{AgentMessage, Heartbeat, SyncHello};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::Request;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
-use tonic::Request;
 use tracing::{debug, info, instrument, warn};
 
 use crate::Result;
@@ -57,11 +57,15 @@ pub async fn run_sync_loop(
 
     // Send Hello first.
     let hello = AgentMessage {
-        payload: Some(isengard_proto::pb::agent_message::Payload::Hello(SyncHello {
-            agent_id: agent_id.clone(),
-        })),
+        payload: Some(isengard_proto::pb::agent_message::Payload::Hello(
+            SyncHello {
+                agent_id: agent_id.clone(),
+            },
+        )),
     };
-    tx.send(hello).await.context("sending Hello to outbound channel")?;
+    tx.send(hello)
+        .await
+        .context("sending Hello to outbound channel")?;
     info!("Sync stream opened, Hello sent");
 
     // Spawn heartbeat task.
