@@ -8,6 +8,9 @@
 #[allow(dead_code)]
 mod image_ref;
 
+#[allow(dead_code)]
+mod labels;
+
 use std::sync::Arc;
 use std::time::Duration;
 
