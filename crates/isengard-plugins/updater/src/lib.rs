@@ -14,6 +14,9 @@ mod labels;
 #[allow(dead_code)]
 mod auth;
 
+#[allow(dead_code)]
+mod registry;
+
 use std::sync::Arc;
 use std::time::Duration;
 
