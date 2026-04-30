@@ -38,12 +38,14 @@ pub async fn save(state_dir: &Path, state: &AgentState) -> Result<()> {
     let path = state_dir.join(STATE_FILENAME);
     let tmp = state_dir.join(format!("{STATE_FILENAME}.tmp"));
 
-    let body = serde_json::to_vec_pretty(state)
-        .map_err(|e| anyhow::anyhow!("serialising state: {e}"))?;
+    let body =
+        serde_json::to_vec_pretty(state).map_err(|e| anyhow::anyhow!("serialising state: {e}"))?;
 
-    tokio::fs::write(&tmp, &body).await
+    tokio::fs::write(&tmp, &body)
+        .await
         .map_err(|e| anyhow::anyhow!("writing {tmp:?}: {e}"))?;
-    tokio::fs::rename(&tmp, &path).await
+    tokio::fs::rename(&tmp, &path)
+        .await
         .map_err(|e| anyhow::anyhow!("rename {tmp:?} -> {path:?}: {e}"))?;
 
     Ok(())
@@ -76,18 +78,27 @@ mod tests {
     #[tokio::test]
     async fn load_returns_error_on_malformed_file() {
         let dir = TempDir::new().unwrap();
-        tokio::fs::write(dir.path().join("agent.json"), b"{not valid json").await.unwrap();
+        tokio::fs::write(dir.path().join("agent.json"), b"{not valid json")
+            .await
+            .unwrap();
 
         let err = load(dir.path()).await.expect_err("must fail");
         let msg = format!("{err}");
-        assert!(msg.contains("parsing") || msg.contains("agent.json"), "got: {msg}");
+        assert!(
+            msg.contains("parsing") || msg.contains("agent.json"),
+            "got: {msg}"
+        );
     }
 
     #[tokio::test]
     async fn save_overwrites_existing() {
         let dir = TempDir::new().unwrap();
-        let first = AgentState { agent_id: "first".into() };
-        let second = AgentState { agent_id: "second".into() };
+        let first = AgentState {
+            agent_id: "first".into(),
+        };
+        let second = AgentState {
+            agent_id: "second".into(),
+        };
         save(dir.path(), &first).await.unwrap();
         save(dir.path(), &second).await.unwrap();
         let loaded = load(dir.path()).await.unwrap().unwrap();

@@ -7,8 +7,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use isengard_agent::{run_agent, AgentOptions};
-use isengard_controller::{run_controller, ControllerOptions};
+use isengard_agent::{AgentOptions, run_agent};
+use isengard_controller::{ControllerOptions, run_controller};
 use tempfile::TempDir;
 
 const TEST_TOKEN: &str = "test-token-2d";
@@ -29,7 +29,8 @@ async fn spawn_controller(state_dir: std::path::PathBuf) -> SocketAddr {
             listen: addr,
             state_dir,
             config: serde_json::Value::Object(Default::default()),
-        }).await;
+        })
+        .await;
     });
 
     for _ in 0..40 {
@@ -62,15 +63,25 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
     let state_path = agent_state.path().join("agent.json");
     assert!(state_path.exists(), "agent.json must exist after enroll");
     let body = std::fs::read_to_string(&state_path).unwrap();
-    assert!(body.contains("agent_id"), "agent.json must contain agent_id key");
+    assert!(
+        body.contains("agent_id"),
+        "agent.json must contain agent_id key"
+    );
 
     // Controller side: hosts table must contain one row.
     use isengard_storage::Inventory;
     let db_path = controller_state.path().join("isengard.db");
     let inv = Inventory::open(&db_path).await.expect("open inventory");
     let hosts = inv.list_hosts().await.expect("list hosts");
-    assert_eq!(hosts.len(), 1, "controller inventory should have exactly 1 host");
-    assert!(!hosts[0].fingerprint.is_empty(), "fingerprint should be set");
+    assert_eq!(
+        hosts.len(),
+        1,
+        "controller inventory should have exactly 1 host"
+    );
+    assert!(
+        !hosts[0].fingerprint.is_empty(),
+        "fingerprint should be set"
+    );
 }
 
 #[tokio::test]

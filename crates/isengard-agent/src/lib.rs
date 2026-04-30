@@ -47,7 +47,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             let id = enroll::enroll(&opts.controller_url, &token, host_info).await?;
             agent_state::save(
                 &opts.state_dir,
-                &agent_state::AgentState { agent_id: id.clone() },
+                &agent_state::AgentState {
+                    agent_id: id.clone(),
+                },
             )
             .await?;
             info!(agent_id = %id, "enrolled");
