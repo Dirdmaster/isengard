@@ -52,6 +52,7 @@ prost = "0.13.4"
 prost-types = "0.13.4"
 tower = "0.5.2"
 tokio-stream = "0.1.17"
+http = "1"
 
 # storage
 sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros", "migrate", "chrono"] }

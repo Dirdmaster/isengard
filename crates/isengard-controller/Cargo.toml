@@ -11,10 +11,12 @@ description = "Controller-mode runtime"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+http.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+subtle.workspace = true
 tokio = { workspace = true }
 tokio-stream.workspace = true
 tonic.workspace = true

@@ -1,6 +1,7 @@
 //! Controller-mode runtime: load plugins, bind the gRPC server, await
 //! shutdown, drain, stop plugins, exit.
 
+mod auth;
 mod service;
 
 use std::net::SocketAddr;
@@ -13,6 +14,7 @@ use tokio::signal;
 use tonic::transport::Server;
 use tracing::{info, instrument};
 
+pub use auth::TokenAuthLayer;
 pub use service::ControllerService;
 
 /// Options for running the controller.

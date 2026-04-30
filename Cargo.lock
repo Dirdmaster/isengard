@@ -1066,10 +1066,12 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "async-trait",
+ "http",
  "isengard-core",
  "isengard-proto",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "tokio-stream",
  "tonic",
