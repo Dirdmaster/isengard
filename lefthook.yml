@@ -1,0 +1,42 @@
+# Lefthook git hooks. https://lefthook.dev
+#
+# Activate locally:  `lefthook install`  (or `just install-hooks`)
+# These run before `git push` and mirror the CI gates so failures are caught
+# locally instead of round-tripping through GitHub Actions.
+
+pre-push:
+  # Run sequentially so output is readable. All gates are fast (< 2 min total).
+  parallel: false
+  commands:
+    fmt-check:
+      run: cargo fmt --check
+      tags: rust
+
+    clippy:
+      run: cargo clippy --workspace --all-targets -- -D warnings
+      tags: rust
+
+    test:
+      # Prefer nextest (faster, better output); fall back to cargo test.
+      run: |
+        if command -v cargo-nextest >/dev/null 2>&1; then
+          cargo nextest run --workspace
+        else
+          cargo test --workspace
+        fi
+      tags: rust
+
+    deny:
+      # cargo-deny is optional; CI always runs it, locally it's a nice-to-have.
+      # Skips silently if not installed — install with `cargo install cargo-deny`.
+      run: |
+        if command -v cargo-deny >/dev/null 2>&1; then
+          cargo deny check
+        else
+          echo "(cargo-deny not installed locally; CI will run it. install: cargo install cargo-deny)"
+        fi
+      tags: rust
+
+# Skip hooks on a single push by setting LEFTHOOK=0:
+#   LEFTHOOK=0 git push
+# (Don't make this a habit. The hooks exist for a reason.)

@@ -70,3 +70,13 @@ clean:
 # Pre-commit gate: fmt + lint + test
 ci-local: fmt-check lint test
     @echo "✓ ci-local passed"
+
+# Install lefthook git hooks (pre-push runs fmt-check + clippy + test + cargo-deny).
+# After running this once, `git push` will run the gates locally.
+install-hooks:
+    @if ! command -v lefthook >/dev/null 2>&1; then \
+        echo "lefthook not installed. install with: brew install lefthook  (or: cargo install lefthook)"; \
+        exit 1; \
+    fi
+    lefthook install
+    @echo "✓ pre-push hook installed"
