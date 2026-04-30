@@ -10,7 +10,9 @@ pub mod sync;
 /// Convenience alias used throughout the agent.
 pub type Result<T> = anyhow::Result<T>;
 
-use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
+use std::sync::Arc;
+
+use isengard_core::{EventEmitter, HostMode, Plugin, PluginContext, registrations_for};
 use tracing::{info, instrument, warn};
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,12 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         }
     };
 
+    // -- build the outbound EventEmitter (mpsc-backed). Receiver lives in
+    //    this scope and is passed by &mut into the sync loop so events stay
+    //    queued across reconnects.
+    let (emitter, mut events_rx) = events::OutboundEmitter::new();
+    let emitter: Arc<dyn EventEmitter> = Arc::new(emitter);
+
     // -- plugin lifecycle (unchanged from Phase 1) -----------------------
     let plugins = load_plugins();
     info!(plugin_count = plugins.len(), "plugins discovered");
@@ -72,7 +80,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             .get(&plugin_name)
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let ctx = PluginContext::new(HostMode::Agent, plugin_config);
+        let ctx = PluginContext::new(HostMode::Agent, plugin_config).with_events(emitter.clone());
         plugin.init(&ctx).await?;
         plugin.start(&ctx).await?;
         info!(plugin = %plugin_name, "plugin started");
@@ -88,28 +96,44 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     // heartbeat_interval_secs from EnrollResponse.
     const HEARTBEAT_INTERVAL_SECS: u32 = 10;
 
-    let sync_handle = {
-        let url = opts.controller_url.clone();
-        let agent_id = agent_id.clone();
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            sync::run_sync_with_reconnect(url, token, agent_id, HEARTBEAT_INTERVAL_SECS, cancel)
-                .await
-        })
+    // The sync loop borrows `events_rx` for its lifetime — own it here.
+    let sync_url = opts.controller_url.clone();
+    let sync_agent_id = agent_id.clone();
+    let sync_cancel = cancel.clone();
+    let sync_fut = async move {
+        sync::run_sync_with_reconnect(
+            sync_url,
+            token,
+            sync_agent_id,
+            HEARTBEAT_INTERVAL_SECS,
+            sync_cancel,
+            &mut events_rx,
+        )
+        .await
     };
+    tokio::pin!(sync_fut);
 
-    // Wait for ctrl_c.
-    let _ = tokio::signal::ctrl_c().await;
-    info!("ctrl_c received, shutting down");
-    cancel.notify_waiters();
+    // Wait for ctrl_c OR for the sync loop to terminate on its own.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("ctrl_c received, shutting down");
+            cancel.notify_waiters();
 
-    // Wait for sync to wind down (with a timeout so we don't hang forever).
-    let sync_result = tokio::time::timeout(std::time::Duration::from_secs(5), sync_handle).await;
-    match sync_result {
-        Ok(Ok(Ok(()))) => info!("sync loop exited cleanly"),
-        Ok(Ok(Err(e))) => warn!(error = %e, "sync loop exited with error"),
-        Ok(Err(e)) => warn!(error = %e, "sync task panicked or was cancelled"),
-        Err(_) => warn!("sync loop timed out on shutdown"),
+            // Wait for sync to wind down (with a timeout so we don't hang forever).
+            let sync_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), &mut sync_fut).await;
+            match sync_result {
+                Ok(Ok(())) => info!("sync loop exited cleanly"),
+                Ok(Err(e)) => warn!(error = %e, "sync loop exited with error"),
+                Err(_) => warn!("sync loop timed out on shutdown"),
+            }
+        }
+        res = &mut sync_fut => {
+            match res {
+                Ok(()) => info!("sync loop exited cleanly before ctrl_c"),
+                Err(e) => warn!(error = %e, "sync loop exited with error before ctrl_c"),
+            }
+        }
     }
 
     // -- plugin stop ---------------------------------------------------

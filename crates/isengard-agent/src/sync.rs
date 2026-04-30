@@ -15,8 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use isengard_core::Event as CoreEvent;
 use isengard_proto::pb::controller_client::ControllerClient;
-use isengard_proto::pb::{AgentMessage, Heartbeat, SyncHello};
+use isengard_proto::pb::{AgentMessage, Event as ProtoEvent, Heartbeat, SyncHello, agent_message};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -29,13 +30,18 @@ use crate::backoff::Backoff;
 
 /// Open a Sync stream and run the heartbeat loop until the stream errors or
 /// `cancel` fires. Returns Ok on graceful cancel; Err on stream error.
-#[instrument(skip(token, cancel), fields(agent_id = %agent_id))]
+///
+/// `events_rx` is borrowed (not moved) so that it survives reconnects: events
+/// emitted while the stream is down stay queued in the channel until the next
+/// stream comes up.
+#[instrument(skip(token, cancel, events_rx), fields(agent_id = %agent_id))]
 pub async fn run_sync_loop(
     controller_url: String,
     token: String,
     agent_id: String,
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
+    events_rx: &mut mpsc::Receiver<CoreEvent>,
 ) -> Result<()> {
     let channel = Channel::from_shared(controller_url.clone())
         .with_context(|| format!("invalid controller url {controller_url:?}"))?
@@ -125,9 +131,12 @@ pub async fn run_sync_loop(
         info!("inbound stream closed");
     });
 
-    // Wait for cancel OR for either spawned task to end. If a task ends before
-    // cancel fires, that means the stream broke (controller died, network
-    // dropped, etc.) — we return Err so the outer reconnect loop retries.
+    // Wait for cancel OR for either spawned task to end OR for an outbound
+    // event to drain. If a task ends before cancel fires, that means the
+    // stream broke (controller died, network dropped, etc.) — we return Err
+    // so the outer reconnect loop retries. Outbound events are forwarded as
+    // AgentMessage::Event frames; we loop until one of the terminal arms
+    // fires.
     //
     // `read_consumed` / `hb_consumed` track which handle (if any) was polled
     // to completion by the select. We must NOT await a JoinHandle a second
@@ -135,20 +144,37 @@ pub async fn run_sync_loop(
     // "JoinHandle polled after completion".
     let mut read_consumed = false;
     let mut hb_consumed = false;
-    let result: Result<()> = tokio::select! {
-        _ = cancel.notified() => {
-            info!("cancel received, shutting down sync");
-            Ok(())
-        }
-        res = &mut read_task => {
-            read_consumed = true;
-            tracing::warn!(?res, "inbound stream task ended before cancel");
-            Err(anyhow::anyhow!("inbound stream ended (controller likely went away)"))
-        }
-        res = &mut heartbeat_task => {
-            hb_consumed = true;
-            tracing::warn!(?res, "heartbeat task ended before cancel");
-            Err(anyhow::anyhow!("heartbeat task ended (outbound channel closed)"))
+    let result: Result<()> = loop {
+        tokio::select! {
+            _ = cancel.notified() => {
+                info!("cancel received, shutting down sync");
+                break Ok(());
+            }
+            res = &mut read_task => {
+                read_consumed = true;
+                tracing::warn!(?res, "inbound stream task ended before cancel");
+                break Err(anyhow::anyhow!("inbound stream ended (controller likely went away)"));
+            }
+            res = &mut heartbeat_task => {
+                hb_consumed = true;
+                tracing::warn!(?res, "heartbeat task ended before cancel");
+                break Err(anyhow::anyhow!("heartbeat task ended (outbound channel closed)"));
+            }
+            maybe_ev = events_rx.recv() => {
+                let Some(core_ev) = maybe_ev else {
+                    // Receiver closed — agent shutting down. Treat like cancel.
+                    info!("events channel closed, shutting down sync");
+                    break Ok(());
+                };
+                let proto_ev: ProtoEvent = core_ev.into();
+                let msg = AgentMessage {
+                    payload: Some(agent_message::Payload::Event(proto_ev)),
+                };
+                if let Err(e) = tx.send(msg).await {
+                    warn!(error = %e, "failed to send event over sync stream");
+                    break Err(anyhow::anyhow!("outbound channel closed while sending event"));
+                }
+            }
         }
     };
 
@@ -173,13 +199,14 @@ pub async fn run_sync_loop(
 ///
 /// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
 /// (proves the connection was healthy).
-#[instrument(skip(token, cancel), fields(agent_id = %agent_id))]
+#[instrument(skip(token, cancel, events_rx), fields(agent_id = %agent_id))]
 pub async fn run_sync_with_reconnect(
     controller_url: String,
     token: String,
     agent_id: String,
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
+    events_rx: &mut mpsc::Receiver<CoreEvent>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -208,6 +235,7 @@ pub async fn run_sync_with_reconnect(
             agent_id.clone(),
             interval_secs,
             cancel.clone(),
+            events_rx,
         )
         .await;
 
