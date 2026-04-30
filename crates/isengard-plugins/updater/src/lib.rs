@@ -1,20 +1,15 @@
 //! Isengard `updater` plugin.
 //!
 //! Watches running Docker containers and (in later sub-phases) keeps their
-//! images up to date. Phase 3a: just lists containers on a schedule.
+//! images up to date. Phase 3b: filters containers by `isengard.enable=true`,
+//! compares each one's local digest against its remote registry digest, and
+//! classifies as `up_to_date | needs_update | unknown`.
 
 #![allow(clippy::result_large_err)]
 
-#[allow(dead_code)]
-mod image_ref;
-
-#[allow(dead_code)]
-mod labels;
-
-#[allow(dead_code)]
 mod auth;
-
-#[allow(dead_code)]
+mod image_ref;
+mod labels;
 mod registry;
 
 use std::sync::Arc;
@@ -30,6 +25,11 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::auth::DockerConfig;
+use crate::image_ref::ImageRef;
+use crate::labels::isengard_enabled;
+use crate::registry::RegistryClient;
+
 const PLUGIN_NAME: &str = "updater";
 const CYCLE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -37,6 +37,7 @@ pub struct Updater {
     /// Lazily set in `init`. Wrapped in Option so the struct can be constructed
     /// by the inventory factory before init runs.
     docker: Option<Docker>,
+    registry: Option<Arc<RegistryClient>>,
     cancel: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -45,6 +46,7 @@ impl Updater {
     pub fn new() -> Self {
         Self {
             docker: None,
+            registry: None,
             cancel: Arc::new(Notify::new()),
             task: None,
         }
@@ -77,10 +79,11 @@ fn start_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
-/// Run one cycle of work. Phase 3a: list running containers, log count + names.
-async fn do_cycle(docker: &Docker) -> anyhow::Result<()> {
+/// One cycle of work. Filter candidates by `isengard.enable=true`, compare
+/// each one's local digest against its remote registry digest, classify, log.
+async fn do_cycle(docker: &Docker, registry: &RegistryClient) -> anyhow::Result<()> {
     let opts = ListContainersOptions::<String> {
-        all: false, // running only
+        all: false,
         ..Default::default()
     };
     let containers = docker
@@ -88,22 +91,77 @@ async fn do_cycle(docker: &Docker) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("listing containers: {e}"))?;
 
-    info!(
-        count = containers.len(),
-        "updater cycle: containers running"
-    );
+    let candidates: Vec<_> = containers
+        .iter()
+        .filter(|c| isengard_enabled(c.labels.as_ref()))
+        .collect();
 
-    for c in &containers {
+    let mut up_to_date = 0usize;
+    let mut needs_update = 0usize;
+    let mut unknown = 0usize;
+
+    for c in &candidates {
         let name = c
             .names
             .as_ref()
             .and_then(|ns| ns.first())
             .map(|s| s.trim_start_matches('/').to_string())
             .unwrap_or_else(|| "<unknown>".into());
-        let image = c.image.as_deref().unwrap_or("<unknown>");
-        debug!(container = %name, image = %image, "running");
+        let image_str = c.image.as_deref().unwrap_or("");
+
+        let Some(image_ref) = ImageRef::parse(image_str) else {
+            debug!(container = %name, image = %image_str, "skipping digest-pinned or unparseable image");
+            continue;
+        };
+
+        let local_digest = match docker.inspect_image(image_str).await {
+            Ok(i) => i
+                .repo_digests
+                .as_ref()
+                .and_then(|v| v.first())
+                .and_then(|d| d.split_once('@'))
+                .map(|(_, dig)| dig.to_string()),
+            Err(e) => {
+                warn!(container = %name, image = %image_str, error = %e, "inspect_image failed");
+                None
+            }
+        };
+
+        let remote_digest = match registry.head_digest(&image_ref).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(container = %name, image = %image_str, error = %e, "registry HEAD failed");
+                unknown += 1;
+                continue;
+            }
+        };
+
+        match (local_digest.as_deref(), remote_digest.as_deref()) {
+            (Some(local), Some(remote)) if local == remote => {
+                info!(container = %name, image = %image_str, status = "up_to_date");
+                up_to_date += 1;
+            }
+            (Some(local), Some(remote)) => {
+                info!(
+                    container = %name,
+                    image = %image_str,
+                    current_digest = %local,
+                    remote_digest = %remote,
+                    status = "needs_update"
+                );
+                needs_update += 1;
+            }
+            _ => {
+                debug!(container = %name, image = %image_str, "could not classify (missing local or remote digest)");
+                unknown += 1;
+            }
+        }
     }
 
+    info!(
+        candidates = candidates.len(),
+        up_to_date, needs_update, unknown, "updater cycle complete"
+    );
     Ok(())
 }
 
@@ -135,6 +193,14 @@ impl Plugin for Updater {
             "updater connected to docker daemon"
         );
 
+        let docker_config = DockerConfig::load_default().unwrap_or_else(|e| {
+            warn!(error = %e, "failed to read ~/.docker/config.json — proceeding without registry creds");
+            DockerConfig::default()
+        });
+        let registry = RegistryClient::new(docker_config)
+            .map_err(|e| init_err(format!("registry client: {e}")))?;
+        self.registry = Some(Arc::new(registry));
+
         self.docker = Some(docker);
         Ok(())
     }
@@ -142,6 +208,10 @@ impl Plugin for Updater {
     async fn start(&mut self, _ctx: &PluginContext) -> Result<()> {
         let docker = self
             .docker
+            .clone()
+            .ok_or_else(|| start_err("updater started before init"))?;
+        let registry = self
+            .registry
             .clone()
             .ok_or_else(|| start_err("updater started before init"))?;
         let cancel = self.cancel.clone();
@@ -155,7 +225,7 @@ impl Plugin for Updater {
                         break;
                     }
                     _ = ticker.tick() => {
-                        if let Err(e) = do_cycle(&docker).await {
+                        if let Err(e) = do_cycle(&docker, &registry).await {
                             // Don't crash the task on a single bad cycle; just log
                             // and try again next tick. Phase 3b adds retry policy.
                             warn!(error = %e, "updater cycle failed");
@@ -194,7 +264,11 @@ impl AgentPlugin for Updater {
             .docker
             .as_ref()
             .ok_or_else(|| init_err("run_cycle before init"))?;
-        do_cycle(docker)
+        let registry = self
+            .registry
+            .as_ref()
+            .ok_or_else(|| init_err("run_cycle before init"))?;
+        do_cycle(docker, registry)
             .await
             .map_err(|e| init_err(format!("cycle failed: {e}")))
     }
