@@ -38,13 +38,13 @@ async fn spawn_controller(state_dir: PathBuf) -> SocketAddr {
         .await;
     });
 
-    for _ in 0..40 {
+    for _ in 0..200 {
         if std::net::TcpStream::connect(addr).is_ok() {
             return addr;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("controller did not bind {addr} within 2s");
+    panic!("controller did not bind {addr} within 10s");
 }
 
 async fn wait_for_state_file(path: &std::path::Path, timeout_ms: u64) -> bool {

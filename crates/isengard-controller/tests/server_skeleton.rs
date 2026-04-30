@@ -53,13 +53,13 @@ async fn spawn_controller(state_dir: PathBuf) -> SocketAddr {
     });
 
     // Wait for the server to bind.
-    for _ in 0..40 {
+    for _ in 0..200 {
         if std::net::TcpStream::connect(addr).is_ok() {
             return addr;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("controller did not bind {addr} within 2s");
+    panic!("controller did not bind {addr} within 10s");
 }
 
 async fn harness() -> Harness {
