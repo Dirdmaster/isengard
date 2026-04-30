@@ -5,12 +5,13 @@ mod auth;
 mod service;
 
 pub mod bus;
+pub mod plugin_host;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
+use isengard_core::{HostMode, Plugin, registrations_for};
 use isengard_proto::FILE_DESCRIPTOR_SET;
 use isengard_proto::pb::controller_server::ControllerServer;
 use tokio::signal;
@@ -46,25 +47,6 @@ pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
 pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     info!("starting controller");
 
-    // -- plugin init/start ----------------------------------------------------
-    let plugins = load_plugins();
-    info!(plugin_count = plugins.len(), "plugins discovered");
-
-    let mut started = Vec::with_capacity(plugins.len());
-    for mut plugin in plugins {
-        let plugin_name = plugin.name().to_string();
-        let plugin_config = opts
-            .config
-            .get(&plugin_name)
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let ctx = PluginContext::new(HostMode::Controller, plugin_config);
-        plugin.init(&ctx).await?;
-        plugin.start(&ctx).await?;
-        info!(plugin = %plugin_name, "plugin started");
-        started.push(plugin);
-    }
-
     // -- inventory + journal + event bus -------------------------------------
     let db_path = opts.state_dir.join("isengard.db");
     let inventory = Arc::new(
@@ -84,6 +66,16 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     );
 
     let bus = Arc::new(crate::bus::EventBus::new());
+
+    // -- plugin init/start ----------------------------------------------------
+    // Load + start controller-side plugins (notifier, etc).
+    let mut controller_plugins =
+        plugin_host::load_controller_plugins(bus.clone(), journal.clone(), opts.config.clone())
+            .await;
+    info!(
+        plugin_count = controller_plugins.len(),
+        "controller plugins started"
+    );
 
     // -- gRPC server ----------------------------------------------------------
     let reflection = tonic_reflection::server::Builder::configure()
@@ -114,9 +106,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     serve_fut.await.context("gRPC server error")?;
 
     // -- plugin stop ----------------------------------------------------------
-    for mut plugin in started {
-        plugin.stop().await?;
-    }
+    plugin_host::stop_controller_plugins(&mut controller_plugins).await;
 
     info!("controller exited cleanly");
     Ok(())
