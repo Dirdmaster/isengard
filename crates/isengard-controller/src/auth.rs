@@ -45,11 +45,9 @@ pub struct TokenAuth<S> {
 
 impl<S, B> Service<Request<B>> for TokenAuth<S>
 where
-    S: Service<Request<B>, Response = Response<BoxBody>, Error = std::convert::Infallible>
-        + Clone
-        + Send
-        + 'static,
+    S: Service<Request<B>, Response = Response<BoxBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
+    S::Error: Send + 'static,
     B: Send + 'static,
 {
     type Response = S::Response;

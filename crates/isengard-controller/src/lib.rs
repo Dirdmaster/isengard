@@ -5,6 +5,7 @@ mod auth;
 mod service;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
@@ -62,16 +63,32 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         started.push(plugin);
     }
 
+    // -- inventory ------------------------------------------------------------
+    let db_path = opts.state_dir.join("isengard.db");
+    let inventory = Arc::new(
+        isengard_storage::Inventory::open(&db_path)
+            .await
+            .with_context(|| format!("opening inventory at {db_path:?}"))?,
+    );
+    info!(?db_path, "inventory opened");
+
     // -- gRPC server ----------------------------------------------------------
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
         .build_v1()
         .context("building reflection service")?;
 
-    let svc = ControllerServer::new(ControllerService);
+    // Build the auth layer from the env var. Binary's main() already verified
+    // it's set; if it's somehow missing here, fail loud rather than silently allow.
+    let token = std::env::var("ISENGARD_TOKEN")
+        .with_context(|| "ISENGARD_TOKEN env var must be set")?;
+    let auth_layer = crate::auth::TokenAuthLayer::new(token);
+
+    let svc = ControllerServer::new(ControllerService::new(inventory));
 
     info!("gRPC server listening");
     let serve_fut = Server::builder()
+        .layer(auth_layer)
         .add_service(svc)
         .add_service(reflection)
         .serve_with_shutdown(opts.listen, async {

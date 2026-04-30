@@ -14,6 +14,7 @@ async-trait.workspace = true
 http.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
+isengard-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 subtle.workspace = true

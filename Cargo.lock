@@ -1069,6 +1069,7 @@ dependencies = [
  "http",
  "isengard-core",
  "isengard-proto",
+ "isengard-storage",
  "serde",
  "serde_json",
  "subtle",
