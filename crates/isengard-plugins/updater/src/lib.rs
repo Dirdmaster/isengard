@@ -13,6 +13,7 @@ pub mod labels;
 pub mod recreate;
 pub mod registry;
 pub mod self_id;
+pub mod self_update;
 
 use std::sync::Arc;
 use std::time::Duration;
