@@ -6,3 +6,6 @@
 pub mod error;
 pub mod host;
 pub mod inventory;
+
+pub use error::{Error, Result};
+pub use host::{EnrollHost, Host, HostId};
