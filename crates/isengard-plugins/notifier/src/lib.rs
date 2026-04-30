@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 pub mod channel;
+pub mod discord;
 pub mod telegram;
 
 use crate::channel::NotifyChannel;
