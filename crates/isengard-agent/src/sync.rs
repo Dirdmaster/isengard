@@ -12,7 +12,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use isengard_proto::pb::controller_client::ControllerClient;
@@ -25,6 +25,7 @@ use tonic::transport::Channel;
 use tracing::{debug, info, instrument, warn};
 
 use crate::Result;
+use crate::backoff::Backoff;
 
 /// Open a Sync stream and run the heartbeat loop until the stream errors or
 /// `cancel` fires. Returns Ok on graceful cancel; Err on stream error.
@@ -133,4 +134,70 @@ pub async fn run_sync_loop(
     let _ = read_task.await;
 
     Ok(())
+}
+
+/// Run the Sync loop with automatic reconnection on stream failure. Returns
+/// Ok only when `cancel` fires (graceful shutdown). On stream error, sleeps
+/// per the backoff policy and retries.
+///
+/// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
+/// (proves the connection was healthy).
+#[instrument(skip(token, cancel), fields(agent_id = %agent_id))]
+pub async fn run_sync_with_reconnect(
+    controller_url: String,
+    token: String,
+    agent_id: String,
+    interval_secs: u32,
+    cancel: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    let mut backoff = Backoff::new();
+    const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
+
+    loop {
+        let delay = backoff.next_delay();
+        if delay > Duration::ZERO {
+            info!(
+                attempt = backoff.attempt(),
+                delay_ms = delay.as_millis() as u64,
+                "waiting before sync reconnect"
+            );
+            tokio::select! {
+                _ = cancel.notified() => {
+                    info!("cancel during backoff, exiting");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        let attempt_started = Instant::now();
+        let result = run_sync_loop(
+            controller_url.clone(),
+            token.clone(),
+            agent_id.clone(),
+            interval_secs,
+            cancel.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                // Graceful cancel — exit.
+                info!("sync loop exited cleanly via cancel");
+                return Ok(());
+            }
+            Err(e) => {
+                let elapsed = attempt_started.elapsed();
+                if elapsed >= STABLE_THRESHOLD {
+                    info!(
+                        elapsed_secs = elapsed.as_secs(),
+                        "stream was stable; resetting backoff"
+                    );
+                    backoff.reset();
+                }
+                tracing::warn!(error = %e, attempt = backoff.attempt(), "sync stream error, will retry");
+                // Loop continues; cancel-during-backoff handled at the top.
+            }
+        }
+    }
 }
