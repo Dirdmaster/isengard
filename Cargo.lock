@@ -1336,8 +1336,11 @@ dependencies = [
 name = "isengard-proto"
 version = "0.1.0-alpha"
 dependencies = [
+ "chrono",
+ "isengard-core",
  "prost",
  "prost-types",
+ "serde_json",
  "tonic",
  "tonic-build",
 ]

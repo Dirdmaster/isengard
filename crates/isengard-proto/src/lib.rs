@@ -14,3 +14,57 @@ pub mod pb {
 /// to expose the schema over the wire (so `grpcurl` and similar tools work
 /// without a local copy of the .proto file).
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("isengard_descriptor");
+
+// --- conversions between proto Event and core Event ---
+
+use crate::pb::Event as ProtoEvent;
+use chrono::{DateTime, Utc};
+use isengard_core::Event as CoreEvent;
+
+impl From<CoreEvent> for ProtoEvent {
+    fn from(e: CoreEvent) -> Self {
+        ProtoEvent {
+            kind: e.kind,
+            occurred_at: e.occurred_at.to_rfc3339(),
+            summary: e.summary,
+            container_name: e.container_name,
+            image: e.image,
+            old_digest: e.old_digest,
+            new_digest: e.new_digest,
+            error: e.error,
+            metadata_json: if e.metadata.is_null() {
+                None
+            } else {
+                Some(e.metadata.to_string())
+            },
+        }
+    }
+}
+
+impl TryFrom<ProtoEvent> for CoreEvent {
+    type Error = String;
+
+    fn try_from(p: ProtoEvent) -> Result<Self, String> {
+        let occurred_at = DateTime::parse_from_rfc3339(&p.occurred_at)
+            .map_err(|e| format!("bad occurred_at: {e}"))?
+            .with_timezone(&Utc);
+        let metadata = match p.metadata_json {
+            Some(s) if !s.is_empty() => {
+                serde_json::from_str(&s).map_err(|e| format!("bad metadata_json: {e}"))?
+            }
+            _ => serde_json::Value::Null,
+        };
+        Ok(CoreEvent {
+            kind: p.kind,
+            occurred_at,
+            host_id: None, // Set by the controller from the connection context.
+            summary: p.summary,
+            container_name: p.container_name,
+            image: p.image,
+            old_digest: p.old_digest,
+            new_digest: p.new_digest,
+            error: p.error,
+            metadata,
+        })
+    }
+}
