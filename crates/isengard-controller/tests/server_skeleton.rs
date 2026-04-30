@@ -3,6 +3,10 @@
 //! Spawns the controller library on an ephemeral port with a temp state dir,
 //! exercises Enroll over a tonic client.
 
+// tonic::Status is ~256 bytes — interceptor closures must return Result<_, Status>
+// per tonic's API. The size lint isn't actionable here.
+#![allow(clippy::result_large_err)]
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
