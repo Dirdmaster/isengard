@@ -3,6 +3,7 @@
 //! Phase 1 minimum: host mode + plugin's slice of the merged config. Subsequent
 //! phases will add: logger handle, journal writer, gRPC clients, secret store.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,9 @@ pub struct PluginContext {
     /// Optional event sink. `None` on the controller in phase 4a; `Some` on
     /// the agent once 4b wires the gRPC client through.
     pub events: Option<Arc<dyn EventEmitter>>,
+    /// Optional opaque handle to a controller-side event bus. Plugins that
+    /// need it downcast through a typed accessor; the core stays decoupled.
+    pub bus: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl PluginContext {
@@ -37,11 +41,17 @@ impl PluginContext {
             mode,
             config,
             events: None,
+            bus: None,
         }
     }
 
     pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn with_bus(mut self, bus: Arc<dyn Any + Send + Sync>) -> Self {
+        self.bus = Some(bus);
         self
     }
 }
@@ -52,6 +62,7 @@ impl std::fmt::Debug for PluginContext {
             .field("mode", &self.mode)
             .field("config", &self.config)
             .field("events", &self.events.as_ref().map(|_| "<emitter>"))
+            .field("bus", &self.bus.as_ref().map(|_| "<bus>"))
             .finish()
     }
 }
@@ -89,6 +100,13 @@ mod tests {
         let ctx = PluginContext::new(HostMode::Agent, serde_json::Value::Null)
             .with_events(Arc::new(NoopEmitter));
         assert!(ctx.events.is_some());
+    }
+
+    #[test]
+    fn plugin_context_with_bus_attaches_handle() {
+        let bus: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u32);
+        let ctx = PluginContext::new(HostMode::Controller, serde_json::Value::Null).with_bus(bus);
+        assert!(ctx.bus.is_some());
     }
 
     #[test]
