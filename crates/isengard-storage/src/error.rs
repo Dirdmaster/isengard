@@ -29,12 +29,17 @@ mod tests {
     #[test]
     fn invalid_host_id_renders_clearly() {
         let err = Error::InvalidHostId(8);
-        assert_eq!(err.to_string(), "invalid HostId byte length: expected 16, got 8");
+        assert_eq!(
+            err.to_string(),
+            "invalid HostId byte length: expected 16, got 8"
+        );
     }
 
     #[test]
     fn decode_renders_clearly() {
-        let err = Error::Decode { reason: "missing column".into() };
+        let err = Error::Decode {
+            reason: "missing column".into(),
+        };
         assert_eq!(err.to_string(), "decoding host row: missing column");
     }
 }

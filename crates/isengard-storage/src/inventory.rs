@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 
 use crate::error::{Error, Result};
 use crate::host::{EnrollHost, Host, HostId};
