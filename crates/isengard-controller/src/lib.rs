@@ -5,6 +5,7 @@ mod auth;
 mod service;
 
 pub mod bus;
+pub mod disconnect_monitor;
 pub mod plugin_host;
 
 use std::net::SocketAddr;

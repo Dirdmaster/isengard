@@ -11,6 +11,7 @@ description = "Controller-mode runtime"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 http.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
@@ -27,5 +28,4 @@ tracing.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 tempfile = "3.14.0"
