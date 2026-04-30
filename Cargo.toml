@@ -6,6 +6,7 @@ members = [
     "crates/isengard-controller",
     "crates/isengard-agent",
     "crates/isengard-proto",
+    "crates/isengard-storage",
     "crates/isengard-plugins/updater",
     "crates/isengard-plugins/dashboard",
     "crates/isengard-plugins/notifier",
@@ -52,11 +53,16 @@ prost-types = "0.13.4"
 tower = "0.5.2"
 tokio-stream = "0.1.17"
 
+# storage
+sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros", "migrate", "chrono"] }
+ulid = { version = "1.1.3", features = ["serde"] }
+
 # internal — path + version so cargo-deny doesn't flag these as wildcard deps
 isengard-core = { path = "crates/isengard-core", version = "0.1.0-alpha" }
 isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-alpha" }
 isengard-agent = { path = "crates/isengard-agent", version = "0.1.0-alpha" }
 isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
+isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
 
 [profile.release]
 lto = "thin"
