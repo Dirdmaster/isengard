@@ -73,7 +73,7 @@ pub async fn run_sync_loop(
     let hb_tx = tx.clone();
     let interval = Duration::from_secs(u64::from(interval_secs.max(1)));
     let cancel_hb = cancel.clone();
-    let heartbeat_task = tokio::spawn(async move {
+    let mut heartbeat_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Skip the first immediate tick; we want the first heartbeat one
         // interval after Hello, not piggybacked on the connection.
@@ -111,7 +111,7 @@ pub async fn run_sync_loop(
     let mut inbound = response.into_inner();
 
     // Read inbound messages (HeartbeatAck, future Command/ConfigUpdate).
-    let read_task = tokio::spawn(async move {
+    let mut read_task = tokio::spawn(async move {
         while let Ok(Some(msg)) = inbound.message().await {
             match msg.payload {
                 Some(isengard_proto::pb::controller_message::Payload::HeartbeatAck(ack)) => {
@@ -125,15 +125,46 @@ pub async fn run_sync_loop(
         info!("inbound stream closed");
     });
 
-    // Wait for cancellation.
-    cancel.notified().await;
-    info!("cancel received, shutting down sync");
-    heartbeat_task.abort();
-    let _ = heartbeat_task.await;
-    drop(tx); // close outbound; server sees EOF
-    let _ = read_task.await;
+    // Wait for cancel OR for either spawned task to end. If a task ends before
+    // cancel fires, that means the stream broke (controller died, network
+    // dropped, etc.) — we return Err so the outer reconnect loop retries.
+    //
+    // `read_consumed` / `hb_consumed` track which handle (if any) was polled
+    // to completion by the select. We must NOT await a JoinHandle a second
+    // time after select consumed its output — tokio panics with
+    // "JoinHandle polled after completion".
+    let mut read_consumed = false;
+    let mut hb_consumed = false;
+    let result: Result<()> = tokio::select! {
+        _ = cancel.notified() => {
+            info!("cancel received, shutting down sync");
+            Ok(())
+        }
+        res = &mut read_task => {
+            read_consumed = true;
+            tracing::warn!(?res, "inbound stream task ended before cancel");
+            Err(anyhow::anyhow!("inbound stream ended (controller likely went away)"))
+        }
+        res = &mut heartbeat_task => {
+            hb_consumed = true;
+            tracing::warn!(?res, "heartbeat task ended before cancel");
+            Err(anyhow::anyhow!("heartbeat task ended (outbound channel closed)"))
+        }
+    };
 
-    Ok(())
+    // Cleanup: drop tx to signal server-side EOF, then abort + reap any task
+    // we didn't already drain via select.
+    drop(tx);
+    if !read_consumed {
+        read_task.abort();
+        let _ = read_task.await;
+    }
+    if !hb_consumed {
+        heartbeat_task.abort();
+        let _ = heartbeat_task.await;
+    }
+
+    result
 }
 
 /// Run the Sync loop with automatic reconnection on stream failure. Returns
