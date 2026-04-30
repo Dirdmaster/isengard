@@ -73,6 +73,7 @@ isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-al
 isengard-agent = { path = "crates/isengard-agent", version = "0.1.0-alpha" }
 isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
 isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
+isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }
 
 [profile.release]
 lto = "thin"

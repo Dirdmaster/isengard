@@ -1187,6 +1187,7 @@ dependencies = [
  "isengard-agent",
  "isengard-controller",
  "isengard-core",
+ "isengard-plugin-updater",
  "predicates",
  "serde_json",
  "tokio",
