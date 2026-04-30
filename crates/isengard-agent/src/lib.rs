@@ -1,7 +1,11 @@
 //! Agent-mode runtime: load plugins, run their lifecycle hooks, wait for
 //! shutdown. Phase 1 minimum — no gRPC client, no docker integration.
 
-use anyhow::Result;
+pub mod agent_state;
+
+/// Convenience alias used throughout the agent.
+pub type Result<T> = anyhow::Result<T>;
+
 use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
 use tracing::{info, instrument};
 
