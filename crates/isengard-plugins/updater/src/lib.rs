@@ -7,10 +7,10 @@
 
 #![allow(clippy::result_large_err)]
 
-mod auth;
-mod image_ref;
-mod labels;
-mod registry;
+pub mod auth;
+pub mod image_ref;
+pub mod labels;
+pub mod registry;
 
 use std::sync::Arc;
 use std::time::Duration;
