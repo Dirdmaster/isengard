@@ -65,7 +65,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         started.push(plugin);
     }
 
-    // -- inventory ------------------------------------------------------------
+    // -- inventory + journal + event bus -------------------------------------
     let db_path = opts.state_dir.join("isengard.db");
     let inventory = Arc::new(
         isengard_storage::Inventory::open(&db_path)
@@ -73,6 +73,17 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
             .with_context(|| format!("opening inventory at {db_path:?}"))?,
     );
     info!(?db_path, "inventory opened");
+
+    // Journal shares the same SQLite file. Inventory::open already ran the
+    // migrations (including 0002_events.sql); Journal::open re-runs migrate!
+    // which is idempotent.
+    let journal = Arc::new(
+        isengard_storage::Journal::open(&db_path)
+            .await
+            .with_context(|| format!("opening journal at {db_path:?}"))?,
+    );
+
+    let bus = Arc::new(crate::bus::EventBus::new());
 
     // -- gRPC server ----------------------------------------------------------
     let reflection = tonic_reflection::server::Builder::configure()
@@ -86,7 +97,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         std::env::var("ISENGARD_TOKEN").with_context(|| "ISENGARD_TOKEN env var must be set")?;
     let auth_layer = crate::auth::TokenAuthLayer::new(token);
 
-    let svc = ControllerServer::new(ControllerService::new(inventory));
+    let svc = ControllerServer::new(ControllerService::new(inventory, journal, bus));
 
     info!("gRPC server listening");
     let serve_fut = Server::builder()

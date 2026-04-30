@@ -4,18 +4,26 @@ use std::sync::Arc;
 
 use isengard_proto::pb::controller_server::Controller;
 use isengard_proto::pb::{AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse};
-use isengard_storage::Inventory;
+use isengard_storage::{InsertEvent, Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
+
+use crate::bus::EventBus;
 
 #[derive(Clone)]
 pub struct ControllerService {
     inventory: Arc<Inventory>,
+    journal: Arc<Journal>,
+    bus: Arc<EventBus>,
 }
 
 impl ControllerService {
-    pub fn new(inventory: Arc<Inventory>) -> Self {
-        Self { inventory }
+    pub fn new(inventory: Arc<Inventory>, journal: Arc<Journal>, bus: Arc<EventBus>) -> Self {
+        Self {
+            inventory,
+            journal,
+            bus,
+        }
     }
 }
 
@@ -121,6 +129,8 @@ impl Controller for ControllerService {
         let outbound = ReceiverStream::new(rx);
 
         let inventory = self.inventory.clone();
+        let journal = self.journal.clone();
+        let bus = self.bus.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -160,9 +170,47 @@ impl Controller for ControllerService {
                         // Hello as second-or-later frame is invalid; ignore + log.
                         tracing::warn!(agent = %agent_hostname, "received Hello after first frame");
                     }
-                    Some(isengard_proto::pb::agent_message::Payload::Event(_)) => {
-                        // TEMPORARY (Phase 4a): handler not yet wired. Real
-                        // dispatch into Journal + EventBus lands in 4b.
+                    Some(isengard_proto::pb::agent_message::Payload::Event(proto_ev)) => {
+                        // host_id is known from the SyncHello flow that opened
+                        // this stream. Convert proto → core, then persist + bus.
+                        let core_ev: isengard_core::Event = match proto_ev.try_into() {
+                            Ok(e) => e,
+                            Err(e) => {
+                                tracing::warn!(
+                                    agent = %agent_hostname,
+                                    error = %e,
+                                    "discarding malformed event",
+                                );
+                                continue;
+                            }
+                        };
+                        let mut to_persist = core_ev;
+                        to_persist.host_id = Some(host_id.into());
+                        let insert = InsertEvent {
+                            host_id: Some(host_id),
+                            kind: to_persist.kind.clone(),
+                            container_name: to_persist.container_name.clone(),
+                            image: to_persist.image.clone(),
+                            old_digest: to_persist.old_digest.clone(),
+                            new_digest: to_persist.new_digest.clone(),
+                            error: to_persist.error.clone(),
+                            summary: to_persist.summary.clone(),
+                            metadata_json: if to_persist.metadata.is_null() {
+                                None
+                            } else {
+                                Some(to_persist.metadata.to_string())
+                            },
+                            occurred_at: to_persist.occurred_at,
+                        };
+                        if let Err(e) = journal.insert(insert).await {
+                            tracing::warn!(
+                                agent = %agent_hostname,
+                                error = %e,
+                                "journal.insert failed; dropping event",
+                            );
+                            continue;
+                        }
+                        bus.publish(to_persist);
                     }
                     None => {
                         tracing::debug!(agent = %agent_hostname, "empty payload, skipping");
