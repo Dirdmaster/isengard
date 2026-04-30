@@ -134,7 +134,10 @@ mod tests {
         }
         // Final delay must be ≤ cap × (1 + jitter)
         let max = ((CAP_MS as f64) * (1.0 + JITTER_PCT)) as u128;
-        assert!(last.as_millis() <= max, "final {last:?} exceeds cap {max}ms");
+        assert!(
+            last.as_millis() <= max,
+            "final {last:?} exceeds cap {max}ms"
+        );
     }
 
     #[test]

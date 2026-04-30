@@ -11,8 +11,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use isengard_agent::{run_agent, AgentOptions};
-use isengard_controller::{run_controller, ControllerOptions};
+use isengard_agent::{AgentOptions, run_agent};
+use isengard_controller::{ControllerOptions, run_controller};
 use isengard_storage::Inventory;
 use tempfile::TempDir;
 
@@ -106,8 +106,7 @@ async fn agent_survives_controller_restart() {
 
     // Spawn controller B on the same port + same state dir. Same agent_id
     // already in the hosts table.
-    let (_addr_b, _ctrl_b) =
-        spawn_controller_on(port, controller_state.path().to_path_buf()).await;
+    let (_addr_b, _ctrl_b) = spawn_controller_on(port, controller_state.path().to_path_buf()).await;
 
     // Wait up to 30s for last_seen_at to advance from `initial_ts`. The agent
     // backoff starts at ~1s; reconnection should land in ~1-3s, then the next
