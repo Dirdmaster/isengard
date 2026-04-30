@@ -5,8 +5,17 @@
 
 use std::collections::HashMap;
 
-use bollard::container::Config;
-use bollard::models::{ContainerInspectResponse, EndpointSettings, HostConfig, MountPoint};
+use bollard::Docker;
+use bollard::container::{
+    Config, CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
+};
+use bollard::image::CreateImageOptions;
+use bollard::models::{ContainerInspectResponse, EndpointSettings, HostConfig};
+use bollard::network::ConnectNetworkOptions;
+use futures_util::StreamExt;
+use tracing::{debug, info, warn};
+
+use crate::image_ref::ImageRef;
 
 /// All the data we need to faithfully recreate a container against a new image.
 #[derive(Debug, Clone)]
@@ -99,10 +108,120 @@ fn dedup_mounts(host_config: &mut HostConfig) {
     }
 }
 
-// Suppress dead_code on the helper while pull_image / update_container land
-// in the next task.
-#[allow(dead_code)]
-fn _unused_marker(_: &MountPoint) {}
+/// Pull an image. Consumes bollard's progress stream until it ends or yields
+/// an error frame.
+pub async fn pull_image(docker: &Docker, image: &ImageRef) -> anyhow::Result<()> {
+    let from_image = format!("{}/{}", image.registry, image.repository);
+    // Bollard's CreateImageOptions takes the image as `from_image` + `tag`.
+    let options = CreateImageOptions::<String> {
+        from_image,
+        tag: image.tag.clone(),
+        ..Default::default()
+    };
+
+    info!(image = %image, "pulling image");
+    let mut stream = docker.create_image(Some(options), None, None);
+    while let Some(frame) = stream.next().await {
+        match frame {
+            Ok(progress) => {
+                if let Some(err) = progress.error {
+                    return Err(anyhow::anyhow!("pull error frame: {err}"));
+                }
+                if let Some(status) = progress.status {
+                    debug!(status = %status, "pull progress");
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("pull stream error: {e}")),
+        }
+    }
+    info!(image = %image, "pull complete");
+    Ok(())
+}
+
+/// Recreate the container at `container_id` against `new_image_ref`.
+/// Inspects → pulls → stops → removes → creates → starts → reconnects networks.
+pub async fn update_container(
+    docker: &Docker,
+    container_id: &str,
+    new_image_ref: &ImageRef,
+) -> anyhow::Result<()> {
+    let inspect = docker
+        .inspect_container(container_id, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("inspect {container_id}: {e}"))?;
+
+    if inspect.state.as_ref().and_then(|s| s.status.as_ref())
+        == Some(&bollard::models::ContainerStateStatusEnum::RESTARTING)
+    {
+        warn!(
+            container = container_id,
+            "container is restarting; deferring update"
+        );
+        return Ok(());
+    }
+
+    pull_image(docker, new_image_ref).await?;
+
+    let new_image_str = format!(
+        "{}/{}:{}",
+        new_image_ref.registry, new_image_ref.repository, new_image_ref.tag
+    );
+    let spec = capture_config(&inspect, &new_image_str);
+
+    info!(container = %spec.name, image = %spec.image, "stopping old container");
+    docker
+        .stop_container(container_id, Some(StopContainerOptions { t: 10 }))
+        .await
+        .map_err(|e| anyhow::anyhow!("stop {container_id}: {e}"))?;
+
+    info!(container = %spec.name, "removing old container");
+    docker
+        .remove_container(
+            container_id,
+            Some(RemoveContainerOptions {
+                force: false,
+                v: false,
+                link: false,
+            }),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("remove {container_id}: {e}"))?;
+
+    info!(container = %spec.name, image = %spec.image, "creating replacement container");
+    let create = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: spec.name.clone(),
+                platform: None,
+            }),
+            spec.config,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create {}: {e}", spec.name))?;
+
+    info!(container = %spec.name, new_id = %create.id, "starting replacement container");
+    docker
+        .start_container::<String>(&create.id, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("start {}: {e}", spec.name))?;
+
+    for (net_name, settings) in &spec.networks {
+        let opts = ConnectNetworkOptions {
+            container: create.id.clone(),
+            endpoint_config: settings.clone(),
+        };
+        if let Err(e) = docker.connect_network(net_name, opts).await {
+            // Don't fail the whole update if a network reattach fails;
+            // log and continue. The container is already running.
+            warn!(container = %spec.name, network = %net_name, error = %e, "network reattach failed");
+        } else {
+            debug!(container = %spec.name, network = %net_name, "reconnected");
+        }
+    }
+
+    info!(container = %spec.name, image = %spec.image, "update complete");
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
