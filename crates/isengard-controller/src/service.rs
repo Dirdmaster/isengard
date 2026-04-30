@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use isengard_proto::pb::controller_server::Controller;
 use isengard_proto::pb::{AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse};
-use isengard_storage::{InsertEvent, Inventory, Journal};
+use isengard_storage::{Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -184,33 +184,9 @@ impl Controller for ControllerService {
                                 continue;
                             }
                         };
-                        let mut to_persist = core_ev;
-                        to_persist.host_id = Some(host_id.into());
-                        let insert = InsertEvent {
-                            host_id: Some(host_id),
-                            kind: to_persist.kind.clone(),
-                            container_name: to_persist.container_name.clone(),
-                            image: to_persist.image.clone(),
-                            old_digest: to_persist.old_digest.clone(),
-                            new_digest: to_persist.new_digest.clone(),
-                            error: to_persist.error.clone(),
-                            summary: to_persist.summary.clone(),
-                            metadata_json: if to_persist.metadata.is_null() {
-                                None
-                            } else {
-                                Some(to_persist.metadata.to_string())
-                            },
-                            occurred_at: to_persist.occurred_at,
-                        };
-                        if let Err(e) = journal.insert(insert).await {
-                            tracing::warn!(
-                                agent = %agent_hostname,
-                                error = %e,
-                                "journal.insert failed; dropping event",
-                            );
-                            continue;
-                        }
-                        bus.publish(to_persist);
+                        let mut core_ev = core_ev;
+                        core_ev.host_id = Some(host_id.into());
+                        crate::persist_and_broadcast(&journal, &bus, core_ev).await;
                     }
                     None => {
                         tracing::debug!(agent = %agent_hostname, "empty payload, skipping");

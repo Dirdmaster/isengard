@@ -11,15 +11,48 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use isengard_core::{HostMode, Plugin, registrations_for};
+use isengard_core::{Event, HostMode, Plugin, registrations_for};
 use isengard_proto::FILE_DESCRIPTOR_SET;
 use isengard_proto::pb::controller_server::ControllerServer;
+use isengard_storage::{InsertEvent, Journal};
 use tokio::signal;
 use tonic::transport::Server;
 use tracing::{info, instrument};
 
 pub use auth::TokenAuthLayer;
 pub use service::ControllerService;
+
+use crate::bus::EventBus;
+
+/// Journal an event then broadcast it on the bus. Used by both the Sync
+/// handler (for agent-originated events) and controller-internal producers
+/// like `disconnect_monitor`.
+///
+/// On journal write failure, broadcasts NO event — better to drop than to
+/// notify on something we have no record of.
+pub async fn persist_and_broadcast(journal: &Journal, bus: &EventBus, event: Event) {
+    let insert = InsertEvent {
+        host_id: event.host_id.map(|id| id.into()),
+        kind: event.kind.clone(),
+        container_name: event.container_name.clone(),
+        image: event.image.clone(),
+        old_digest: event.old_digest.clone(),
+        new_digest: event.new_digest.clone(),
+        error: event.error.clone(),
+        summary: event.summary.clone(),
+        metadata_json: if event.metadata.is_null() {
+            None
+        } else {
+            Some(event.metadata.to_string())
+        },
+        occurred_at: event.occurred_at,
+    };
+    if let Err(e) = journal.insert(insert).await {
+        tracing::warn!(error = %e, kind = %event.kind, "journal.insert failed; dropping event");
+        return;
+    }
+    bus.publish(event);
+}
 
 /// Options for running the controller.
 #[derive(Debug, Clone)]
