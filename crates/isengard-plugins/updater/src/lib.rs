@@ -11,6 +11,9 @@ mod image_ref;
 #[allow(dead_code)]
 mod labels;
 
+#[allow(dead_code)]
+mod auth;
+
 use std::sync::Arc;
 use std::time::Duration;
 
