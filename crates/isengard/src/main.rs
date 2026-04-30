@@ -66,14 +66,16 @@ async fn main() -> Result<()> {
             // but checked at startup so misconfiguration fails loud and early.
             let _ = token;
 
-            let listen_addr: std::net::SocketAddr = listen.parse()
+            let listen_addr: std::net::SocketAddr = listen
+                .parse()
                 .map_err(|e| anyhow::anyhow!("invalid --listen address {listen:?}: {e}"))?;
 
             tracing::info!(%listen_addr, "controller mode");
             isengard_controller::run_controller(isengard_controller::ControllerOptions {
                 listen: listen_addr,
                 config: serde_json::Value::Object(Default::default()),
-            }).await
+            })
+            .await
         }
         Command::Agent { controller } => {
             tracing::info!(?controller, "agent mode");

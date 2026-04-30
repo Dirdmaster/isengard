@@ -13,5 +13,4 @@ pub mod pb {
 /// Encoded `FileDescriptorSet` for the v1 service. Used by `tonic-reflection`
 /// to expose the schema over the wire (so `grpcurl` and similar tools work
 /// without a local copy of the .proto file).
-pub const FILE_DESCRIPTOR_SET: &[u8] =
-    tonic::include_file_descriptor_set!("isengard_descriptor");
+pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("isengard_descriptor");

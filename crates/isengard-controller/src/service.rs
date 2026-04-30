@@ -2,9 +2,7 @@
 //! Phase 2c–2e replace these with real handlers.
 
 use isengard_proto::pb::controller_server::Controller;
-use isengard_proto::pb::{
-    AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse,
-};
+use isengard_proto::pb::{AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
