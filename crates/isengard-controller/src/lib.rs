@@ -20,6 +20,9 @@ pub use service::ControllerService;
 pub struct ControllerOptions {
     /// Address the gRPC server binds to (e.g. `0.0.0.0:9417`).
     pub listen: SocketAddr,
+    /// Directory where mutable state lives (the SQLite db, future config cache, etc).
+    /// Created if missing.
+    pub state_dir: std::path::PathBuf,
     /// Optional config tree (per-plugin slices keyed by plugin name).
     pub config: serde_json::Value,
 }

@@ -34,6 +34,10 @@ enum Command {
         /// HTTP/gRPC listen address.
         #[arg(long, env = "ISENGARD_LISTEN", default_value = "0.0.0.0:9417")]
         listen: String,
+        /// Directory where the controller stores mutable state (SQLite db, etc).
+        /// Created if missing.
+        #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
+        state_dir: std::path::PathBuf,
     },
     /// Run in agent mode: registers with a controller, runs agent-side plugins
     /// (updater).
@@ -59,20 +63,23 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Command::Controller { listen } => {
+        Command::Controller { listen, state_dir } => {
             let token = std::env::var("ISENGARD_TOKEN")
                 .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
-            // Token is unused in Phase 2a (the middleware lands in Phase 2c)
-            // but checked at startup so misconfiguration fails loud and early.
-            let _ = token;
+            let _ = token; // unused in this task; Task 2 wires it into TokenAuthLayer
 
             let listen_addr: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid --listen address {listen:?}: {e}"))?;
 
-            tracing::info!(%listen_addr, "controller mode");
+            // Create state dir if missing (controller can't run without somewhere to put the db).
+            std::fs::create_dir_all(&state_dir)
+                .map_err(|e| anyhow::anyhow!("creating state dir {state_dir:?}: {e}"))?;
+
+            tracing::info!(%listen_addr, ?state_dir, "controller mode");
             isengard_controller::run_controller(isengard_controller::ControllerOptions {
                 listen: listen_addr,
+                state_dir,
                 config: serde_json::Value::Object(Default::default()),
             })
             .await

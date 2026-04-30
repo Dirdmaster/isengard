@@ -19,6 +19,7 @@ async fn spawn_controller_on_ephemeral_port() -> SocketAddr {
     tokio::spawn(async move {
         let _ = run_controller(ControllerOptions {
             listen: addr,
+            state_dir: std::env::temp_dir(),
             config: serde_json::Value::Object(Default::default()),
         })
         .await;
