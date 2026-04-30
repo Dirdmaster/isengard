@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 
 pub mod channel;
 pub mod discord;
+pub mod http;
 pub mod telegram;
 
 use crate::channel::NotifyChannel;
