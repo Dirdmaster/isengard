@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package isengard.v1;
+
+// Controller-side service. Agents call into it.
+//
+// v1 wire surface, scoped for Phase 2 (Enroll + Sync only). Phase 3+ message
+// variants are scaffolded as oneof fields so the schema stays stable.
+service Controller {
+  // One-shot at agent startup. Agent presents host metadata, receives a
+  // controller-assigned ULID + the heartbeat interval the controller wants.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Long-lived bidirectional stream. After enrolling, the agent opens this
+  // stream once and reconnects on drop with exponential backoff.
+  //
+  //   client -> server: SyncHello (first frame), Heartbeat, then Phase 3+
+  //   server -> client: HeartbeatAck, then Phase 3+ (Command, ConfigUpdate)
+  rpc Sync(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+// ============ ENROLL ============
+
+message EnrollRequest {
+  string fingerprint     = 1; // stable host id (hostname for v1; machine-id later)
+  string hostname        = 2;
+  string os              = 3; // e.g. "linux"
+  string arch            = 4; // e.g. "x86_64"
+  string agent_version   = 5;
+  string docker_version  = 6;
+}
+
+message EnrollResponse {
+  string agent_id                  = 1; // controller-assigned ULID
+  uint32 heartbeat_interval_secs   = 2; // default 10
+  uint64 server_time_ms            = 3;
+}
+
+// ============ SYNC ============
+
+message AgentMessage {
+  oneof payload {
+    // First frame of every Sync stream. Identifies the agent post-enroll.
+    SyncHello   hello     = 1;
+    Heartbeat   heartbeat = 2;
+    // Phase 3+: ContainerSnapshot snapshot = 3;
+    // Phase 4+: Event              event    = 4;
+  }
+}
+
+message SyncHello {
+  string agent_id = 1;
+}
+
+message Heartbeat {
+  uint64 ts_ms = 1; // agent's local clock at send time
+}
+
+message ControllerMessage {
+  oneof payload {
+    HeartbeatAck heartbeat_ack = 1;
+    // Phase 3+: Command       command       = 2;
+    // Phase 4+: ConfigUpdate  config_update = 3;
+  }
+}
+
+message HeartbeatAck {
+  uint64 server_time_ms = 1;
+}
