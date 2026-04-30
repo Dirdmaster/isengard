@@ -92,7 +92,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         let agent_id = agent_id.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            sync::run_sync_loop(url, token, agent_id, HEARTBEAT_INTERVAL_SECS, cancel).await
+            sync::run_sync_with_reconnect(url, token, agent_id, HEARTBEAT_INTERVAL_SECS, cancel).await
         })
     };
 
