@@ -60,9 +60,20 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Controller { listen } => {
-            tracing::info!(%listen, "controller mode");
-            isengard_controller::run_controller(isengard_controller::ControllerOptions::default())
-                .await
+            let token = std::env::var("ISENGARD_TOKEN")
+                .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
+            // Token is unused in Phase 2a (the middleware lands in Phase 2c)
+            // but checked at startup so misconfiguration fails loud and early.
+            let _ = token;
+
+            let listen_addr: std::net::SocketAddr = listen.parse()
+                .map_err(|e| anyhow::anyhow!("invalid --listen address {listen:?}: {e}"))?;
+
+            tracing::info!(%listen_addr, "controller mode");
+            isengard_controller::run_controller(isengard_controller::ControllerOptions {
+                listen: listen_addr,
+                config: serde_json::Value::Object(Default::default()),
+            }).await
         }
         Command::Agent { controller } => {
             tracing::info!(?controller, "agent mode");
