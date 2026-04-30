@@ -9,3 +9,4 @@ pub mod inventory;
 
 pub use error::{Error, Result};
 pub use host::{EnrollHost, Host, HostId};
+pub use inventory::Inventory;
