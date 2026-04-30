@@ -1294,6 +1294,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "inventory",
  "serde",
  "serde_json",
@@ -1343,6 +1344,7 @@ dependencies = [
 name = "isengard-storage"
 version = "0.1.0-alpha"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "sqlx",
