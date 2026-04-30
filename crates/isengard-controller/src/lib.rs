@@ -111,6 +111,17 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         "controller plugins started"
     );
 
+    // Background task: detect long-disconnected agents and emit
+    // `agent.disconnect_long` (4h threshold, 60s poll cadence in production).
+    let disconnect_monitor = std::sync::Arc::new(disconnect_monitor::DisconnectMonitor::new(
+        inventory.clone(),
+        journal.clone(),
+        bus.clone(),
+        14400, // 4 hours
+        60.0,  // 60s poll
+    ));
+    let disconnect_handle = disconnect_monitor.start();
+
     // -- gRPC server ----------------------------------------------------------
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
@@ -138,6 +149,9 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         });
 
     serve_fut.await.context("gRPC server error")?;
+
+    // -- shutdown -------------------------------------------------------------
+    disconnect_handle.abort();
 
     // -- plugin stop ----------------------------------------------------------
     plugin_host::stop_controller_plugins(&mut controller_plugins).await;
