@@ -38,13 +38,24 @@ message EnrollResponse {
 
 // ============ SYNC ============
 
+message Event {
+  string kind = 1;
+  string occurred_at = 2;
+  string summary = 3;
+  optional string container_name = 4;
+  optional string image = 5;
+  optional string old_digest = 6;
+  optional string new_digest = 7;
+  optional string error = 8;
+  optional string metadata_json = 9;
+}
+
 message AgentMessage {
   oneof payload {
     // First frame of every Sync stream. Identifies the agent post-enroll.
     SyncHello   hello     = 1;
     Heartbeat   heartbeat = 2;
-    // Phase 3+: ContainerSnapshot snapshot = 3;
-    // Phase 4+: Event              event    = 4;
+    Event       event     = 3;
   }
 }
 

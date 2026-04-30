@@ -160,6 +160,10 @@ impl Controller for ControllerService {
                         // Hello as second-or-later frame is invalid; ignore + log.
                         tracing::warn!(agent = %agent_hostname, "received Hello after first frame");
                     }
+                    Some(isengard_proto::pb::agent_message::Payload::Event(_)) => {
+                        // TEMPORARY (Phase 4a): handler not yet wired. Real
+                        // dispatch into Journal + EventBus lands in 4b.
+                    }
                     None => {
                         tracing::debug!(agent = %agent_hostname, "empty payload, skipping");
                     }
