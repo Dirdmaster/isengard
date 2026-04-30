@@ -11,6 +11,7 @@ pub mod auth;
 pub mod image_ref;
 pub mod labels;
 pub mod registry;
+pub mod self_id;
 
 use std::sync::Arc;
 use std::time::Duration;
