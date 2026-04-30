@@ -26,9 +26,6 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# internal workspace path-deps (isengard-core, etc.) are versionless on purpose;
-# allow-wildcard-paths exempts those without weakening the ban for crates.io deps
-allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
