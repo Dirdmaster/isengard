@@ -64,6 +64,9 @@ subtle = "2.6.1"
 # system info
 hostname = "0.4.0"
 
+# docker
+bollard = { version = "0.18.1", default-features = false, features = ["ssl"] }
+
 # internal — path + version so cargo-deny doesn't flag these as wildcard deps
 isengard-core = { path = "crates/isengard-core", version = "0.1.0-alpha" }
 isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-alpha" }
