@@ -16,6 +16,7 @@ isengard-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
+tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 

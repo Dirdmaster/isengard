@@ -3,6 +3,7 @@
 
 pub mod agent_state;
 pub mod enroll;
+pub mod sync;
 
 /// Convenience alias used throughout the agent.
 pub type Result<T> = anyhow::Result<T>;
