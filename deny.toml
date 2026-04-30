@@ -7,7 +7,7 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 
 [licenses]
-unlicensed = "deny"
+# anything not in `allow` is denied (per cargo-deny 0.14+; the old `unlicensed` key was removed in PR #611)
 allow = [
     "MIT",
     "Apache-2.0",
