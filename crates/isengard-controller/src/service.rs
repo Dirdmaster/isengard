@@ -1,4 +1,4 @@
-//! `Controller` gRPC service. `enroll` is real (Phase 2c); `sync` is still a stub.
+//! `Controller` gRPC service. `enroll` (Phase 2c) and `sync` (Phase 2e) are real.
 
 use std::sync::Arc;
 
@@ -80,9 +80,95 @@ impl Controller for ControllerService {
 
     async fn sync(
         &self,
-        _request: Request<Streaming<AgentMessage>>,
+        request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::SyncStream>, Status> {
-        tracing::debug!("Sync RPC reached stub — returning Unimplemented");
-        Err(Status::unimplemented("Sync handler lands in Phase 2e"))
+        let mut inbound = request.into_inner();
+
+        // Read first frame: must be SyncHello with a valid agent_id.
+        let hello = inbound
+            .message()
+            .await
+            .map_err(|e| Status::aborted(format!("reading hello: {e}")))?
+            .ok_or_else(|| Status::invalid_argument("stream closed before SyncHello"))?;
+
+        let agent_id_str = match hello.payload {
+            Some(isengard_proto::pb::agent_message::Payload::Hello(h)) => h.agent_id,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "first frame must be SyncHello",
+                ));
+            }
+        };
+
+        // Parse the ULID and look up the host.
+        let agent_ulid = ulid::Ulid::from_string(&agent_id_str)
+            .map_err(|e| Status::unauthenticated(format!("invalid agent_id: {e}")))?;
+        let host_id = isengard_storage::HostId(agent_ulid);
+
+        let host = self
+            .inventory
+            .get_host(host_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Sync: db error during host lookup");
+                Status::internal("database error")
+            })?
+            .ok_or_else(|| Status::unauthenticated("agent_id not in inventory; re-enroll"))?;
+
+        tracing::info!(agent = %host.hostname, "agent connected for sync");
+
+        // Build outbound channel. Controller uses this to send HeartbeatAcks
+        // (and Phase 3+ commands).
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ControllerMessage, Status>>(16);
+        let outbound = ReceiverStream::new(rx);
+
+        let inventory = self.inventory.clone();
+        let agent_hostname = host.hostname.clone();
+
+        tokio::spawn(async move {
+            while let Ok(Some(msg)) = inbound.message().await {
+                match msg.payload {
+                    Some(isengard_proto::pb::agent_message::Payload::Heartbeat(hb)) => {
+                        // Update last_seen_at to the controller's clock (not the
+                        // agent's — keeps the inventory's notion of "recent" tied
+                        // to a single clock).
+                        let server_ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+
+                        if let Err(e) = inventory.touch_host(host_id, server_ts).await {
+                            tracing::error!(error = %e, agent = %agent_hostname, "touch_host failed");
+                        }
+
+                        let ack = ControllerMessage {
+                            payload: Some(isengard_proto::pb::controller_message::Payload::HeartbeatAck(
+                                isengard_proto::pb::HeartbeatAck {
+                                    server_time_ms: (server_ts as u64) * 1000,
+                                },
+                            )),
+                        };
+                        if tx.send(Ok(ack)).await.is_err() {
+                            // Client closed the receive side; stream is over.
+                            tracing::debug!(agent = %agent_hostname, "client receiver closed");
+                            break;
+                        }
+
+                        let _ = hb.ts_ms; // agent clock for future drift logging
+                    }
+                    Some(isengard_proto::pb::agent_message::Payload::Hello(_)) => {
+                        // Hello as second-or-later frame is invalid; ignore + log.
+                        tracing::warn!(agent = %agent_hostname, "received Hello after first frame");
+                    }
+                    None => {
+                        tracing::debug!(agent = %agent_hostname, "empty payload, skipping");
+                    }
+                }
+            }
+
+            tracing::info!(agent = %agent_hostname, "agent stream closed");
+        });
+
+        Ok(Response::new(outbound))
     }
 }

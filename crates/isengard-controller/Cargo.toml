@@ -24,6 +24,7 @@ tonic.workspace = true
 tonic-reflection.workspace = true
 tower.workspace = true
 tracing.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 tempfile = "3.14.0"
