@@ -16,6 +16,7 @@ use bollard::Docker;
 use bollard::container::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, RenameContainerOptions,
 };
+use bollard::image::RemoveImageOptions;
 use bollard::network::ConnectNetworkOptions;
 use tracing::{info, warn};
 
@@ -37,6 +38,8 @@ pub async fn update_self(
         .inspect_container(self_id, None)
         .await
         .map_err(|e| anyhow::anyhow!("inspect self {self_id}: {e}"))?;
+
+    let old_image_id = inspect.image.clone();
 
     let original_name = inspect
         .name
@@ -123,7 +126,24 @@ pub async fn update_self(
     }
 
     info!("self-update complete; exiting current process in 200ms");
-    tokio::spawn(async {
+    let docker_exit = docker.clone();
+    tokio::spawn(async move {
+        if let Some(old) = old_image_id {
+            match docker_exit
+                .remove_image(
+                    &old,
+                    Some(RemoveImageOptions {
+                        force: false,
+                        noprune: false,
+                    }),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => info!(old_image = %old, "removed old self image"),
+                Err(e) => info!(old_image = %old, error = %e, "old self image not removed"),
+            }
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
         std::process::exit(0);
     });
