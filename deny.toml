@@ -5,6 +5,12 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+ignore = [
+    # rustls-pemfile is unmaintained; transitive via bollard 0.18.1.
+    # We don't use rustls-pemfile directly. Bollard 0.19+ may swap it; revisit on next bollard bump.
+    # https://rustsec.org/advisories/RUSTSEC-2025-0134
+    "RUSTSEC-2025-0134",
+]
 
 [licenses]
 # anything not in `allow` is denied (per cargo-deny 0.14+; the old `unlicensed` key was removed in PR #611)

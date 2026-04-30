@@ -27,14 +27,18 @@ pre-push:
       tags: rust
 
     deny:
-      # cargo-deny is optional; CI always runs it, locally it's a nice-to-have.
-      # Skips silently if not installed — install with `cargo install cargo-deny`.
+      # cargo-deny MUST run locally — CI runs the same gate, and a silent
+      # local skip caused 3 red-CI pushes on 2026-04-30. If you don't have
+      # cargo-deny installed, run `just install-hooks` (it bootstraps it)
+      # or `cargo install cargo-deny`.
       run: |
-        if command -v cargo-deny >/dev/null 2>&1; then
-          cargo deny check
-        else
-          echo "(cargo-deny not installed locally; CI will run it. install: cargo install cargo-deny)"
+        if ! command -v cargo-deny >/dev/null 2>&1; then
+          echo "ERROR: cargo-deny is not installed."
+          echo "  Install via: cargo install cargo-deny"
+          echo "  Or:          just install-hooks"
+          exit 1
         fi
+        cargo deny check
       tags: rust
 
 # Skip hooks on a single push by setting LEFTHOOK=0:
