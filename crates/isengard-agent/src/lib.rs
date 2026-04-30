@@ -9,7 +9,7 @@ pub mod sync;
 pub type Result<T> = anyhow::Result<T>;
 
 use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
@@ -77,8 +77,39 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         started.push(plugin);
     }
 
-    // Phase 2d: stop every plugin and return. Phase 2e holds the runner open
-    // on a Sync stream + ctrl_c await.
+    // -- run sync loop in background; ctrl_c triggers shutdown ----------
+    let token = std::env::var("ISENGARD_TOKEN")
+        .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
+    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+
+    // Phase 2e hardcodes 10s heartbeat interval. Phase 2e+ honors
+    // heartbeat_interval_secs from EnrollResponse.
+    const HEARTBEAT_INTERVAL_SECS: u32 = 10;
+
+    let sync_handle = {
+        let url = opts.controller_url.clone();
+        let agent_id = agent_id.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            sync::run_sync_loop(url, token, agent_id, HEARTBEAT_INTERVAL_SECS, cancel).await
+        })
+    };
+
+    // Wait for ctrl_c.
+    let _ = tokio::signal::ctrl_c().await;
+    info!("ctrl_c received, shutting down");
+    cancel.notify_waiters();
+
+    // Wait for sync to wind down (with a timeout so we don't hang forever).
+    let sync_result = tokio::time::timeout(std::time::Duration::from_secs(5), sync_handle).await;
+    match sync_result {
+        Ok(Ok(Ok(()))) => info!("sync loop exited cleanly"),
+        Ok(Ok(Err(e))) => warn!(error = %e, "sync loop exited with error"),
+        Ok(Err(e)) => warn!(error = %e, "sync task panicked or was cancelled"),
+        Err(_) => warn!("sync loop timed out on shutdown"),
+    }
+
+    // -- plugin stop ---------------------------------------------------
     for mut plugin in started {
         plugin.stop().await?;
     }
