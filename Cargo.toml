@@ -43,6 +43,14 @@ clap = { version = "4.5.23", features = ["derive", "env"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 
+# gRPC + protobuf
+tonic = "0.12.3"
+tonic-build = "0.12.3"
+tonic-reflection = "0.12.3"
+prost = "0.13.4"
+prost-types = "0.13.4"
+tower = "0.5.2"
+
 # internal — path + version so cargo-deny doesn't flag these as wildcard deps
 isengard-core = { path = "crates/isengard-core", version = "0.1.0-alpha" }
 isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-alpha" }
