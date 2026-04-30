@@ -154,14 +154,23 @@ async fn do_cycle(docker: &Docker, registry: &RegistryClient) -> anyhow::Result<
                 );
                 needs_update += 1;
 
-                // Self-protection: skip if this container is the agent itself.
+                // Self-update: when the candidate is this process's own
+                // container, use rename-then-replace ordering (3d).
                 if let Some(self_id) = crate::self_id::current_container_id() {
                     if c.id.as_deref() == Some(self_id.as_str()) {
-                        warn!(
-                            container = %name,
-                            "skipping self-update; deferred to phase 3d"
-                        );
-                        continue;
+                        info!(container = %name, "self-update path: rename-then-replace");
+                        match self_update::update_self(docker, &self_id, &image_ref).await {
+                            Ok(()) => {
+                                // update_self schedules process exit; bail out
+                                // of the cycle so we don't keep working.
+                                info!("self-update succeeded; cycle ending early");
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "self-update failed; will retry next cycle");
+                                continue;
+                            }
+                        }
                     }
                 }
 
