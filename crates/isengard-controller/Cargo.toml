@@ -27,4 +27,5 @@ tracing.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile = "3.14.0"

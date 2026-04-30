@@ -4,6 +4,8 @@
 mod auth;
 mod service;
 
+pub mod bus;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
