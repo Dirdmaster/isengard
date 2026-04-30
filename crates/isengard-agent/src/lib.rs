@@ -2,6 +2,7 @@
 //! shutdown. Phase 1 minimum — no gRPC client, no docker integration.
 
 pub mod agent_state;
+pub mod backoff;
 pub mod enroll;
 pub mod sync;
 
