@@ -1,23 +1,27 @@
-//! Controller-mode runtime: load plugins, run their lifecycle hooks, wait for
-//! shutdown. Phase 1 minimum — no gRPC server, no inventory store.
+//! Controller-mode runtime: load plugins, bind the gRPC server, await
+//! shutdown, drain, stop plugins, exit.
 
-use anyhow::Result;
+mod service;
+
+use std::net::SocketAddr;
+
+use anyhow::{Context, Result};
 use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
+use isengard_proto::FILE_DESCRIPTOR_SET;
+use isengard_proto::pb::controller_server::ControllerServer;
+use tokio::signal;
+use tonic::transport::Server;
 use tracing::{info, instrument};
+
+pub use service::ControllerService;
 
 /// Options for running the controller.
 #[derive(Debug, Clone)]
 pub struct ControllerOptions {
+    /// Address the gRPC server binds to (e.g. `0.0.0.0:9417`).
+    pub listen: SocketAddr,
     /// Optional config tree (per-plugin slices keyed by plugin name).
     pub config: serde_json::Value,
-}
-
-impl Default for ControllerOptions {
-    fn default() -> Self {
-        Self {
-            config: serde_json::Value::Object(Default::default()),
-        }
-    }
 }
 
 /// Discover and instantiate every plugin that advertises `Capability::Controller`.
@@ -28,18 +32,17 @@ pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
         .collect()
 }
 
-/// Run controller-mode lifecycle: init → start every plugin, then wait. Stop
-/// every plugin on `ctx_token` cancellation. Phase 1 returns immediately
-/// (no event loop yet) — subsequent phases hold the runner open on tokio
-/// signal.
-#[instrument(skip(opts))]
+/// Run controller-mode: init+start every plugin, bind the gRPC server, await
+/// ctrl_c, drain in-flight requests, stop every plugin, return.
+#[instrument(skip(opts), fields(listen = %opts.listen))]
 pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     info!("starting controller");
+
+    // -- plugin init/start ----------------------------------------------------
     let plugins = load_plugins();
     info!(plugin_count = plugins.len(), "plugins discovered");
 
     let mut started = Vec::with_capacity(plugins.len());
-
     for mut plugin in plugins {
         let plugin_name = plugin.name().to_string();
         let plugin_config = opts
@@ -54,8 +57,28 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         started.push(plugin);
     }
 
-    // Phase 1: stop everything immediately and return. Phase 2+ replaces this
-    // with a tokio::signal::ctrl_c().await + per-plugin task supervision.
+    // -- gRPC server ----------------------------------------------------------
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .context("building reflection service")?;
+
+    let svc = ControllerServer::new(ControllerService);
+
+    info!("gRPC server listening");
+    let serve_fut = Server::builder()
+        .add_service(svc)
+        .add_service(reflection)
+        .serve_with_shutdown(opts.listen, async {
+            // SIGINT / Ctrl-C terminates serve_with_shutdown gracefully.
+            // serve waits for in-flight requests to drain before returning.
+            let _ = signal::ctrl_c().await;
+            info!("shutdown signal received, draining");
+        });
+
+    serve_fut.await.context("gRPC server error")?;
+
+    // -- plugin stop ----------------------------------------------------------
     for mut plugin in started {
         plugin.stop().await?;
     }
@@ -66,14 +89,12 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn run_controller_loads_zero_or_more_plugins_and_returns_ok() {
-        // No plugins are registered against Capability::Controller in the
-        // controller crate's own test cfg — that's fine, this asserts the
-        // runner doesn't blow up on an empty plugin set or any plugin set.
-        let res = run_controller(ControllerOptions::default()).await;
-        assert!(res.is_ok(), "run_controller failed: {:?}", res);
+    // Integration tests against a running server live in
+    // `tests/server_skeleton.rs`. The Phase-1-style "default options" smoke
+    // test no longer applies because the runner now blocks on ctrl_c.
+    #[test]
+    fn dummy() {
+        // placeholder so the unit-test target stays alive for nextest
+        assert_eq!(2 + 2, 4);
     }
 }
