@@ -5,6 +5,9 @@
 
 #![allow(clippy::result_large_err)]
 
+#[allow(dead_code)]
+mod image_ref;
+
 use std::sync::Arc;
 use std::time::Duration;
 
