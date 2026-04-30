@@ -1251,6 +1251,8 @@ name = "isengard-agent"
 version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
  "hostname",
  "isengard-controller",
  "isengard-core",

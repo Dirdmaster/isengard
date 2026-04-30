@@ -4,6 +4,7 @@
 pub mod agent_state;
 pub mod backoff;
 pub mod enroll;
+pub mod events;
 pub mod sync;
 
 /// Convenience alias used throughout the agent.
