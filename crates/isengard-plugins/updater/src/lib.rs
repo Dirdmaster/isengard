@@ -224,6 +224,26 @@ impl Plugin for Updater {
             .map_err(|e| init_err(format!("registry client: {e}")))?;
         self.registry = Some(Arc::new(registry));
 
+        // If we're running inside a container, clean up any leftover
+        // `<our-name>-replaced-*` siblings from a prior self-update.
+        if let Some(my_id) = crate::self_id::current_container_id() {
+            match docker.inspect_container(&my_id, None).await {
+                Ok(self_inspect) => {
+                    let my_name = self_inspect
+                        .name
+                        .as_deref()
+                        .map(|s| s.trim_start_matches('/').to_string())
+                        .unwrap_or_default();
+                    if !my_name.is_empty() {
+                        crate::self_update::cleanup_replaced_siblings(&docker, &my_name).await;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not inspect self container; skipping replaced-sibling cleanup");
+                }
+            }
+        }
+
         self.docker = Some(docker);
         Ok(())
     }
