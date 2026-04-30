@@ -176,7 +176,8 @@ async fn do_cycle(
                 if let Some(self_id) = crate::self_id::current_container_id() {
                     if c.id.as_deref() == Some(self_id.as_str()) {
                         info!(container = %name, "self-update path: rename-then-replace");
-                        match self_update::update_self(docker, &self_id, &image_ref).await {
+                        match self_update::update_self(docker, &self_id, &image_ref, emitter).await
+                        {
                             Ok(()) => {
                                 // update_self schedules process exit; bail out
                                 // of the cycle so we don't keep working.

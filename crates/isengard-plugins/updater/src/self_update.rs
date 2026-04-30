@@ -10,6 +10,7 @@
 //! after the old one.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bollard::Docker;
@@ -18,6 +19,8 @@ use bollard::container::{
 };
 use bollard::image::RemoveImageOptions;
 use bollard::network::ConnectNetworkOptions;
+use chrono::Utc;
+use isengard_core::{Event, EventEmitter};
 use tracing::{info, warn};
 
 use crate::image_ref::ImageRef;
@@ -33,6 +36,7 @@ pub async fn update_self(
     docker: &Docker,
     self_id: &str,
     new_image_ref: &ImageRef,
+    emitter: Option<&Arc<dyn EventEmitter>>,
 ) -> anyhow::Result<()> {
     let inspect = docker
         .inspect_container(self_id, None)
@@ -126,6 +130,18 @@ pub async fn update_self(
     }
 
     info!("self-update complete; exiting current process in 200ms");
+    if let Some(e) = emitter {
+        // Synchronous emit so the event hits the wire before our process dies.
+        e.emit(Event {
+            kind: "update.success".into(),
+            occurred_at: Utc::now(),
+            summary: format!("self-update complete: {original_name} → {new_image_str}"),
+            container_name: Some(original_name.clone()),
+            image: Some(new_image_str.clone()),
+            ..Default::default()
+        })
+        .await;
+    }
     let docker_exit = docker.clone();
     tokio::spawn(async move {
         if let Some(old) = old_image_id {
