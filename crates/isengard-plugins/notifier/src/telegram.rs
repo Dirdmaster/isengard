@@ -17,7 +17,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::channel::NotifyChannel;
+use crate::channel::{NotifyChannel, format_event};
 
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 
@@ -79,30 +79,6 @@ impl TelegramChannel {
                 .map_err(|e| anyhow::anyhow!("building http client: {e}"))?,
         })
     }
-}
-
-/// Format an event into a plain-text Telegram message.
-pub fn format_event(event: &Event) -> String {
-    let mut lines = vec![format!("[isengard] {}", event.kind)];
-    if let Some(c) = &event.container_name {
-        lines.push(format!("container: {c}"));
-    }
-    if let Some(i) = &event.image {
-        lines.push(format!("image: {i}"));
-    }
-    match (event.old_digest.as_deref(), event.new_digest.as_deref()) {
-        (Some(o), Some(n)) => lines.push(format!("digest: {o} → {n}")),
-        (None, Some(n)) => lines.push(format!("digest: {n}")),
-        (Some(o), None) => lines.push(format!("digest (old): {o}")),
-        (None, None) => {}
-    }
-    if let Some(e) = &event.error {
-        lines.push(format!("error: {e}"));
-    }
-    if !event.summary.is_empty() {
-        lines.push(event.summary.clone());
-    }
-    lines.join("\n")
 }
 
 #[async_trait]
