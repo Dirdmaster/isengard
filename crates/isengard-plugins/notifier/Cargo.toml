@@ -9,3 +9,18 @@ repository.workspace = true
 description = "Isengard notifier plugin (populated in a later phase)"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+inventory.workspace = true
+isengard-core.workspace = true
+isengard-controller.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock.workspace = true

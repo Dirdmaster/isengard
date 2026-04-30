@@ -28,6 +28,7 @@ isengard-agent.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-plugin-updater.workspace = true
+isengard-plugin-notifier.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true

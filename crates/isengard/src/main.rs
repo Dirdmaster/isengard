@@ -10,6 +10,12 @@ use tracing_subscriber::EnvFilter;
 #[cfg(feature = "dev")]
 mod dev_plugin;
 
+// Force-link the notifier plugin so its `inventory::submit!` registration is
+// picked up at controller startup. The `as _` import keeps the symbol live
+// without polluting the main namespace.
+#[allow(unused_imports)]
+use isengard_plugin_notifier as _;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "isengard",

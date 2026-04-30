@@ -83,6 +83,9 @@ futures-util = { version = "0.3.31", default-features = false, features = ["std"
 # tempfile (test helpers)
 tempfile = "3.14.0"
 
+# HTTP mock server for tests
+wiremock = "0.6.2"
+
 # internal — path + version so cargo-deny doesn't flag these as wildcard deps
 isengard-core = { path = "crates/isengard-core", version = "0.1.0-alpha" }
 isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-alpha" }
@@ -90,6 +93,7 @@ isengard-agent = { path = "crates/isengard-agent", version = "0.1.0-alpha" }
 isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
 isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
 isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }
+isengard-plugin-notifier = { path = "crates/isengard-plugins/notifier", version = "0.1.0-alpha" }
 
 [profile.release]
 lto = "thin"
