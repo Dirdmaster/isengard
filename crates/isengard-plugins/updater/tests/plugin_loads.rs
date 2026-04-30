@@ -28,7 +28,10 @@ async fn updater_lifecycle_against_real_docker() {
     let mut plugin = Updater::new();
     let ctx = PluginContext::new(HostMode::Agent, serde_json::Value::Null);
 
-    plugin.init(&ctx).await.expect("init should succeed against real Docker");
+    plugin
+        .init(&ctx)
+        .await
+        .expect("init should succeed against real Docker");
     plugin.start(&ctx).await.expect("start should succeed");
 
     // Cycle interval is 30s. Test would be too slow waiting for the natural

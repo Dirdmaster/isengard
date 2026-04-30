@@ -76,7 +76,10 @@ async fn do_cycle(docker: &Docker) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("listing containers: {e}"))?;
 
-    info!(count = containers.len(), "updater cycle: containers running");
+    info!(
+        count = containers.len(),
+        "updater cycle: containers running"
+    );
 
     for c in &containers {
         let name = c
