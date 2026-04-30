@@ -34,13 +34,15 @@ use crate::labels::isengard_enabled;
 use crate::registry::RegistryClient;
 
 const PLUGIN_NAME: &str = "updater";
-const CYCLE_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_CYCLE_INTERVAL_SECS: u64 = 30;
+const MIN_CYCLE_INTERVAL_SECS: u64 = 5;
 
 pub struct Updater {
     /// Lazily set in `init`. Wrapped in Option so the struct can be constructed
     /// by the inventory factory before init runs.
     docker: Option<Docker>,
     registry: Option<Arc<RegistryClient>>,
+    cycle_interval: Duration,
     cancel: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -50,6 +52,7 @@ impl Updater {
         Self {
             docker: None,
             registry: None,
+            cycle_interval: Duration::from_secs(DEFAULT_CYCLE_INTERVAL_SECS),
             cancel: Arc::new(Notify::new()),
             task: None,
         }
@@ -207,7 +210,16 @@ impl Plugin for Updater {
         env!("CARGO_PKG_VERSION")
     }
 
-    async fn init(&mut self, _ctx: &PluginContext) -> Result<()> {
+    async fn init(&mut self, ctx: &PluginContext) -> Result<()> {
+        let cycle_interval_secs = ctx
+            .config
+            .get("cycle_interval_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_CYCLE_INTERVAL_SECS)
+            .max(MIN_CYCLE_INTERVAL_SECS);
+        self.cycle_interval = Duration::from_secs(cycle_interval_secs);
+        info!(cycle_interval_secs, "updater cycle interval configured");
+
         // Connect to the local Docker daemon. Honors DOCKER_HOST + standard
         // socket paths.
         let docker = Docker::connect_with_local_defaults()
@@ -267,9 +279,10 @@ impl Plugin for Updater {
             .clone()
             .ok_or_else(|| start_err("updater started before init"))?;
         let cancel = self.cancel.clone();
+        let interval = self.cycle_interval;
 
         let task = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(CYCLE_INTERVAL);
+            let mut ticker = tokio::time::interval(interval);
             loop {
                 tokio::select! {
                     _ = cancel.notified() => {
