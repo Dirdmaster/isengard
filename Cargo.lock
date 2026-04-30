@@ -1065,8 +1065,10 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "hostname",
+ "isengard-controller",
  "isengard-core",
  "isengard-proto",
+ "isengard-storage",
  "serde",
  "serde_json",
  "tempfile",
