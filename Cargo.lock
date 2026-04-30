@@ -1318,6 +1318,7 @@ dependencies = [
  "base64",
  "bollard",
  "dirs",
+ "futures-util",
  "inventory",
  "isengard-core",
  "reqwest",

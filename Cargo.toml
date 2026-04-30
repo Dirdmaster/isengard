@@ -76,6 +76,9 @@ base64 = "0.22.1"
 # user dirs (locate ~/.docker/config.json cross-platform)
 dirs = "6.0.0"
 
+# futures utilities (consume bollard pull streams)
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+
 # tempfile (test helpers)
 tempfile = "3.14.0"
 
