@@ -12,10 +12,10 @@ Phase 3 made the updater feature-complete with the legacy Go binary. But the val
 
 1. A controller-side **event journal** — append-only durable record of what happened across the fleet (which agent updated which container at what time, what the digests were, what failed).
 2. An in-process **event bus** so plugins can react to events as they happen.
-3. The **`notifier` plugin** — first consumer of the bus — sending those events to Slack, Discord, or a generic HTTP POST endpoint.
+3. The **`notifier` plugin** — first consumer of the bus — sending those events to Telegram, Discord, or a generic HTTP POST endpoint.
 4. The **`agent.disconnect_long` detection** in the controller — produced internally, not from agents.
 
-Once Phase 4 lands, you can deploy the platform and get a Slack ping every time the friend's prod fleet updates a container. That's the user-visible product proof.
+Once Phase 4 lands, you can deploy the platform and get a Telegram ping every time the friend's prod fleet updates a container. That's the user-visible product proof. Telegram is the v1 default channel because BotFather + `/start` is a 5-minute one-person setup; Slack incoming webhooks require workspace admin rights and an org account, which we don't want to assume.
 
 ---
 
@@ -248,7 +248,7 @@ Trade-off: in-memory `HashSet` for "already emitted" so we don't spam every minu
 Crate: `crates/isengard-plugins/notifier/` (already scaffolded empty in Phase 0).
 
 Implements `Plugin + EventSubscriber`. On init:
-1. Read config (Slack webhook URL, Discord webhook URL, generic POST URL, channel-specific kind filters)
+1. Read config (Telegram bot token + chat IDs, Discord webhook URLs, generic POST URLs, channel-specific kind filters)
 2. Subscribe to controller's EventBus
 3. Spawn a per-channel worker task that consumes from a per-channel mpsc and dispatches with rate limiting
 
@@ -265,7 +265,14 @@ pub trait NotifyChannel: Send + Sync {
 }
 ```
 
-Implementations: `SlackChannel`, `DiscordChannel`, `HttpChannel`. Telegram deferred (different bot API needs polling for update_id; not pure webhook).
+Implementations: `TelegramChannel` (v1 default), `DiscordChannel`, `HttpChannel`. Slack deferred to v1.x — workspace-admin gating makes it a worse fit for the v1 audience (solo / small-team operators), and the wire format is essentially `HttpChannel` + a JSON shape if anyone wants to wire it up.
+
+**Telegram channel** — outbound-only in v1:
+- Config: `bot_token` (from @BotFather), `chat_ids: Vec<String>` (one bot can post to many chats)
+- One-time setup: user creates bot via @BotFather → gets token → adds bot to chat → sends `/start` → reads chat_id from `https://api.telegram.org/bot<TOKEN>/getUpdates`
+- Send: `POST https://api.telegram.org/bot<TOKEN>/sendMessage` with `{ chat_id, text, parse_mode: "MarkdownV2" }` (or HTML; pick whichever escapes cleaner)
+- No bot polling/getUpdates loop in v1 — we never receive from Telegram, only send
+- Rate limit: Telegram's docs cap at 30 msg/sec/bot. Our 10/min default is comfortably below.
 
 Rate limit: token bucket per channel, default 10/min. When token exhausted, events queued; on next refill, batch into one message ("3 events in last minute: ...").
 
@@ -278,17 +285,18 @@ Rate limit: token bucket per channel, default 10/min. When token exhausted, even
 | 4a | proto Event + AgentMessage variant; `events` table + `Journal` API in isengard-storage; EventBus type in isengard-controller; finalised core types (Event, EventEmitter, EventSubscriber). Pure plumbing — no new producers/consumers. |
 | 4b | Agent's sync stream wires an `EventEmitter` impl that queues events onto the existing outbound stream. Controller's Sync handler matches the new variant, persists to journal, broadcasts on EventBus. EventBus passed to plugin host. |
 | 4c | Updater emits `update.checked`, `update.success`, `update.failed`, `update.skipped` via the injected EventEmitter. Each event includes container_name, image, digests where applicable. |
-| 4d | Notifier plugin scaffold: Plugin + EventSubscriber traits, channel abstraction, Slack channel implementation. Subscribes to bus on init, dispatches matching events with no rate limit (4e adds it). |
+| 4d | Notifier plugin scaffold: Plugin + EventSubscriber traits, channel abstraction, **Telegram channel** implementation. Subscribes to bus on init, dispatches matching events with no rate limit (4e adds it). |
 | 4e | Discord + generic HTTP POST channels. Token-bucket rate limiter. Batched messages when over limit. |
 | 4f | `agent.disconnect_long` background task in controller. Integration test: agent enrolls, controller waits, agent dies, after threshold the event flows to a test-mode notifier that captures into a Vec. |
 
-Each sub-phase is independently shippable. After 4d, Slack notifications work end-to-end. 4e + 4f are polish + monitoring.
+Each sub-phase is independently shippable. After 4d, Telegram notifications work end-to-end. 4e + 4f are polish + monitoring.
 
 ---
 
 ## 10. Out of scope (deferred)
 
-- Telegram channel (bot API model is different)
+- Slack channel (workspace-admin friction, deferred to v1.x — `HttpChannel` covers anyone who really wants to wire an incoming webhook)
+- Bot-receives-commands flow (Telegram inbound — would need polling getUpdates loop or webhook; v1.x with `dashboard` integration so users can `/list-hosts` from Telegram)
 - Email channel (SMTP setup is hostile in 2026)
 - Webhook signing (HMAC) — v1.x
 - Per-channel templates (defaults only in v1; configurable templates in v1.x)
@@ -308,4 +316,4 @@ None blocking. Choices documented above. If any direction is wrong, push back be
 
 ## 12. Done condition for Phase 4
 
-After 4f: Deploy the controller + an agent in Docker against a labelled container with an outdated tag. Within ~30s, the updater performs the recreate. Within ~5s of that, a Slack message lands: `[isengard] update.success — web (nginx:1.25-alpine) on host-abc, digest sha256:xxx → sha256:yyy`. The journal contains the event. `journalctl -u isengard-controller` shows it received and broadcast.
+After 4f: Deploy the controller + an agent in Docker against a labelled container with an outdated tag. Within ~30s, the updater performs the recreate. Within ~5s of that, a Telegram message lands in the user's chat: `[isengard] update.success — web (nginx:1.25-alpine) on host-abc, digest sha256:xxx → sha256:yyy`. The journal contains the event. `journalctl -u isengard-controller` shows it received and broadcast.
