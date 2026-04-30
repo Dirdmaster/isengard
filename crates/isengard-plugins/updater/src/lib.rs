@@ -152,6 +152,26 @@ async fn do_cycle(docker: &Docker, registry: &RegistryClient) -> anyhow::Result<
                     status = "needs_update"
                 );
                 needs_update += 1;
+
+                // Self-protection: skip if this container is the agent itself.
+                if let Some(self_id) = crate::self_id::current_container_id() {
+                    if c.id.as_deref() == Some(self_id.as_str()) {
+                        warn!(
+                            container = %name,
+                            "skipping self-update; deferred to phase 3d"
+                        );
+                        continue;
+                    }
+                }
+
+                let Some(container_id) = c.id.as_deref() else {
+                    warn!(container = %name, "no container ID; cannot update");
+                    continue;
+                };
+
+                if let Err(e) = recreate::update_container(docker, container_id, &image_ref).await {
+                    warn!(container = %name, error = %e, "update failed");
+                }
             }
             _ => {
                 debug!(container = %name, image = %image_str, "could not classify (missing local or remote digest)");
