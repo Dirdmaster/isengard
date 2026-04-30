@@ -3,7 +3,11 @@
 //! Phase 1 minimum: host mode + plugin's slice of the merged config. Subsequent
 //! phases will add: logger handle, journal writer, gRPC clients, secret store.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+
+use crate::EventEmitter;
 
 /// Which mode the host is running in. Affects which capability sub-traits a
 /// plugin's lifecycle hooks are called through.
@@ -16,17 +20,39 @@ pub enum HostMode {
 
 /// Context handed to a plugin during `init`/`start`. Cheap to clone (Arc-backed
 /// fields will land in later phases).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PluginContext {
     pub mode: HostMode,
     /// The plugin's slice of the merged configuration tree. Empty `Value::Null`
     /// when the plugin has no configuration.
     pub config: serde_json::Value,
+    /// Optional event sink. `None` on the controller in phase 4a; `Some` on
+    /// the agent once 4b wires the gRPC client through.
+    pub events: Option<Arc<dyn EventEmitter>>,
 }
 
 impl PluginContext {
     pub fn new(mode: HostMode, config: serde_json::Value) -> Self {
-        Self { mode, config }
+        Self {
+            mode,
+            config,
+            events: None,
+        }
+    }
+
+    pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
+        self.events = Some(events);
+        self
+    }
+}
+
+impl std::fmt::Debug for PluginContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginContext")
+            .field("mode", &self.mode)
+            .field("config", &self.config)
+            .field("events", &self.events.as_ref().map(|_| "<emitter>"))
+            .finish()
     }
 }
 
@@ -47,6 +73,7 @@ mod tests {
         let ctx = PluginContext::new(HostMode::Agent, serde_json::Value::Null);
         assert_eq!(ctx.mode, HostMode::Agent);
         assert!(ctx.config.is_null());
+        assert!(ctx.events.is_none());
     }
 
     #[test]
@@ -54,5 +81,22 @@ mod tests {
         let cfg = serde_json::json!({"interval": "30m", "watch_all": true});
         let ctx = PluginContext::new(HostMode::Controller, cfg.clone());
         assert_eq!(ctx.config["interval"], "30m");
+    }
+
+    #[test]
+    fn plugin_context_with_events_attaches_emitter() {
+        use crate::event::NoopEmitter;
+        let ctx = PluginContext::new(HostMode::Agent, serde_json::Value::Null)
+            .with_events(Arc::new(NoopEmitter));
+        assert!(ctx.events.is_some());
+    }
+
+    #[test]
+    fn plugin_context_debug_elides_emitter() {
+        use crate::event::NoopEmitter;
+        let ctx = PluginContext::new(HostMode::Agent, serde_json::Value::Null)
+            .with_events(Arc::new(NoopEmitter));
+        let s = format!("{ctx:?}");
+        assert!(s.contains("<emitter>"));
     }
 }

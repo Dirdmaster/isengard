@@ -34,6 +34,18 @@ impl std::fmt::Display for HostId {
     }
 }
 
+impl From<ulid::Ulid> for HostId {
+    fn from(u: ulid::Ulid) -> Self {
+        Self(u)
+    }
+}
+
+impl From<HostId> for ulid::Ulid {
+    fn from(h: HostId) -> Self {
+        h.0
+    }
+}
+
 /// One row from the `hosts` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {

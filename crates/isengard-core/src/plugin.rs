@@ -14,7 +14,7 @@
 
 use crate::context::PluginContext;
 use crate::error::Result;
-use crate::event::{Event, EventKind};
+use crate::event::Event;
 use async_trait::async_trait;
 
 /// Lifecycle. Every plugin implements this.
@@ -53,10 +53,11 @@ pub trait ControllerPlugin: Plugin {}
 /// Capability: this plugin reacts to journal events on the controller.
 #[async_trait]
 pub trait EventSubscriber: Plugin {
-    /// Filter — which event kinds this subscriber wants. Empty = all.
-    fn subscribed_events(&self) -> &[EventKind];
+    /// Glob-style kind patterns this subscriber wants. "*" matches everything.
+    /// Empty list means subscribe to nothing.
+    fn event_kinds(&self) -> &[&'static str];
 
-    /// Called on every matching event. Errors are logged; they do not stop
+    /// Handle a single matching event. Errors are logged; they do not stop
     /// the journal.
     async fn handle(&self, event: &Event, ctx: &PluginContext) -> Result<()>;
 }

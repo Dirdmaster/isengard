@@ -1,33 +1,52 @@
 //! Event types emitted by plugins and consumed by the journal + subscribers.
 //!
-//! Phase 1 contains only the minimal shape used by the plugin trait. The
-//! journal/subscriber wiring lands in Phase 4.
+//! An [`Event`] is the canonical shape carried over the wire (proto), persisted
+//! by the controller's journal, and broadcast on the in-process EventBus.
+//! [`EventEmitter`] is the async sink plugins write to via their
+//! [`crate::PluginContext`].
 
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for the kind of event. Used by `EventSubscriber` to filter.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventKind {
-    UpdateChecked,
-    UpdateSuccess,
-    UpdateFailed,
-    UpdateSkipped,
-    AgentConnect,
-    AgentDisconnect,
-    PluginCrashed,
+use crate::HostId;
+
+/// A journal event. Plugin-defined `kind` strings (e.g. "update.success",
+/// "agent.connect") drive subscriber filtering. Optional fields are populated
+/// when relevant; `metadata` is a free-form JSON escape hatch.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Event {
+    pub kind: String,
+    pub occurred_at: DateTime<Utc>,
+    pub host_id: Option<HostId>,
+    pub summary: String,
+    pub container_name: Option<String>,
+    pub image: Option<String>,
+    pub old_digest: Option<String>,
+    pub new_digest: Option<String>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
-/// A journal event. The payload is plugin-defined JSON; concrete schemas are
-/// owned by each plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Event {
-    pub kind: EventKind,
-    pub ts_millis: u64,
-    pub host_id: Option<String>,
-    pub container_id: Option<String>,
-    pub plugin: Option<String>,
-    pub payload: serde_json::Value,
+/// Async sink for events emitted by plugins.
+#[async_trait::async_trait]
+pub trait EventEmitter: Send + Sync + 'static {
+    async fn emit(&self, event: Event);
+}
+
+/// A no-op emitter for contexts where events go nowhere (e.g. unit tests).
+pub struct NoopEmitter;
+
+#[async_trait::async_trait]
+impl EventEmitter for NoopEmitter {
+    async fn emit(&self, _event: Event) {}
+}
+
+/// Convenience for plugins: wrap an emitter into an `Arc<dyn EventEmitter>`.
+pub fn arc_emitter<E: EventEmitter>(e: E) -> Arc<dyn EventEmitter> {
+    Arc::new(e)
 }
 
 #[cfg(test)]
@@ -35,27 +54,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_kind_round_trips_through_json() {
-        let kind = EventKind::UpdateSuccess;
-        let s = serde_json::to_string(&kind).unwrap();
-        assert_eq!(s, "\"update_success\"");
-        let back: EventKind = serde_json::from_str(&s).unwrap();
-        assert_eq!(back, EventKind::UpdateSuccess);
+    fn event_serialises_round_trip() {
+        let e = Event {
+            kind: "update.success".into(),
+            occurred_at: Utc::now(),
+            summary: "ok".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, "update.success");
+        assert_eq!(back.summary, "ok");
     }
 
-    #[test]
-    fn event_serialises_with_optionals() {
-        let evt = Event {
-            kind: EventKind::AgentConnect,
-            ts_millis: 1_700_000_000_000,
-            host_id: Some("01J...".into()),
-            container_id: None,
-            plugin: Some("agent".into()),
-            payload: serde_json::json!({"version": "0.1.0-alpha"}),
-        };
-        let s = serde_json::to_string(&evt).unwrap();
-        assert!(s.contains("\"kind\":\"agent_connect\""));
-        assert!(s.contains("\"host_id\":\"01J...\""));
-        assert!(s.contains("\"container_id\":null"));
+    #[tokio::test]
+    async fn noop_emitter_swallows_event() {
+        let e = NoopEmitter;
+        e.emit(Event::default()).await;
     }
 }
