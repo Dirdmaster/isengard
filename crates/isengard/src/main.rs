@@ -42,9 +42,13 @@ enum Command {
     /// Run in agent mode: registers with a controller, runs agent-side plugins
     /// (updater).
     Agent {
-        /// URL of the controller, e.g. `https://controller.example.com:9417`.
+        /// URL of the controller, e.g. `http://controller.example.com:9417`.
         #[arg(long, env = "ISENGARD_CONTROLLER")]
-        controller: Option<String>,
+        controller: String,
+        /// Directory where the agent persists state (agent.json, etc).
+        /// Created if missing.
+        #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
+        state_dir: std::path::PathBuf,
     },
 }
 
@@ -84,11 +88,21 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Command::Agent { controller } => {
-            tracing::info!(?controller, "agent mode");
+        Command::Agent {
+            controller,
+            state_dir,
+        } => {
+            let _token = std::env::var("ISENGARD_TOKEN")
+                .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
+
+            std::fs::create_dir_all(&state_dir)
+                .map_err(|e| anyhow::anyhow!("creating state dir {state_dir:?}: {e}"))?;
+
+            tracing::info!(%controller, ?state_dir, "agent mode");
             isengard_agent::run_agent(isengard_agent::AgentOptions {
                 controller_url: controller,
-                ..Default::default()
+                state_dir,
+                config: serde_json::Value::Object(Default::default()),
             })
             .await
         }

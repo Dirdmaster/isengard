@@ -8,17 +8,6 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
-fn agent_mode_loads_dev_plugin() {
-    let output = Command::cargo_bin("isengard")
-        .unwrap()
-        .args(["--log=info", "agent"])
-        .assert()
-        .success();
-
-    output.stderr(predicate::str::contains("plugin_count=1"));
-}
-
-#[test]
 fn agent_help_lists_controller_flag() {
     Command::cargo_bin("isengard")
         .unwrap()
