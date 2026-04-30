@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "gRPC service definitions and generated code (populated in Phase 2)"
+description = "gRPC service definitions and tonic-generated code"
 
 [dependencies]
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
