@@ -89,9 +89,38 @@ impl Inventory {
         row.map(decode_host).transpose()
     }
 
+    /// Update `last_seen_at` for a host. No-op if the host doesn't exist.
+    /// Returns whether a row was actually updated.
+    pub async fn touch_host(&self, id: HostId, ts: i64) -> Result<bool> {
+        let id_bytes: &[u8] = &id.to_bytes();
+        let result = sqlx::query("UPDATE hosts SET last_seen_at = ? WHERE id = ?")
+            .bind(ts)
+            .bind(id_bytes)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Return every host, ordered by `last_seen_at DESC` (recently active first;
+    /// hosts never seen sort to the bottom).
+    pub async fn list_hosts(&self) -> Result<Vec<Host>> {
+        let rows: Vec<HostRow> = sqlx::query_as(
+            r#"
+            SELECT id, fingerprint, hostname, os, arch,
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
+            FROM hosts
+            ORDER BY last_seen_at DESC NULLS LAST, enrolled_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(decode_host).collect()
+    }
+
     /// Borrow the underlying pool. Used by inventory methods (and tests that
     /// want to peek at table state).
-    #[allow(dead_code)] // consumed by inventory CRUD methods in later tasks
+    #[allow(dead_code)] // only consumed by tests; lib build sees it as unused
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -228,5 +257,54 @@ mod tests {
             .await
             .expect_err("dup fingerprint must error");
         assert!(matches!(err, Error::Db(_)), "unexpected error: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn touch_updates_last_seen_for_known_host() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let id = inv.enroll_host(sample_enrollment()).await.unwrap();
+
+        let updated = inv.touch_host(id, 1_700_000_000).await.unwrap();
+        assert!(updated);
+
+        let host = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(host.last_seen_at, Some(1_700_000_000));
+    }
+
+    #[tokio::test]
+    async fn touch_unknown_host_returns_false() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let updated = inv.touch_host(HostId::new(), 1_700_000_000).await.unwrap();
+        assert!(!updated);
+    }
+
+    #[tokio::test]
+    async fn list_returns_recently_seen_first() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+
+        // Enroll two hosts with different fingerprints.
+        let mut req_a = sample_enrollment();
+        req_a.fingerprint = "host-a.example".into();
+        let id_a = inv.enroll_host(req_a).await.unwrap();
+
+        let mut req_b = sample_enrollment();
+        req_b.fingerprint = "host-b.example".into();
+        let id_b = inv.enroll_host(req_b).await.unwrap();
+
+        // Touch B more recently than A.
+        inv.touch_host(id_a, 1_700_000_000).await.unwrap();
+        inv.touch_host(id_b, 1_700_000_500).await.unwrap();
+
+        let listed = inv.list_hosts().await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, id_b, "more recent host should come first");
+        assert_eq!(listed[1].id, id_a);
+    }
+
+    #[tokio::test]
+    async fn list_empty_inventory_returns_empty_vec() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let listed = inv.list_hosts().await.unwrap();
+        assert!(listed.is_empty());
     }
 }
