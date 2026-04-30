@@ -35,6 +35,8 @@ pub struct TelegramConfig {
     /// Override base URL (used by tests; defaults to https://api.telegram.org).
     #[serde(default)]
     pub api_base: Option<String>,
+    #[serde(default)]
+    pub tokens_per_minute: Option<f64>,
 }
 
 pub struct TelegramChannel {
@@ -177,6 +179,7 @@ mod tests {
             chat_ids: vec!["123".into()],
             kinds: vec!["update.success".into(), "update.failed".into()],
             api_base: None,
+            tokens_per_minute: None,
         };
         let ch = TelegramChannel::from_config(cfg).unwrap();
         assert!(ch.matches_kind("update.success"));
@@ -199,6 +202,7 @@ mod tests {
             chat_ids: vec!["123".into()],
             kinds: vec![],
             api_base: None,
+            tokens_per_minute: None,
         };
         let r = TelegramChannel::from_config(cfg);
         if let Some(p) = prev {
@@ -216,6 +220,7 @@ mod tests {
             chat_ids: vec![],
             kinds: vec![],
             api_base: None,
+            tokens_per_minute: None,
         };
         let r = TelegramChannel::from_config(cfg);
         assert!(r.is_err());

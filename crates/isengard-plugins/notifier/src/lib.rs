@@ -22,7 +22,9 @@ pub mod discord;
 pub mod http;
 pub mod telegram;
 
-use crate::channel::NotifyChannel;
+use crate::channel::{NotifyChannel, RateLimited};
+use crate::discord::{DiscordChannel, DiscordConfig};
+use crate::http::{HttpChannel, HttpConfig};
 use crate::telegram::{TelegramChannel, TelegramConfig};
 
 const PLUGIN_NAME: &str = "notifier";
@@ -31,6 +33,10 @@ const PLUGIN_NAME: &str = "notifier";
 struct NotifierConfig {
     #[serde(default)]
     telegram: Option<TelegramConfig>,
+    #[serde(default)]
+    discord: Option<DiscordConfig>,
+    #[serde(default)]
+    http: Option<HttpConfig>,
 }
 
 pub struct Notifier {
@@ -86,20 +92,26 @@ impl Plugin for Notifier {
             .map_err(|e| init_err(format!("parsing notifier config: {e}")))?;
 
         if let Some(tg_cfg) = cfg.telegram {
+            let tpm = tg_cfg.tokens_per_minute.unwrap_or(10.0);
             let tg = TelegramChannel::from_config(tg_cfg)
                 .map_err(|e| init_err(format!("telegram channel: {e}")))?;
-            // Collect kinds the channel cares about. v1: re-parse the JSON
-            // because matches_kind doesn't expose the list.
-            // Simpler: re-read the kinds from the parsed config.
-            self.channels.push(Box::new(tg));
+            self.channels.push(Box::new(RateLimited::new(tg, tpm)));
         }
 
-        // Currently only Telegram is configurable; future channels (Discord,
-        // HTTP) are added in 4e. Re-derive subscribed kinds from config.
-        // For v1, simplest approach: subscribe to every event kind ("*"
-        // semantics) since we just-built channels filter per-kind anyway.
-        // But event_kinds() returns &[&'static str] — we don't have a
-        // catch-all literal. Hardcode the known producer kinds:
+        if let Some(dc_cfg) = cfg.discord {
+            let tpm = dc_cfg.tokens_per_minute.unwrap_or(10.0);
+            let dc = DiscordChannel::from_config(dc_cfg)
+                .map_err(|e| init_err(format!("discord channel: {e}")))?;
+            self.channels.push(Box::new(RateLimited::new(dc, tpm)));
+        }
+
+        if let Some(http_cfg) = cfg.http {
+            let tpm = http_cfg.tokens_per_minute.unwrap_or(10.0);
+            let hc = HttpChannel::from_config(http_cfg)
+                .map_err(|e| init_err(format!("http channel: {e}")))?;
+            self.channels.push(Box::new(RateLimited::new(hc, tpm)));
+        }
+
         self.kinds = vec![
             "update.success".into(),
             "update.failed".into(),

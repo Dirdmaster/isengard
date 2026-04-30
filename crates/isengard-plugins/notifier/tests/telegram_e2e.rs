@@ -29,6 +29,7 @@ async fn telegram_send_posts_to_send_message_endpoint() {
         chat_ids: vec!["555".into()],
         kinds: vec!["update.success".into()],
         api_base: Some(server.uri()),
+        tokens_per_minute: None,
     };
     let ch = TelegramChannel::from_config(cfg).unwrap();
 
