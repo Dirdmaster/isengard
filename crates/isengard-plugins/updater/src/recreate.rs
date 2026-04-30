@@ -9,7 +9,7 @@ use bollard::Docker;
 use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
 };
-use bollard::image::CreateImageOptions;
+use bollard::image::{CreateImageOptions, RemoveImageOptions};
 use bollard::models::{ContainerInspectResponse, EndpointSettings, HostConfig};
 use bollard::network::ConnectNetworkOptions;
 use futures_util::StreamExt;
@@ -150,6 +150,8 @@ pub async fn update_container(
         .await
         .map_err(|e| anyhow::anyhow!("inspect {container_id}: {e}"))?;
 
+    let old_image_id = inspect.image.clone();
+
     if inspect.state.as_ref().and_then(|s| s.status.as_ref())
         == Some(&bollard::models::ContainerStateStatusEnum::RESTARTING)
     {
@@ -216,6 +218,25 @@ pub async fn update_container(
             warn!(container = %spec.name, network = %net_name, error = %e, "network reattach failed");
         } else {
             debug!(container = %spec.name, network = %net_name, "reconnected");
+        }
+    }
+
+    if let Some(old) = old_image_id {
+        match docker
+            .remove_image(
+                &old,
+                Some(RemoveImageOptions {
+                    force: false,
+                    noprune: false,
+                }),
+                None,
+            )
+            .await
+        {
+            Ok(_) => info!(old_image = %old, "removed old image"),
+            Err(e) => {
+                info!(old_image = %old, error = %e, "old image not removed (likely still in use)")
+            }
         }
     }
 
