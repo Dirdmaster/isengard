@@ -12,9 +12,11 @@ description = "Dashboard plugin for Isengard — Nuxt 3 SPA + axum"
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+chrono.workspace = true
 inventory.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
+isengard-storage.workspace = true
 mime_guess.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
@@ -22,3 +24,4 @@ serde_json.workspace = true
 tokio = { workspace = true }
 tower.workspace = true
 tracing.workspace = true
+ulid.workspace = true

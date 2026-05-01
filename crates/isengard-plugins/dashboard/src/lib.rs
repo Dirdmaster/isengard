@@ -5,6 +5,10 @@
 
 #![allow(clippy::result_large_err)]
 
+// DTOs land in 5b Task 3; wired into handlers in subsequent tasks.
+#[allow(dead_code)]
+mod dto;
+
 use std::net::SocketAddr;
 #[allow(unused_imports)] // TODO(5b): Arc used for ControllerHandles
 use std::sync::Arc;
