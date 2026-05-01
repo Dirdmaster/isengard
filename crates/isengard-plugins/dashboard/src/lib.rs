@@ -82,6 +82,7 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
     if let Some(h) = handles {
         let ws_router = Router::new()
             .route("/ws/events", get(ws::ws_handler))
+            .route("/api/v1/services/{id}/logs", get(ws::handle_logs))
             .with_state(h.clone());
         router = router.nest("/api/v1", api::router(h)).merge(ws_router);
     }
