@@ -147,7 +147,7 @@ async fn handle_logs_socket(
     let _ = socket.send(Message::Text(info.to_string().into())).await;
 
     // Hold the connection open briefly so the client can read the message,
-    // then close. Browser closes are fine too — we honor them via select.
+    // then close. Browser closes are fine too: we honor them via select.
     let mut keepalive = tokio::time::interval(Duration::from_secs(15));
     keepalive.tick().await;
 

@@ -40,7 +40,7 @@ async function copy() {
     await navigator.clipboard.writeText(installCommand.value)
     toast.success('Install command copied to clipboard')
   } catch {
-    toast.error('Copy failed — please copy manually')
+    toast.error('Copy failed: please copy manually')
   }
 }
 

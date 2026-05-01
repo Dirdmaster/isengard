@@ -7,7 +7,7 @@ interface ConfirmOpts {
   danger?: boolean
 }
 
-// Module-scoped state — single dialog at a time, shared across composable instances.
+// Module-scoped state: single dialog at a time, shared across composable instances.
 const open = ref(false)
 const opts = ref<ConfirmOpts>({ title: '', description: '' })
 let resolver: ((confirmed: boolean) => void) | null = null

@@ -37,7 +37,7 @@ export default {
         terminal: {
           bg: '#050505',
         },
-        // shadcn tokens — wired to iso-* via CSS vars in main.css
+        // shadcn tokens, wired to iso-* via CSS vars in main.css
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',

@@ -114,7 +114,7 @@ async fn fallback_handler(uri: Uri) -> Response {
     if !path.is_empty() && WebAssets::get(path).is_some() {
         return serve_embedded(path).await;
     }
-    // SPA fallback — any unknown route serves index.html so client-side routing handles it.
+    // SPA fallback: any unknown route serves index.html so client-side routing handles it.
     serve_embedded("index.html").await
 }
 
@@ -174,7 +174,7 @@ impl Plugin for Dashboard {
             .and_then(|b| b.downcast::<isengard_controller::ControllerHandles>().ok());
 
         if handles.is_none() {
-            warn!("dashboard started without ControllerHandles — API routes will not be mounted");
+            warn!("dashboard started without ControllerHandles, API routes will not be mounted");
         }
 
         let app = build_router(handles);

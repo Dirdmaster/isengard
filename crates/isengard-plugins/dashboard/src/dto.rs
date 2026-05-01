@@ -185,7 +185,7 @@ impl From<Stack> for StackDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceDto {
     /// Synthetic id: `{host_id}:{container_name}`. Containers don't have
-    /// stable database ids in v1 — they're tracked by name within a host.
+    /// stable database ids in v1; they're tracked by name within a host.
     pub id: String,
     pub host_id: String,
     pub stack_id: Option<String>,
@@ -201,7 +201,7 @@ pub struct SparklineDto {
     pub buckets: Vec<u32>,
     /// Range queried, e.g. "24h".
     pub range: String,
-    /// Sum of all buckets — convenience for the row's "N events" summary.
+    /// Sum of all buckets, for the row's "N events" summary.
     pub total: u32,
 }
 

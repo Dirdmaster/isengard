@@ -61,7 +61,7 @@ async function decommission() {
 }
 
 function formatTs(ts: string | null | undefined): string {
-  if (!ts) return '—'
+  if (!ts) return 'unknown'
   return new Date(ts).toLocaleString()
 }
 </script>
@@ -84,10 +84,10 @@ function formatTs(ts: string | null | undefined): string {
       <section class="px-5 py-5 space-y-4">
         <div class="text-xs uppercase tracking-wider text-iso-text-faint">Metadata</div>
         <dl class="grid grid-cols-[120px_1fr] gap-y-2 text-sm font-mono">
-          <dt class="text-iso-text-muted">os</dt>           <dd>{{ host.os ?? '—' }}</dd>
-          <dt class="text-iso-text-muted">arch</dt>         <dd>{{ host.arch ?? '—' }}</dd>
-          <dt class="text-iso-text-muted">agent</dt>        <dd>{{ host.agent_version ?? '—' }}</dd>
-          <dt class="text-iso-text-muted">docker</dt>       <dd>{{ host.docker_version ?? '—' }}</dd>
+          <template v-if="host.os"><dt class="text-iso-text-muted">os</dt><dd>{{ host.os }}</dd></template>
+          <template v-if="host.arch"><dt class="text-iso-text-muted">arch</dt><dd>{{ host.arch }}</dd></template>
+          <template v-if="host.agent_version"><dt class="text-iso-text-muted">agent</dt><dd>{{ host.agent_version }}</dd></template>
+          <template v-if="host.docker_version"><dt class="text-iso-text-muted">docker</dt><dd>{{ host.docker_version }}</dd></template>
           <dt class="text-iso-text-muted">enrolled</dt>     <dd class="text-iso-text-secondary">{{ formatTs(host.enrolled_at) }}</dd>
           <dt class="text-iso-text-muted">last seen</dt>    <dd class="text-iso-text-secondary">{{ formatTs(host.last_seen_at) }}</dd>
           <dt class="text-iso-text-muted">fingerprint</dt>  <dd class="text-iso-text-faint truncate">{{ host.fingerprint }}</dd>

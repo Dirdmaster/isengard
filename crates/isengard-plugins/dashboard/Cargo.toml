@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Dashboard plugin for Isengard — Nuxt 3 SPA + axum"
+description = "Dashboard plugin for Isengard: Nuxt 3 SPA + axum"
 
 [dependencies]
 anyhow.workspace = true

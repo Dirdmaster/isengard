@@ -31,7 +31,7 @@
 
     --border:               215 12% 13%;    /* iso-border-subtle */
     --input:                215 12% 13%;
-    --ring:                 142 71% 58%;    /* iso-success — focus ring */
+    --ring:                 142 71% 58%;    /* iso-success: focus ring */
 
     --radius: 0.5rem;
   }
