@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useFleetsStore } from '~/stores/fleets'
+import { useToast } from '~/composables/useToast'
 
-defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: [] }>()
 
 const fleetsStore = useFleetsStore()
 if (!fleetsStore.loaded) await fleetsStore.load()
 
-const toast = useToast()
 const fleet = ref('default')
 const hostname = ref('')
 const installCommand = ref('')
 const loading = ref(false)
 const error = ref('')
+const toast = useToast()
 
 async function generate() {
   loading.value = true
@@ -42,64 +43,81 @@ async function copy() {
     toast.error('Copy failed — please copy manually')
   }
 }
+
+function handleOpenChange(v: boolean) {
+  if (!v) emit('close')
+}
 </script>
 
 <template>
-  <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="$emit('close')">
-    <div class="bg-iso-bg-base border border-iso-border-subtle rounded-lg w-[640px] max-w-full p-6 space-y-4">
-      <header class="flex items-center justify-between">
-        <h2 class="font-mono text-lg">Add host</h2>
-        <button class="text-iso-text-muted hover:text-iso-text-primary" @click="$emit('close')">
-          <Icon name="lucide:x" class="w-5 h-5" />
-        </button>
-      </header>
+  <Dialog :open="true" @update:open="handleOpenChange">
+    <DialogContent class="bg-iso-bg-base border-iso-border-subtle sm:max-w-[640px]">
+      <DialogHeader>
+        <DialogTitle class="font-mono text-iso-text-primary">Add host</DialogTitle>
+        <DialogDescription v-if="!installCommand" class="text-iso-text-muted">
+          Generate a one-time install command. Run it on the host to enroll.
+        </DialogDescription>
+        <DialogDescription v-else class="text-iso-text-muted">
+          Run this on the host you want to enroll. It will install the agent and contact this controller.
+        </DialogDescription>
+      </DialogHeader>
 
-      <div v-if="!installCommand" class="space-y-3">
-        <label class="block">
-          <span class="text-xs uppercase tracking-wider text-iso-text-faint">Fleet</span>
-          <select
-            v-model="fleet"
-            class="mt-1 w-full bg-iso-bg-elevated border border-iso-border-subtle rounded px-3 py-2 text-sm font-mono"
-          >
-            <option v-for="f in fleetsStore.fleets" :key="f.name" :value="f.name">{{ f.name }}</option>
-          </select>
-        </label>
+      <!-- Form (pre-generation) -->
+      <div v-if="!installCommand" class="space-y-4">
+        <div class="space-y-1.5">
+          <Label for="fleet" class="text-xs uppercase tracking-wider text-iso-text-faint">Fleet</Label>
+          <Select v-model="fleet">
+            <SelectTrigger id="fleet" class="font-mono bg-iso-bg-elevated border-iso-border-subtle">
+              <SelectValue placeholder="Select a fleet" />
+            </SelectTrigger>
+            <SelectContent class="bg-iso-bg-overlay border-iso-border-subtle">
+              <SelectItem v-for="f in fleetsStore.fleets" :key="f.name" :value="f.name" class="font-mono">
+                {{ f.name }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
-        <label class="block">
-          <span class="text-xs uppercase tracking-wider text-iso-text-faint">Hostname (optional)</span>
-          <input
+        <div class="space-y-1.5">
+          <Label for="hostname" class="text-xs uppercase tracking-wider text-iso-text-faint">Hostname (optional)</Label>
+          <Input
+            id="hostname"
             v-model="hostname"
-            type="text"
             placeholder="e.g. prod-04"
-            class="mt-1 w-full bg-iso-bg-elevated border border-iso-border-subtle rounded px-3 py-2 text-sm font-mono"
+            class="font-mono bg-iso-bg-elevated border-iso-border-subtle"
           />
-        </label>
-
-        <button
-          class="px-4 py-2 rounded border border-iso-border-subtle hover:border-iso-success hover:text-iso-success disabled:opacity-50"
-          :disabled="loading"
-          @click="generate"
-        >
-          {{ loading ? 'Generating...' : 'Generate install command' }}
-        </button>
+        </div>
 
         <p v-if="error" class="text-xs text-iso-error">{{ error }}</p>
       </div>
 
+      <!-- Result (post-generation) -->
       <div v-else class="space-y-3">
-        <p class="text-sm text-iso-text-muted">
-          Run this on the host you want to enroll. It will install the agent and contact this controller.
-        </p>
-        <pre class="text-xs font-mono bg-iso-bg-elevated rounded p-3 overflow-x-auto whitespace-pre-wrap">{{ installCommand }}</pre>
-        <div class="flex items-center gap-2">
-          <button class="px-3 py-1.5 text-sm rounded border border-iso-border-subtle hover:border-iso-success" @click="copy">
-            Copy
-          </button>
-          <button class="px-3 py-1.5 text-sm rounded border border-iso-border-subtle" @click="$emit('close')">
-            Done
-          </button>
-        </div>
+        <pre class="text-xs font-mono bg-iso-bg-elevated border border-iso-border-subtle rounded-md p-3 overflow-x-auto whitespace-pre-wrap text-iso-text-primary">{{ installCommand }}</pre>
       </div>
-    </div>
-  </div>
+
+      <DialogFooter v-if="!installCommand">
+        <Button variant="ghost" @click="emit('close')">Cancel</Button>
+        <Button
+          variant="outline"
+          :disabled="loading"
+          class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+          @click="generate"
+        >
+          {{ loading ? 'Generating…' : 'Generate install command' }}
+        </Button>
+      </DialogFooter>
+
+      <DialogFooter v-else>
+        <Button variant="ghost" @click="emit('close')">Done</Button>
+        <Button
+          variant="outline"
+          class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+          @click="copy"
+        >
+          Copy command
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 </template>
