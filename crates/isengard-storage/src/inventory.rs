@@ -103,9 +103,9 @@ impl Inventory {
 
     /// Remove a host from the inventory. Returns true if a row was deleted.
     pub async fn delete_host(&self, id: HostId) -> Result<bool> {
-        let bytes = id.to_bytes().to_vec();
+        let id_bytes: &[u8] = &id.to_bytes();
         let result = sqlx::query("DELETE FROM hosts WHERE id = ?")
-            .bind(bytes)
+            .bind(id_bytes)
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
