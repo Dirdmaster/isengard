@@ -10,8 +10,6 @@ const eventsStore = useEventsStore()
 const uiStore = useUiStore()
 
 const sparklines = ref<Record<string, number[]>>({})
-const fleetWeatherBuckets = ref<number[]>(new Array(24).fill(0))
-const fleetWeatherRange = ref<'24h' | '7d'>('24h')
 const inspectingHost = ref<Host | null>(null)
 
 await Promise.all([
@@ -20,7 +18,6 @@ await Promise.all([
   eventsStore.load(200),
 ])
 
-// Fetch sparklines for each host
 for (const host of hostsStore.hosts) {
   try {
     const { data, fetch } = useSparkline(host.id)
@@ -30,13 +27,6 @@ for (const host of hostsStore.hosts) {
     sparklines.value[host.id] = []
   }
 }
-
-// Aggregate buckets across hosts for the FleetWeather strip
-const aggregate = new Array(24).fill(0)
-for (const buckets of Object.values(sparklines.value)) {
-  buckets.forEach((v, i) => { aggregate[i] += v })
-}
-fleetWeatherBuckets.value = aggregate
 
 const filteredHosts = computed(() => {
   const fleet = uiStore.activeFleet
@@ -62,8 +52,6 @@ const latestEvents = computed(() => {
   }
   return out
 })
-
-const totalEvents = computed(() => fleetWeatherBuckets.value.reduce((a, b) => a + b, 0))
 
 const router = useRouter()
 
@@ -91,18 +79,15 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
 <template>
   <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
-    <FleetWeather
-      :buckets="fleetWeatherBuckets"
-      :range="fleetWeatherRange"
-      :total-events="totalEvents"
-      @range-change="(r) => fleetWeatherRange = r"
-    />
-    <div class="flex items-center justify-between px-4 py-3">
-      <div class="text-sm text-iso-text-muted">
-        {{ filteredHosts.length }} hosts
+    <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border-subtle">
+      <div class="flex items-center gap-3">
+        <h1 class="font-mono text-base text-iso-text-primary">Hosts</h1>
+        <span class="text-xs text-iso-text-muted">
+          {{ filteredHosts.length }} {{ filteredHosts.length === 1 ? 'host' : 'hosts' }}
+        </span>
       </div>
       <AddHostButton />
-    </div>
+    </header>
     <TableSkeleton v-if="!hostsStore.loaded" :rows="6" />
     <HostsTable
       v-else

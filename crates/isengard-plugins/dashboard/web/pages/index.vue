@@ -64,7 +64,9 @@ onMounted(async () => {
 })
 
 const fleetsToShow = computed(() => {
-  if (ui.activeFleet === 'all') return fleetsStore.fleets
-  return fleetsStore.fleets.filter(f => f.name === ui.activeFleet)
+  const list = ui.activeFleet === 'all'
+    ? fleetsStore.fleets
+    : fleetsStore.fleets.filter(f => f.name === ui.activeFleet)
+  return list.filter(f => f.host_count > 0)
 })
 </script>
