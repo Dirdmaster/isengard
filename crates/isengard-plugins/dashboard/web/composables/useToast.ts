@@ -1,10 +1,9 @@
-import { useToastsStore } from '~/stores/toasts'
+import { toast as sonnerToast } from 'vue-sonner'
 
 export function useToast() {
-  const store = useToastsStore()
   return {
-    success: (text: string) => store.push('success', text),
-    error:   (text: string) => store.push('error', text),
-    info:    (text: string) => store.push('info', text),
+    success: (text: string) => sonnerToast.success(text),
+    error:   (text: string) => sonnerToast.error(text),
+    info:    (text: string) => sonnerToast.info(text),
   }
 }
