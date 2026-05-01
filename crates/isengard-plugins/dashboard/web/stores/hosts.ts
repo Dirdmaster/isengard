@@ -8,6 +8,7 @@ export interface Host {
   fleet: string
   enrolled_at: string
   last_seen_at: string | null
+  agent_version: string | null
 }
 
 export const useHostsStore = defineStore('hosts', () => {
