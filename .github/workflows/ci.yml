@@ -40,7 +40,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: latest
+          bun-version: "1"
 
       - name: cargo fmt --check
         run: cargo fmt --check
