@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use isengard_core::{Event, HostMode, Plugin, registrations_for};
 use isengard_proto::FILE_DESCRIPTOR_SET;
 use isengard_proto::pb::controller_server::ControllerServer;
-use isengard_storage::{InsertEvent, Journal};
+use isengard_storage::{InsertEvent, Inventory, Journal};
 use tokio::signal;
 use tonic::transport::Server;
 use tracing::{info, instrument};
@@ -24,6 +24,15 @@ pub use auth::TokenAuthLayer;
 pub use service::ControllerService;
 
 use crate::bus::EventBus;
+
+/// Bundle of references controller-side plugins need to access controller state.
+/// Passed via `PluginContext.bus` (downcast from `Arc<dyn Any>`).
+#[derive(Clone)]
+pub struct ControllerHandles {
+    pub inventory: Arc<Inventory>,
+    pub journal: Arc<Journal>,
+    pub bus: Arc<EventBus>,
+}
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
 /// handler (for agent-originated events) and controller-internal producers
@@ -103,9 +112,13 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
+    let handles = Arc::new(ControllerHandles {
+        inventory: inventory.clone(),
+        journal: journal.clone(),
+        bus: bus.clone(),
+    });
     let mut controller_plugins =
-        plugin_host::load_controller_plugins(bus.clone(), journal.clone(), opts.config.clone())
-            .await;
+        plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
     info!(
         plugin_count = controller_plugins.len(),
         "controller plugins started"

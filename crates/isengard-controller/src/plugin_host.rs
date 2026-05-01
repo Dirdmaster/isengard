@@ -13,11 +13,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 use isengard_core::{HostMode, Plugin, PluginContext, registrations_for};
-use isengard_storage::Journal;
 use serde_json::Value;
 use tracing::{info, warn};
 
-use crate::bus::EventBus;
+use crate::ControllerHandles;
 
 pub struct LoadedPlugin {
     pub name: &'static str,
@@ -27,12 +26,11 @@ pub struct LoadedPlugin {
 /// Construct + init + start every controller-side plugin in the inventory.
 /// Returns the loaded plugins so the caller can drive them through stop on shutdown.
 pub async fn load_controller_plugins(
-    bus: Arc<EventBus>,
-    _journal: Arc<Journal>,
+    handles: Arc<ControllerHandles>,
     config: Value,
 ) -> Vec<LoadedPlugin> {
-    let bus_handle: Arc<dyn Any + Send + Sync> = bus.clone();
-    let ctx = PluginContext::new(HostMode::Controller, config).with_bus(bus_handle);
+    let handles_any: Arc<dyn Any + Send + Sync> = handles.clone();
+    let ctx = PluginContext::new(HostMode::Controller, config).with_bus(handles_any);
 
     let mut loaded = Vec::new();
     for reg in registrations_for(HostMode::Controller) {
@@ -64,14 +62,19 @@ pub async fn stop_controller_plugins(loaded: &mut [LoadedPlugin]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::EventBus;
+    use isengard_storage::{Inventory, Journal};
 
     #[tokio::test]
     async fn empty_inventory_yields_no_plugins() {
         // Without any controller plugins linked into this test binary,
         // load_controller_plugins should return empty.
-        let bus = Arc::new(EventBus::new());
-        let journal = Arc::new(Journal::open_in_memory().await.unwrap());
-        let loaded = load_controller_plugins(bus, journal, Value::Null).await;
+        let handles = Arc::new(ControllerHandles {
+            inventory: Arc::new(Inventory::open_in_memory().await.unwrap()),
+            journal: Arc::new(Journal::open_in_memory().await.unwrap()),
+            bus: Arc::new(EventBus::new()),
+        });
+        let loaded = load_controller_plugins(handles, Value::Null).await;
         // Note: this test asserts the function returns CLEANLY with no plugins.
         // If a future test in this binary links a controller plugin, this
         // assertion would fail — adapt at that time.

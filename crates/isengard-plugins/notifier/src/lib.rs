@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use isengard_controller::bus::EventBus;
+use isengard_controller::ControllerHandles;
 use isengard_core::{
     Capability, CoreError, Event, EventSubscriber, Plugin, PluginContext, PluginRegistration,
     Result,
@@ -124,15 +124,14 @@ impl Plugin for Notifier {
     }
 
     async fn start(&mut self, ctx: &PluginContext) -> Result<()> {
-        // Downcast the bus handle to the concrete EventBus.
-        let bus_arc = ctx
+        // Downcast the bus handle to the controller handles bundle.
+        let handles = ctx
             .bus
             .clone()
-            .ok_or_else(|| start_err("notifier started without a bus on PluginContext"))?;
-        let bus = bus_arc
-            .downcast::<EventBus>()
-            .map_err(|_| start_err("bus on PluginContext was not an EventBus"))?;
-        let mut rx = bus.subscribe();
+            .ok_or_else(|| start_err("notifier started without ControllerHandles on PluginContext"))?
+            .downcast::<ControllerHandles>()
+            .map_err(|_| start_err("bus on PluginContext was not ControllerHandles"))?;
+        let mut rx = handles.bus.subscribe();
 
         // Move channels out so the spawned task owns them (Plugin::stop
         // doesn't need them anymore).
