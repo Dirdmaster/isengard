@@ -7,8 +7,10 @@ pub mod error;
 pub mod host;
 pub mod inventory;
 pub mod journal;
+pub mod stack;
 
 pub use error::{Error, Result};
 pub use host::{EnrollHost, Host, HostId};
 pub use inventory::Inventory;
 pub use journal::{EventRow, InsertEvent, Journal};
+pub use stack::{InsertStack, Stack, StackId, StackSource};

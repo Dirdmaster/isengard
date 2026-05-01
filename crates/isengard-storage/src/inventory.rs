@@ -77,7 +77,7 @@ impl Inventory {
         let row: Option<HostRow> = sqlx::query_as(
             r#"
             SELECT id, fingerprint, hostname, os, arch,
-                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata, fleet
             FROM hosts
             WHERE id = ?
             "#,
@@ -117,7 +117,7 @@ impl Inventory {
         let rows: Vec<HostRow> = sqlx::query_as(
             r#"
             SELECT id, fingerprint, hostname, os, arch,
-                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata, fleet
             FROM hosts
             ORDER BY last_seen_at DESC NULLS LAST, enrolled_at DESC
             "#,
@@ -147,6 +147,7 @@ type HostRow = (
     i64,         // enrolled_at
     Option<i64>, // last_seen_at
     String,      // metadata (json text)
+    String,      // fleet
 );
 
 fn decode_host(row: HostRow) -> Result<Host> {
@@ -170,6 +171,7 @@ fn decode_host(row: HostRow) -> Result<Host> {
         enrolled_at: row.7,
         last_seen_at: row.8,
         metadata,
+        fleet: row.10,
     })
 }
 

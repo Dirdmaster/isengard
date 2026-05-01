@@ -62,6 +62,8 @@ pub struct Host {
     pub last_seen_at: Option<i64>,
     /// Free-form JSON metadata. Defaults to `{}`.
     pub metadata: serde_json::Value,
+    /// Fleet tag this host belongs to. Defaults to `"default"`.
+    pub fleet: String,
 }
 
 /// Request shape for inserting a new host. The controller calls this; the

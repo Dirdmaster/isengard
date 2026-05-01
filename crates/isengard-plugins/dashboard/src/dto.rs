@@ -29,7 +29,7 @@ impl From<Host> for HostDto {
             arch: h.arch,
             agent_version: h.agent_version,
             docker_version: h.docker_version,
-            fleet: "default".to_string(), // 5d migration adds the real field
+            fleet: h.fleet,
             enrolled_at: DateTime::<Utc>::from_timestamp(h.enrolled_at, 0).unwrap_or_else(Utc::now),
             last_seen_at: h
                 .last_seen_at
@@ -161,6 +161,7 @@ mod tests {
             enrolled_at: 1714521600, // 2024-05-01T00:00:00Z
             last_seen_at: Some(1714525200),
             metadata: serde_json::json!({}),
+            fleet: "default".to_string(),
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.enrolled_at.timestamp(), 1714521600);
