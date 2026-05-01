@@ -30,8 +30,7 @@ impl From<Host> for HostDto {
             agent_version: h.agent_version,
             docker_version: h.docker_version,
             fleet: "default".to_string(), // 5d migration adds the real field
-            enrolled_at: DateTime::<Utc>::from_timestamp(h.enrolled_at, 0)
-                .unwrap_or_else(Utc::now),
+            enrolled_at: DateTime::<Utc>::from_timestamp(h.enrolled_at, 0).unwrap_or_else(Utc::now),
             last_seen_at: h
                 .last_seen_at
                 .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),

@@ -128,7 +128,9 @@ impl Plugin for Notifier {
         let handles = ctx
             .bus
             .clone()
-            .ok_or_else(|| start_err("notifier started without ControllerHandles on PluginContext"))?
+            .ok_or_else(|| {
+                start_err("notifier started without ControllerHandles on PluginContext")
+            })?
             .downcast::<ControllerHandles>()
             .map_err(|_| start_err("bus on PluginContext was not ControllerHandles"))?;
         let mut rx = handles.bus.subscribe();

@@ -84,8 +84,7 @@ mod tests {
         // empty in this lib test binary. The name-containment check lives in
         // the isengard binary's integration tests where both plugins are linked.
         // This assertion guards the return type and no-panic contract.
-        let names: std::collections::HashSet<&str> =
-            loaded.iter().map(|p| p.name).collect();
+        let names: std::collections::HashSet<&str> = loaded.iter().map(|p| p.name).collect();
         // Every name that DID load must be a known controller plugin.
         let known = ["dashboard", "notifier", "updater"];
         for name in &names {

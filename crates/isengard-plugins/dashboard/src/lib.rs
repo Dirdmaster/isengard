@@ -83,9 +83,7 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
         let ws_router = Router::new()
             .route("/ws/events", get(ws::ws_handler))
             .with_state(h.clone());
-        router = router
-            .nest("/api/v1", api::router(h))
-            .merge(ws_router);
+        router = router.nest("/api/v1", api::router(h)).merge(ws_router);
     }
 
     router.fallback(get(fallback_handler))

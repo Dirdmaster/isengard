@@ -17,7 +17,10 @@ use crate::dto::*;
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/hosts", get(list_hosts).post(enroll_host))
-        .route("/hosts/{id}", get(get_host).patch(patch_host).delete(delete_host))
+        .route(
+            "/hosts/{id}",
+            get(get_host).patch(patch_host).delete(delete_host),
+        )
         .route("/hosts/{id}/events", get(host_events))
         .route("/events", get(list_events))
         .route("/events/{id}", get(get_event))
@@ -41,13 +44,19 @@ async fn list_hosts(
             }
             // 5d wires real state filter; until then we accept and ignore.
             if let Some(state) = q.state {
-                debug!(state, "list_hosts: state filter accepted but not yet applied");
+                debug!(
+                    state,
+                    "list_hosts: state filter accepted but not yet applied"
+                );
             }
             Json(dtos).into_response()
         }
         Err(e) => {
             warn!(error = %e, "list_hosts failed");
-            json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("list_hosts: {e}"))
+            json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_hosts: {e}"),
+            )
         }
     }
 }
@@ -78,7 +87,10 @@ async fn host_events(
             let dtos: Vec<EventDto> = rows.into_iter().map(EventDto::from).collect();
             Json(dtos).into_response()
         }
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("host_events: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("host_events: {e}"),
+        ),
     }
 }
 
@@ -123,7 +135,10 @@ async fn delete_host(
     };
     match handles.inventory.delete_host(host_id).await {
         Ok(deleted) => Json(DeleteResponse { deleted }).into_response(),
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete_host: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("delete_host: {e}"),
+        ),
     }
 }
 
@@ -143,7 +158,10 @@ async fn list_events(
             }
             Json(dtos).into_response()
         }
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("list_events: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list_events: {e}"),
+        ),
     }
 }
 
@@ -174,7 +192,10 @@ async fn list_fleets(State(handles): State<Arc<ControllerHandles>>) -> Response 
             }];
             Json(dtos).into_response()
         }
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("list_fleets: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list_fleets: {e}"),
+        ),
     }
 }
 
@@ -207,7 +228,12 @@ mod tests {
     async fn list_hosts_empty_returns_empty_array() {
         let app = router(test_handles().await);
         let resp = app
-            .oneshot(Request::builder().uri("/hosts").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/hosts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -230,7 +256,12 @@ mod tests {
             .unwrap();
         let app = router(handles);
         let resp = app
-            .oneshot(Request::builder().uri("/hosts").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/hosts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
