@@ -1448,6 +1448,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bollard",
  "chrono",
  "hostname",
  "isengard-controller",

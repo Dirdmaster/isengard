@@ -95,9 +95,11 @@ pub async fn run_sync_loop(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
+                    let snapshots = crate::container_snapshot::list_container_snapshots().await;
+                    let stacks = crate::container_snapshot::derive_stacks(&snapshots);
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
-                            Heartbeat { ts_ms, stacks: vec![] },
+                            Heartbeat { ts_ms, stacks },
                         )),
                     };
                     if hb_tx.send(msg).await.is_err() {

@@ -3,6 +3,7 @@
 
 pub mod agent_state;
 pub mod backoff;
+pub mod container_snapshot;
 pub mod enroll;
 pub mod events;
 pub mod sync;
