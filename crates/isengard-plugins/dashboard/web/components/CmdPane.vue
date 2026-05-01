@@ -18,6 +18,19 @@
             />
           </template>
 
+          <template v-if="results.stacks.length > 0">
+            <CmdSection label="Stacks" />
+            <CmdResultRow
+              v-for="(s, i) in results.stacks"
+              :key="`s-${s.id}`"
+              icon="lucide:layers"
+              :label="s.name"
+              :meta="s.source"
+              :highlighted="selectedIdx === results.hosts.length + i"
+              @select="navigateToStack(s)"
+            />
+          </template>
+
           <template v-if="results.events.length > 0">
             <CmdSection label="Events" />
             <CmdResultRow
@@ -26,7 +39,7 @@
               icon="lucide:activity"
               :label="e.summary"
               :meta="e.kind"
-              :highlighted="selectedIdx === results.hosts.length + i"
+              :highlighted="selectedIdx === results.hosts.length + results.stacks.length + i"
               @select="selectEvent(e)"
             />
           </template>
@@ -39,7 +52,7 @@
               :icon="a.icon"
               :label="a.label"
               :meta="a.meta"
-              :highlighted="selectedIdx === results.hosts.length + results.events.length + i"
+              :highlighted="selectedIdx === results.hosts.length + results.stacks.length + results.events.length + i"
               @select="a.run()"
             />
           </template>
@@ -72,19 +85,24 @@ const ui = useUiStore()
 const router = useRouter()
 const hostsStore = useHostsStore()
 const eventsStore = useEventsStore()
+const stacksStore = useStacksStore()
 
 const query = ref('')
 const selectedIdx = ref(0)
 
-watch(() => ui.cmdPaneOpen, (open) => {
+watch(() => ui.cmdPaneOpen, async (open) => {
   if (open) {
     query.value = ''
     selectedIdx.value = 0
+    if (!stacksStore.loaded) {
+      await stacksStore.fetchAll()
+    }
   }
 })
 
 const hostFuse = computed(() => new Fuse(hostsStore.hosts, { keys: ['hostname', 'fingerprint', 'fleet'] }))
 const eventFuse = computed(() => new Fuse(eventsStore.events, { keys: ['summary', 'kind', 'container_name'] }))
+const stackFuse = computed(() => new Fuse(stacksStore.items, { keys: ['name', 'source'] }))
 
 const defaultActions = computed(() => [
   { icon: 'lucide:zap', label: 'Force update cycle on all hosts', meta: 'runs now', run: () => alert('TODO 5d: wire force-update RPC') },
@@ -93,10 +111,16 @@ const defaultActions = computed(() => [
 
 const results = computed(() => {
   if (query.value.length === 0) {
-    return { hosts: hostsStore.hosts.slice(0, 5), events: [] as any[], actions: defaultActions.value }
+    return {
+      hosts: hostsStore.hosts.slice(0, 5),
+      stacks: stacksStore.items.slice(0, 5),
+      events: [] as any[],
+      actions: defaultActions.value,
+    }
   }
   return {
     hosts: hostFuse.value.search(query.value).slice(0, 5).map(r => r.item),
+    stacks: stackFuse.value.search(query.value).slice(0, 5).map(r => r.item),
     events: eventFuse.value.search(query.value).slice(0, 5).map(r => r.item),
     actions: defaultActions.value.filter(a =>
       a.label.toLowerCase().includes(query.value.toLowerCase())
@@ -104,7 +128,12 @@ const results = computed(() => {
   }
 })
 
-const totalResults = computed(() => results.value.hosts.length + results.value.events.length + results.value.actions.length)
+const totalResults = computed(() =>
+  results.value.hosts.length +
+  results.value.stacks.length +
+  results.value.events.length +
+  results.value.actions.length
+)
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx.value = Math.min(selectedIdx.value + 1, totalResults.value - 1) }
@@ -114,12 +143,17 @@ function onKey(e: KeyboardEvent) {
 
 function selectActive() {
   const hostsLen = results.value.hosts.length
+  const stacksLen = results.value.stacks.length
   const eventsLen = results.value.events.length
   const i = selectedIdx.value
-  if (i < hostsLen) navigateToHost(results.value.hosts[i])
-  else if (i < hostsLen + eventsLen) selectEvent(results.value.events[i - hostsLen])
-  else {
-    const actionIdx = i - hostsLen - eventsLen
+  if (i < hostsLen) {
+    navigateToHost(results.value.hosts[i])
+  } else if (i < hostsLen + stacksLen) {
+    navigateToStack(results.value.stacks[i - hostsLen])
+  } else if (i < hostsLen + stacksLen + eventsLen) {
+    selectEvent(results.value.events[i - hostsLen - stacksLen])
+  } else {
+    const actionIdx = i - hostsLen - stacksLen - eventsLen
     results.value.actions[actionIdx]?.run()
   }
 }
@@ -127,6 +161,11 @@ function selectActive() {
 function navigateToHost(h: any) {
   ui.closeCmdPane()
   router.push(`/hosts/${h.id}`)
+}
+
+function navigateToStack(s: any) {
+  ui.closeCmdPane()
+  router.push(`/stacks/${s.id}`)
 }
 
 function selectEvent(e: any) {
