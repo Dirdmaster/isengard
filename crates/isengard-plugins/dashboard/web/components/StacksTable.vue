@@ -26,9 +26,10 @@ const kindColor = (kind: string) => ({
 </script>
 
 <template>
-  <div>
+  <div class="flex flex-col min-h-0">
     <div
-      class="grid items-center gap-3 px-3 py-2 text-[10px] uppercase tracking-wider text-iso-text-faint border-b border-iso-border-subtle"
+      class="grid items-center gap-3 px-3 py-2 text-[10px] uppercase tracking-wider text-iso-text-faint border-b border-iso-border-subtle shrink-0"
+      v-show="rows.length > 0"
       style="grid-template-columns: 200px 170px 70px 70px 1fr 90px"
     >
       <span>Stack</span>
@@ -39,10 +40,14 @@ const kindColor = (kind: string) => ({
       <span>Source</span>
     </div>
 
-    <div v-if="rows.length === 0" class="py-16 text-center">
-      <Icon name="lucide:layers" class="w-9 h-9 text-iso-text-faint mx-auto mb-3" />
-      <p class="text-sm text-iso-text-muted mb-1">No stacks match the current filter</p>
-      <p class="text-xs text-iso-text-faint max-w-md mx-auto">Stacks are discovered from the <code class="font-mono">com.docker.compose.project</code> label on running containers.</p>
+    <div v-if="rows.length === 0" class="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-3">
+      <div class="w-16 h-16 rounded-full bg-iso-bg-elevated border border-iso-border-subtle flex items-center justify-center">
+        <Icon name="lucide:boxes" class="w-7 h-7 text-iso-text-muted" />
+      </div>
+      <h2 class="font-mono text-base text-iso-text-primary">No stacks yet</h2>
+      <p class="text-sm text-iso-text-muted max-w-md text-center leading-relaxed">
+        Stacks appear automatically when your hosts report containers labelled <code class="font-mono text-xs text-iso-text-secondary">com.docker.compose.project</code> or <code class="font-mono text-xs text-iso-text-secondary">isengard.stack</code>.
+      </p>
     </div>
 
     <template v-else>

@@ -23,15 +23,24 @@
           </Button>
         </header>
 
-        <div class="flex-1 overflow-y-auto">
+        <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
           <StateStrip
             v-for="f in fleetsToShow"
             :key="f.name"
             :fleet="f"
           />
 
-          <div v-if="eventsStore.events.length === 0 && eventsStore.loaded" class="px-6 py-8 text-center text-sm text-iso-text-faint">
-            No events yet.
+          <div
+            v-if="eventsStore.events.length === 0 && eventsStore.loaded"
+            class="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-3"
+          >
+            <div class="w-16 h-16 rounded-full bg-iso-bg-elevated border border-iso-border-subtle flex items-center justify-center">
+              <Icon name="lucide:activity" class="w-7 h-7 text-iso-text-muted" />
+            </div>
+            <h2 class="font-mono text-base text-iso-text-primary">All quiet</h2>
+            <p class="text-sm text-iso-text-muted max-w-md text-center leading-relaxed">
+              Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed.
+            </p>
           </div>
           <EventTimeline v-else />
         </div>
