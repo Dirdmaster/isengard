@@ -7,7 +7,11 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 
 use crate::error::{Error, Result};
+use crate::fleet::Fleet;
 use crate::host::{EnrollHost, Host, HostId};
+use crate::host_action::{HostAction, HostActionId, HostActionKind};
+use crate::service::{InsertService, Service, ServiceId, ServiceState};
+use crate::setting::Setting;
 use crate::stack::{InsertStack, Stack, StackId, StackSource};
 
 /// Wraps a `sqlx::SqlitePool` opened against a single `.db` file.
@@ -199,6 +203,209 @@ impl Inventory {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    pub async fn insert_service(&self, req: InsertService) -> Result<ServiceId> {
+        use sqlx::Row;
+        sqlx::query(
+            "INSERT INTO services (host_id, stack_id, name, image, state, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(host_id, name) DO UPDATE SET
+                 stack_id     = excluded.stack_id,
+                 image        = excluded.image,
+                 state        = excluded.state,
+                 last_seen_at = CURRENT_TIMESTAMP",
+        )
+        .bind(req.host_id.to_bytes().as_slice())
+        .bind(req.stack_id.map(|s| s.0))
+        .bind(&req.name)
+        .bind(&req.image)
+        .bind(req.state.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        let row = sqlx::query("SELECT id FROM services WHERE host_id = ? AND name = ?")
+            .bind(req.host_id.to_bytes().as_slice())
+            .bind(&req.name)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(ServiceId(row.try_get("id")?))
+    }
+
+    pub async fn list_services(&self, stack_id: Option<StackId>) -> Result<Vec<Service>> {
+        let rows = match stack_id {
+            Some(s) => {
+                sqlx::query(
+                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at \
+                     FROM services WHERE stack_id = ? ORDER BY name",
+                )
+                .bind(s.0)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at \
+                     FROM services ORDER BY name",
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        rows.into_iter().map(service_from_row).collect()
+    }
+
+    pub async fn get_service(&self, id: ServiceId) -> Result<Option<Service>> {
+        let row = sqlx::query(
+            "SELECT id, host_id, stack_id, name, image, state, last_seen_at \
+             FROM services WHERE id = ?",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(service_from_row).transpose()
+    }
+
+    pub async fn delete_service(&self, id: ServiceId) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM services WHERE id = ?")
+            .bind(id.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn queue_action(
+        &self,
+        host_id: HostId,
+        kind: HostActionKind,
+    ) -> Result<HostActionId> {
+        let kind_str = kind.kind_str();
+        let payload = kind.payload_json();
+        let r =
+            sqlx::query("INSERT INTO host_actions (host_id, kind, payload_json) VALUES (?, ?, ?)")
+                .bind(host_id.to_bytes().as_slice())
+                .bind(kind_str)
+                .bind(payload)
+                .execute(&self.pool)
+                .await?;
+        Ok(HostActionId(r.last_insert_rowid()))
+    }
+
+    pub async fn pending_actions(&self, host_id: HostId) -> Result<Vec<HostAction>> {
+        let rows = sqlx::query(
+            "SELECT id, host_id, kind, payload_json, created_at, delivered_at, result \
+             FROM host_actions WHERE host_id = ? AND delivered_at IS NULL ORDER BY id",
+        )
+        .bind(host_id.to_bytes().as_slice())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(host_action_from_row).collect()
+    }
+
+    pub async fn mark_action_delivered(&self, id: HostActionId, result: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE host_actions SET delivered_at = CURRENT_TIMESTAMP, result = ? WHERE id = ?",
+        )
+        .bind(result)
+        .bind(id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn create_fleet(&self, name: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES (?)")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_fleets(&self) -> Result<Vec<Fleet>> {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT name, created_at FROM fleets ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(Fleet {
+                    name: r.try_get("name")?,
+                    created_at: r.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn delete_fleet(&self, name: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hosts WHERE fleet = ?")
+            .bind(name)
+            .fetch_one(&self.pool)
+            .await?;
+        if count > 0 {
+            return Err(Error::Conflict(format!(
+                "fleet '{name}' has {count} hosts assigned"
+            )));
+        }
+        let r = sqlx::query("DELETE FROM fleets WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+        let json = serde_json::to_string(value).map_err(|e| Error::Decode {
+            reason: e.to_string(),
+        })?;
+        sqlx::query(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(key)
+        .bind(&json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        use sqlx::Row;
+        let row = sqlx::query("SELECT value_json FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => {
+                let json: String = r.try_get("value_json")?;
+                Ok(Some(serde_json::from_str(&json).map_err(|e| {
+                    Error::Decode {
+                        reason: e.to_string(),
+                    }
+                })?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn list_settings(&self) -> Result<Vec<Setting>> {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT key, value_json, updated_at FROM settings ORDER BY key")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|r| {
+                let json: String = r.try_get("value_json")?;
+                let value = serde_json::from_str(&json).map_err(|e| Error::Decode {
+                    reason: e.to_string(),
+                })?;
+                Ok(Setting {
+                    key: r.try_get("key")?,
+                    value,
+                    updated_at: r.try_get("updated_at")?,
+                })
+            })
+            .collect()
+    }
 }
 
 fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
@@ -220,6 +427,47 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
         name: row.try_get("name")?,
         source,
         discovered_at,
+    })
+}
+
+fn service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Service> {
+    use sqlx::Row;
+    let host_bytes: Vec<u8> = row.try_get("host_id")?;
+    if host_bytes.len() != 16 {
+        return Err(Error::InvalidHostId(host_bytes.len()));
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(&host_bytes);
+    Ok(Service {
+        id: ServiceId(row.try_get("id")?),
+        host_id: HostId::from_bytes(arr),
+        stack_id: row.try_get::<Option<i64>, _>("stack_id")?.map(StackId),
+        name: row.try_get("name")?,
+        image: row.try_get("image")?,
+        state: ServiceState::from_str(&row.try_get::<String, _>("state")?),
+        last_seen_at: row.try_get("last_seen_at")?,
+    })
+}
+
+fn host_action_from_row(row: sqlx::sqlite::SqliteRow) -> Result<HostAction> {
+    use sqlx::Row;
+    let host_bytes: Vec<u8> = row.try_get("host_id")?;
+    if host_bytes.len() != 16 {
+        return Err(Error::InvalidHostId(host_bytes.len()));
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(&host_bytes);
+    let payload: String = row.try_get("payload_json")?;
+    let kind: HostActionKind = serde_json::from_str(&payload).map_err(|e| Error::Decode {
+        reason: format!("bad host_action payload: {e}"),
+    })?;
+    Ok(HostAction {
+        id: HostActionId(row.try_get("id")?),
+        host_id: HostId::from_bytes(arr),
+        kind,
+        created_at: row.try_get("created_at")?,
+        delivered_at: row.try_get("delivered_at")?,
+        result: row.try_get("result")?,
     })
 }
 
@@ -496,5 +744,112 @@ mod tests {
             !updated,
             "set_host_fleet should return false when row does not exist"
         );
+    }
+
+    #[tokio::test]
+    async fn insert_service_upserts_by_host_and_name() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = test_enroll_h(&inv, "h1").await;
+
+        let id1 = inv
+            .insert_service(InsertService {
+                host_id,
+                stack_id: None,
+                name: "web".into(),
+                image: "nginx:1".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+
+        let id2 = inv
+            .insert_service(InsertService {
+                host_id,
+                stack_id: None,
+                name: "web".into(),
+                image: "nginx:2".into(),
+                state: ServiceState::Restarting,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(id1, id2);
+
+        let svcs = inv.list_services(None).await.unwrap();
+        assert_eq!(svcs.len(), 1);
+        assert_eq!(svcs[0].image, "nginx:2");
+        assert!(matches!(svcs[0].state, ServiceState::Restarting));
+    }
+
+    #[tokio::test]
+    async fn queue_and_deliver_host_action() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = test_enroll_h(&inv, "h1").await;
+
+        let action_id = inv
+            .queue_action(host_id, HostActionKind::ForceUpdate { stack_name: None })
+            .await
+            .unwrap();
+
+        let pending = inv.pending_actions(host_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, action_id);
+
+        inv.mark_action_delivered(action_id, "ok").await.unwrap();
+        let pending = inv.pending_actions(host_id).await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "delivered actions are not returned by pending_actions"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleets_create_list_delete() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+
+        inv.create_fleet("staging").await.unwrap();
+        inv.create_fleet("prod").await.unwrap();
+
+        let fleets = inv.list_fleets().await.unwrap();
+        let names: std::collections::HashSet<_> = fleets.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains("default"));
+        assert!(names.contains("staging"));
+        assert!(names.contains("prod"));
+
+        let deleted = inv.delete_fleet("staging").await.unwrap();
+        assert!(deleted);
+
+        let host_id = test_enroll_h(&inv, "h-prod").await;
+        inv.set_host_fleet(host_id, "prod").await.unwrap();
+        let err = inv.delete_fleet("prod").await;
+        assert!(err.is_err(), "fleet with hosts should not be deletable");
+    }
+
+    #[tokio::test]
+    async fn settings_round_trip() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+
+        inv.set_setting("notifier.telegram.enabled", &serde_json::json!(true))
+            .await
+            .unwrap();
+
+        let v = inv.get_setting("notifier.telegram.enabled").await.unwrap();
+        assert_eq!(v, Some(serde_json::json!(true)));
+
+        let missing = inv.get_setting("nope").await.unwrap();
+        assert!(missing.is_none());
+    }
+
+    async fn test_enroll_h(inv: &Inventory, hostname: &str) -> HostId {
+        inv.enroll_host(EnrollHost {
+            fingerprint: format!("fp-{hostname}"),
+            hostname: hostname.into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            agent_version: "0.1.0".into(),
+            docker_version: "27.0".into(),
+        })
+        .await
+        .unwrap()
     }
 }

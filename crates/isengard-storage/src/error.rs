@@ -18,6 +18,9 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
