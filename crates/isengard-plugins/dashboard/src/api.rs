@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use isengard_controller::ControllerHandles;
 use isengard_storage::{HostId, StackId};
@@ -24,13 +24,17 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         )
         .route("/hosts/{id}/events", get(host_events))
         .route("/hosts/{id}/sparkline", get(get_host_sparkline))
+        .route("/hosts/{id}/actions/force-update", post(force_update_host))
         .route("/stacks", get(list_stacks))
         .route("/stacks/{id}", get(get_stack))
+        .route("/stacks/{id}/actions/force-update", post(force_update_stack))
         .route("/services", get(list_services))
         .route("/services/{id}", get(get_service))
         .route("/events", get(list_events))
         .route("/events/{id}", get(get_event))
-        .route("/fleets", get(list_fleets))
+        .route("/fleets", get(list_fleets).post(create_fleet))
+        .route("/fleets/{name}", delete(delete_fleet))
+        .route("/settings", get(get_settings).patch(patch_settings))
         .with_state(handles)
 }
 
@@ -101,24 +105,83 @@ async fn host_events(
 }
 
 async fn enroll_host(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Json(req): Json<EnrollRequest>,
+    State(handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<EnrollRequest>,
 ) -> Response {
-    // 5e wires real enrollment with a token store. For 5b, return a placeholder.
-    debug!(
-        fleet = ?req.fleet,
-        hostname = ?req.hostname,
-        "enroll_host: placeholder response (5e wires real flow)"
+    let token = ulid::Ulid::new().to_string();
+    let agent_id = ulid::Ulid::new().to_string();
+
+    // Persist token in settings (v1.x: dedicated enrollment_tokens table with TTL).
+    let payload = serde_json::json!({
+        "agent_id": agent_id,
+        "fleet": body.fleet.clone().unwrap_or_else(|| "default".into()),
+        "hostname": body.hostname.clone(),
+    });
+    if let Err(e) = handles
+        .inventory
+        .set_setting(&format!("enrollment.token.{token}"), &payload)
+        .await
+    {
+        return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("set_setting: {e}"));
+    }
+
+    // TODO 5e+: derive controller_url from runtime config rather than hardcoding.
+    let controller_url = "http://localhost:9418";
+    let install_command = format!(
+        "curl -fsSL {controller_url}/install.sh | sh -s -- --token {token}",
     );
-    let token = format!("pending-{}", ulid::Ulid::new());
-    let cmd = format!(
-        "docker run -d --name isengard-agent -e ISENGARD_TOKEN={token} ghcr.io/dirdmaster/isengard:latest agent --controller=https://CONTROLLER_HOST:9417"
-    );
-    Json(EnrollResponse {
+
+    Json(EnrollmentDto {
+        agent_id,
         enrollment_token: token,
-        install_command: cmd,
+        install_command,
     })
     .into_response()
+}
+
+async fn force_update_host(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<String>,
+) -> Response {
+    let host_id = match parse_host_id(&id) {
+        Ok(h) => h,
+        Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
+    };
+    match handles
+        .inventory
+        .queue_action(
+            host_id,
+            isengard_storage::HostActionKind::ForceUpdate { stack_name: None },
+        )
+        .await
+    {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("queue_action: {e}")),
+    }
+}
+
+async fn force_update_stack(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}")),
+    };
+    match handles
+        .inventory
+        .queue_action(
+            stack.host_id,
+            isengard_storage::HostActionKind::ForceUpdate {
+                stack_name: Some(stack.name),
+            },
+        )
+        .await
+    {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("queue_action: {e}")),
+    }
 }
 
 async fn patch_host(
@@ -209,20 +272,121 @@ async fn get_event(
 }
 
 async fn list_fleets(State(handles): State<Arc<ControllerHandles>>) -> Response {
-    match handles.inventory.list_hosts().await {
-        Ok(rows) => {
-            let host_count = rows.len();
-            let dtos = vec![FleetDto {
-                name: "default".into(),
-                host_count,
-            }];
-            Json(dtos).into_response()
+    let fleets = match handles.inventory.list_fleets().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_fleets: {e}"),
+            );
         }
+    };
+    let hosts = match handles.inventory.list_hosts().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_hosts: {e}"),
+            );
+        }
+    };
+
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for h in hosts {
+        *counts.entry(h.fleet).or_default() += 1;
+    }
+
+    let dtos: Vec<FleetDto> = fleets
+        .into_iter()
+        .map(|f| FleetDto {
+            name: f.name.clone(),
+            host_count: counts.get(&f.name).copied().unwrap_or(0),
+            created_at: f.created_at,
+        })
+        .collect();
+
+    Json(dtos).into_response()
+}
+
+async fn create_fleet(
+    State(handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<CreateFleetBody>,
+) -> Response {
+    if body.name.is_empty() || body.name.len() > 32 {
+        return json_err(StatusCode::BAD_REQUEST, "fleet name must be 1-32 chars");
+    }
+    match handles.inventory.create_fleet(&body.name).await {
+        Ok(_) => StatusCode::CREATED.into_response(),
         Err(e) => json_err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("list_fleets: {e}"),
+            format!("create_fleet: {e}"),
         ),
     }
+}
+
+async fn delete_fleet(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(name): Path<String>,
+) -> Response {
+    if name == "default" {
+        return json_err(StatusCode::BAD_REQUEST, "cannot delete the default fleet");
+    }
+    match handles.inventory.delete_fleet(&name).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => json_err(StatusCode::NOT_FOUND, "fleet not found"),
+        Err(e) => {
+            // Distinguish Conflict (has hosts) -> 409
+            if matches!(&e, isengard_storage::Error::Conflict(_)) {
+                json_err(StatusCode::CONFLICT, e.to_string())
+            } else {
+                json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("delete_fleet: {e}"),
+                )
+            }
+        }
+    }
+}
+
+async fn get_settings(State(handles): State<Arc<ControllerHandles>>) -> Response {
+    let all = match handles.inventory.list_settings().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_settings: {e}"),
+            );
+        }
+    };
+    let mut values = serde_json::Map::new();
+    for s in all {
+        if s.key.starts_with("enrollment.token.") {
+            continue;
+        }
+        values.insert(s.key, s.value);
+    }
+    Json(SettingsDto { values }).into_response()
+}
+
+async fn patch_settings(
+    State(handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<PatchSettingsBody>,
+) -> Response {
+    for (key, value) in body.values {
+        if key.starts_with("enrollment.token.") {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "cannot set enrollment tokens via settings",
+            );
+        }
+        if let Err(e) = handles.inventory.set_setting(&key, &value).await {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("set_setting: {e}"),
+            );
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -554,5 +718,92 @@ mod tests {
 
         let host = handles.inventory.get_host(host_id).await.unwrap().unwrap();
         assert_eq!(host.fleet, "prod");
+    }
+
+    #[tokio::test]
+    async fn force_update_host_queues_action() {
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+
+        let app = router(handles.clone());
+        let id_str = ulid::Ulid::from(host_id).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/hosts/{id_str}/actions/force-update"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let pending = handles.inventory.pending_actions(host_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending[0].kind,
+            isengard_storage::HostActionKind::ForceUpdate { stack_name: None }
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_fleet_then_delete_succeeds() {
+        let handles = test_handles().await;
+        let app = router(handles.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/fleets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"prod"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/fleets/prod")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn enroll_host_returns_install_command() {
+        let handles = test_handles().await;
+        let app = router(handles);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/hosts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"fleet":"staging"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let install_cmd = parsed["install_command"].as_str().unwrap();
+        let token = parsed["enrollment_token"].as_str().unwrap();
+        assert!(install_cmd.starts_with("curl"));
+        assert!(install_cmd.contains(token));
     }
 }

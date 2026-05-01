@@ -105,19 +105,36 @@ impl From<&Event> for LiveEventDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct FleetDto {
     pub name: String,
-    pub host_count: usize,
+    pub host_count: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateFleetBody {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrollmentDto {
+    pub agent_id: String,
+    pub enrollment_token: String,
+    pub install_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsDto {
+    pub values: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PatchSettingsBody {
+    pub values: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EnrollRequest {
     pub fleet: Option<String>,
     pub hostname: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EnrollResponse {
-    pub enrollment_token: String,
-    pub install_command: String,
 }
 
 #[derive(Debug, Deserialize)]
