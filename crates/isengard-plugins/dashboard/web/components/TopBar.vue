@@ -55,5 +55,6 @@ const tabs = [
   { path: '/hosts', label: 'Hosts' },
   { path: '/stacks', label: 'Stacks' },
   { path: '/events', label: 'Events' },
+  { path: '/settings', label: 'Settings' },
 ]
 </script>
