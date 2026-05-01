@@ -45,10 +45,10 @@ fn main() {
             || walk_for_newer(&web_dir.join("composables"), out_ts)
             || walk_for_newer(&web_dir.join("stores"), out_ts)
             || walk_for_newer(&web_dir.join("assets"), out_ts)
-            || mtime(&web_dir.join("package.json")).map_or(false, |t| t > out_ts)
-            || mtime(&web_dir.join("nuxt.config.ts")).map_or(false, |t| t > out_ts)
-            || mtime(&web_dir.join("tailwind.config.ts")).map_or(false, |t| t > out_ts)
-            || mtime(&web_dir.join("app.vue")).map_or(false, |t| t > out_ts);
+            || mtime(&web_dir.join("package.json")).is_some_and(|t| t > out_ts)
+            || mtime(&web_dir.join("nuxt.config.ts")).is_some_and(|t| t > out_ts)
+            || mtime(&web_dir.join("tailwind.config.ts")).is_some_and(|t| t > out_ts)
+            || mtime(&web_dir.join("app.vue")).is_some_and(|t| t > out_ts);
         if !needs_rebuild {
             println!("cargo:warning=dashboard bundle up to date; skipping bun build");
             return;
@@ -108,10 +108,8 @@ fn walk_for_newer(dir: &Path, ts: SystemTime) -> bool {
                 if walk(&path, ts) {
                     return true;
                 }
-            } else if ft.is_file() {
-                if mtime(&path).map_or(false, |t| t > ts) {
-                    return true;
-                }
+            } else if ft.is_file() && mtime(&path).is_some_and(|t| t > ts) {
+                return true;
             }
         }
         false
