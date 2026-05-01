@@ -2,59 +2,58 @@
   <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
 
-    <!-- Zero hosts: never enrolled -->
-    <div v-if="!hostsStore.loading && hostsStore.loaded && hostsStore.hosts.length === 0" class="flex-1 flex items-center justify-center">
-      <div class="text-center max-w-md">
-        <Icon name="lucide:server" class="w-12 h-12 text-iso-text-faint mx-auto mb-4" />
-        <h2 class="font-mono text-lg text-iso-text-primary mb-2">No hosts yet</h2>
-        <p class="text-iso-sm text-iso-text-muted mb-6">
-          Add your first host and watch its containers appear in real time.
-        </p>
-        <Button
-          variant="outline"
-          as-child
-          class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
-        >
-          <NuxtLink to="/hosts">
+    <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden">
+      <div class="flex flex-col overflow-hidden">
+        <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border-subtle">
+          <div class="flex items-center gap-3">
+            <h1 class="font-mono text-base text-iso-text-primary">Activity</h1>
+            <span class="text-xs text-iso-text-muted">
+              {{ eventsStore.events.length }} {{ eventsStore.events.length === 1 ? 'event' : 'events' }}
+              <template v-if="hostsStore.hosts.length"> · {{ hostsStore.hosts.length }} {{ hostsStore.hosts.length === 1 ? 'host' : 'hosts' }}</template>
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+            @click="addHostOpen = true"
+          >
             <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
-            Add a host
-          </NuxtLink>
-        </Button>
-      </div>
-    </div>
+            Add host
+          </Button>
+        </header>
 
-    <!-- Zero events but hosts exist -->
-    <div v-else-if="!eventsStore.loading && eventsStore.loaded && eventsStore.events.length === 0" class="flex-1 px-4 py-12 text-center">
-      <p class="text-iso-sm text-iso-text-faint">
-        No events yet. Events appear as your hosts check for image updates and apply them.
-      </p>
-    </div>
+        <div class="flex-1 overflow-y-auto">
+          <StateStrip
+            v-for="f in fleetsToShow"
+            :key="f.name"
+            :fleet="f"
+          />
 
-    <!-- Normal layout -->
-    <main v-else class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden">
-      <div class="overflow-y-auto">
-        <StateStrip
-          v-for="f in fleetsToShow"
-          :key="f.name"
-          :fleet="f"
-        />
-        <EventTimeline />
+          <div v-if="eventsStore.events.length === 0 && eventsStore.loaded" class="px-6 py-8 text-center text-sm text-iso-text-faint">
+            No events yet.
+          </div>
+          <EventTimeline v-else />
+        </div>
       </div>
       <Inspector />
     </main>
 
     <CmdPane />
     <HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />
+    <AddHostModal v-if="addHostOpen" @close="addHostOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 const eventsStore = useEventsStore()
 const hostsStore = useHostsStore()
 const fleetsStore = useFleetsStore()
 const ui = useUiStore()
+
+const addHostOpen = ref(false)
 
 onMounted(async () => {
   await Promise.all([
