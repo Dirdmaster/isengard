@@ -8,6 +8,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 
 use crate::error::{Error, Result};
 use crate::host::{EnrollHost, Host, HostId};
+use crate::stack::{InsertStack, Stack, StackId, StackSource};
 
 /// Wraps a `sqlx::SqlitePool` opened against a single `.db` file.
 /// Cheap to clone (the pool is `Arc`-backed inside).
@@ -134,6 +135,92 @@ impl Inventory {
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    pub async fn insert_stack(&self, req: InsertStack) -> Result<StackId> {
+        // Upsert: SQLite's INSERT ... ON CONFLICT DO UPDATE doesn't return the
+        // existing id, so we INSERT OR IGNORE then SELECT to fetch the id.
+        sqlx::query(
+            "INSERT OR IGNORE INTO stacks (host_id, name, source) VALUES (?, ?, ?)",
+        )
+        .bind(req.host_id.to_bytes().as_slice())
+        .bind(&req.name)
+        .bind(req.source.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        let row = sqlx::query("SELECT id FROM stacks WHERE host_id = ? AND name = ?")
+            .bind(req.host_id.to_bytes().as_slice())
+            .bind(&req.name)
+            .fetch_one(&self.pool)
+            .await?;
+        use sqlx::Row;
+        let id: i64 = row.try_get("id")?;
+        Ok(StackId(id))
+    }
+
+    pub async fn list_stacks(&self, host_id: Option<HostId>) -> Result<Vec<Stack>> {
+        let rows = match host_id {
+            Some(h) => {
+                sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE host_id = ? ORDER BY name")
+                    .bind(h.to_bytes().as_slice())
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks ORDER BY name")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+
+        rows.into_iter().map(stack_from_row).collect()
+    }
+
+    pub async fn get_stack(&self, id: StackId) -> Result<Option<Stack>> {
+        let row = sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE id = ?")
+            .bind(id.0)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(stack_from_row).transpose()
+    }
+
+    pub async fn delete_stack(&self, id: StackId) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM stacks WHERE id = ?")
+            .bind(id.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn set_host_fleet(&self, id: HostId, fleet: &str) -> Result<bool> {
+        let result = sqlx::query("UPDATE hosts SET fleet = ? WHERE id = ?")
+            .bind(fleet)
+            .bind(id.to_bytes().as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
+    use sqlx::Row;
+    let host_bytes: Vec<u8> = row.try_get("host_id")?;
+    if host_bytes.len() != 16 {
+        return Err(Error::InvalidHostId(host_bytes.len()));
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(&host_bytes);
+    let source_str: String = row.try_get("source")?;
+    let source = StackSource::from_str(&source_str)
+        .ok_or_else(|| Error::Decode { reason: format!("unknown stack source: {source_str}") })?;
+    let discovered_at: chrono::DateTime<chrono::Utc> = row.try_get("discovered_at")?;
+    Ok(Stack {
+        id: StackId(row.try_get("id")?),
+        host_id: HostId::from_bytes(arr),
+        name: row.try_get("name")?,
+        source,
+        discovered_at,
+    })
 }
 
 type HostRow = (
@@ -337,5 +424,71 @@ mod tests {
         assert!(inv.get_host(id).await.unwrap().is_none());
         let removed_again = inv.delete_host(id).await.unwrap();
         assert!(!removed_again);
+    }
+
+    #[tokio::test]
+    async fn insert_stack_is_idempotent_per_host_and_name() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = inv
+            .enroll_host(EnrollHost {
+                fingerprint: "fp1".into(),
+                hostname: "h1".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "0.1.0".into(),
+                docker_version: "27.0".into(),
+            })
+            .await
+            .unwrap();
+
+        let id1 = inv
+            .insert_stack(InsertStack {
+                host_id,
+                name: "wordpress".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let id2 = inv
+            .insert_stack(InsertStack {
+                host_id,
+                name: "wordpress".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(id1, id2, "second insert with same (host_id, name) should return the same id");
+
+        let listed = inv.list_stacks(Some(host_id)).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "wordpress");
+    }
+
+    #[tokio::test]
+    async fn set_host_fleet_updates_existing_host() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = inv
+            .enroll_host(EnrollHost {
+                fingerprint: "fp1".into(),
+                hostname: "h1".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "0.1.0".into(),
+                docker_version: "27.0".into(),
+            })
+            .await
+            .unwrap();
+
+        let updated = inv.set_host_fleet(host_id, "prod").await.unwrap();
+        assert!(updated, "set_host_fleet should return true when row exists");
+
+        let host = inv.get_host(host_id).await.unwrap().unwrap();
+        assert_eq!(host.fleet, "prod");
+
+        let missing = HostId::new();
+        let updated = inv.set_host_fleet(missing, "prod").await.unwrap();
+        assert!(!updated, "set_host_fleet should return false when row does not exist");
     }
 }
