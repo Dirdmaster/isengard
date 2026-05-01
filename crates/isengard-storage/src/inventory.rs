@@ -101,6 +101,16 @@ impl Inventory {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Remove a host from the inventory. Returns true if a row was deleted.
+    pub async fn delete_host(&self, id: HostId) -> Result<bool> {
+        let bytes = id.to_bytes().to_vec();
+        let result = sqlx::query("DELETE FROM hosts WHERE id = ?")
+            .bind(bytes)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Return every host, ordered by `last_seen_at DESC` (recently active first;
     /// hosts never seen sort to the bottom).
     pub async fn list_hosts(&self) -> Result<Vec<Host>> {
@@ -306,5 +316,24 @@ mod tests {
         let inv = Inventory::open_in_memory().await.unwrap();
         let listed = inv.list_hosts().await.unwrap();
         assert!(listed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_host_removes_entry() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let enroll = EnrollHost {
+            fingerprint: "fp-delete".into(),
+            hostname: "h1".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            agent_version: "test".into(),
+            docker_version: "test".into(),
+        };
+        let id = inv.enroll_host(enroll).await.unwrap();
+        let removed = inv.delete_host(id).await.unwrap();
+        assert!(removed);
+        assert!(inv.get_host(id).await.unwrap().is_none());
+        let removed_again = inv.delete_host(id).await.unwrap();
+        assert!(!removed_again);
     }
 }
