@@ -53,6 +53,7 @@
   - `DELETE /api/v1/fleets/:tag` — delete a fleet tag if no hosts assigned
   - `GET /api/v1/settings` — returns the controller config snapshot (notifier endpoints, agent install instructions, etc.)
   - `PATCH /api/v1/settings` — updates a subset of settings (notifier toggles, default fleet)
+  - `GET /install.sh?token=<t>` — serves the agent installer bash script bound to a one-time enrollment token (validates token before serving)
 - New migration `crates/isengard-storage/migrations/0007_fleets.sql` and `0008_settings.sql`:
   - `fleets` table (just `name TEXT PRIMARY KEY`, `created_at TEXT`)
   - `settings` table (key/value JSON store)
@@ -69,9 +70,15 @@
   - `components/EnrollmentSettings.vue` — explain enrollment, button to open modal
   - `components/CmdTerminal.vue` — xterm.js mounted inside CmdPane in terminal mode
   - `components/CmdBreadcrumb.vue` — header for terminal mode showing context path
+  - `components/Toast.vue` + `components/ToastContainer.vue` — bottom-right toast notifications for action feedback
+  - `components/ConfirmDialog.vue` — in-app destructive-action confirm (replaces native `confirm()` for decommission, delete fleet)
   - `composables/useLogStream.ts` — WS wrapper for `/api/v1/services/:id/logs`
+  - `composables/useToast.ts` — convenience wrapper around toasts store
+  - `composables/useConfirm.ts` — promise-returning confirm dialog
   - `stores/settings.ts` — Pinia for settings
   - `stores/fleets.ts` — extend (was 5b stub) with create/delete actions
+  - `stores/toasts.ts` — Pinia for the toast queue
+  - `templates/install.sh.tmpl` — bash installer template rendered by `/install.sh` handler
 - New unit + integration tests:
   - Migration tests (services, host_actions, fleets, settings)
   - `Inventory::queue_action` + `pending_actions` + `mark_action_delivered` round-trip
@@ -101,7 +108,9 @@
    - Browser: `/settings` shows Fleets section listing existing fleets + a "+ New fleet" form; create a fleet → it appears; delete it → it vanishes
    - Browser: `/hosts` → click "+ Add host" → modal opens with a curl command; copy it
    - Browser: `⌘K` → type `logs web` → select "Tail logs on web @ host" → cmd pane swaps to terminal mode showing live `docker logs -f web` output via xterm
-   - Browser: click "Force update" on a host → action is queued → next agent heartbeat picks it up → updater runs → events flow back to the timeline
+   - Browser: click "Force update" on a host → action is queued → toast appears bottom-right → next agent heartbeat picks it up → updater runs → events flow back to the timeline
+   - Browser: click Decommission in HostInspector → ConfirmDialog appears with red "Decommission" button → confirming runs the action and shows a success toast
+   - Browser: copy the curl command from Add host modal, run it in a terminal pointed at the controller URL → `/install.sh` returns a valid bash script that downloads and registers the agent (smoke check via `curl ...?token=<token>` and inspect output begins with `#!/usr/bin/env bash`)
 6. Tag `v0.1.0-alpha.phase5e` set locally
 7. Tag `v0.1.0-alpha.phase5-complete` set locally (Phase 5 done)
 8. **Not pushed**
@@ -137,10 +146,12 @@ crates/isengard-controller/
 └── src/sync.rs                      # MODIFY: persist services, attach pending_actions to reply
 
 crates/isengard-plugins/dashboard/
-└── src/
-    ├── dto.rs                       # MODIFY: + FleetDto (real), + SettingsDto, + EnrollmentDto
-    ├── api.rs                       # MODIFY: real force-update + enroll + fleet CRUD + settings
-    └── ws.rs                        # MODIFY: + handle_logs WS handler
+├── src/
+│   ├── dto.rs                       # MODIFY: + FleetDto (real), + SettingsDto, + EnrollmentDto
+│   ├── api.rs                       # MODIFY: real force-update + enroll + fleet CRUD + settings + install_sh
+│   └── ws.rs                        # MODIFY: + handle_logs WS handler
+└── templates/
+    └── install.sh.tmpl              # NEW (rendered by /install.sh handler)
 
 crates/isengard-plugins/dashboard/web/
 ├── components/
@@ -153,12 +164,20 @@ crates/isengard-plugins/dashboard/web/
 │   ├── EnrollmentSettings.vue       # NEW
 │   ├── CmdTerminal.vue              # NEW
 │   ├── CmdBreadcrumb.vue            # NEW
+│   ├── Toast.vue                    # NEW
+│   ├── ToastContainer.vue           # NEW
+│   ├── ConfirmDialog.vue            # NEW
 │   └── AddHostButton.vue            # MODIFY (5d): wire to AddHostModal
 ├── composables/
-│   └── useLogStream.ts              # NEW
+│   ├── useLogStream.ts              # NEW
+│   ├── useToast.ts                  # NEW
+│   └── useConfirm.ts                # NEW
+├── layouts/
+│   └── default.vue                  # NEW (mounts ToastContainer + ConfirmDialog)
 ├── stores/
 │   ├── settings.ts                  # NEW
-│   └── fleets.ts                    # MODIFY (5b extension): create/delete actions
+│   ├── fleets.ts                    # MODIFY (5b extension): create/delete actions
+│   └── toasts.ts                    # NEW
 └── pages/
     ├── events/
     │   ├── index.vue                # NEW
@@ -2458,7 +2477,571 @@ git commit -m "feat(dashboard-web): + CmdTerminal w/ xterm.js + CmdBreadcrumb; n
 
 ---
 
-## Task 13: Final CI gate, end-to-end smoke, both tags
+## Task 13: `/install.sh` endpoint — serve agent install script bound to enrollment token
+
+**Files:**
+- Create: `crates/isengard-plugins/dashboard/templates/install.sh.tmpl`
+- Modify: `crates/isengard-plugins/dashboard/src/api.rs` (add handler)
+- Modify: `crates/isengard-plugins/dashboard/src/lib.rs` (route registration)
+
+The Add Host modal generates `curl -fsSL <controller>/install.sh | sh -s -- --token <token>`. This task creates the actual `/install.sh` endpoint that responds to that curl. The server reads the token query (or first script arg), looks it up in the `settings` table (`enrollment.token.<token>`), and renders a bash script that downloads the agent binary and registers with the controller.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `api.rs` test module:
+
+```rust
+#[tokio::test]
+async fn install_sh_with_valid_token_returns_bash_script() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    inv.set_setting(
+        "enrollment.token.testtoken",
+        &serde_json::json!({
+            "agent_id": "01HX0000000000000000000001",
+            "fleet": "staging",
+            "hostname": null,
+        }),
+    ).await.unwrap();
+
+    let app = build_router(test_handles(inv));
+    let resp = app.oneshot(
+        Request::builder()
+            .uri("/install.sh?token=testtoken")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "text/x-shellscript; charset=utf-8");
+    let body = body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let body_str = std::str::from_utf8(&body).unwrap();
+    assert!(body_str.starts_with("#!/usr/bin/env bash"));
+    assert!(body_str.contains("ISENGARD_TOKEN=testtoken"));
+    assert!(body_str.contains("ISENGARD_FLEET=staging"));
+}
+
+#[tokio::test]
+async fn install_sh_with_missing_token_returns_400() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let app = build_router(test_handles(inv));
+    let resp = app.oneshot(
+        Request::builder()
+            .uri("/install.sh")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn install_sh_with_unknown_token_returns_403() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let app = build_router(test_handles(inv));
+    let resp = app.oneshot(
+        Request::builder()
+            .uri("/install.sh?token=nope")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(resp.status(), 403);
+}
+```
+
+- [ ] **Step 2: Run failing tests**
+
+Run: `cargo test -p isengard-dashboard install_sh --no-run`
+Expected: FAIL — handler doesn't exist.
+
+- [ ] **Step 3: Create the install script template**
+
+Create `crates/isengard-plugins/dashboard/templates/install.sh.tmpl`:
+
+```bash
+#!/usr/bin/env bash
+# Isengard agent installer — generated by controller at {{controller_url}}
+# Token: {{token}} (single-use, expires in 30 min)
+set -euo pipefail
+
+ISENGARD_CONTROLLER="{{controller_url}}"
+ISENGARD_TOKEN="{{token}}"
+ISENGARD_FLEET="{{fleet}}"
+ISENGARD_HOSTNAME="${ISENGARD_HOSTNAME:-{{hostname_or_default}}}"
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64)  ARCH=x86_64 ;;
+  aarch64|arm64) ARCH=aarch64 ;;
+  *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+esac
+
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$OS" in
+  linux) ;;
+  *) echo "unsupported os: $OS" >&2; exit 1 ;;
+esac
+
+INSTALL_DIR="/usr/local/bin"
+TMP="$(mktemp -d)"
+trap "rm -rf $TMP" EXIT
+
+echo "Downloading isengard-agent for $OS-$ARCH..."
+curl -fsSL "$ISENGARD_CONTROLLER/dist/isengard-agent-$OS-$ARCH" -o "$TMP/isengard-agent"
+chmod +x "$TMP/isengard-agent"
+
+if [ "$(id -u)" -eq 0 ]; then
+  mv "$TMP/isengard-agent" "$INSTALL_DIR/isengard-agent"
+else
+  sudo mv "$TMP/isengard-agent" "$INSTALL_DIR/isengard-agent"
+fi
+
+echo "Enrolling with controller..."
+"$INSTALL_DIR/isengard-agent" enroll \
+  --controller "$ISENGARD_CONTROLLER" \
+  --token "$ISENGARD_TOKEN" \
+  --fleet "$ISENGARD_FLEET" \
+  ${ISENGARD_HOSTNAME:+--hostname "$ISENGARD_HOSTNAME"}
+
+echo "Installing systemd unit..."
+"$INSTALL_DIR/isengard-agent" install-service
+
+echo "Done. Agent running. View it at $ISENGARD_CONTROLLER"
+```
+
+(Embed via `include_str!` in the handler.)
+
+- [ ] **Step 4: Implement the handler**
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct InstallShQuery {
+    pub token: Option<String>,
+}
+
+const INSTALL_SH_TEMPLATE: &str = include_str!("../templates/install.sh.tmpl");
+
+pub async fn install_sh(
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<InstallShQuery>,
+) -> Result<Response, ApiError> {
+    let token = q.token.ok_or(ApiError::BadRequest("missing token query".into()))?;
+
+    // Token must basic-validate before we hit the DB (avoid SQL on garbage).
+    if token.len() != 26 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(ApiError::Forbidden("invalid token format".into()));
+    }
+
+    let key = format!("enrollment.token.{token}");
+    let entry = handles.inventory.get_setting(&key).await?
+        .ok_or(ApiError::Forbidden("token not found or already used".into()))?;
+
+    let fleet = entry.get("fleet").and_then(|v| v.as_str()).unwrap_or("default");
+    let hostname = entry.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+    let controller_url = handles.config.public_url.clone();
+
+    let body = INSTALL_SH_TEMPLATE
+        .replace("{{controller_url}}", &controller_url)
+        .replace("{{token}}", &token)
+        .replace("{{fleet}}", fleet)
+        .replace("{{hostname_or_default}}", hostname);
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        body,
+    ).into_response())
+}
+```
+
+Add `Forbidden(String)` variant to `ApiError` if missing.
+
+- [ ] **Step 5: Register the route**
+
+In `lib.rs`, add to the router:
+
+```rust
+.route("/install.sh", get(crate::api::install_sh))
+```
+
+- [ ] **Step 6: Run tests**
+
+Run: `cargo test -p isengard-dashboard install_sh`
+Expected: PASS — all three tests green.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/isengard-plugins/dashboard/templates/install.sh.tmpl \
+        crates/isengard-plugins/dashboard/src/api.rs \
+        crates/isengard-plugins/dashboard/src/lib.rs
+git commit -m "feat(dashboard): /install.sh endpoint — serves agent installer bound to enrollment token"
+```
+
+---
+
+## Task 14: Toast notifications system
+
+**Files:**
+- Create: `crates/isengard-plugins/dashboard/web/components/Toast.vue`
+- Create: `crates/isengard-plugins/dashboard/web/components/ToastContainer.vue`
+- Create: `crates/isengard-plugins/dashboard/web/composables/useToast.ts`
+- Create: `crates/isengard-plugins/dashboard/web/stores/toasts.ts`
+- Modify: `crates/isengard-plugins/dashboard/web/layouts/default.vue` (mount ToastContainer)
+- Modify: pages that perform mutations (Settings, Hosts, Stack detail, Add host modal) — call `toast.success/error/info`
+
+Mutations need feedback. Toast is a small bottom-right panel that fades in for ~4s. Three kinds: success (green), error (red), info (neutral). A queue of up to 3 visible at once; new ones push old ones up; dismissable via X.
+
+- [ ] **Step 1: Write the toasts store**
+
+```typescript
+// crates/isengard-plugins/dashboard/web/stores/toasts.ts
+import { defineStore } from 'pinia'
+
+export type ToastKind = 'success' | 'error' | 'info'
+
+export interface Toast {
+  id: number
+  kind: ToastKind
+  text: string
+  expiresAt: number
+}
+
+let nextId = 1
+
+export const useToastsStore = defineStore('toasts', {
+  state: () => ({
+    items: [] as Toast[],
+  }),
+
+  actions: {
+    push(kind: ToastKind, text: string, durationMs = 4000) {
+      const t: Toast = {
+        id: nextId++,
+        kind,
+        text,
+        expiresAt: Date.now() + durationMs,
+      }
+      this.items.push(t)
+      // Cap visible to 3
+      if (this.items.length > 3) this.items.splice(0, this.items.length - 3)
+      // Auto-dismiss
+      setTimeout(() => this.dismiss(t.id), durationMs)
+    },
+
+    dismiss(id: number) {
+      this.items = this.items.filter((t) => t.id !== id)
+    },
+  },
+})
+```
+
+- [ ] **Step 2: Write the useToast composable**
+
+```typescript
+// crates/isengard-plugins/dashboard/web/composables/useToast.ts
+import { useToastsStore } from '~/stores/toasts'
+
+export function useToast() {
+  const store = useToastsStore()
+  return {
+    success: (text: string) => store.push('success', text),
+    error:   (text: string) => store.push('error', text),
+    info:    (text: string) => store.push('info', text),
+  }
+}
+```
+
+- [ ] **Step 3: Write Toast.vue**
+
+```vue
+<script setup lang="ts">
+import type { Toast } from '~/stores/toasts'
+import { useToastsStore } from '~/stores/toasts'
+
+defineProps<{ toast: Toast }>()
+const store = useToastsStore()
+
+const kindClasses = {
+  success: 'border-iso-success bg-iso-success/10 text-iso-success',
+  error:   'border-iso-error   bg-iso-error/10   text-iso-error',
+  info:    'border-iso-border  bg-iso-bg-overlay text-iso-text-secondary',
+}
+
+const kindIcons = {
+  success: 'lucide:check-circle',
+  error:   'lucide:x-circle',
+  info:    'lucide:info',
+}
+</script>
+
+<template>
+  <div
+    class="flex items-center gap-3 px-4 py-3 rounded-lg border min-w-[280px] max-w-[420px] shadow-lg"
+    :class="kindClasses[toast.kind]"
+  >
+    <Icon :name="kindIcons[toast.kind]" :size="16" class="shrink-0" />
+    <span class="text-sm flex-1">{{ toast.text }}</span>
+    <button class="opacity-60 hover:opacity-100" @click="store.dismiss(toast.id)">
+      <Icon name="lucide:x" :size="14" />
+    </button>
+  </div>
+</template>
+```
+
+- [ ] **Step 4: Write ToastContainer.vue**
+
+```vue
+<script setup lang="ts">
+import { useToastsStore } from '~/stores/toasts'
+
+const store = useToastsStore()
+</script>
+
+<template>
+  <div class="fixed bottom-12 right-4 z-50 flex flex-col gap-2 pointer-events-auto">
+    <Toast
+      v-for="t in store.items"
+      :key="t.id"
+      :toast="t"
+    />
+  </div>
+</template>
+```
+
+- [ ] **Step 5: Mount in default layout**
+
+Edit `layouts/default.vue` (create if missing):
+
+```vue
+<template>
+  <div class="h-screen flex flex-col">
+    <slot />
+    <ToastContainer />
+  </div>
+</template>
+```
+
+- [ ] **Step 6: Wire mutations to toast**
+
+In every mutation site:
+
+```typescript
+// hosts/index.vue handleAction force-update branch
+const toast = useToast()
+try {
+  await actions.forceUpdate(host.id)
+  toast.success(`Force update queued for ${host.hostname}`)
+} catch (e) {
+  toast.error(`Force update failed: ${e instanceof Error ? e.message : String(e)}`)
+}
+```
+
+Apply the same pattern in:
+- `HostInspector.vue` → setFleet, forceUpdate, decommission
+- `FleetsSettings.vue` → create, remove
+- `NotifierSettings.vue` → patch (settings save)
+- `AddHostModal.vue` → generate (enrollment created)
+- Stack detail → forceUpdate
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/isengard-plugins/dashboard/web/components/Toast.vue \
+        crates/isengard-plugins/dashboard/web/components/ToastContainer.vue \
+        crates/isengard-plugins/dashboard/web/composables/useToast.ts \
+        crates/isengard-plugins/dashboard/web/stores/toasts.ts \
+        crates/isengard-plugins/dashboard/web/layouts/default.vue \
+        crates/isengard-plugins/dashboard/web/components/HostInspector.vue \
+        crates/isengard-plugins/dashboard/web/components/FleetsSettings.vue \
+        crates/isengard-plugins/dashboard/web/components/NotifierSettings.vue \
+        crates/isengard-plugins/dashboard/web/components/AddHostModal.vue \
+        crates/isengard-plugins/dashboard/web/pages/hosts/index.vue \
+        crates/isengard-plugins/dashboard/web/pages/stacks/[id].vue
+git commit -m "feat(dashboard-web): toast notifications + wire into all mutations"
+```
+
+---
+
+## Task 15: ConfirmDialog for destructive actions
+
+**Files:**
+- Create: `crates/isengard-plugins/dashboard/web/components/ConfirmDialog.vue`
+- Create: `crates/isengard-plugins/dashboard/web/composables/useConfirm.ts`
+- Modify: `HostInspector.vue` (decommission), `FleetsSettings.vue` (delete fleet)
+
+Replace the native `confirm()` calls with a styled in-app modal that matches the AddHostModal pattern. Body: title + description + danger callout + Cancel/Confirm. Confirm button is red-bordered. Returns a promise that resolves true/false.
+
+- [ ] **Step 1: Write ConfirmDialog.vue**
+
+```vue
+<script setup lang="ts">
+interface Props {
+  open: boolean
+  title: string
+  description: string
+  confirmText?: string
+  danger?: boolean
+}
+
+withDefaults(defineProps<Props>(), {
+  confirmText: 'Confirm',
+  danger: false,
+})
+
+defineEmits<{ resolve: [confirmed: boolean] }>()
+</script>
+
+<template>
+  <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" @click.self="$emit('resolve', false)">
+    <div class="bg-iso-bg-base border border-iso-border rounded-lg w-[460px] max-w-full p-6 space-y-4">
+      <h2 class="font-mono text-base">{{ title }}</h2>
+      <p class="text-sm text-iso-text-muted">{{ description }}</p>
+      <div class="flex justify-end gap-2 pt-2">
+        <button
+          class="px-3 py-1.5 text-sm rounded border border-iso-border hover:border-iso-text-muted"
+          @click="$emit('resolve', false)"
+        >
+          Cancel
+        </button>
+        <button
+          class="px-3 py-1.5 text-sm rounded border"
+          :class="danger
+            ? 'border-iso-error text-iso-error hover:bg-iso-error/10'
+            : 'border-iso-success text-iso-success hover:bg-iso-success/10'"
+          @click="$emit('resolve', true)"
+        >
+          {{ confirmText }}
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+```
+
+- [ ] **Step 2: Write useConfirm composable**
+
+```typescript
+// crates/isengard-plugins/dashboard/web/composables/useConfirm.ts
+import { ref } from 'vue'
+
+interface ConfirmOpts {
+  title: string
+  description: string
+  confirmText?: string
+  danger?: boolean
+}
+
+const open = ref(false)
+const opts = ref<ConfirmOpts>({ title: '', description: '' })
+let resolver: ((confirmed: boolean) => void) | null = null
+
+export function useConfirm() {
+  function confirm(o: ConfirmOpts): Promise<boolean> {
+    opts.value = o
+    open.value = true
+    return new Promise((resolve) => { resolver = resolve })
+  }
+
+  function resolve(confirmed: boolean) {
+    open.value = false
+    resolver?.(confirmed)
+    resolver = null
+  }
+
+  return { open, opts, confirm, resolve }
+}
+```
+
+- [ ] **Step 3: Mount globally in default layout**
+
+Edit `layouts/default.vue`:
+
+```vue
+<script setup lang="ts">
+const { open, opts, resolve } = useConfirm()
+</script>
+
+<template>
+  <div class="h-screen flex flex-col">
+    <slot />
+    <ToastContainer />
+    <ConfirmDialog
+      :open="open"
+      :title="opts.title"
+      :description="opts.description"
+      :confirm-text="opts.confirmText"
+      :danger="opts.danger"
+      @resolve="resolve"
+    />
+  </div>
+</template>
+```
+
+- [ ] **Step 4: Replace native `confirm()` calls**
+
+In `HostInspector.vue`:
+
+```typescript
+async function decommission() {
+  const { confirm } = useConfirm()
+  const ok = await confirm({
+    title: `Decommission ${props.host.hostname}?`,
+    description: 'This revokes its enrollment token and removes it from inventory. The agent on the host will no longer report. This cannot be undone.',
+    confirmText: 'Decommission',
+    danger: true,
+  })
+  if (!ok) return
+
+  const toast = useToast()
+  try {
+    await actions.decommission(props.host.id)
+    toast.success(`${props.host.hostname} decommissioned`)
+    emit('close')
+    emit('changed')
+  } catch (e) {
+    toast.error(`Decommission failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+```
+
+In `FleetsSettings.vue`:
+
+```typescript
+async function remove(name: string) {
+  const { confirm } = useConfirm()
+  const ok = await confirm({
+    title: `Delete fleet "${name}"?`,
+    description: 'The fleet tag is removed. Hosts assigned to this fleet must be reassigned first.',
+    confirmText: 'Delete',
+    danger: true,
+  })
+  if (!ok) return
+
+  const toast = useToast()
+  try {
+    await fleetsStore.remove(name)
+    toast.success(`Fleet "${name}" deleted`)
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : String(e))
+  }
+}
+```
+
+- [ ] **Step 5: Build sanity**
+
+Run: `bun --cwd crates/isengard-plugins/dashboard/web run build`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/isengard-plugins/dashboard/web/components/ConfirmDialog.vue \
+        crates/isengard-plugins/dashboard/web/composables/useConfirm.ts \
+        crates/isengard-plugins/dashboard/web/layouts/default.vue \
+        crates/isengard-plugins/dashboard/web/components/HostInspector.vue \
+        crates/isengard-plugins/dashboard/web/components/FleetsSettings.vue
+git commit -m "feat(dashboard-web): ConfirmDialog for decommission + delete-fleet (replaces native confirm)"
+```
+
+---
+
+## Task 16: Final CI gate, end-to-end smoke, both tags
 
 **Files:**
 - (none — verification + tagging)

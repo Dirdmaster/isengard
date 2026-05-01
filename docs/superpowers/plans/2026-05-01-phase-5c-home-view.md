@@ -1145,7 +1145,240 @@ cd ~/Projects/isengard && git commit -m "feat(dashboard/web): assemble Home view
 
 ---
 
-## Task 7: Manual smoke + tag
+## Task 7: Chrome polish — WS connection status + HelpOverlay + empty states
+
+**Files:**
+- Modify: `crates/isengard-plugins/dashboard/web/components/BottomStatusBar.vue`
+- Modify: `crates/isengard-plugins/dashboard/web/composables/useEventStream.ts` (expose connection state)
+- Create: `crates/isengard-plugins/dashboard/web/components/HelpOverlay.vue`
+- Modify: `crates/isengard-plugins/dashboard/web/composables/useShortcuts.ts` (`?` opens HelpOverlay)
+- Modify: `crates/isengard-plugins/dashboard/web/pages/index.vue` (zero-state + zero-event state)
+
+Three small but important polish items the design spec assumes but the previous tasks didn't cover.
+
+### Step 1: WS connection state in useEventStream
+
+Modify `useEventStream.ts` to expose a reactive `connectionState` ref that's one of `'connecting' | 'live' | 'reconnecting' | 'offline'`:
+
+```typescript
+// crates/isengard-plugins/dashboard/web/composables/useEventStream.ts (additions)
+import { ref, type Ref } from 'vue'
+
+export type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'offline'
+
+export function useEventStream() {
+  const connectionState: Ref<ConnectionState> = ref('connecting')
+  let ws: WebSocket | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectAttempt = 0
+
+  function connect() {
+    connectionState.value = reconnectAttempt > 0 ? 'reconnecting' : 'connecting'
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    ws = new WebSocket(`${proto}//${window.location.host}/ws/events`)
+
+    ws.onopen = () => {
+      connectionState.value = 'live'
+      reconnectAttempt = 0
+    }
+
+    ws.onmessage = (ev) => {
+      // existing event-handling logic from earlier task...
+    }
+
+    ws.onclose = () => {
+      connectionState.value = reconnectAttempt > 5 ? 'offline' : 'reconnecting'
+      // Exponential backoff up to 5 attempts, then give up.
+      if (reconnectAttempt < 5) {
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000)
+        reconnectAttempt++
+        reconnectTimer = setTimeout(connect, delay)
+      }
+    }
+  }
+
+  function disconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (ws) ws.close()
+    connectionState.value = 'offline'
+  }
+
+  return { connect, disconnect, connectionState }
+}
+```
+
+### Step 2: BottomStatusBar shows WS state
+
+Modify `BottomStatusBar.vue` to swap the static "live · 247 events today" with a connection-aware label:
+
+```vue
+<script setup lang="ts">
+import { useEventsStore } from '~/stores/events'
+import { useEventStream } from '~/composables/useEventStream'
+
+const events = useEventsStore()
+const { connectionState } = useEventStream()
+
+const stateLabel = computed(() => ({
+  connecting:   { dot: 'bg-iso-warn',    text: 'connecting…',    color: 'text-iso-warn' },
+  live:         { dot: 'bg-iso-success', text: `live · ${events.eventsTodayCount} events today`, color: 'text-iso-success' },
+  reconnecting: { dot: 'bg-iso-warn',    text: 'reconnecting…',  color: 'text-iso-warn' },
+  offline:      { dot: 'bg-iso-error',   text: 'offline · click to retry', color: 'text-iso-error' },
+}[connectionState.value]))
+</script>
+
+<template>
+  <div class="flex items-center gap-4 px-4 py-1.5 text-xs border-t border-iso-border bg-iso-bg-elevated">
+    <span class="flex items-center gap-2" :class="stateLabel.color">
+      <span class="w-1.5 h-1.5 rounded-full" :class="stateLabel.dot" />
+      {{ stateLabel.text }}
+    </span>
+    <span class="text-iso-text-faint">controller v0.1.0-alpha</span>
+    <span class="ml-auto text-iso-text-faint">↑↓ navigate · ⌘K command · ? help</span>
+  </div>
+</template>
+```
+
+### Step 3: Write HelpOverlay.vue
+
+```vue
+<script setup lang="ts">
+defineProps<{ open: boolean }>()
+defineEmits<{ close: [] }>()
+
+const groups = [
+  {
+    title: 'Global',
+    items: [
+      { keys: ['⌘K'], desc: 'open cmd pane (navigator)' },
+      { keys: ['⌘.'], desc: 'toggle cmd pane position (center ↔ docked)' },
+      { keys: ['/'],  desc: 'focus filter on current page' },
+      { keys: ['?'],  desc: 'show this overlay' },
+      { keys: ['j', 'k'], desc: 'move down/up in lists' },
+      { keys: ['Esc'], desc: 'close overlay or cmd pane' },
+    ],
+  },
+  {
+    title: 'In cmd pane navigator',
+    items: [
+      { keys: ['↑', '↓'], desc: 'move selection' },
+      { keys: ['Enter'], desc: 'select result' },
+      { keys: [':'], desc: 'actions only' },
+      { keys: ['$'], desc: 'shell command (after picking a container)' },
+    ],
+  },
+  {
+    title: 'In cmd pane terminal',
+    items: [
+      { keys: ['⌘P'], desc: 'back to navigator' },
+      { keys: ['⌘N'], desc: 'new shell session' },
+      { keys: ['⌘W'], desc: 'close pane' },
+      { keys: ['⌘↑'], desc: 'scrollback' },
+    ],
+  },
+]
+</script>
+
+<template>
+  <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" @click.self="$emit('close')">
+    <div class="bg-iso-bg-base border border-iso-border rounded-lg w-[680px] max-w-full p-8">
+      <header class="flex items-center justify-between mb-6">
+        <h2 class="font-mono text-lg">Keyboard shortcuts</h2>
+        <button class="text-iso-text-muted" @click="$emit('close')">
+          <Icon name="lucide:x" :size="18" />
+        </button>
+      </header>
+      <div class="grid grid-cols-2 gap-x-10 gap-y-6">
+        <section v-for="g in groups" :key="g.title">
+          <h3 class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">{{ g.title }}</h3>
+          <dl class="space-y-2">
+            <div v-for="i in g.items" :key="i.desc" class="flex items-center justify-between gap-4">
+              <dt class="text-sm text-iso-text-secondary">{{ i.desc }}</dt>
+              <dd class="flex items-center gap-1">
+                <kbd v-for="k in i.keys" :key="k" class="px-1.5 py-0.5 bg-iso-bg-elevated rounded font-mono text-xs">{{ k }}</kbd>
+              </dd>
+            </div>
+          </dl>
+        </section>
+      </div>
+    </div>
+  </div>
+</template>
+```
+
+### Step 4: Wire `?` shortcut
+
+In `useShortcuts.ts`, add a global handler that toggles the help overlay state in `useUiStore`:
+
+```typescript
+// useShortcuts.ts (existing file, add a binding)
+const ui = useUiStore()
+useEventListener(window, 'keydown', (e: KeyboardEvent) => {
+  // ... existing ⌘K, ⌘., Esc handlers ...
+  if (e.key === '?' && !e.metaKey && !e.ctrlKey && !isInputFocused()) {
+    e.preventDefault()
+    ui.helpOpen = !ui.helpOpen
+  }
+})
+```
+
+Add `helpOpen: false` to `useUiStore` state. Mount `<HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />` in `pages/index.vue` (or in the default layout once Task 14 of plan 5e adds the layout file — for now mount per-page).
+
+### Step 5: Empty states in pages/index.vue
+
+Add render conditionals for the two "0" states:
+
+```vue
+<!-- inside pages/index.vue template -->
+
+<!-- Zero hosts: never enrolled -->
+<div v-if="hostsStore.items.length === 0 && hostsStore.loaded" class="flex-1 flex items-center justify-center">
+  <div class="text-center max-w-md">
+    <Icon name="lucide:server" :size="48" class="text-iso-text-faint mx-auto mb-4" />
+    <h2 class="font-mono text-lg mb-2">No hosts yet</h2>
+    <p class="text-sm text-iso-text-muted mb-6">
+      Add your first host and watch its containers appear in real time.
+    </p>
+    <NuxtLink to="/hosts" class="inline-flex items-center gap-2 px-4 py-2 rounded border border-iso-border hover:border-iso-success">
+      <Icon name="lucide:plus" :size="14" />
+      Add a host
+    </NuxtLink>
+  </div>
+</div>
+
+<!-- Zero events but hosts exist -->
+<div v-else-if="eventsStore.items.length === 0 && eventsStore.loaded" class="px-4 py-12 text-center">
+  <p class="text-sm text-iso-text-faint">
+    No events yet. Events appear as your hosts check for image updates and apply them.
+  </p>
+</div>
+
+<!-- Otherwise the normal timeline + state strip render -->
+<template v-else>
+  <!-- ... existing layout ... -->
+</template>
+```
+
+### Step 6: Build sanity
+
+Run: `bun --cwd crates/isengard-plugins/dashboard/web run build`
+Expected: PASS.
+
+### Step 7: Commit
+
+```bash
+git add crates/isengard-plugins/dashboard/web/components/BottomStatusBar.vue \
+        crates/isengard-plugins/dashboard/web/components/HelpOverlay.vue \
+        crates/isengard-plugins/dashboard/web/composables/useEventStream.ts \
+        crates/isengard-plugins/dashboard/web/composables/useShortcuts.ts \
+        crates/isengard-plugins/dashboard/web/stores/ui.ts \
+        crates/isengard-plugins/dashboard/web/pages/index.vue
+git commit -m "feat(dashboard-web): WS reconnect indicator + HelpOverlay (?) + Home empty states"
+```
+
+---
+
+## Task 8: Manual smoke + tag
 
 - [ ] **Step 1: `just ci-local`**
 

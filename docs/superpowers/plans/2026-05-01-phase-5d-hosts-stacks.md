@@ -2599,7 +2599,106 @@ git commit -m "feat(dashboard-web): cmd pane navigator surfaces stacks + service
 
 ---
 
-## Task 14: CI gate, end-to-end smoke, tag
+## Task 14: Empty + loading states for Hosts and Stacks tables
+
+**Files:**
+- Modify: `crates/isengard-plugins/dashboard/web/components/HostsTable.vue` (empty state)
+- Modify: `crates/isengard-plugins/dashboard/web/components/StacksTable.vue` (empty state)
+- Create: `crates/isengard-plugins/dashboard/web/components/TableSkeleton.vue` (loading)
+- Modify: `crates/isengard-plugins/dashboard/web/pages/hosts/index.vue` (use skeleton)
+- Modify: `crates/isengard-plugins/dashboard/web/pages/stacks/index.vue` (use skeleton)
+
+The first time a fresh install renders, hostsStore.items is empty. Without a state we just show a blank table — confusing. Same for filtered Stacks when the filter matches nothing.
+
+### Step 1: Write TableSkeleton.vue
+
+```vue
+<script setup lang="ts">
+withDefaults(defineProps<{ rows?: number; columns?: number[] }>(), {
+  rows: 6,
+  columns: () => [170, 70, 130, 80, 400, 90, 60],
+})
+</script>
+
+<template>
+  <div>
+    <div
+      v-for="r in rows"
+      :key="r"
+      class="grid items-center gap-3 px-3 py-3 border-b border-iso-border animate-pulse"
+      :style="{ gridTemplateColumns: columns.map(c => `${c}px`).join(' ') }"
+    >
+      <div
+        v-for="(c, i) in columns"
+        :key="i"
+        class="h-3 rounded bg-iso-bg-elevated"
+        :style="{ width: `${Math.max(40, c - 30)}px` }"
+      />
+    </div>
+  </div>
+</template>
+```
+
+### Step 2: HostsTable empty state
+
+Add to `HostsTable.vue` template, replacing the `<HostRow v-for>` block with a conditional:
+
+```vue
+<template>
+  <div>
+    <div class="grid ..." style="grid-template-columns: ..."> <!-- existing header --> </div>
+
+    <div v-if="hosts.length === 0" class="py-16 text-center">
+      <Icon name="lucide:server-off" :size="36" class="text-iso-text-faint mx-auto mb-3" />
+      <p class="text-sm text-iso-text-muted mb-1">No hosts in this fleet</p>
+      <p class="text-xs text-iso-text-faint">Try a different fleet, or add a new host.</p>
+    </div>
+
+    <HostRow v-else v-for="h in hosts" :key="h.id" ... />
+  </div>
+</template>
+```
+
+### Step 3: StacksTable empty state
+
+```vue
+<div v-if="rows.length === 0" class="py-16 text-center">
+  <Icon name="lucide:layers" :size="36" class="text-iso-text-faint mx-auto mb-3" />
+  <p class="text-sm text-iso-text-muted mb-1">No stacks match the current filter</p>
+  <p class="text-xs text-iso-text-faint">Stacks are discovered from the `com.docker.compose.project` label on running containers.</p>
+</div>
+```
+
+### Step 4: Use TableSkeleton during load
+
+In `pages/hosts/index.vue`:
+
+```vue
+<TableSkeleton v-if="!hostsStore.loaded" :rows="6" />
+<HostsTable v-else ... />
+```
+
+Same pattern in `pages/stacks/index.vue` with `:columns="[200, 170, 70, 70, 400, 90]"`.
+
+### Step 5: Build sanity
+
+Run: `bun --cwd crates/isengard-plugins/dashboard/web run build`
+Expected: PASS.
+
+### Step 6: Commit
+
+```bash
+git add crates/isengard-plugins/dashboard/web/components/HostsTable.vue \
+        crates/isengard-plugins/dashboard/web/components/StacksTable.vue \
+        crates/isengard-plugins/dashboard/web/components/TableSkeleton.vue \
+        crates/isengard-plugins/dashboard/web/pages/hosts/index.vue \
+        crates/isengard-plugins/dashboard/web/pages/stacks/index.vue
+git commit -m "feat(dashboard-web): empty states + loading skeletons for Hosts/Stacks tables"
+```
+
+---
+
+## Task 15: CI gate, end-to-end smoke, tag
 
 **Files:**
 - Modify (if needed): `.github/workflows/ci.yml`
