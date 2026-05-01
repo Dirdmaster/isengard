@@ -30,8 +30,11 @@ pub struct PluginContext {
     /// Optional event sink. `None` on the controller in phase 4a; `Some` on
     /// the agent once 4b wires the gRPC client through.
     pub events: Option<Arc<dyn EventEmitter>>,
-    /// Optional opaque handle to a controller-side event bus. Plugins that
-    /// need it downcast through a typed accessor; the core stays decoupled.
+    /// Optional opaque handle passed by the controller host to plugins.
+    /// Currently carries `Arc<ControllerHandles>` (inventory + journal + bus bundle);
+    /// downcast in plugin `start()` to access concrete state. Field name is
+    /// retained for backward compatibility — see TODO in isengard-controller for
+    /// a future migration of ControllerHandles to isengard-core.
     pub bus: Option<Arc<dyn Any + Send + Sync>>,
 }
 
