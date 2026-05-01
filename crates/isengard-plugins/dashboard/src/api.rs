@@ -27,7 +27,10 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/hosts/{id}/actions/force-update", post(force_update_host))
         .route("/stacks", get(list_stacks))
         .route("/stacks/{id}", get(get_stack))
-        .route("/stacks/{id}/actions/force-update", post(force_update_stack))
+        .route(
+            "/stacks/{id}/actions/force-update",
+            post(force_update_stack),
+        )
         .route("/services", get(list_services))
         .route("/services/{id}", get(get_service))
         .route("/events", get(list_events))
@@ -122,14 +125,16 @@ async fn enroll_host(
         .set_setting(&format!("enrollment.token.{token}"), &payload)
         .await
     {
-        return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("set_setting: {e}"));
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("set_setting: {e}"),
+        );
     }
 
     // TODO 5e+: derive controller_url from runtime config rather than hardcoding.
     let controller_url = "http://localhost:9418";
-    let install_command = format!(
-        "curl -fsSL {controller_url}/install.sh | sh -s -- --token {token}",
-    );
+    let install_command =
+        format!("curl -fsSL {controller_url}/install.sh | sh -s -- --token {token}",);
 
     Json(EnrollmentDto {
         agent_id,
@@ -156,7 +161,10 @@ async fn force_update_host(
         .await
     {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("queue_action: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("queue_action: {e}"),
+        ),
     }
 }
 
@@ -180,7 +188,10 @@ async fn force_update_stack(
         .await
     {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("queue_action: {e}")),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("queue_action: {e}"),
+        ),
     }
 }
 
@@ -560,17 +571,19 @@ pub async fn install_sh(
     let entry = match handles.inventory.get_setting(&key).await {
         Ok(Some(v)) => v,
         Ok(None) => return json_err(StatusCode::FORBIDDEN, "token not found or already used"),
-        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_setting: {e}")),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("get_setting: {e}"),
+            );
+        }
     };
 
     let fleet = entry
         .get("fleet")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
-    let hostname = entry
-        .get("hostname")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let hostname = entry.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
     // TODO 5e+: derive controller_url from runtime config rather than hardcoding.
     let controller_url = "http://localhost:9418";
 

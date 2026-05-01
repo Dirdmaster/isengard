@@ -22,10 +22,12 @@ pub async fn process_heartbeat_services(
     let host_stacks = inv.list_stacks(Some(host_id)).await?;
 
     for s in services {
-        let stack_id = s
-            .stack
-            .as_deref()
-            .and_then(|name| host_stacks.iter().find(|st| st.name == name).map(|st| st.id));
+        let stack_id = s.stack.as_deref().and_then(|name| {
+            host_stacks
+                .iter()
+                .find(|st| st.name == name)
+                .map(|st| st.id)
+        });
 
         inv.insert_service(InsertService {
             host_id,
