@@ -97,9 +97,10 @@ pub async fn run_sync_loop(
                         .unwrap_or(0);
                     let snapshots = crate::container_snapshot::list_container_snapshots().await;
                     let stacks = crate::container_snapshot::derive_stacks(&snapshots);
+                    let services = crate::container_snapshot::derive_services(&snapshots);
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
-                            Heartbeat { ts_ms, stacks, services: vec![] },
+                            Heartbeat { ts_ms, stacks, services },
                         )),
                     };
                     if hb_tx.send(msg).await.is_err() {
@@ -124,6 +125,18 @@ pub async fn run_sync_loop(
             match msg.payload {
                 Some(isengard_proto::pb::controller_message::Payload::HeartbeatAck(ack)) => {
                     debug!(server_time_ms = ack.server_time_ms, "HeartbeatAck");
+                    for action in ack.pending_actions {
+                        // v1: log receipt. Real execution (force-update via updater
+                        // plugin signal, decommission, etc.) lands in v1.x. The
+                        // controller marks the action delivered as soon as it
+                        // includes it in the ack — see Task 5.
+                        info!(
+                            action_id = action.id,
+                            kind = %action.kind,
+                            payload = %action.payload_json,
+                            "received pending action (execution deferred to v1.x)"
+                        );
+                    }
                 }
                 _ => {
                     warn!(?msg.payload, "unexpected ControllerMessage payload");

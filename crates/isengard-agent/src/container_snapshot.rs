@@ -6,13 +6,15 @@ use std::collections::{BTreeMap, HashMap};
 
 use bollard::Docker;
 use bollard::container::ListContainersOptions;
-use isengard_proto::pb::StackInfo;
+use isengard_proto::pb::{ServiceInfo, StackInfo};
 use tracing::warn;
 
-/// Lightweight snapshot of one container — only the bits we need to derive stacks.
+/// Lightweight snapshot of one container — only the bits we need to derive stacks + services.
 #[derive(Debug, Clone)]
 pub struct ContainerSnapshot {
     pub name: String,
+    pub image: String,
+    pub state: String,
     pub labels: HashMap<String, String>,
 }
 
@@ -50,8 +52,38 @@ pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
                 .and_then(|ns| ns.first().cloned())
                 .map(|n| n.trim_start_matches('/').to_string())
                 .unwrap_or_default();
+            let image = c.image.clone().unwrap_or_default();
+            let state = c.state.clone().unwrap_or_else(|| "unknown".to_string());
             let labels = c.labels.unwrap_or_default();
-            ContainerSnapshot { name, labels }
+            ContainerSnapshot {
+                name,
+                image,
+                state,
+                labels,
+            }
+        })
+        .collect()
+}
+
+/// Build per-container ServiceInfo entries with stack association.
+/// Mirrors derive_stacks naming: same precedence (isengard.stack > compose label > inferred).
+pub fn derive_services(containers: &[ContainerSnapshot]) -> Vec<ServiceInfo> {
+    containers
+        .iter()
+        .map(|c| {
+            let stack = c
+                .labels
+                .get("isengard.stack")
+                .or_else(|| c.labels.get("com.docker.compose.project"))
+                .cloned()
+                .unwrap_or_else(|| c.name.clone());
+
+            ServiceInfo {
+                name: c.name.clone(),
+                image: c.image.clone(),
+                state: c.state.clone(),
+                stack: Some(stack),
+            }
         })
         .collect()
 }
@@ -98,6 +130,8 @@ mod tests {
     fn snap(name: &str, labels: &[(&str, &str)]) -> ContainerSnapshot {
         ContainerSnapshot {
             name: name.into(),
+            image: format!("{name}:latest"),
+            state: "running".into(),
             labels: labels
                 .iter()
                 .map(|(k, v)| ((*k).into(), (*v).into()))
@@ -141,5 +175,38 @@ mod tests {
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].name, "override-name");
         assert_eq!(stacks[0].source, "manual");
+    }
+
+    #[test]
+    fn derives_service_info_with_state_and_stack_link() {
+        let mut compose_label = std::collections::HashMap::new();
+        compose_label.insert("com.docker.compose.project".to_string(), "blog".to_string());
+
+        let containers = vec![
+            ContainerSnapshot {
+                name: "web".into(),
+                image: "nginx:1.25-alpine".into(),
+                state: "running".into(),
+                labels: compose_label.clone(),
+            },
+            ContainerSnapshot {
+                name: "homer".into(),
+                image: "b4bz/homer:latest".into(),
+                state: "stopped".into(),
+                labels: std::collections::HashMap::new(),
+            },
+        ];
+
+        let services = derive_services(&containers);
+        assert_eq!(services.len(), 2);
+
+        let web = services.iter().find(|s| s.name == "web").unwrap();
+        assert_eq!(web.image, "nginx:1.25-alpine");
+        assert_eq!(web.state, "running");
+        assert_eq!(web.stack.as_deref(), Some("blog"));
+
+        let homer = services.iter().find(|s| s.name == "homer").unwrap();
+        assert_eq!(homer.state, "stopped");
+        assert_eq!(homer.stack.as_deref(), Some("homer"));
     }
 }
