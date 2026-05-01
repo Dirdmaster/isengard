@@ -14,6 +14,8 @@ mod dev_plugin;
 // picked up at controller startup. The `as _` import keeps the symbol live
 // without polluting the main namespace.
 #[allow(unused_imports)]
+use isengard_plugin_dashboard as _;
+#[allow(unused_imports)]
 use isengard_plugin_notifier as _;
 
 #[derive(Debug, Parser)]

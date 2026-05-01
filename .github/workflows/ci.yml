@@ -37,6 +37,11 @@ jobs:
         with:
           tool: cargo-nextest
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
       - name: cargo fmt --check
         run: cargo fmt --check
 

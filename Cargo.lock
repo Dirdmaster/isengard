@@ -1430,6 +1430,7 @@ dependencies = [
  "isengard-agent",
  "isengard-controller",
  "isengard-core",
+ "isengard-plugin-dashboard",
  "isengard-plugin-notifier",
  "isengard-plugin-updater",
  "predicates",
