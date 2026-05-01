@@ -9,6 +9,8 @@ export interface EventRow {
   image: string | null
   summary: string
   occurred_at: string
+  received_at?: string
+  metadata?: Record<string, any>
 }
 
 export const useEventsStore = defineStore('events', () => {
@@ -27,6 +29,18 @@ export const useEventsStore = defineStore('events', () => {
     }
   }
 
+  async function fetchOne(id: number): Promise<EventRow | null> {
+    try {
+      const event = await api.get<EventRow>(`/events/${id}`)
+      const idx = events.value.findIndex(e => e.id === id)
+      if (idx >= 0) events.value[idx] = event
+      else events.value.unshift(event)
+      return event
+    } catch {
+      return null
+    }
+  }
+
   function prepend(event: any) {
     events.value.unshift({
       id: event.id ?? -1,
@@ -40,5 +54,5 @@ export const useEventsStore = defineStore('events', () => {
     if (events.value.length > 500) events.value.length = 500
   }
 
-  return { events, loading, loaded, load, prepend }
+  return { events, loading, loaded, load, fetchOne, prepend }
 })
