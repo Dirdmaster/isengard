@@ -7,6 +7,7 @@ defineEmits<{ close: [] }>()
 const fleetsStore = useFleetsStore()
 if (!fleetsStore.loaded) await fleetsStore.load()
 
+const toast = useToast()
 const fleet = ref('default')
 const hostname = ref('')
 const installCommand = ref('')
@@ -23,15 +24,23 @@ async function generate() {
       hostname: hostname.value || undefined,
     })
     installCommand.value = dto.install_command
+    toast.info('Install command generated. Token expires in 30 min.')
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    const msg = e instanceof Error ? e.message : String(e)
+    error.value = msg
+    toast.error(`Generate failed: ${msg}`)
   } finally {
     loading.value = false
   }
 }
 
 async function copy() {
-  await navigator.clipboard.writeText(installCommand.value)
+  try {
+    await navigator.clipboard.writeText(installCommand.value)
+    toast.success('Install command copied to clipboard')
+  } catch {
+    toast.error('Copy failed — please copy manually')
+  }
 }
 </script>
 

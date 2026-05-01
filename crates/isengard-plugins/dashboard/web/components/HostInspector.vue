@@ -12,6 +12,7 @@ const fleets = useFleetsStore()
 if (fleets.fleets.length === 0) await fleets.load()
 
 const actions = useHostActions()
+const toast = useToast()
 const editingFleet = ref(false)
 const newFleet = ref(props.host.fleet)
 const error = ref('')
@@ -21,21 +22,34 @@ async function applyFleet() {
   try {
     await actions.setFleet(props.host.id, newFleet.value)
     editingFleet.value = false
+    toast.success(`Fleet updated to ${newFleet.value}`)
     emit('changed')
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    const msg = e instanceof Error ? e.message : String(e)
+    error.value = msg
+    toast.error(`Set fleet failed: ${msg}`)
   }
 }
 
 async function forceUpdate() {
-  await actions.forceUpdate(props.host.id)
+  try {
+    await actions.forceUpdate(props.host.id)
+    toast.success(`Force update queued for ${props.host.hostname}`)
+  } catch (e) {
+    toast.error(`Force update failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 
 async function decommission() {
   if (!confirm(`Decommission ${props.host.hostname}? This revokes its token and removes it from inventory.`)) return
-  await actions.decommission(props.host.id)
-  emit('close')
-  emit('changed')
+  try {
+    await actions.decommission(props.host.id)
+    toast.success(`${props.host.hostname} decommissioned`)
+    emit('close')
+    emit('changed')
+  } catch (e) {
+    toast.error(`Decommission failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 
 function formatTs(ts: string | null | undefined): string {

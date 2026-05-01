@@ -38,9 +38,14 @@ const recentEvents = computed(() => {
     .slice(0, 20)
 })
 
-function forceUpdate() {
-  // POST /api/v1/stacks/:id/actions/force-update — wired in 5e
-  console.log('force update stack', stackId.value)
+async function forceUpdate() {
+  try {
+    const api = useApi()
+    await api.post(`/stacks/${stackId.value}/actions/force-update`, {})
+    useToast().success(`Force update queued for stack`)
+  } catch (e) {
+    useToast().error(`Force update failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 </script>
 

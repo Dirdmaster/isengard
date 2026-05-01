@@ -5,14 +5,30 @@ import { useSettingsStore } from '~/stores/settings'
 const settings = useSettingsStore()
 if (!settings.loaded) await settings.load()
 
+const toast = useToast()
+
 const telegramEnabled = computed({
   get: () => Boolean(settings.values['notifier.telegram.enabled']),
-  set: (v: boolean) => { settings.patch({ 'notifier.telegram.enabled': v }) },
+  set: async (v: boolean) => {
+    try {
+      await settings.patch({ 'notifier.telegram.enabled': v })
+      toast.success(`Telegram notifications ${v ? 'enabled' : 'disabled'}`)
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  },
 })
 
 const discordEnabled = computed({
   get: () => Boolean(settings.values['notifier.discord.enabled']),
-  set: (v: boolean) => { settings.patch({ 'notifier.discord.enabled': v }) },
+  set: async (v: boolean) => {
+    try {
+      await settings.patch({ 'notifier.discord.enabled': v })
+      toast.success(`Discord notifications ${v ? 'enabled' : 'disabled'}`)
+    } catch (e) {
+      toast.error(`Save failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  },
 })
 </script>
 

@@ -72,13 +72,18 @@ function selectHost(host: Host) {
   router.push(`/stacks?host_id=${host.id}`)
 }
 
-function handleAction(action: 'force-update' | 'shell' | 'menu', host: Host) {
+async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Host) {
   if (action === 'menu') {
     inspectingHost.value = host
   } else if (action === 'force-update') {
-    useHostActions().forceUpdate(host.id)
+    try {
+      await useHostActions().forceUpdate(host.id)
+      useToast().success(`Force update queued for ${host.hostname}`)
+    } catch (e) {
+      useToast().error(`Force update failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
   } else if (action === 'shell') {
-    // 5e: opens cmd pane terminal mode for the host's first service
+    // 5e+: opens cmd pane terminal mode for the host's first service
   }
 }
 </script>

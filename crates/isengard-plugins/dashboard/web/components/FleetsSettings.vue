@@ -5,16 +5,21 @@ import { useFleetsStore } from '~/stores/fleets'
 const fleetsStore = useFleetsStore()
 if (!fleetsStore.loaded) await fleetsStore.load()
 
+const toast = useToast()
 const newFleetName = ref('')
 const error = ref('')
 
 async function create() {
   error.value = ''
   try {
-    await fleetsStore.create(newFleetName.value.trim())
+    const name = newFleetName.value.trim()
+    await fleetsStore.create(name)
+    toast.success(`Fleet "${name}" created`)
     newFleetName.value = ''
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    const msg = e instanceof Error ? e.message : String(e)
+    error.value = msg
+    toast.error(`Create fleet failed: ${msg}`)
   }
 }
 
@@ -22,8 +27,11 @@ async function remove(name: string) {
   error.value = ''
   try {
     await fleetsStore.remove(name)
+    toast.success(`Fleet "${name}" deleted`)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    const msg = e instanceof Error ? e.message : String(e)
+    error.value = msg
+    toast.error(`Delete fleet failed: ${msg}`)
   }
 }
 </script>
