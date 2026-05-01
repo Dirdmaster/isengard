@@ -127,10 +127,7 @@ const hostFuse = computed(() => new Fuse(hostsStore.hosts, { keys: ['hostname', 
 const eventFuse = computed(() => new Fuse(eventsStore.events, { keys: ['summary', 'kind', 'container_name'] }))
 const stackFuse = computed(() => new Fuse(stacksStore.items, { keys: ['name', 'source'] }))
 
-const defaultActions = computed(() => [
-  { icon: 'lucide:zap', label: 'Force update cycle on all hosts', meta: 'runs now', run: () => alert('TODO 5d: wire force-update RPC') },
-  { icon: 'lucide:terminal', label: 'Open shell on a container', meta: 'pick container next', run: () => alert('TODO 5e: cmd pane terminal mode') },
-])
+const defaultActions = computed<Array<{ icon: string; label: string; meta: string; run: () => void }>>(() => [])
 
 const results = computed(() => {
   if (query.value.length === 0) {
@@ -183,7 +180,7 @@ function selectActive() {
 
 function navigateToHost(h: any) {
   ui.closeCmdPane()
-  router.push(`/hosts/${h.id}`)
+  router.push(`/stacks?host_id=${h.id}`)
 }
 
 function navigateToStack(s: any) {

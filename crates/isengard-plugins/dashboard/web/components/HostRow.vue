@@ -12,14 +12,17 @@ interface Props {
   selected?: boolean
 }
 
-defineProps<Props>()
+const props = defineProps<Props>()
 const emit = defineEmits<{
   click: [host: Host]
   action: [action: 'force-update' | 'shell' | 'menu', host: Host]
 }>()
 
 const stateDot = computed((): string => {
-  // TODO 5e: derive from real state when service snapshot lands
+  const kind = props.latestEvent?.kind
+  if (kind === 'FAILED' || kind === 'update.failed') return 'bg-iso-error'
+  if (kind === 'PULLING' || kind === 'update.pulling') return 'bg-iso-warn'
+  if (kind === 'DISCONNECT' || kind === 'agent.disconnect_long') return 'bg-iso-info'
   return 'bg-iso-success'
 })
 

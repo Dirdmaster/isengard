@@ -23,15 +23,6 @@
 
     <div class="flex-1"></div>
 
-    <!-- Right cluster -->
-    <button
-      class="h-8 px-3 rounded-md bg-iso-bg-overlay border border-iso-border-subtle text-iso-text-secondary text-sm flex items-center gap-1.5 hover:border-iso-border-strong"
-      title="Atlas mode (coming in v1.x)"
-    >
-      <Icon name="lucide:compass" class="w-4 h-4 text-iso-text-muted" />
-      Atlas
-    </button>
-
     <button
       class="h-8 px-3 rounded-md bg-iso-bg-overlay border border-iso-border-subtle text-sm flex items-center gap-2 hover:border-iso-border-strong"
       @click="ui.openCmdPane('navigator')"

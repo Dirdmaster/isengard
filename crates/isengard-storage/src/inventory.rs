@@ -72,6 +72,10 @@ impl Inventory {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES ('default')")
+            .execute(&self.pool)
+            .await?;
+
         Ok(id)
     }
 
@@ -812,9 +816,9 @@ mod tests {
 
         let fleets = inv.list_fleets().await.unwrap();
         let names: std::collections::HashSet<_> = fleets.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains("default"));
         assert!(names.contains("staging"));
         assert!(names.contains("prod"));
+        assert!(!names.contains("default"), "default fleet must NOT exist before any host is enrolled");
 
         let deleted = inv.delete_fleet("staging").await.unwrap();
         assert!(deleted);
