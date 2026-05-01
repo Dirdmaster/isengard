@@ -55,10 +55,10 @@ fn main() {
         }
     }
 
-    // Install if node_modules missing.
-    if !web_dir.join("node_modules").exists() {
-        run("bun", &["install"], &web_dir);
-    }
+    // Always install with --frozen-lockfile. Cheap when nothing changed
+    // (bun checks the lockfile vs node_modules and exits in <1s if in sync).
+    // Catches the case where package.json was updated but node_modules wasn't.
+    run("bun", &["install", "--frozen-lockfile"], &web_dir);
     run("bun", &["run", "build"], &web_dir);
 
     // Verify output exists.
@@ -71,7 +71,22 @@ fn rerun_dir(dir: &Path) {
     if !dir.exists() {
         return;
     }
-    println!("cargo:rerun-if-changed={}", dir.display());
+    // Cargo's rerun-if-changed on a directory is non-recursive. Emit one entry
+    // per file in the subtree so deep edits trigger the build script.
+    fn walk(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                walk(&entry.path());
+            } else if ft.is_file() {
+                println!("cargo:rerun-if-changed={}", entry.path().display());
+            }
+        }
+    }
+    walk(dir);
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
@@ -87,13 +102,16 @@ fn walk_for_newer(dir: &Path, ts: SystemTime) -> bool {
             return false;
         };
         for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
-            if path.is_dir() {
+            if ft.is_dir() {
                 if walk(&path, ts) {
                     return true;
                 }
-            } else if mtime(&path).map_or(false, |t| t > ts) {
-                return true;
+            } else if ft.is_file() {
+                if mtime(&path).map_or(false, |t| t > ts) {
+                    return true;
+                }
             }
         }
         false
