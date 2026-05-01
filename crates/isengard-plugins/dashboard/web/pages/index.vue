@@ -2,19 +2,7 @@
   <AppShell>
     <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden min-h-0">
       <div class="flex flex-col overflow-hidden">
-        <PageHeader title="Activity" :subtitle="activitySubtitle">
-          <template #actions>
-            <Button
-              variant="outline"
-              size="sm"
-              class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
-              @click="addHostOpen = true"
-            >
-              <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
-              Add host
-            </Button>
-          </template>
-        </PageHeader>
+        <PageHeader title="Activity" :subtitle="activitySubtitle" />
 
         <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
           <StateStrip
@@ -28,7 +16,19 @@
             icon="activity"
             title="All quiet"
             description="Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed."
-          />
+          >
+            <template v-if="hostsStore.hosts.length === 0" #cta>
+              <Button
+                variant="outline"
+                size="sm"
+                class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+                @click="addHostOpen = true"
+              >
+                <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
+                Add a host
+              </Button>
+            </template>
+          </EmptyState>
           <EventTimeline v-else />
         </div>
       </div>
