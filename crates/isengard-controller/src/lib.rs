@@ -6,7 +6,9 @@ mod service;
 
 pub mod bus;
 pub mod disconnect_monitor;
+pub mod pending_actions;
 pub mod plugin_host;
+pub mod sync_services;
 pub mod sync_stacks;
 
 use std::net::SocketAddr;

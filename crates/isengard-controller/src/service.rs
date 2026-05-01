@@ -157,12 +157,34 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_stacks failed");
                         }
 
+                        if let Err(e) = crate::sync_services::process_heartbeat_services(
+                            &inventory,
+                            host_id,
+                            &hb.services,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_services failed");
+                        }
+
+                        let pending_actions = match crate::pending_actions::collect_pending_actions(
+                            &inventory, host_id,
+                        )
+                        .await
+                        {
+                            Ok(actions) => actions,
+                            Err(e) => {
+                                tracing::error!(error = %e, agent = %agent_hostname, "collect_pending_actions failed");
+                                vec![]
+                            }
+                        };
+
                         let ack = ControllerMessage {
                             payload: Some(
                                 isengard_proto::pb::controller_message::Payload::HeartbeatAck(
                                     isengard_proto::pb::HeartbeatAck {
                                         server_time_ms: (server_ts as u64) * 1000,
-                                        pending_actions: vec![],
+                                        pending_actions,
                                     },
                                 ),
                             ),
