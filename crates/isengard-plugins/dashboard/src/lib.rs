@@ -10,16 +10,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::Path;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 #[allow(unused_imports)] // TODO(5b): IntoResponse used by API/WS handlers
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use isengard_core::{
-    Capability, CoreError, Plugin, PluginContext, PluginRegistration, Result,
-};
+use isengard_core::{Capability, CoreError, Plugin, PluginContext, PluginRegistration, Result};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use tokio::task::JoinHandle;

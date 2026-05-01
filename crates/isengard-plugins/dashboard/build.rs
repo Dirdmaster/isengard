@@ -34,7 +34,10 @@ fn main() {
                 web_dir.display()
             );
         }
-        println!("cargo:warning=bun not found; using pre-built bundle at {}", output_index.display());
+        println!(
+            "cargo:warning=bun not found; using pre-built bundle at {}",
+            output_index.display()
+        );
         return;
     }
 
@@ -63,7 +66,10 @@ fn main() {
 
     // Verify output exists.
     if !output_index.exists() {
-        panic!("bun run build completed but {} doesn't exist", output_index.display());
+        panic!(
+            "bun run build completed but {} doesn't exist",
+            output_index.display()
+        );
     }
 }
 
