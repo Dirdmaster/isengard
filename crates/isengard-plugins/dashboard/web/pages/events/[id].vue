@@ -12,7 +12,7 @@ const event = computed(() => eventsStore.events.find((e) => e.id === id.value))
 </script>
 
 <template>
-  <div class="h-screen flex flex-col">
+  <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
     <div v-if="event" class="p-6 max-w-3xl">
       <NuxtLink to="/events" class="text-xs text-iso-text-muted hover:text-iso-text-primary">

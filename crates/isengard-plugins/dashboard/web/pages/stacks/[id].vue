@@ -50,7 +50,7 @@ async function forceUpdate() {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col">
+  <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
     <div v-if="stack && host" class="flex-1 overflow-y-auto">
       <StackHeader

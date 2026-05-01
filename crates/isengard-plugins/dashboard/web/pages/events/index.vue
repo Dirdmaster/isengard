@@ -56,7 +56,7 @@ function openEvent(e: { id: number }) {
 </script>
 
 <template>
-  <div class="flex flex-col h-screen">
+  <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
     <div class="flex items-center gap-2 px-4 py-3 border-b border-iso-border-subtle flex-wrap">
       <span class="text-xs uppercase tracking-wider text-iso-text-faint mr-2">Filter</span>

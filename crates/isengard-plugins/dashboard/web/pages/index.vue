@@ -1,5 +1,5 @@
 <template>
-  <div class="h-screen flex flex-col">
+  <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
 
     <!-- Zero hosts: never enrolled -->

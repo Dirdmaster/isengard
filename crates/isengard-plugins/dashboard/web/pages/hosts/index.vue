@@ -89,7 +89,7 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
 </script>
 
 <template>
-  <div class="h-screen flex flex-col">
+  <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
     <FleetWeather
       :buckets="fleetWeatherBuckets"

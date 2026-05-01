@@ -1,5 +1,5 @@
 <template>
-  <div class="h-screen flex flex-col">
+  <div class="flex-1 flex flex-col min-h-0">
     <TopBar />
     <div class="max-w-3xl mx-auto w-full p-6 overflow-y-auto">
       <h1 class="font-mono text-xl mb-1">Settings</h1>
