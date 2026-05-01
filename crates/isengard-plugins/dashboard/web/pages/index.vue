@@ -10,10 +10,16 @@
         <p class="text-iso-sm text-iso-text-muted mb-6">
           Add your first host and watch its containers appear in real time.
         </p>
-        <NuxtLink to="/hosts" class="inline-flex items-center gap-2 px-4 py-2 rounded-iso-md border border-iso-border-subtle hover:border-iso-success text-iso-text-primary">
-          <Icon name="lucide:plus" class="w-3.5 h-3.5" />
-          Add a host
-        </NuxtLink>
+        <Button
+          variant="outline"
+          as-child
+          class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+        >
+          <NuxtLink to="/hosts">
+            <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
+            Add a host
+          </NuxtLink>
+        </Button>
       </div>
     </div>
 
@@ -37,7 +43,6 @@
       <Inspector />
     </main>
 
-    <BottomStatusBar :connection-state="connectionState" :event-count="eventsStore.events.length" />
     <CmdPane />
     <HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />
   </div>
@@ -50,7 +55,6 @@ const eventsStore = useEventsStore()
 const hostsStore = useHostsStore()
 const fleetsStore = useFleetsStore()
 const ui = useUiStore()
-const { connectionState } = useEventStream()
 
 onMounted(async () => {
   await Promise.all([

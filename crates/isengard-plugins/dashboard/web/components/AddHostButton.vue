@@ -5,12 +5,14 @@ const open = ref(false)
 </script>
 
 <template>
-  <button
-    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-iso-border-subtle hover:border-iso-success hover:text-iso-success text-sm transition-colors"
+  <Button
+    variant="outline"
+    size="sm"
+    class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success font-medium"
     @click="open = true"
   >
-    <Icon name="lucide:plus" class="w-3.5 h-3.5" />
+    <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
     Add host
-  </button>
+  </Button>
   <AddHostModal v-if="open" @close="open = false" />
 </template>

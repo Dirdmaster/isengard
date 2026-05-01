@@ -76,9 +76,9 @@ function formatTs(ts: string | null | undefined): string {
           <h2 class="font-mono text-base">{{ host.hostname }}</h2>
           <span class="text-xs text-iso-text-muted">· {{ host.fleet }}</span>
         </div>
-        <button class="text-iso-text-muted hover:text-iso-text-primary" @click="$emit('close')">
+        <Button variant="ghost" size="icon" class="text-iso-text-muted hover:text-iso-text-primary" @click="$emit('close')">
           <Icon name="lucide:x" class="w-4 h-4" />
-        </button>
+        </Button>
       </header>
 
       <section class="px-5 py-5 space-y-4">
@@ -104,26 +104,40 @@ function formatTs(ts: string | null | undefined): string {
           <select v-model="newFleet" class="bg-iso-bg-elevated border border-iso-border-subtle rounded px-2 py-1 text-sm font-mono">
             <option v-for="f in fleets.fleets" :key="f.name" :value="f.name">{{ f.name }}</option>
           </select>
-          <button class="text-xs px-2 py-1 rounded border border-iso-border-subtle hover:border-iso-success" @click="applyFleet">Apply</button>
-          <button class="text-xs text-iso-text-muted" @click="editingFleet = false">Cancel</button>
+          <Button size="sm" variant="outline" @click="applyFleet">Apply</Button>
+          <Button size="sm" variant="ghost" @click="editingFleet = false">Cancel</Button>
         </div>
         <p v-if="error" class="text-xs text-iso-error">{{ error }}</p>
       </section>
 
-      <section class="px-5 py-5 border-t border-iso-border-subtle space-y-3">
-        <div class="text-xs uppercase tracking-wider text-iso-text-faint">Quick actions</div>
-        <button class="w-full px-3 py-2 text-sm rounded border border-iso-border-subtle hover:border-iso-success flex items-center gap-2" @click="forceUpdate">
-          <Icon name="lucide:zap" class="w-3.5 h-3.5" />
+      <section class="px-5 py-5 border-t border-iso-border-subtle space-y-2">
+        <div class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">Quick actions</div>
+        <Button
+          variant="outline"
+          class="w-full justify-start border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+          @click="forceUpdate"
+        >
+          <Icon name="lucide:zap" class="w-3.5 h-3.5 mr-2" />
           Force update all stacks on this host
-        </button>
-        <NuxtLink :to="`/stacks?host_id=${host.id}`" class="block w-full px-3 py-2 text-sm rounded border border-iso-border-subtle hover:border-iso-success flex items-center gap-2">
-          <Icon name="lucide:layers" class="w-3.5 h-3.5" />
-          View stacks on this host
-        </NuxtLink>
-        <button class="w-full px-3 py-2 text-sm rounded border border-iso-border-subtle hover:border-iso-error/50 text-iso-error flex items-center gap-2" @click="decommission">
-          <Icon name="lucide:trash-2" class="w-3.5 h-3.5" />
+        </Button>
+        <Button
+          variant="outline"
+          as-child
+          class="w-full justify-start border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+        >
+          <NuxtLink :to="`/stacks?host_id=${host.id}`">
+            <Icon name="lucide:layers" class="w-3.5 h-3.5 mr-2" />
+            View stacks on this host
+          </NuxtLink>
+        </Button>
+        <Button
+          variant="outline"
+          class="w-full justify-start border-iso-error/40 text-iso-error hover:bg-iso-error/10 hover:border-iso-error"
+          @click="decommission"
+        >
+          <Icon name="lucide:trash-2" class="w-3.5 h-3.5 mr-2" />
           Decommission host
-        </button>
+        </Button>
       </section>
     </aside>
   </div>

@@ -1,6 +1,9 @@
 <template>
-  <div class="min-h-screen bg-iso-bg-base text-iso-text-primary font-sans antialiased">
-    <NuxtPage />
+  <div class="min-h-screen flex flex-col bg-iso-bg-base text-iso-text-primary font-sans antialiased">
+    <div class="flex-1 flex flex-col min-h-0">
+      <NuxtPage />
+    </div>
+    <BottomStatusBar :connection-state="connectionState" :event-count="eventsStore.events.length" />
     <Toaster
       theme="dark"
       :toast-options="{
@@ -23,5 +26,8 @@
 </template>
 
 <script setup lang="ts">
+const eventsStore = useEventsStore()
+const { connectionState } = useEventStream()
+
 useShortcuts()
 </script>

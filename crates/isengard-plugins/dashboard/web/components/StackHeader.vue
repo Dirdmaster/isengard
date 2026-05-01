@@ -27,12 +27,13 @@ defineEmits<{ 'force-update': [] }>()
         · source {{ stack.source }}
       </div>
     </div>
-    <button
-      class="px-3 py-1.5 text-sm rounded border border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+    <Button
+      variant="outline"
+      class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
       @click="$emit('force-update')"
     >
-      <Icon name="lucide:zap" class="w-3.5 h-3.5 inline mr-1" />
+      <Icon name="lucide:zap" class="w-3.5 h-3.5 mr-1.5" />
       Force update stack
-    </button>
+    </Button>
   </header>
 </template>
