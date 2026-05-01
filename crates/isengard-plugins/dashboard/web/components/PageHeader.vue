@@ -1,5 +1,5 @@
 <template>
-  <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border-subtle shrink-0">
+  <header class="flex items-center justify-between gap-4 min-h-14 px-4 py-2 border-b border-iso-border-subtle shrink-0">
     <div class="flex items-center gap-3 min-w-0">
       <h1 class="font-mono text-base text-iso-text-primary shrink-0">{{ title }}</h1>
       <span v-if="subtitle" class="text-xs text-iso-text-muted truncate">{{ subtitle }}</span>
