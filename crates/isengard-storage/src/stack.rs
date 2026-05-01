@@ -80,8 +80,17 @@ mod tests {
 
     #[test]
     fn stack_source_serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&StackSource::Compose).unwrap(), "\"compose\"");
-        assert_eq!(serde_json::to_string(&StackSource::Manual).unwrap(), "\"manual\"");
-        assert_eq!(serde_json::to_string(&StackSource::Inferred).unwrap(), "\"inferred\"");
+        assert_eq!(
+            serde_json::to_string(&StackSource::Compose).unwrap(),
+            "\"compose\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StackSource::Manual).unwrap(),
+            "\"manual\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StackSource::Inferred).unwrap(),
+            "\"inferred\""
+        );
     }
 }

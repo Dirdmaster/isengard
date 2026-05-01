@@ -72,7 +72,10 @@ pub fn derive_stacks(containers: &[ContainerSnapshot]) -> Vec<StackInfo> {
             (c.name.clone(), "inferred")
         };
 
-        grouped.entry((name, source)).or_default().push(c.name.clone());
+        grouped
+            .entry((name, source))
+            .or_default()
+            .push(c.name.clone());
     }
 
     grouped
@@ -95,7 +98,10 @@ mod tests {
     fn snap(name: &str, labels: &[(&str, &str)]) -> ContainerSnapshot {
         ContainerSnapshot {
             name: name.into(),
-            labels: labels.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
         }
     }
 

@@ -139,7 +139,7 @@ async fn patch_host(
                 return json_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("set_host_fleet: {e}"),
-                )
+                );
             }
         }
     }
@@ -249,7 +249,7 @@ async fn list_stacks(
             return json_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("list_stacks: {e}"),
-            )
+            );
         }
     };
 
@@ -260,7 +260,7 @@ async fn list_stacks(
                 return json_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("list_hosts: {e}"),
-                )
+                );
             }
         };
         let allowed: std::collections::HashSet<_> = hosts
@@ -275,10 +275,7 @@ async fn list_stacks(
     Json(dtos).into_response()
 }
 
-async fn get_stack(
-    State(handles): State<Arc<ControllerHandles>>,
-    Path(id): Path<i64>,
-) -> Response {
+async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path<i64>) -> Response {
     match handles.inventory.get_stack(StackId(id)).await {
         Ok(Some(s)) => Json(StackDto::from(s)).into_response(),
         Ok(None) => json_err(StatusCode::NOT_FOUND, "stack not found"),
@@ -342,7 +339,7 @@ async fn get_host_sparkline(
             return json_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("list_recent: {e}"),
-            )
+            );
         }
     };
 

@@ -139,14 +139,12 @@ impl Inventory {
     pub async fn insert_stack(&self, req: InsertStack) -> Result<StackId> {
         // Upsert: SQLite's INSERT ... ON CONFLICT DO UPDATE doesn't return the
         // existing id, so we INSERT OR IGNORE then SELECT to fetch the id.
-        sqlx::query(
-            "INSERT OR IGNORE INTO stacks (host_id, name, source) VALUES (?, ?, ?)",
-        )
-        .bind(req.host_id.to_bytes().as_slice())
-        .bind(&req.name)
-        .bind(req.source.as_str())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT OR IGNORE INTO stacks (host_id, name, source) VALUES (?, ?, ?)")
+            .bind(req.host_id.to_bytes().as_slice())
+            .bind(&req.name)
+            .bind(req.source.as_str())
+            .execute(&self.pool)
+            .await?;
 
         let row = sqlx::query("SELECT id FROM stacks WHERE host_id = ? AND name = ?")
             .bind(req.host_id.to_bytes().as_slice())
@@ -177,10 +175,11 @@ impl Inventory {
     }
 
     pub async fn get_stack(&self, id: StackId) -> Result<Option<Stack>> {
-        let row = sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE id = ?")
-            .bind(id.0)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE id = ?")
+                .bind(id.0)
+                .fetch_optional(&self.pool)
+                .await?;
         row.map(stack_from_row).transpose()
     }
 
@@ -211,8 +210,9 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&host_bytes);
     let source_str: String = row.try_get("source")?;
-    let source = StackSource::from_str(&source_str)
-        .ok_or_else(|| Error::Decode { reason: format!("unknown stack source: {source_str}") })?;
+    let source = StackSource::from_str(&source_str).ok_or_else(|| Error::Decode {
+        reason: format!("unknown stack source: {source_str}"),
+    })?;
     let discovered_at: chrono::DateTime<chrono::Utc> = row.try_get("discovered_at")?;
     Ok(Stack {
         id: StackId(row.try_get("id")?),
@@ -459,7 +459,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(id1, id2, "second insert with same (host_id, name) should return the same id");
+        assert_eq!(
+            id1, id2,
+            "second insert with same (host_id, name) should return the same id"
+        );
 
         let listed = inv.list_stacks(Some(host_id)).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -489,6 +492,9 @@ mod tests {
 
         let missing = HostId::new();
         let updated = inv.set_host_fleet(missing, "prod").await.unwrap();
-        assert!(!updated, "set_host_fleet should return false when row does not exist");
+        assert!(
+            !updated,
+            "set_host_fleet should return false when row does not exist"
+        );
     }
 }
