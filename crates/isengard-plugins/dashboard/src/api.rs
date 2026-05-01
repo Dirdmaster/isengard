@@ -134,11 +134,7 @@ async fn enroll_host(
     // Resolve the controller URL the agent should dial. Reads from settings
     // (set on first run via Settings → Networking) and falls back to the
     // dashboard's own host. Strips any trailing /api or /install.sh suffix.
-    let dashboard_url = match handles
-        .inventory
-        .get_setting("controller.public_url")
-        .await
-    {
+    let dashboard_url = match handles.inventory.get_setting("controller.public_url").await {
         Ok(Some(v)) => v.as_str().map(String::from).unwrap_or_else(default_url),
         _ => default_url(),
     };

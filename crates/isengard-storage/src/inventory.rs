@@ -818,7 +818,10 @@ mod tests {
         let names: std::collections::HashSet<_> = fleets.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains("staging"));
         assert!(names.contains("prod"));
-        assert!(!names.contains("default"), "default fleet must NOT exist before any host is enrolled");
+        assert!(
+            !names.contains("default"),
+            "default fleet must NOT exist before any host is enrolled"
+        );
 
         let deleted = inv.delete_fleet("staging").await.unwrap();
         assert!(deleted);
