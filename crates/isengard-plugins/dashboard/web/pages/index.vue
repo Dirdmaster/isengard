@@ -43,11 +43,14 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { shouldShowWizard } from '~/stores/wizard'
 
 const eventsStore = useEventsStore()
 const hostsStore = useHostsStore()
 const fleetsStore = useFleetsStore()
 const ui = useUiStore()
+const router = useRouter()
 
 const addHostOpen = ref(false)
 
@@ -57,6 +60,9 @@ onMounted(async () => {
     hostsStore.load(),
     fleetsStore.load(),
   ])
+  if (hostsStore.hosts.length === 0 && shouldShowWizard()) {
+    router.replace('/welcome')
+  }
 })
 
 const fleetsToShow = computed(() => {
