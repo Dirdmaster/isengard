@@ -149,6 +149,14 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "touch_host failed");
                         }
 
+                        if let Err(e) = crate::sync_stacks::process_heartbeat_stacks(
+                            &inventory,
+                            host_id,
+                            &hb.stacks,
+                        ).await {
+                            tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_stacks failed");
+                        }
+
                         let ack = ControllerMessage {
                             payload: Some(
                                 isengard_proto::pb::controller_message::Payload::HeartbeatAck(
