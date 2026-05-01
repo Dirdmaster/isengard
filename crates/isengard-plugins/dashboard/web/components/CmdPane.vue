@@ -1,7 +1,12 @@
 <template>
   <Teleport to="body">
     <div v-if="ui.cmdPaneOpen" class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm pt-[180px]" @click.self="ui.closeCmdPane()">
-      <div class="w-[640px] max-w-full bg-iso-bg-overlay border border-iso-border-strong rounded-iso-lg shadow-2xl overflow-hidden flex flex-col" @click.stop style="max-height: 70vh">
+      <div
+        v-if="ui.cmdPaneMode === 'navigator'"
+        class="w-[640px] max-w-full bg-iso-bg-overlay border border-iso-border-strong rounded-iso-lg shadow-2xl overflow-hidden flex flex-col"
+        @click.stop
+        style="max-height: 70vh"
+      >
         <CmdInput v-model="query" @keydown="onKey" />
 
         <div class="flex-1 overflow-y-auto py-1.5">
@@ -72,6 +77,24 @@
           <div class="flex-1"></div>
           <span>⌘. dock · esc close</span>
         </div>
+      </div>
+
+      <div
+        v-else-if="ui.cmdPaneMode === 'terminal' && ui.cmdPaneTerminal"
+        class="absolute bottom-0 left-0 right-0 h-[400px] bg-iso-bg-overlay border-t border-iso-border-strong shadow-2xl"
+        @click.stop
+      >
+        <ClientOnly>
+          <CmdTerminal
+            :service-id="ui.cmdPaneTerminal.serviceId"
+            :service-name="ui.cmdPaneTerminal.serviceName"
+            :host-hostname="ui.cmdPaneTerminal.hostHostname"
+            :fleet="ui.cmdPaneTerminal.fleet"
+            :stack-name="ui.cmdPaneTerminal.stackName"
+            @toggle-position="ui.toggleCmdPanePosition()"
+            @close="ui.closeCmdPane()"
+          />
+        </ClientOnly>
       </div>
     </div>
   </Teleport>
