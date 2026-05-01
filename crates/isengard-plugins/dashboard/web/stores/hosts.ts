@@ -9,6 +9,9 @@ export interface Host {
   enrolled_at: string
   last_seen_at: string | null
   agent_version: string | null
+  os?: string | null
+  arch?: string | null
+  docker_version?: string | null
 }
 
 export const useHostsStore = defineStore('hosts', () => {
