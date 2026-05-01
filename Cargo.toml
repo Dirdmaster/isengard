@@ -59,6 +59,15 @@ sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio
 ulid = { version = "1.1.3", features = ["serde"] }
 chrono = { version = "0.4.39", default-features = false, features = ["serde", "clock"] }
 
+# HTTP server (dashboard)
+axum = { version = "0.8.1", default-features = false, features = ["http1", "http2", "tokio", "json", "ws", "macros"] }
+
+# embedded static assets (dashboard bundle)
+rust-embed = { version = "8.5.0", features = ["compression"] }
+
+# mime type detection for embedded asset serving
+mime_guess = "2.0.5"
+
 # crypto helpers
 subtle = "2.6.1"
 
@@ -94,6 +103,7 @@ isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
 isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
 isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }
 isengard-plugin-notifier = { path = "crates/isengard-plugins/notifier", version = "0.1.0-alpha" }
+isengard-plugin-dashboard = { path = "crates/isengard-plugins/dashboard", version = "0.1.0-alpha" }
 
 [profile.release]
 lto = "thin"

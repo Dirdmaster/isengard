@@ -6,6 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Isengard dashboard plugin (populated in a later phase)"
+description = "Dashboard plugin for Isengard — Nuxt 3 SPA + axum"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+inventory.workspace = true
+isengard-controller.workspace = true
+isengard-core.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+tower.workspace = true
+tracing.workspace = true
