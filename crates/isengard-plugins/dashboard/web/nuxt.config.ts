@@ -1,5 +1,6 @@
 export default defineNuxtConfig({
   compatibilityDate: '2026-05-01',
+  telemetry: false,
   ssr: false,  // SPA mode — Rust serves the static bundle
   modules: [
     '@nuxtjs/tailwindcss',

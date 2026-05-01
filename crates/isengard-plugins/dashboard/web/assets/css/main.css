@@ -2,8 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body {
-  background: #0b0d0f;
-  color: #e6e8eb;
-  font-family: Inter, system-ui, sans-serif;
+@layer base {
+  html, body {
+    @apply bg-iso-bg-base text-iso-text-primary font-sans;
+  }
 }
