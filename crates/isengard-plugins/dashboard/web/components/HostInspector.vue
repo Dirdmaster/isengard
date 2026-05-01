@@ -41,7 +41,15 @@ async function forceUpdate() {
 }
 
 async function decommission() {
-  if (!confirm(`Decommission ${props.host.hostname}? This revokes its token and removes it from inventory.`)) return
+  const { confirm } = useConfirm()
+  const ok = await confirm({
+    title: `Decommission ${props.host.hostname}?`,
+    description: 'This revokes its enrollment token and removes it from inventory. The agent on the host will no longer report. This cannot be undone.',
+    confirmText: 'Decommission',
+    danger: true,
+  })
+  if (!ok) return
+
   try {
     await actions.decommission(props.host.id)
     toast.success(`${props.host.hostname} decommissioned`)

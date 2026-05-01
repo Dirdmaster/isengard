@@ -24,6 +24,15 @@ async function create() {
 }
 
 async function remove(name: string) {
+  const { confirm } = useConfirm()
+  const ok = await confirm({
+    title: `Delete fleet "${name}"?`,
+    description: 'The fleet tag is removed. Hosts assigned to this fleet must be reassigned first.',
+    confirmText: 'Delete',
+    danger: true,
+  })
+  if (!ok) return
+
   error.value = ''
   try {
     await fleetsStore.remove(name)
