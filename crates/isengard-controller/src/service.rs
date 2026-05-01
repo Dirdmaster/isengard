@@ -79,6 +79,30 @@ impl Controller for ControllerService {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
+        // Emit agent.enroll event so dashboard subscribers (e.g. the
+        // onboarding wizard's listening step) can react in real time.
+        let display_name = if req.hostname.is_empty() {
+            "host".to_string()
+        } else {
+            req.hostname.clone()
+        };
+        let event = isengard_core::Event {
+            kind: "agent.enroll".to_string(),
+            occurred_at: chrono::Utc::now(),
+            host_id: Some(id.0),
+            summary: format!(
+                "{} enrolled (fingerprint {})",
+                display_name,
+                req.fingerprint.chars().take(12).collect::<String>(),
+            ),
+            metadata: serde_json::json!({
+                "fingerprint": req.fingerprint,
+                "hostname": req.hostname,
+            }),
+            ..Default::default()
+        };
+        crate::persist_and_broadcast(&self.journal, &self.bus, event).await;
+
         Ok(Response::new(EnrollResponse {
             agent_id: id.to_string(),
             heartbeat_interval_secs: 10,

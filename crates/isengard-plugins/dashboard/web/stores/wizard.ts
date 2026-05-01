@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch, type WatchStopHandle } from 'vue'
 import type { Host } from '~/stores/hosts'
 
 export type WizardStep = 1 | 2 | 3 | 4
@@ -20,10 +20,13 @@ export const useWizardStore = defineStore('wizard', () => {
   const error = ref<string | null>(null)
   const startedAt = ref(0)
 
-  // Mock-data fallback used by Phase 6a so the flow renders end-to-end without
-  // any backend wiring. Phase 6b replaces issueToken/listenForEnroll bodies.
-  const useMock = ref(true)
+  // useMock can be flipped by the dev console (window.__wizardMock = true) or
+  // a future ?mock=1 query param. Production default is FALSE — wizard uses
+  // the real /api/v1/hosts endpoint and watches the live event stream for
+  // agent.enroll events matching its issued host id.
+  const useMock = ref(false)
   let mockTimerId: ReturnType<typeof setTimeout> | null = null
+  let stopEnrollWatcher: WatchStopHandle | null = null
 
   function reset() {
     step.value = 1
@@ -40,6 +43,10 @@ export const useWizardStore = defineStore('wizard', () => {
     if (mockTimerId) {
       clearTimeout(mockTimerId)
       mockTimerId = null
+    }
+    if (stopEnrollWatcher) {
+      stopEnrollWatcher()
+      stopEnrollWatcher = null
     }
   }
 
@@ -108,8 +115,51 @@ export const useWizardStore = defineStore('wizard', () => {
       }, 5000)
       return
     }
-    // Phase 6b: subscribe to /ws/events, filter for kind === 'agent.enroll'
-    // matching hostId.value, then advance to step 4.
+
+    // Real path: watch the global event stream (already running from app.vue
+    // via useEventStream + eventsStore) for an agent.enroll event matching
+    // our issued host id. The id is the controller-assigned ULID returned by
+    // POST /hosts. The agent dials enroll → controller persists + publishes
+    // → eventsStore.events updates → this watcher fires.
+    const eventsStore = useEventsStore()
+    const hostsStore = useHostsStore()
+    stopEnrollWatcher = watch(
+      () => eventsStore.events,
+      async (events) => {
+        if (!hostId.value) return
+        const match = events.find(
+          (e) => e.kind === 'agent.enroll' && e.host_id === hostId.value,
+        )
+        if (!match) return
+
+        // Found it. Refresh the hosts store and pull the row.
+        await hostsStore.load()
+        const enrolled = hostsStore.hosts.find((h) => h.id === hostId.value)
+        if (enrolled) {
+          enrolledHost.value = enrolled
+        }
+
+        // Stack/service discovery counts come from later heartbeats. Best
+        // effort: peek at the stacks store; fall back to 0 (Step 4 renders
+        // a graceful "Agent reporting" line in that case).
+        try {
+          const stacksStore = useStacksStore()
+          if (!stacksStore.loaded) await stacksStore.fetchAll()
+          const hostStacks = stacksStore.byHost(hostId.value)
+          discoveredStacks.value = hostStacks.length
+          // Stack DTO doesn't carry per-service counts yet; approximate as
+          // 1 service per stack until Phase 5d's service rollup ships.
+          discoveredServices.value = hostStacks.length
+        } catch { /* discovery counts are best-effort */ }
+
+        step.value = 4
+        if (stopEnrollWatcher) {
+          stopEnrollWatcher()
+          stopEnrollWatcher = null
+        }
+      },
+      { deep: false, immediate: true },
+    )
   }
 
   function next() {

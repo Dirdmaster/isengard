@@ -131,10 +131,23 @@ async fn enroll_host(
         );
     }
 
-    // TODO 5e+: derive controller_url from runtime config rather than hardcoding.
-    let controller_url = "http://localhost:9418";
-    let install_command =
-        format!("curl -fsSL {controller_url}/install.sh | sh -s -- --token {token}",);
+    // Resolve the controller URL the agent should dial. Reads from settings
+    // (set on first run via Settings → Networking) and falls back to the
+    // dashboard's own host. Strips any trailing /api or /install.sh suffix.
+    let dashboard_url = match handles
+        .inventory
+        .get_setting("controller.public_url")
+        .await
+    {
+        Ok(Some(v)) => v.as_str().map(String::from).unwrap_or_else(default_url),
+        _ => default_url(),
+    };
+    let agent_url = dashboard_url
+        .replace(":9418", ":9417")
+        .trim_end_matches('/')
+        .to_string();
+
+    let install_command = render_docker_run_command(&agent_url, &token);
 
     Json(EnrollmentDto {
         agent_id,
@@ -142,6 +155,26 @@ async fn enroll_host(
         install_command,
     })
     .into_response()
+}
+
+fn default_url() -> String {
+    "http://controller.local:9418".to_string()
+}
+
+/// Builds the multi-line `docker run` command shown to the user during
+/// onboarding. Single source of truth — both the wizard and any docs that
+/// need to embed an example install command should call this.
+fn render_docker_run_command(controller_url: &str, token: &str) -> String {
+    [
+        "docker run -d --name isengard-agent --restart=always \\".to_string(),
+        "  -v /var/run/docker.sock:/var/run/docker.sock \\".to_string(),
+        "  -v isengard-agent-data:/var/lib/isengard \\".to_string(),
+        format!("  -e CONTROLLER_URL={controller_url} \\"),
+        format!("  -e ENROLLMENT_TOKEN={token} \\"),
+        "  --group-add $(stat -c %g /var/run/docker.sock) \\".to_string(),
+        "  ghcr.io/dirdmaster/isengard-agent:latest".to_string(),
+    ]
+    .join("\n")
 }
 
 async fn force_update_host(
@@ -872,8 +905,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let install_cmd = parsed["install_command"].as_str().unwrap();
         let token = parsed["enrollment_token"].as_str().unwrap();
-        assert!(install_cmd.starts_with("curl"));
-        assert!(install_cmd.contains(token));
+        assert!(install_cmd.starts_with("docker run"));
+        assert!(install_cmd.contains("isengard-agent"));
+        assert!(install_cmd.contains("-v /var/run/docker.sock"));
+        assert!(install_cmd.contains("CONTROLLER_URL="));
+        assert!(install_cmd.contains(&format!("ENROLLMENT_TOKEN={token}")));
     }
 
     #[tokio::test]
