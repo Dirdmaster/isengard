@@ -27,6 +27,8 @@ export const useWizardStore = defineStore('wizard', () => {
   const useMock = ref(false)
   let mockTimerId: ReturnType<typeof setTimeout> | null = null
   let stopEnrollWatcher: WatchStopHandle | null = null
+  let tickIntervalId: ReturnType<typeof setInterval> | null = null
+  const nowTick = ref(0)
 
   function reset() {
     step.value = 1
@@ -47,6 +49,10 @@ export const useWizardStore = defineStore('wizard', () => {
     if (stopEnrollWatcher) {
       stopEnrollWatcher()
       stopEnrollWatcher = null
+    }
+    if (tickIntervalId) {
+      clearInterval(tickIntervalId)
+      tickIntervalId = null
     }
   }
 
@@ -95,6 +101,9 @@ export const useWizardStore = defineStore('wizard', () => {
 
   function listenForEnroll() {
     startedAt.value = Date.now()
+    nowTick.value = startedAt.value
+    if (tickIntervalId) clearInterval(tickIntervalId)
+    tickIntervalId = setInterval(() => { nowTick.value = Date.now() }, 1000)
     if (useMock.value) {
       mockTimerId = setTimeout(() => {
         enrolledHost.value = {
@@ -194,9 +203,11 @@ export const useWizardStore = defineStore('wizard', () => {
     reset()
   }
 
-  const elapsedSeconds = computed(() =>
-    startedAt.value === 0 ? 0 : Math.floor((Date.now() - startedAt.value) / 1000)
-  )
+  const elapsedSeconds = computed(() => {
+    if (startedAt.value === 0) return 0
+    const ref = nowTick.value || Date.now()
+    return Math.floor((ref - startedAt.value) / 1000)
+  })
 
   return {
     step,
