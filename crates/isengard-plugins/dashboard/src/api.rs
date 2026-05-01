@@ -535,6 +535,62 @@ fn parse_host_id(s: &str) -> Result<HostId, String> {
     Ok(HostId::from(ulid))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InstallShQuery {
+    pub token: Option<String>,
+}
+
+const INSTALL_SH_TEMPLATE: &str = include_str!("../templates/install.sh.tmpl");
+
+pub async fn install_sh(
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<InstallShQuery>,
+) -> Response {
+    let token = match q.token {
+        Some(t) => t,
+        None => return json_err(StatusCode::BAD_REQUEST, "missing token query"),
+    };
+
+    // Basic format guard before hitting the DB (avoid SQL on garbage).
+    if token.len() != 26 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return json_err(StatusCode::FORBIDDEN, "invalid token format");
+    }
+
+    let key = format!("enrollment.token.{token}");
+    let entry = match handles.inventory.get_setting(&key).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return json_err(StatusCode::FORBIDDEN, "token not found or already used"),
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_setting: {e}")),
+    };
+
+    let fleet = entry
+        .get("fleet")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+    let hostname = entry
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // TODO 5e+: derive controller_url from runtime config rather than hardcoding.
+    let controller_url = "http://localhost:9418";
+
+    let body = INSTALL_SH_TEMPLATE
+        .replace("{{controller_url}}", controller_url)
+        .replace("{{token}}", &token)
+        .replace("{{fleet}}", fleet)
+        .replace("{{hostname_or_default}}", hostname);
+
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/x-shellscript; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +861,91 @@ mod tests {
         let token = parsed["enrollment_token"].as_str().unwrap();
         assert!(install_cmd.starts_with("curl"));
         assert!(install_cmd.contains(token));
+    }
+
+    #[tokio::test]
+    async fn install_sh_with_valid_token_returns_bash_script() {
+        let handles = test_handles().await;
+        handles
+            .inventory
+            .set_setting(
+                "enrollment.token.01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                &serde_json::json!({
+                    "agent_id": "01HX0000000000000000000001",
+                    "fleet": "staging",
+                    "hostname": null,
+                }),
+            )
+            .await
+            .unwrap();
+
+        use axum::Router;
+        let app: Router = Router::new()
+            .route("/install.sh", get(install_sh))
+            .with_state(handles);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/install.sh?token=01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/x-shellscript; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert!(body_str.starts_with("#!/usr/bin/env bash"));
+        assert!(body_str.contains("ISENGARD_TOKEN=\"01ARZ3NDEKTSV4RRFFQ69G5FAV\""));
+        assert!(body_str.contains("ISENGARD_FLEET=\"staging\""));
+    }
+
+    #[tokio::test]
+    async fn install_sh_with_missing_token_returns_400() {
+        let handles = test_handles().await;
+        use axum::Router;
+        let app: Router = Router::new()
+            .route("/install.sh", get(install_sh))
+            .with_state(handles);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/install.sh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn install_sh_with_unknown_token_returns_403() {
+        let handles = test_handles().await;
+        use axum::Router;
+        let app: Router = Router::new()
+            .route("/install.sh", get(install_sh))
+            .with_state(handles);
+
+        // 26-char alphanumeric format passes the basic guard but isn't in the DB.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/install.sh?token=01ARZ3NDEKTSV4RRFFQ69G5FAW")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
