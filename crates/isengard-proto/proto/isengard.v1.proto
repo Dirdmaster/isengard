@@ -63,8 +63,17 @@ message SyncHello {
   string agent_id = 1;
 }
 
+message StackInfo {
+  string name = 1;
+  // One of: "compose", "manual", "inferred".
+  string source = 2;
+  // Container names that belong to this stack on this host.
+  repeated string services = 3;
+}
+
 message Heartbeat {
   uint64 ts_ms = 1; // agent's local clock at send time
+  repeated StackInfo stacks = 2;
 }
 
 message ControllerMessage {

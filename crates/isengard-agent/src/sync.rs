@@ -97,7 +97,7 @@ pub async fn run_sync_loop(
                         .unwrap_or(0);
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
-                            Heartbeat { ts_ms },
+                            Heartbeat { ts_ms, stacks: vec![] },
                         )),
                     };
                     if hb_tx.send(msg).await.is_err() {
