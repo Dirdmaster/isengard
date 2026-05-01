@@ -1,10 +1,10 @@
-# Phase 5d — Hosts + Host Detail + Stacks + Stack Detail Implementation Plan
+# Phase 5d — Hosts + Stacks + Stack Detail Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the Stack entity end-to-end (migration → storage → agent discovery → controller persist → dashboard API → UI) and ship the four entity pages (Hosts table, Host Detail, Stacks table, Stack Detail).
+**Goal:** Land the Stack entity end-to-end (migration → storage → agent discovery → controller persist → dashboard API → UI) and ship the three entity pages (Hosts table, Stacks table, Stack Detail) plus the `<HostInspector>` slide-over for host metadata + actions.
 
-**Architecture:** New `stacks` table + `hosts.fleet` column (`0003`/`0004` migrations). `isengard-storage` gains a `Stack` model and inventory methods. Agent's existing inventory snapshot is extended with stack metadata derived from `com.docker.compose.project` (or `isengard.stack=` override) labels. Controller's sync handler upserts stacks via the new inventory methods. Dashboard's REST API replaces the v1 stub stacks endpoints with real handlers. Four Vue pages render the data using shared components (`<HostRow>`, `<HostCard>`, `<StackRow>`, `<ServiceChip>`, `<Sparkline>`, `<FleetWeather>`).
+**Architecture:** New `stacks` table + `hosts.fleet` column (`0003`/`0004` migrations). `isengard-storage` gains a `Stack` model and inventory methods. Agent's existing inventory snapshot is extended with stack metadata derived from `com.docker.compose.project` (or `isengard.stack=` override) labels. Controller's sync handler upserts stacks via the new inventory methods. Dashboard's REST API replaces the v1 stub stacks endpoints with real handlers. Three Vue pages render the data using shared components (`<HostRow>`, `<StackRow>`, `<ServiceChip>`, `<Sparkline>`, `<FleetWeather>`, `<HostInspector>`). Clicking a hostname in the Hosts table navigates to `/stacks?host_id=<id>`; clicking the row's ellipsis opens the slide-over.
 
 **Tech Stack:** Rust (sqlx 0.8, axum 0.8, tonic 0.13), TypeScript / Vue 3 / Nuxt 3 / Tailwind 4 / Pinia.
 
@@ -47,15 +47,15 @@
   - `StackDto`, `ServiceDto`, `SparklineDto`
   - `HostDto` updated to read real `fleet` from storage (drop the `"default"` placeholder)
 - Frontend pages (under `crates/isengard-plugins/dashboard/web/pages/`):
-  - `hosts/index.vue` — Hosts table v2 enhanced (full-width, no inspector)
-  - `hosts/[id].vue` — Host Detail (cards-with-stacks layout)
-  - `stacks/index.vue` — Stacks table (flat sortable, all stacks across fleet/hosts)
+  - `hosts/index.vue` — Hosts table v2 enhanced (full-width). Hostname links to `/stacks?host_id=<id>`. Row ellipsis opens HostInspector.
+  - `stacks/index.vue` — Stacks table (flat sortable, all stacks across fleet/hosts; reads `?host_id=` query)
   - `stacks/[id].vue` — Stack Detail (services + recent events + history)
 - New Pinia stores: `stores/stacks.ts`, `stores/services.ts`
 - New composables: `composables/useSparkline.ts`, `composables/useHostActions.ts`
 - New components in `crates/isengard-plugins/dashboard/web/components/`:
   - `HostRow.vue`, `HostsTable.vue`, `FleetWeather.vue`, `Sparkline.vue`, `StatusPill.vue`
-  - `HostCard.vue`, `StackRow.vue`, `ServiceChip.vue`
+  - `HostInspector.vue` (slide-over — host metadata + actions; full implementation here, no separate Host Detail page)
+  - `StackRow.vue`, `ServiceChip.vue`
   - `StacksTable.vue`, `StackHeader.vue`
   - `AddHostButton.vue` (button only — modal lands in 5e)
 - TopBar tab activation (Home / Hosts / Stacks / Events / Settings) wired up via `useRoute()`
@@ -86,7 +86,7 @@
    - T1: controller running with at least 2 hosts enrolled, each with at least one Docker Compose project labelled correctly
    - T2: agent on each host emits a heartbeat containing `StackInfo` for each project
    - T3: `curl -s http://localhost:9418/api/v1/stacks | jq .` returns the discovered stacks (not empty)
-   - Browser: navigate `/hosts` → see HostsTable with sparklines, latest event, hover actions; click `prod-01` → see Host Detail with HostCard listing the stacks; click `wordpress` stack → see StackDetail with service chips
+   - Browser: navigate `/hosts` → see HostsTable with sparklines, latest event, hover actions; click `prod-01` hostname → land on `/stacks?host_id=<prod-01-id>` filtered to that host; click ellipsis on `prod-01` row → HostInspector slide-over opens with metadata + actions; click `wordpress` stack → see StackDetail with service chips
    - Switch fleet picker → table refilters
 6. Tag `v0.1.0-alpha.phase5d` set locally
 7. **Not pushed**
@@ -130,7 +130,7 @@ crates/isengard-plugins/dashboard/web/
 │   ├── FleetWeather.vue                # NEW
 │   ├── Sparkline.vue                   # NEW
 │   ├── StatusPill.vue                  # NEW
-│   ├── HostCard.vue                    # NEW
+│   ├── HostInspector.vue               # NEW (slide-over)
 │   ├── StackRow.vue                    # NEW
 │   ├── ServiceChip.vue                 # NEW
 │   ├── StacksTable.vue                 # NEW
@@ -138,10 +138,9 @@ crates/isengard-plugins/dashboard/web/
 │   └── AddHostButton.vue               # NEW (modal in 5e)
 ├── pages/
 │   ├── hosts/
-│   │   ├── index.vue                   # NEW
-│   │   └── [id].vue                    # NEW
+│   │   └── index.vue                   # NEW (no [id].vue — use HostInspector slide-over instead)
 │   └── stacks/
-│       ├── index.vue                   # NEW
+│       ├── index.vue                   # NEW (reads ?host_id= query)
 │       └── [id].vue                    # NEW
 ├── stores/
 │   ├── stacks.ts                       # NEW
@@ -1919,85 +1918,127 @@ git commit -m "feat(dashboard-web): HostsTable v2 components — HostRow, FleetW
 
 ---
 
-## Task 11: HostCard + page assembly: /hosts and /hosts/:id
+## Task 11: HostInspector slide-over + page assembly: /hosts
 
 **Files:**
-- Create: `crates/isengard-plugins/dashboard/web/components/HostCard.vue`
+- Create: `crates/isengard-plugins/dashboard/web/components/HostInspector.vue`
 - Create: `crates/isengard-plugins/dashboard/web/pages/hosts/index.vue`
-- Create: `crates/isengard-plugins/dashboard/web/pages/hosts/[id].vue`
 - Modify: `crates/isengard-plugins/dashboard/web/components/TopBar.vue`
 
-- [ ] **Step 1: Write HostCard.vue**
+There is no `/hosts/:id` page. Per the design spec, clicking a hostname navigates to `/stacks?host_id=<id>` (filtered Stacks list); clicking the row's ellipsis (or the hover menu) opens the `<HostInspector>` slide-over with metadata + actions.
+
+- [ ] **Step 1: Write HostInspector.vue**
 
 ```vue
 <script setup lang="ts">
 import type { Host } from '~/stores/hosts'
-import type { Stack } from '~/stores/stacks'
+import { useHostActions } from '~/composables/useHostActions'
+import { useFleetsStore } from '~/stores/fleets'
 
 interface Props {
   host: Host
-  stacks: Stack[]
-  // services keyed by stack_id
-  services: Record<string, { name: string; state?: 'running' | 'stopped' | 'restarting' | 'unknown' }[]>
-  hasIssues: boolean
 }
 
 const props = defineProps<Props>()
-const expanded = ref(props.hasIssues) // healthy hosts are collapsed by default
+const emit = defineEmits<{ close: []; changed: [] }>()
 
-const totalServices = computed(() =>
-  Object.values(props.services).reduce((acc, s) => acc + s.length, 0)
-)
+const fleets = useFleetsStore()
+if (!fleets.loaded) await fleets.fetchAll()
+
+const actions = useHostActions()
+const editingFleet = ref(false)
+const newFleet = ref(props.host.fleet)
+const error = ref('')
+
+async function applyFleet() {
+  error.value = ''
+  try {
+    await actions.setFleet(props.host.id, newFleet.value)
+    editingFleet.value = false
+    emit('changed')
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function forceUpdate() {
+  await actions.forceUpdate(props.host.id)
+}
+
+async function decommission() {
+  if (!confirm(`Decommission ${props.host.hostname}? This revokes its token and removes it from inventory.`)) return
+  await actions.decommission(props.host.id)
+  emit('close')
+  emit('changed')
+}
+
+function formatTs(ts: string | null | undefined): string {
+  if (!ts) return '—'
+  return new Date(ts).toLocaleString()
+}
 </script>
 
 <template>
-  <article class="rounded-lg border border-iso-border bg-iso-bg-elevated/30 overflow-hidden">
-    <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border">
-      <div class="flex items-center gap-3">
-        <span class="w-2.5 h-2.5 rounded-full" :class="hasIssues ? 'bg-iso-error' : 'bg-iso-success'" />
-        <h3 class="font-mono text-base">{{ host.hostname }}</h3>
-        <span class="text-xs text-iso-text-muted">· {{ host.fleet }}</span>
-      </div>
-      <div class="flex items-center gap-3 text-xs text-iso-text-muted font-mono">
-        <span>{{ stacks.length }} stacks</span>
-        <span>·</span>
-        <span>{{ totalServices }} services</span>
-        <span>·</span>
-        <span>agent {{ host.agent_version }}</span>
-      </div>
-    </header>
+  <div class="fixed inset-0 z-40 flex justify-end" @click.self="$emit('close')">
+    <div class="absolute inset-0 bg-black/30" />
+    <aside class="relative z-10 w-[420px] h-full bg-iso-bg-base border-l border-iso-border overflow-y-auto">
+      <header class="flex items-center justify-between px-5 py-4 border-b border-iso-border">
+        <div class="flex items-center gap-3">
+          <span class="w-2.5 h-2.5 rounded-full bg-iso-success" />
+          <h2 class="font-mono text-base">{{ host.hostname }}</h2>
+          <span class="text-xs text-iso-text-muted">· {{ host.fleet }}</span>
+        </div>
+        <button class="text-iso-text-muted hover:text-iso-text-base" @click="$emit('close')">
+          <Icon name="lucide:x" :size="18" />
+        </button>
+      </header>
 
-    <div v-if="!hasIssues && !expanded" class="px-4 py-3">
-      <button
-        class="text-sm text-iso-success flex items-center gap-2"
-        @click="expanded = true"
-      >
-        <Icon name="lucide:check" :size="14" />
-        All {{ stacks.length }} stacks healthy
-        <span class="text-iso-text-faint">· show all ▾</span>
-      </button>
-    </div>
+      <section class="px-5 py-5 space-y-4">
+        <div class="text-xs uppercase tracking-wider text-iso-text-faint">Metadata</div>
+        <dl class="grid grid-cols-[120px_1fr] gap-y-2 text-sm font-mono">
+          <dt class="text-iso-text-muted">os</dt>           <dd>{{ host.os }}</dd>
+          <dt class="text-iso-text-muted">arch</dt>         <dd>{{ host.arch }}</dd>
+          <dt class="text-iso-text-muted">agent</dt>        <dd>{{ host.agent_version }}</dd>
+          <dt class="text-iso-text-muted">docker</dt>       <dd>{{ host.docker_version }}</dd>
+          <dt class="text-iso-text-muted">enrolled</dt>     <dd class="text-iso-text-secondary">{{ formatTs(host.enrolled_at) }}</dd>
+          <dt class="text-iso-text-muted">last seen</dt>    <dd class="text-iso-text-secondary">{{ formatTs(host.last_seen_at) }}</dd>
+          <dt class="text-iso-text-muted">fingerprint</dt>  <dd class="text-iso-text-faint truncate">{{ host.fingerprint }}</dd>
+        </dl>
+      </section>
 
-    <div v-else class="divide-y divide-iso-border">
-      <StackRow
-        v-for="stack in stacks"
-        :key="stack.id"
-        :stack="stack"
-        :services="services[stack.id] ?? []"
-        @click="$router.push(`/stacks/${stack.id}`)"
-      />
-    </div>
+      <section class="px-5 py-5 border-t border-iso-border space-y-3">
+        <div class="text-xs uppercase tracking-wider text-iso-text-faint">Fleet</div>
+        <div v-if="!editingFleet" class="flex items-center gap-3">
+          <span class="font-mono text-sm">{{ host.fleet }}</span>
+          <button class="text-xs text-iso-text-muted hover:text-iso-text-base underline" @click="editingFleet = true">Change</button>
+        </div>
+        <div v-else class="flex items-center gap-2">
+          <select v-model="newFleet" class="bg-iso-bg-elevated border border-iso-border rounded px-2 py-1 text-sm font-mono">
+            <option v-for="f in fleets.items" :key="f.name" :value="f.name">{{ f.name }}</option>
+          </select>
+          <button class="text-xs px-2 py-1 rounded border border-iso-border hover:border-iso-success" @click="applyFleet">Apply</button>
+          <button class="text-xs text-iso-text-muted" @click="editingFleet = false">Cancel</button>
+        </div>
+        <p v-if="error" class="text-xs text-iso-error">{{ error }}</p>
+      </section>
 
-    <footer v-if="hasIssues || expanded" class="px-4 py-2 border-t border-iso-border text-xs text-iso-text-faint">
-      <button
-        v-if="!hasIssues"
-        class="hover:text-iso-text-muted"
-        @click="expanded = false"
-      >
-        Collapse
-      </button>
-    </footer>
-  </article>
+      <section class="px-5 py-5 border-t border-iso-border space-y-3">
+        <div class="text-xs uppercase tracking-wider text-iso-text-faint">Quick actions</div>
+        <button class="w-full px-3 py-2 text-sm rounded border border-iso-border hover:border-iso-success flex items-center gap-2" @click="forceUpdate">
+          <Icon name="lucide:zap" :size="14" />
+          Force update all stacks on this host
+        </button>
+        <NuxtLink :to="`/stacks?host_id=${host.id}`" class="block w-full px-3 py-2 text-sm rounded border border-iso-border hover:border-iso-success flex items-center gap-2">
+          <Icon name="lucide:layers" :size="14" />
+          View stacks on this host
+        </NuxtLink>
+        <button class="w-full px-3 py-2 text-sm rounded border border-iso-border hover:border-iso-error/50 text-iso-error flex items-center gap-2" @click="decommission">
+          <Icon name="lucide:trash-2" :size="14" />
+          Decommission host
+        </button>
+      </section>
+    </aside>
+  </div>
 </template>
 ```
 
@@ -2111,13 +2152,25 @@ const latestEvents = computed(() => {
 const totalEvents = computed(() => fleetWeatherBuckets.value.reduce((a, b) => a + b, 0))
 
 const router = useRouter()
+const inspectingHost = ref<typeof hostsStore.items[number] | null>(null)
+
 function selectHost(host: { id: string }) {
-  router.push(`/hosts/${host.id}`)
+  // Hostname click → filtered Stacks list. Inspector is opened via the row's
+  // ellipsis action; see handleAction below.
+  router.push(`/stacks?host_id=${host.id}`)
 }
 
-function handleAction(action: string, host: { id: string }) {
-  // Wired to useHostActions — full UX in 5e
-  console.log('action', action, host.id)
+function handleAction(action: string, host: typeof hostsStore.items[number]) {
+  if (action === 'menu') {
+    inspectingHost.value = host
+  } else if (action === 'force-update') {
+    // Quick row-level shortcut; full UX in HostInspector
+    import('~/composables/useHostActions').then(({ useHostActions }) => {
+      useHostActions().forceUpdate(host.id)
+    })
+  } else if (action === 'shell') {
+    // 5e: opens cmd pane terminal mode for the host's first service
+  }
 }
 </script>
 
@@ -2150,97 +2203,29 @@ function handleAction(action: string, host: { id: string }) {
       <kbd class="px-1.5 py-0.5 bg-iso-bg-elevated rounded">Enter</kbd> open ·
       <kbd class="px-1.5 py-0.5 bg-iso-bg-elevated rounded">⌘K</kbd> cmd
     </div>
-  </div>
-</template>
-```
 
-- [ ] **Step 4: Write pages/hosts/[id].vue**
-
-```vue
-<script setup lang="ts">
-import { useHostsStore } from '~/stores/hosts'
-import { useStacksStore } from '~/stores/stacks'
-import { useEventsStore } from '~/stores/events'
-
-const route = useRoute()
-const hostId = computed(() => route.params.id as string)
-
-const hostsStore = useHostsStore()
-const stacksStore = useStacksStore()
-const eventsStore = useEventsStore()
-
-await Promise.all([
-  hostsStore.fetchOne(hostId.value),
-  stacksStore.fetchAll({ host_id: hostId.value }),
-  eventsStore.fetchRecent({ host_id: hostId.value, limit: 50 }),
-])
-
-const host = computed(() => hostsStore.byId(hostId.value))
-const stacks = computed(() => stacksStore.byHost(hostId.value))
-
-// services per stack derived from the heartbeat-time StackInfo (until 5e
-// adds a real services table, the page renders chip names from a temporary
-// map that lives in the stack itself in v1; the agent sends them and the
-// UI reads from a parallel `services` field on stack if present)
-const services = ref<Record<string, { name: string; state?: 'running' | 'stopped' | 'restarting' | 'unknown' }[]>>({})
-
-const hasIssues = computed(() =>
-  eventsStore.items.some((e) => e.kind === 'FAILED' && e.host_id === hostId.value)
-)
-</script>
-
-<template>
-  <div v-if="host" class="p-6 space-y-4">
-    <header class="flex items-center justify-between">
-      <div>
-        <NuxtLink to="/hosts" class="text-xs text-iso-text-muted hover:text-iso-text-base">
-          ← Hosts
-        </NuxtLink>
-        <h1 class="font-mono text-xl mt-1">{{ host.hostname }}</h1>
-        <div class="text-sm text-iso-text-muted mt-1">
-          {{ host.os }} · {{ host.arch }} · agent {{ host.agent_version }} · fleet
-          <select class="bg-transparent text-iso-text-base">
-            <option>{{ host.fleet }}</option>
-          </select>
-        </div>
-      </div>
-      <div class="flex items-center gap-2">
-        <button class="px-3 py-1.5 text-sm rounded border border-iso-border hover:border-iso-success">
-          Force update
-        </button>
-        <button class="px-3 py-1.5 text-sm rounded border border-iso-border hover:border-iso-error/50 text-iso-error">
-          Decommission
-        </button>
-      </div>
-    </header>
-
-    <HostCard
-      :host="host"
-      :stacks="stacks"
-      :services="services"
-      :has-issues="hasIssues"
+    <HostInspector
+      v-if="inspectingHost"
+      :host="inspectingHost"
+      @close="inspectingHost = null"
+      @changed="hostsStore.fetchAll()"
     />
   </div>
-
-  <div v-else class="p-6 text-iso-text-muted">
-    Host not found.
-  </div>
 </template>
 ```
 
-- [ ] **Step 5: Build + smoke**
+- [ ] **Step 4: Build + smoke**
 
 Run: `bun --cwd crates/isengard-plugins/dashboard/web run build`
-Expected: PASS.
+Expected: PASS — Nuxt builds with no TypeScript errors. Verify in the browser: hostname click jumps to `/stacks?host_id=<id>`; ellipsis opens the inspector with metadata + actions.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add crates/isengard-plugins/dashboard/web/components/HostCard.vue \
+git add crates/isengard-plugins/dashboard/web/components/HostInspector.vue \
         crates/isengard-plugins/dashboard/web/components/TopBar.vue \
-        crates/isengard-plugins/dashboard/web/pages/hosts/index.vue \
-        crates/isengard-plugins/dashboard/web/pages/hosts/[id].vue
-git commit -m "feat(dashboard-web): /hosts table page + /hosts/:id detail with HostCard"
+        crates/isengard-plugins/dashboard/web/pages/hosts/index.vue
+git commit -m "feat(dashboard-web): /hosts table page + HostInspector slide-over (no /hosts/:id)"
 ```
 
 ---
@@ -2669,7 +2654,8 @@ curl -s http://localhost:9418/api/v1/hosts | jq '.[].fleet'
 
 Then in a browser: `http://localhost:9418`
 - Click `Hosts` tab → see the host listed with fleet=staging, sparkline showing recent events, latest event visible
-- Click the host → see Host Detail with the `blog` stack listed, expanded because there might be initial check events
+- Click the hostname → land on `/stacks?host_id=<id>` filtered to that host with the `blog` stack visible
+- Click the row's ellipsis on the same host → HostInspector slide-over opens with metadata, fleet selector, force-update / decommission actions
 - Click `blog` stack → see Stack Detail with `web` and `db` service chips
 - Click `Stacks` tab → see `blog` listed flat
 - Switch fleet picker to "All fleets" / "staging" → verify filter works
@@ -2712,7 +2698,7 @@ After writing this plan, re-check against the spec:
    - Frontend stores + composables: ✅ Task 8
    - Leaf components (Sparkline, StatusPill, StackRow, ServiceChip): ✅ Task 9
    - Hosts table v2 (HostRow + HostsTable + FleetWeather + AddHostButton): ✅ Task 10
-   - HostCard + /hosts pages + TopBar tab activation: ✅ Task 11
+   - HostInspector slide-over + /hosts page + TopBar tab activation: ✅ Task 11 (no /hosts/:id — hostname links to /stacks?host_id=)
    - Stacks tab + Stack Detail: ✅ Task 12
    - Cmd pane extension: ✅ Task 13
    - End-to-end smoke + tag: ✅ Task 14

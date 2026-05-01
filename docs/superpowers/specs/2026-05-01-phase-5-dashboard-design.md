@@ -191,14 +191,15 @@ When cmd pane is docked at bottom: **the cmd pane absorbs the bottom area** (320
 |---|---|---|
 | `/` | Home (event timeline + state strip + inspector) | `Home · Timeline (v1 — locked)` |
 | `/hosts` | Hosts table | `Hosts tab v2 (enhanced)` |
-| `/hosts/:id` | Host Detail (cards with stacks) | `Host Detail · staging` |
-| `/stacks` | Stacks table (cross-fleet) | not mocked — adapts Hosts pattern |
-| `/stacks/:id` | Stack Detail (services, events, history) | not mocked — adapts Host Detail pattern |
-| `/events` | Event journal (full, filterable) | not mocked — adapts Home timeline |
+| `/stacks` | Stacks table (cross-fleet, filterable by `?host_id=`) | `Stacks tab` |
+| `/stacks/:id` | Stack Detail (services, events, history) | `Stack detail · blog` |
+| `/events` | Event journal (full, filterable) | `Events tab` |
 | `/events/:id` | Event detail (rare deep-link) | not mocked — adapts inspector |
-| `/settings` | Settings (fleets, channels, agent enrollment) | not mocked — conventional form patterns |
+| `/settings` | Settings (fleets, channels, agent enrollment) | `Settings` |
 
 All routes share the top bar + cmd pane chrome.
+
+**Note: there is no `/hosts/:id` page.** Earlier iterations had a Host Detail page using cards-with-stacks. That layout was redundant — the Hosts table already exposes per-host info (sparkline, latest event, stack count) and the Stacks table is filterable by host. Clicking a hostname in the Hosts table navigates to `/stacks?host_id=<id>`. Host-level metadata (OS, agent version) and actions (decommission, change fleet) live in a `<HostInspector>` slide-over panel triggered by the row's ellipsis menu.
 
 ---
 
@@ -285,17 +286,16 @@ Each component below has: **Intent** (what it's for), **Pencil reference** (fram
 - **Composition:** label + wide sparkline + summary text + range selector
 - **Props:** `:events` (last 24h aggregated), `:range`, `@range-change`
 
-### `<HostCard />` (Host Detail page)
-- **Intent:** rich card for a single host showing its stacks
-- **Pencil:** `Host card · prod-01` etc. (inside `Host Detail · staging`)
-- **Variants:** healthy (collapsed-default, single "All N stacks healthy" line), with-issues (expanded showing problem stacks)
-- **Composition:** card frame + header (host info + stats summary + agent meta) + stacks list
-- **Props:** `:host`, `:stacks`, `:expanded`, `@toggle`
+### `<HostInspector />` (slide-over)
+- **Intent:** slide-over panel showing host metadata + actions, triggered by Hosts row ellipsis menu
+- **Pencil:** not mocked — conventional slide-over pattern (see Inspector variants)
+- **Composition:** SECTION LABEL + entity header (icon + hostname + fleet) + KV block (OS, arch, agent version, docker version, enrolled at, last seen) + Quick Actions (Force update, Open shell, Change fleet, Decommission)
+- **Props:** `:host`, `@close`, `@action`
 
-### `<StackRow />` (inside HostCard)
-- **Intent:** one stack within a host's card
-- **Pencil:** `Stack · wordpress` etc.
-- **Composition:** row frame + layers icon + stack name + service count meta + service chips (right-aligned)
+### `<StackRow />` (inside StacksTable / Stack detail body)
+- **Intent:** one stack row (used in tables and embedded lists)
+- **Pencil:** `Stack · ...` rows (inside `Stacks tab` and `Stack detail · blog`)
+- **Composition:** row frame + layers icon + stack name + service count meta + service chips (right-aligned, optional)
 - **Props:** `:stack`, `:services`, `@click`
 
 ### `<ServiceChip />`
@@ -588,7 +588,7 @@ Explicitly NOT in Phase 5:
 | **5a** | Nuxt scaffold + Tailwind + bundle pipeline + axum static-serving | `2026-05-01-phase-5a-dashboard-scaffold.md` |
 | **5b** | REST API endpoints + WebSocket `/ws/events` + Pinia stores | `2026-05-01-phase-5b-api-and-ws.md` |
 | **5c** | Home view (state strip + event timeline + inspector + cmd pane navigator) | `2026-05-01-phase-5c-home-view.md` |
-| **5d** | Hosts table + Host Detail + Stacks table + Stack Detail | `2026-05-01-phase-5d-hosts-stacks.md` |
+| **5d** | Hosts table + HostInspector slide-over + Stacks table + Stack Detail | `2026-05-01-phase-5d-hosts-stacks.md` |
 | **5e** | Events tab + Settings + Add host modal + cmd pane terminal mode | `2026-05-01-phase-5e-events-settings-shell.md` |
 
 Each sub-phase is independently shippable. After 5a the bundle pipeline works (just shows a placeholder page). After 5b the API contract is testable (curlable). 5c through 5e build the actual UI in incremental layers.
@@ -609,20 +609,34 @@ Each sub-phase is independently shippable. After 5a the bundle pipeline works (j
 
 ## 15. Visual fidelity reference
 
-The Pencil source (`design/app.pen`) contains 13 frames at the time of this spec:
+The Pencil source (`design/app.pen`) is organized into 4 labeled rows:
 
+**Row 1 — HOME · chosen + iterations** (y=200):
 1. `Home · Timeline (v1 — locked)` — canonical home view
-2. `Home · Drawer collapsed` — abandoned VS-Code drawer pattern (reference only)
-3. `Home · Drawer expanded` — abandoned VS-Code drawer pattern (reference only)
-4. `Home · Cmd pane (navigator + terminal)` — center mode, navigator showing "prod" search
-5. `Home · Cmd pane (terminal mode)` — center mode, transformed into shell session
-6. `Home · Cmd pane (snap to bottom)` — abandoned floating-popover bottom-snap (reference only)
-7. `Home · Cmd pane (docked & integrated)` — chosen docked-bottom-integrated model
-8. `Hosts tab` — abandoned simple flat table (reference only — superseded by v2)
-9. `Host Detail · staging` — host detail page with cards-with-stacks layout
-10. `Hosts tab v2 (enhanced)` — chosen Hosts table with sparklines + inline latest event + hover actions + fleet weather strip + add-host button + keyboard hints, full-width (no inspector)
+2. `Home · Cmd pane (navigator + terminal)` — center mode, navigator showing "prod" search
+3. `Home · Cmd pane (terminal mode)` — center mode, transformed into shell session
+4. `Home · Cmd pane (docked & integrated)` — chosen docked-bottom-integrated model
+5. `Cmd pane · docked logs` — Hosts page with cmd pane docked at bottom showing live `docker logs -f db` output
+
+**Row 2 — HOME · abandoned variants** (y=1300, reference only):
+6. `Home · Drawer collapsed` — abandoned VS-Code drawer pattern
+7. `Home · Drawer expanded` — abandoned VS-Code drawer pattern
+8. `Home · Cmd pane (snap to bottom)` — abandoned floating-popover bottom-snap
+
+**Row 3 — HOSTS** (y=2400):
+9. `Hosts tab v2 (enhanced)` — chosen Hosts table with sparklines + inline latest event + hover actions + fleet weather strip + add-host button + keyboard hints
+10. `Add host modal (over Hosts)` — dimmed Hosts page with centered modal showing fleet/hostname form + generated curl install command + Copy/Done actions
+11. `Hosts tab` — abandoned simple flat table (reference only — superseded by v2)
+
+**Row 4 — STACKS · EVENTS · SETTINGS** (y=3500):
+12. `Stacks tab` — flat sortable table across hosts/fleets, source column (compose/manual/inferred)
+13. `Stack detail · blog` — header with force-update + 2-column body (services left, recent events right)
+14. `Events tab` — filter chip bar (per-kind toggleable + host filter) + dense rows under day labels
+15. `Settings` — three sections: Fleets (CRUD), Notifiers (Telegram/Discord toggles), Agent enrollment (generate command)
 
 Plus reusable variables (35 design tokens) declared at the document level.
+
+**Removed in iteration:** `Host Detail · staging` was deleted after we realized the Hosts table v2 + Stacks table (filterable by host) covered the same ground without a dedicated page. Host metadata + actions live in the `<HostInspector>` slide-over (see §6).
 
 ---
 
