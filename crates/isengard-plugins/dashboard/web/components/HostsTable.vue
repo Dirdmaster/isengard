@@ -49,7 +49,11 @@ function lastSeenRelative(host: Host): string {
       icon="server"
       title="No hosts yet"
       description="Add your first host to start tracking containers across your fleet."
-    />
+    >
+      <template #cta>
+        <AddHostButton />
+      </template>
+    </EmptyState>
 
     <template v-else>
       <HostRow
