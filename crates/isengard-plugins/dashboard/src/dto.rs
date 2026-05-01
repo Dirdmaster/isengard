@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use isengard_core::Event;
-use isengard_storage::{EventRow, Host};
+use isengard_storage::{EventRow, Host, Stack};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +143,54 @@ pub struct HostsQuery {
     pub state: Option<String>,
 }
 
+#[allow(dead_code)] // Used by Task 7 API handlers landing next.
+#[derive(Debug, Clone, Serialize)]
+pub struct StackDto {
+    pub id: String,
+    pub host_id: String,
+    pub name: String,
+    /// One of "compose", "manual", "inferred".
+    pub source: String,
+    pub discovered_at: DateTime<Utc>,
+}
+
+impl From<Stack> for StackDto {
+    fn from(s: Stack) -> Self {
+        Self {
+            id: s.id.0.to_string(),
+            host_id: ulid::Ulid::from(s.host_id).to_string(),
+            name: s.name,
+            source: s.source.as_str().to_string(),
+            discovered_at: s.discovered_at,
+        }
+    }
+}
+
+#[allow(dead_code)] // Used by Task 7 API handlers landing next.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceDto {
+    /// Synthetic id: `{host_id}:{container_name}`. Containers don't have
+    /// stable database ids in v1 — they're tracked by name within a host.
+    pub id: String,
+    pub host_id: String,
+    pub stack_id: Option<String>,
+    pub name: String,
+    pub image: String,
+    /// One of "running", "stopped", "restarting", "unknown".
+    pub state: String,
+}
+
+#[allow(dead_code)] // Used by Task 7 API handlers landing next.
+#[derive(Debug, Clone, Serialize)]
+pub struct SparklineDto {
+    /// Number of buckets (typically 24 for a 24h range, one per hour).
+    pub buckets: Vec<u32>,
+    /// Range queried, e.g. "24h".
+    pub range: String,
+    /// Sum of all buckets — convenience for the row's "N events" summary.
+    pub total: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +236,47 @@ mod tests {
         let dto: EventDto = row.into();
         assert_eq!(dto.id, 7);
         assert_eq!(dto.metadata["k"], "v");
+    }
+
+    #[test]
+    fn stack_dto_maps_from_storage_stack() {
+        use chrono::TimeZone;
+        use isengard_storage::{HostId, Stack, StackId, StackSource};
+
+        let host_id = HostId::new();
+        let s = Stack {
+            id: StackId(7),
+            host_id,
+            name: "wordpress".into(),
+            source: StackSource::Compose,
+            discovered_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+        };
+
+        let dto: StackDto = s.into();
+        assert_eq!(dto.id, "7");
+        assert_eq!(dto.host_id, ulid::Ulid::from(host_id).to_string());
+        assert_eq!(dto.name, "wordpress");
+        assert_eq!(dto.source, "compose");
+    }
+
+    #[test]
+    fn host_dto_carries_real_fleet() {
+        use isengard_storage::{Host, HostId};
+        let h = Host {
+            id: HostId::new(),
+            fingerprint: "fp".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            agent_version: "0.1.0".into(),
+            docker_version: "27.0".into(),
+            enrolled_at: 0,
+            last_seen_at: None,
+            metadata: serde_json::json!({}),
+            fleet: "prod".into(),
+        };
+
+        let dto: HostDto = h.into();
+        assert_eq!(dto.fleet, "prod");
     }
 }
