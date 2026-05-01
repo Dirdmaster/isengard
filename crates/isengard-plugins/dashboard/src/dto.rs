@@ -143,7 +143,6 @@ pub struct HostsQuery {
     pub state: Option<String>,
 }
 
-#[allow(dead_code)] // Used by Task 7 API handlers landing next.
 #[derive(Debug, Clone, Serialize)]
 pub struct StackDto {
     pub id: String,
@@ -166,7 +165,6 @@ impl From<Stack> for StackDto {
     }
 }
 
-#[allow(dead_code)] // Used by Task 7 API handlers landing next.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceDto {
     /// Synthetic id: `{host_id}:{container_name}`. Containers don't have
@@ -180,7 +178,6 @@ pub struct ServiceDto {
     pub state: String,
 }
 
-#[allow(dead_code)] // Used by Task 7 API handlers landing next.
 #[derive(Debug, Clone, Serialize)]
 pub struct SparklineDto {
     /// Number of buckets (typically 24 for a 24h range, one per hour).
