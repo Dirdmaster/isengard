@@ -37,7 +37,11 @@ const rows = computed(() => {
 
 <template>
   <AppShell>
-    <PageHeader title="Stacks" :subtitle="`${rows.length} ${rows.length === 1 ? 'stack' : 'stacks'}`" />
+    <PageHeader title="Stacks" :subtitle="`${rows.length} ${rows.length === 1 ? 'stack' : 'stacks'}`">
+      <template #actions>
+        <AddHostButton />
+      </template>
+    </PageHeader>
     <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
       <TableSkeleton v-if="!stacksStore.loaded" :rows="6" :columns="[200, 170, 70, 70, 400, 90]" />
       <StacksTable v-else :rows="rows" class="flex-1 flex flex-col min-h-0" />
