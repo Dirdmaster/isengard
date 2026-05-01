@@ -3,6 +3,39 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    /* Map shadcn tokens onto our iso-* palette. Values are HSL triplets. */
+    --background:           220 11% 5%;     /* iso-bg-base #0b0d0f */
+    --foreground:           215 12% 91%;    /* iso-text-primary #e6e8eb */
+
+    --card:                 215 16% 7%;     /* iso-bg-elevated */
+    --card-foreground:      215 12% 91%;
+
+    --popover:              215 16% 9%;     /* iso-bg-overlay */
+    --popover-foreground:   215 12% 91%;
+
+    --primary:              215 12% 91%;
+    --primary-foreground:   220 11% 5%;
+
+    --secondary:            215 16% 7%;
+    --secondary-foreground: 215 12% 91%;
+
+    --muted:                215 16% 7%;
+    --muted-foreground:     215 9% 56%;     /* iso-text-muted */
+
+    --accent:               215 16% 9%;
+    --accent-foreground:    215 12% 91%;
+
+    --destructive:          0 91% 71%;      /* iso-error */
+    --destructive-foreground: 215 12% 91%;
+
+    --border:               215 12% 13%;    /* iso-border-subtle */
+    --input:                215 12% 13%;
+    --ring:                 142 71% 58%;    /* iso-success — focus ring */
+
+    --radius: 0.5rem;
+  }
+
   html, body {
     @apply bg-iso-bg-base text-iso-text-primary font-sans;
   }

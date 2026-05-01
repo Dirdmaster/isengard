@@ -6,7 +6,12 @@ export default defineNuxtConfig({
     '@nuxtjs/tailwindcss',
     '@nuxt/icon',
     '@pinia/nuxt',
+    'shadcn-nuxt',
   ],
+  shadcn: {
+    prefix: '',
+    componentDir: './components/ui',
+  },
   css: [
     '@fontsource/inter/400.css',
     '@fontsource/inter/500.css',
