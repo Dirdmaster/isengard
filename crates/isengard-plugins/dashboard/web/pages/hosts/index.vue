@@ -98,7 +98,9 @@ function handleAction(action: 'force-update' | 'shell' | 'menu', host: Host) {
       </div>
       <AddHostButton @click="$router.push('/hosts?add=1')" />
     </div>
+    <TableSkeleton v-if="!hostsStore.loaded" :rows="6" />
     <HostsTable
+      v-else
       :hosts="filteredHosts"
       :sparklines="sparklines"
       :stack-counts="stackCounts"

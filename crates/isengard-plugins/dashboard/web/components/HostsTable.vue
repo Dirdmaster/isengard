@@ -43,19 +43,27 @@ function lastSeenRelative(host: Host): string {
       <span>Agent</span>
       <span></span>
     </div>
-    <HostRow
-      v-for="h in hosts"
-      :key="h.id"
-      :host="h"
-      :sparkline="sparklines[h.id] ?? []"
-      :stack-count="stackCounts[h.id]?.stacks ?? 0"
-      :service-count="stackCounts[h.id]?.services ?? 0"
-      :latest-event="latestEvents[h.id] ?? null"
-      :last-seen-relative="lastSeenRelative(h)"
-      :agent-version-warn="false"
-      :selected="selectedId === h.id"
-      @click="emit('select', h)"
-      @action="(a, host) => emit('action', a, host)"
-    />
+    <div v-if="hosts.length === 0" class="py-16 text-center">
+      <Icon name="lucide:server-off" class="w-9 h-9 text-iso-text-faint mx-auto mb-3" />
+      <p class="text-sm text-iso-text-muted mb-1">No hosts in this fleet</p>
+      <p class="text-xs text-iso-text-faint">Try a different fleet, or add a new host.</p>
+    </div>
+
+    <template v-else>
+      <HostRow
+        v-for="h in hosts"
+        :key="h.id"
+        :host="h"
+        :sparkline="sparklines[h.id] ?? []"
+        :stack-count="stackCounts[h.id]?.stacks ?? 0"
+        :service-count="stackCounts[h.id]?.services ?? 0"
+        :latest-event="latestEvents[h.id] ?? null"
+        :last-seen-relative="lastSeenRelative(h)"
+        :agent-version-warn="false"
+        :selected="selectedId === h.id"
+        @click="emit('select', h)"
+        @action="(a, host) => emit('action', a, host)"
+      />
+    </template>
   </div>
 </template>

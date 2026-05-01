@@ -41,7 +41,8 @@ const rows = computed(() => {
     <div class="px-4 py-3 border-b border-iso-border-subtle">
       <div class="text-sm text-iso-text-muted">{{ rows.length }} stacks</div>
     </div>
-    <StacksTable :rows="rows" />
+    <TableSkeleton v-if="!stacksStore.loaded" :rows="6" :columns="[200, 170, 70, 70, 400, 90]" />
+    <StacksTable v-else :rows="rows" />
     <div class="mt-auto px-4 py-2 text-xs text-iso-text-faint border-t border-iso-border-subtle">
       <kbd class="px-1.5 py-0.5 bg-iso-bg-elevated rounded">/</kbd> filter ·
       <kbd class="px-1.5 py-0.5 bg-iso-bg-elevated rounded">⌘K</kbd> cmd
