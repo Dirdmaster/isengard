@@ -9,12 +9,13 @@ const showModal = ref(false)
     title="Agent enrollment"
     description="Add a new host by running a generated install command on it."
   >
-    <button
-      class="px-4 py-2 rounded border border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+    <Button
+      variant="outline"
+      class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
       @click="showModal = true"
     >
       + Generate install command
-    </button>
+    </Button>
 
     <AddHostModal v-if="showModal" @close="showModal = false" />
   </SettingsSection>

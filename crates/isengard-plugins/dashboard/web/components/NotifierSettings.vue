@@ -35,24 +35,24 @@ const discordEnabled = computed({
 <template>
   <SettingsSection
     title="Notifiers"
-    description="Send events to external chat platforms. Configure secrets in the controller config file."
+    description="Send events to external chat platforms. Configure secrets via env vars on the controller."
   >
-    <div class="space-y-3">
-      <label class="flex items-center justify-between px-3 py-2 rounded border border-iso-border-subtle bg-iso-bg-elevated cursor-pointer">
+    <div class="space-y-2">
+      <div class="flex items-center justify-between px-4 py-3 rounded-md border border-iso-border-subtle bg-iso-bg-elevated">
         <div>
-          <div class="font-mono text-sm">Telegram</div>
-          <div class="text-xs text-iso-text-muted">Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on the controller.</div>
+          <div class="font-mono text-sm text-iso-text-primary">Telegram</div>
+          <div class="text-xs text-iso-text-muted mt-0.5">Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on the controller.</div>
         </div>
-        <input v-model="telegramEnabled" type="checkbox" class="w-4 h-4" />
-      </label>
+        <Switch v-model="telegramEnabled" class="data-[state=checked]:bg-iso-success" />
+      </div>
 
-      <label class="flex items-center justify-between px-3 py-2 rounded border border-iso-border-subtle bg-iso-bg-elevated cursor-pointer">
+      <div class="flex items-center justify-between px-4 py-3 rounded-md border border-iso-border-subtle bg-iso-bg-elevated">
         <div>
-          <div class="font-mono text-sm">Discord</div>
-          <div class="text-xs text-iso-text-muted">Set DISCORD_WEBHOOK_URL on the controller.</div>
+          <div class="font-mono text-sm text-iso-text-primary">Discord</div>
+          <div class="text-xs text-iso-text-muted mt-0.5">Set DISCORD_WEBHOOK_URL on the controller.</div>
         </div>
-        <input v-model="discordEnabled" type="checkbox" class="w-4 h-4" />
-      </label>
+        <Switch v-model="discordEnabled" class="data-[state=checked]:bg-iso-success" />
+      </div>
     </div>
   </SettingsSection>
 </template>

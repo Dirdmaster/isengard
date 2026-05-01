@@ -5,14 +5,15 @@ import { useFleetsStore } from '~/stores/fleets'
 const fleetsStore = useFleetsStore()
 if (!fleetsStore.loaded) await fleetsStore.load()
 
-const toast = useToast()
 const newFleetName = ref('')
 const error = ref('')
+const toast = useToast()
 
 async function create() {
   error.value = ''
   try {
     const name = newFleetName.value.trim()
+    if (!name) return
     await fleetsStore.create(name)
     toast.success(`Fleet "${name}" created`)
     newFleetName.value = ''
@@ -51,38 +52,48 @@ async function remove(name: string) {
       <div
         v-for="f in fleetsStore.fleets"
         :key="f.name"
-        class="flex items-center justify-between px-3 py-2 rounded border border-iso-border-subtle bg-iso-bg-elevated"
+        class="flex items-center justify-between px-4 py-3 rounded-md border border-iso-border-subtle bg-iso-bg-elevated"
       >
         <div class="flex items-center gap-3">
-          <span class="font-mono text-sm">{{ f.name }}</span>
-          <span class="text-xs text-iso-text-muted">{{ f.host_count }} hosts</span>
+          <span class="font-mono text-sm text-iso-text-primary">{{ f.name }}</span>
+          <span class="text-xs text-iso-text-muted">{{ f.host_count }} {{ f.host_count === 1 ? 'host' : 'hosts' }}</span>
         </div>
-        <button
-          v-if="f.name !== 'default'"
-          class="text-xs text-iso-error hover:underline disabled:opacity-50"
+        <Badge
+          v-if="f.name === 'default'"
+          variant="outline"
+          class="text-iso-text-faint border-iso-border-subtle uppercase tracking-wider text-[10px]"
+        >
+          system
+        </Badge>
+        <Button
+          v-else
+          variant="ghost"
+          size="sm"
+          class="text-iso-error hover:text-iso-error hover:bg-iso-error/10"
           :disabled="f.host_count > 0"
           :title="f.host_count > 0 ? 'Cannot delete fleet with hosts' : ''"
           @click="remove(f.name)"
         >
           Delete
-        </button>
+        </Button>
       </div>
     </div>
 
     <form class="flex items-center gap-2" @submit.prevent="create">
-      <input
+      <Input
         v-model="newFleetName"
         type="text"
         placeholder="new-fleet-name"
-        class="bg-iso-bg-elevated border border-iso-border-subtle rounded px-3 py-1.5 text-sm font-mono w-64"
+        class="font-mono w-64 bg-iso-bg-elevated border-iso-border-subtle"
       />
-      <button
+      <Button
         type="submit"
-        class="px-3 py-1.5 text-sm rounded border border-iso-border-subtle hover:border-iso-success hover:text-iso-success disabled:opacity-50"
+        variant="outline"
+        class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
         :disabled="!newFleetName.trim()"
       >
         + New fleet
-      </button>
+      </Button>
     </form>
 
     <p v-if="error" class="text-xs text-iso-error mt-2">{{ error }}</p>
