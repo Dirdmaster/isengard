@@ -5,12 +5,10 @@
 
 #![allow(clippy::result_large_err)]
 
-// DTOs land in 5b Task 3; wired into handlers in subsequent tasks.
-#[allow(dead_code)]
+mod api;
 mod dto;
 
 use std::net::SocketAddr;
-#[allow(unused_imports)] // TODO(5b): Arc used for ControllerHandles
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,6 +19,7 @@ use axum::http::{StatusCode, Uri, header};
 #[allow(unused_imports)] // TODO(5b): IntoResponse used by API/WS handlers
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use isengard_controller::ControllerHandles;
 use isengard_core::{Capability, CoreError, Plugin, PluginContext, PluginRegistration, Result};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
@@ -74,11 +73,16 @@ fn start_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
-fn build_router() -> Router {
-    Router::new()
+fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
+    let mut router = Router::new()
         .route("/_nuxt/{*path}", get(serve_asset_nuxt))
-        .route("/", get(serve_index))
-        .fallback(get(fallback_handler))
+        .route("/", get(serve_index));
+
+    if let Some(h) = handles {
+        router = router.nest("/api/v1", api::router(h));
+    }
+
+    router.fallback(get(fallback_handler))
 }
 
 async fn serve_index() -> Response {
@@ -150,8 +154,17 @@ impl Plugin for Dashboard {
         Ok(())
     }
 
-    async fn start(&mut self, _ctx: &PluginContext) -> Result<()> {
-        let app = build_router();
+    async fn start(&mut self, ctx: &PluginContext) -> Result<()> {
+        let handles = ctx
+            .bus
+            .clone()
+            .and_then(|b| b.downcast::<isengard_controller::ControllerHandles>().ok());
+
+        if handles.is_none() {
+            warn!("dashboard started without ControllerHandles — API routes will not be mounted");
+        }
+
+        let app = build_router(handles);
         let addr = self.bind_addr;
 
         let listener = tokio::net::TcpListener::bind(addr)
@@ -198,6 +211,6 @@ mod tests {
 
     #[test]
     fn router_builds_without_panic() {
-        let _ = build_router();
+        let _ = build_router(None);
     }
 }

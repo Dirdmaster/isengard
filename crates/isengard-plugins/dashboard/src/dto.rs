@@ -80,6 +80,8 @@ impl From<EventRow> for EventDto {
 }
 
 /// Live event frame for WebSocket broadcasts.
+// Wired by the WebSocket task in 5b Task 5; until then, only the type/conversion exist.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveEventDto {
     pub kind: String,
