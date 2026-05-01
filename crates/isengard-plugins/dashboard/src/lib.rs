@@ -7,6 +7,7 @@
 
 mod api;
 mod dto;
+mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -79,7 +80,12 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
         .route("/", get(serve_index));
 
     if let Some(h) = handles {
-        router = router.nest("/api/v1", api::router(h));
+        let ws_router = Router::new()
+            .route("/ws/events", get(ws::ws_handler))
+            .with_state(h.clone());
+        router = router
+            .nest("/api/v1", api::router(h))
+            .merge(ws_router);
     }
 
     router.fallback(get(fallback_handler))
