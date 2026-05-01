@@ -1,7 +1,31 @@
 <template>
   <div class="h-screen flex flex-col">
     <TopBar />
-    <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden">
+
+    <!-- Zero hosts: never enrolled -->
+    <div v-if="!hostsStore.loading && hostsStore.loaded && hostsStore.hosts.length === 0" class="flex-1 flex items-center justify-center">
+      <div class="text-center max-w-md">
+        <Icon name="lucide:server" class="w-12 h-12 text-iso-text-faint mx-auto mb-4" />
+        <h2 class="font-mono text-lg text-iso-text-primary mb-2">No hosts yet</h2>
+        <p class="text-iso-sm text-iso-text-muted mb-6">
+          Add your first host and watch its containers appear in real time.
+        </p>
+        <NuxtLink to="/hosts" class="inline-flex items-center gap-2 px-4 py-2 rounded-iso-md border border-iso-border-subtle hover:border-iso-success text-iso-text-primary">
+          <Icon name="lucide:plus" class="w-3.5 h-3.5" />
+          Add a host
+        </NuxtLink>
+      </div>
+    </div>
+
+    <!-- Zero events but hosts exist -->
+    <div v-else-if="!eventsStore.loading && eventsStore.loaded && eventsStore.events.length === 0" class="flex-1 px-4 py-12 text-center">
+      <p class="text-iso-sm text-iso-text-faint">
+        No events yet. Events appear as your hosts check for image updates and apply them.
+      </p>
+    </div>
+
+    <!-- Normal layout -->
+    <main v-else class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden">
       <div class="overflow-y-auto">
         <StateStrip
           v-for="f in fleetsToShow"
@@ -12,8 +36,10 @@
       </div>
       <Inspector />
     </main>
-    <BottomStatusBar :connected="connected" :event-count="eventsStore.events.length" />
+
+    <BottomStatusBar :connection-state="connectionState" :event-count="eventsStore.events.length" />
     <CmdPane />
+    <HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />
   </div>
 </template>
 
@@ -24,7 +50,7 @@ const eventsStore = useEventsStore()
 const hostsStore = useHostsStore()
 const fleetsStore = useFleetsStore()
 const ui = useUiStore()
-const { connected } = useEventStream()
+const { connectionState } = useEventStream()
 
 onMounted(async () => {
   await Promise.all([

@@ -1,4 +1,4 @@
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watchEffect, type Ref } from 'vue'
 
 export interface LiveEvent {
   kind: string
@@ -9,33 +9,71 @@ export interface LiveEvent {
   occurred_at: string
 }
 
+export type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'offline'
+
 export function useEventStream() {
-  const connected = ref(false)
+  const connectionState: Ref<ConnectionState> = ref('connecting')
   const events = ref<LiveEvent[]>([])
   let socket: WebSocket | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectAttempt = 0
 
   function connect() {
+    connectionState.value = reconnectAttempt > 0 ? 'reconnecting' : 'connecting'
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${window.location.host}/ws/events`
-    socket = new WebSocket(url)
-    socket.addEventListener('open', () => { connected.value = true })
-    socket.addEventListener('close', () => { connected.value = false })
+    socket = new WebSocket(`${proto}//${window.location.host}/ws/events`)
+
+    socket.addEventListener('open', () => {
+      connectionState.value = 'live'
+      reconnectAttempt = 0
+    })
+
     socket.addEventListener('message', (msg) => {
       try {
         const frame = JSON.parse(msg.data)
         if (frame.type === 'event') {
           events.value.unshift(frame.event)
           if (events.value.length > 500) events.value.length = 500
-          // Also push into the global Pinia store so EventTimeline / StateStrip update.
+          // Push into the global Pinia store so EventTimeline / StateStrip update.
           const eventsStore = useEventsStore()
           eventsStore.prepend(frame.event)
         }
       } catch { /* ignore */ }
     })
+
+    socket.addEventListener('close', () => {
+      if (reconnectAttempt > 5) {
+        connectionState.value = 'offline'
+        return
+      }
+      connectionState.value = 'reconnecting'
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000)
+      reconnectAttempt++
+      reconnectTimer = setTimeout(connect, delay)
+    })
   }
 
-  onMounted(connect)
-  onBeforeUnmount(() => { socket?.close() })
+  function disconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (socket) socket.close()
+    connectionState.value = 'offline'
+  }
 
-  return { connected, events }
+  // Backward-compat boolean for callers that haven't migrated to connectionState.
+  const connected = ref(false)
+  watchEffect(() => {
+    connected.value = connectionState.value === 'live'
+  })
+
+  // Keep auto-connect behavior on mount (existing call sites depend on this)
+  onMounted(connect)
+  onBeforeUnmount(disconnect)
+
+  return {
+    connected,
+    connectionState,
+    events,
+    connect,
+    disconnect,
+  }
 }

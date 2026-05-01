@@ -1,5 +1,10 @@
 import { useEventListener } from '@vueuse/core'
 
+function isInputFocused(): boolean {
+  const a = document.activeElement
+  return !!(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || (a as HTMLElement).isContentEditable))
+}
+
 export function useShortcuts() {
   const ui = useUiStore()
 
@@ -15,8 +20,19 @@ export function useShortcuts() {
       ui.toggleCmdPanePosition()
       return
     }
-    if (e.key === 'Escape' && ui.cmdPaneOpen) {
-      ui.closeCmdPane()
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !isInputFocused()) {
+      e.preventDefault()
+      ui.helpOpen = !ui.helpOpen
+      return
+    }
+    if (e.key === 'Escape') {
+      if (ui.helpOpen) {
+        ui.helpOpen = false
+        return
+      }
+      if (ui.cmdPaneOpen) {
+        ui.closeCmdPane()
+      }
     }
   })
 }

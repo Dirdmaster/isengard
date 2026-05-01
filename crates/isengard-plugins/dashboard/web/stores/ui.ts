@@ -10,6 +10,7 @@ export const useUiStore = defineStore('ui', () => {
   const cmdPanePosition = ref<CmdPanePosition>('center')
   const cmdPaneMode = ref<CmdPaneMode>('navigator')
   const activeFleet = ref<string>('all')
+  const helpOpen = ref(false)
 
   function selectEvent(id: number | null) {
     selectedEventId.value = id
@@ -38,6 +39,7 @@ export const useUiStore = defineStore('ui', () => {
     cmdPanePosition,
     cmdPaneMode,
     activeFleet,
+    helpOpen,
     selectEvent,
     openCmdPane,
     closeCmdPane,

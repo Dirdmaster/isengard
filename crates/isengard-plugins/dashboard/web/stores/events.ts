@@ -14,12 +14,14 @@ export interface EventRow {
 export const useEventsStore = defineStore('events', () => {
   const events = ref<EventRow[]>([])
   const loading = ref(false)
+  const loaded = ref(false)
   const api = useApi()
 
   async function load(limit = 100) {
     loading.value = true
     try {
       events.value = await api.get<EventRow[]>('/events', { limit })
+      loaded.value = true
     } finally {
       loading.value = false
     }
@@ -38,5 +40,5 @@ export const useEventsStore = defineStore('events', () => {
     if (events.value.length > 500) events.value.length = 500
   }
 
-  return { events, loading, load, prepend }
+  return { events, loading, loaded, load, prepend }
 })

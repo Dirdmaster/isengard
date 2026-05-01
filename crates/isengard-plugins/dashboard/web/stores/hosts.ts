@@ -13,16 +13,18 @@ export interface Host {
 export const useHostsStore = defineStore('hosts', () => {
   const hosts = ref<Host[]>([])
   const loading = ref(false)
+  const loaded = ref(false)
   const api = useApi()
 
   async function load(fleet?: string) {
     loading.value = true
     try {
       hosts.value = await api.get<Host[]>('/hosts', fleet ? { fleet } : undefined)
+      loaded.value = true
     } finally {
       loading.value = false
     }
   }
 
-  return { hosts, loading, load }
+  return { hosts, loading, loaded, load }
 })
