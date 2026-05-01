@@ -1,0 +1,17 @@
+target/
+.git/
+.github/
+.idea/
+.vscode/
+.superpowers/
+docs/
+design/
+legacy-go/
+node_modules/
+**/.DS_Store
+**/.nuxt/
+**/.output/
+**/.bun/
+**/dist/
+*.md
+!README.md
