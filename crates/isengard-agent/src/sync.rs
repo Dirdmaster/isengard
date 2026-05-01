@@ -99,7 +99,7 @@ pub async fn run_sync_loop(
                     let stacks = crate::container_snapshot::derive_stacks(&snapshots);
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
-                            Heartbeat { ts_ms, stacks },
+                            Heartbeat { ts_ms, stacks, services: vec![] },
                         )),
                     };
                     if hb_tx.send(msg).await.is_err() {

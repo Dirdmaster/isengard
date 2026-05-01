@@ -162,6 +162,7 @@ impl Controller for ControllerService {
                                 isengard_proto::pb::controller_message::Payload::HeartbeatAck(
                                     isengard_proto::pb::HeartbeatAck {
                                         server_time_ms: (server_ts as u64) * 1000,
+                                        pending_actions: vec![],
                                     },
                                 ),
                             ),

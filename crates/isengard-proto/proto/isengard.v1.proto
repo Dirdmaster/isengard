@@ -71,9 +71,28 @@ message StackInfo {
   repeated string services = 3;
 }
 
+message ServiceInfo {
+  string name = 1;
+  string image = 2;
+  // One of: "running", "stopped", "restarting", "unknown".
+  string state = 3;
+  // Stack name this service belongs to (if any). Same value the agent reported
+  // in the matching StackInfo.
+  optional string stack = 4;
+}
+
+message PendingAction {
+  uint64 id = 1;
+  // One of: "force_update", "decommission".
+  string kind = 2;
+  // JSON-encoded HostActionKind payload.
+  string payload_json = 3;
+}
+
 message Heartbeat {
   uint64 ts_ms = 1; // agent's local clock at send time
   repeated StackInfo stacks = 2;
+  repeated ServiceInfo services = 3;
 }
 
 message ControllerMessage {
@@ -86,4 +105,5 @@ message ControllerMessage {
 
 message HeartbeatAck {
   uint64 server_time_ms = 1;
+  repeated PendingAction pending_actions = 2;
 }
