@@ -96,7 +96,7 @@ function handleAction(action: 'force-update' | 'shell' | 'menu', host: Host) {
       <div class="text-sm text-iso-text-muted">
         {{ filteredHosts.length }} hosts
       </div>
-      <AddHostButton @click="$router.push('/hosts?add=1')" />
+      <AddHostButton />
     </div>
     <TableSkeleton v-if="!hostsStore.loaded" :rows="6" />
     <HostsTable

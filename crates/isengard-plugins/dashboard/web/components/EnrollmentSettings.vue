@@ -16,6 +16,6 @@ const showModal = ref(false)
       + Generate install command
     </button>
 
-    <div v-if="showModal" class="text-xs text-iso-text-muted mt-3">(modal landing in next commit)</div>
+    <AddHostModal v-if="showModal" @close="showModal = false" />
   </SettingsSection>
 </template>
