@@ -19,17 +19,19 @@
       >
         All fleets
       </button>
-      <div class="h-px bg-iso-border-subtle my-1"></div>
-      <button
-        v-for="f in fleetsStore.fleets"
-        :key="f.name"
-        class="w-full text-left px-3 py-2 text-sm flex items-center justify-between hover:bg-iso-bg-row-hover"
-        :class="ui.activeFleet === f.name ? 'text-iso-text-primary' : 'text-iso-text-muted'"
-        @click="select(f.name)"
-      >
-        <span class="font-mono">{{ f.name }}</span>
-        <span class="text-xs text-iso-text-faint">{{ f.host_count }} hosts</span>
-      </button>
+      <template v-if="populatedFleets.length">
+        <div class="h-px bg-iso-border-subtle my-1"></div>
+        <button
+          v-for="f in populatedFleets"
+          :key="f.name"
+          class="w-full text-left px-3 py-2 text-sm flex items-center justify-between hover:bg-iso-bg-row-hover"
+          :class="ui.activeFleet === f.name ? 'text-iso-text-primary' : 'text-iso-text-muted'"
+          @click="select(f.name)"
+        >
+          <span class="font-mono">{{ f.name }}</span>
+          <span class="text-xs text-iso-text-faint">{{ f.host_count }} {{ f.host_count === 1 ? 'host' : 'hosts' }}</span>
+        </button>
+      </template>
     </div>
   </div>
 </template>
@@ -42,6 +44,8 @@ const fleetsStore = useFleetsStore()
 const open = ref(false)
 
 onMounted(() => fleetsStore.load())
+
+const populatedFleets = computed(() => fleetsStore.fleets.filter(f => f.host_count > 0))
 
 const activeLabel = computed(() => {
   if (ui.activeFleet === 'all') return 'All fleets'
