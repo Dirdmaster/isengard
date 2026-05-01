@@ -25,8 +25,10 @@ export function useEventStream() {
         const frame = JSON.parse(msg.data)
         if (frame.type === 'event') {
           events.value.unshift(frame.event)
-          // Cap memory.
           if (events.value.length > 500) events.value.length = 500
+          // Also push into the global Pinia store so EventTimeline / StateStrip update.
+          const eventsStore = useEventsStore()
+          eventsStore.prepend(frame.event)
         }
       } catch { /* ignore */ }
     })
