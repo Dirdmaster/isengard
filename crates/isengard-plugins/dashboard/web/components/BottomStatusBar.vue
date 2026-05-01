@@ -1,11 +1,11 @@
 <template>
-  <div class="h-8 border-t border-iso-border-subtle bg-iso-bg-elevated px-4 flex items-center gap-4 text-iso-xs">
+  <div class="h-9 border-t border-iso-border-subtle bg-iso-bg-elevated px-4 flex items-center gap-4 text-iso-sm shrink-0">
     <span class="flex items-center gap-2" :class="stateLabel.color">
-      <span class="w-1.5 h-1.5 rounded-full" :class="stateLabel.dot"></span>
+      <span class="w-2 h-2 rounded-full" :class="stateLabel.dot"></span>
       {{ stateLabel.text }}
     </span>
     <div class="flex-1"></div>
-    <span class="text-iso-text-faint font-mono">⌘K command · ? help</span>
+    <span class="text-iso-text-muted font-mono">⌘K command · ? help</span>
   </div>
 </template>
 

@@ -1,27 +1,20 @@
 <template>
-  <div class="flex-1 flex flex-col min-h-0">
-    <TopBar />
-
-    <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden">
+  <AppShell>
+    <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden min-h-0">
       <div class="flex flex-col overflow-hidden">
-        <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border-subtle">
-          <div class="flex items-center gap-3">
-            <h1 class="font-mono text-base text-iso-text-primary">Activity</h1>
-            <span class="text-xs text-iso-text-muted">
-              {{ eventsStore.events.length }} {{ eventsStore.events.length === 1 ? 'event' : 'events' }}
-              <template v-if="hostsStore.hosts.length"> · {{ hostsStore.hosts.length }} {{ hostsStore.hosts.length === 1 ? 'host' : 'hosts' }}</template>
-            </span>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
-            @click="addHostOpen = true"
-          >
-            <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
-            Add host
-          </Button>
-        </header>
+        <PageHeader title="Activity" :subtitle="activitySubtitle">
+          <template #actions>
+            <Button
+              variant="outline"
+              size="sm"
+              class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+              @click="addHostOpen = true"
+            >
+              <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
+              Add host
+            </Button>
+          </template>
+        </PageHeader>
 
         <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
           <StateStrip
@@ -30,18 +23,12 @@
             :fleet="f"
           />
 
-          <div
+          <EmptyState
             v-if="eventsStore.events.length === 0 && eventsStore.loaded"
-            class="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-3"
-          >
-            <div class="w-16 h-16 rounded-full bg-iso-bg-elevated border border-iso-border-subtle flex items-center justify-center">
-              <Icon name="lucide:activity" class="w-7 h-7 text-iso-text-muted" />
-            </div>
-            <h2 class="font-mono text-base text-iso-text-primary">All quiet</h2>
-            <p class="text-sm text-iso-text-muted max-w-md text-center leading-relaxed">
-              Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed.
-            </p>
-          </div>
+            icon="activity"
+            title="All quiet"
+            description="Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed."
+          />
           <EventTimeline v-else />
         </div>
       </div>
@@ -51,7 +38,7 @@
     <CmdPane />
     <HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />
     <AddHostModal v-if="addHostOpen" @close="addHostOpen = false" />
-  </div>
+  </AppShell>
 </template>
 
 <script setup lang="ts">
@@ -77,5 +64,13 @@ const fleetsToShow = computed(() => {
     ? fleetsStore.fleets
     : fleetsStore.fleets.filter(f => f.name === ui.activeFleet)
   return list.filter(f => f.host_count > 0)
+})
+
+const activitySubtitle = computed(() => {
+  const events = eventsStore.events.length
+  const hosts = hostsStore.hosts.length
+  const eventLabel = `${events} ${events === 1 ? 'event' : 'events'}`
+  if (hosts === 0) return eventLabel
+  return `${eventLabel} · ${hosts} ${hosts === 1 ? 'host' : 'hosts'}`
 })
 </script>

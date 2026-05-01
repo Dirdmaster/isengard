@@ -56,7 +56,6 @@ const latestEvents = computed(() => {
 const router = useRouter()
 
 function selectHost(host: Host) {
-  // Hostname click → filtered Stacks list. Inspector opens via row ellipsis.
   router.push(`/stacks?host_id=${host.id}`)
 }
 
@@ -70,24 +69,17 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
     } catch (e) {
       useToast().error(`Force update failed: ${e instanceof Error ? e.message : String(e)}`)
     }
-  } else if (action === 'shell') {
-    // 5e+: opens cmd pane terminal mode for the host's first service
   }
 }
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-h-0">
-    <TopBar />
-    <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border-subtle">
-      <div class="flex items-center gap-3">
-        <h1 class="font-mono text-base text-iso-text-primary">Hosts</h1>
-        <span class="text-xs text-iso-text-muted">
-          {{ filteredHosts.length }} {{ filteredHosts.length === 1 ? 'host' : 'hosts' }}
-        </span>
-      </div>
-      <AddHostButton />
-    </header>
+  <AppShell>
+    <PageHeader title="Hosts" :subtitle="`${filteredHosts.length} ${filteredHosts.length === 1 ? 'host' : 'hosts'}`">
+      <template #actions>
+        <AddHostButton />
+      </template>
+    </PageHeader>
     <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
       <TableSkeleton v-if="!hostsStore.loaded" :rows="6" />
       <HostsTable
@@ -109,5 +101,5 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
       @close="inspectingHost = null"
       @changed="hostsStore.load()"
     />
-  </div>
+  </AppShell>
 </template>

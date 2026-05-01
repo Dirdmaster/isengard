@@ -27,7 +27,7 @@ const rows = computed(() => {
         stack,
         hostHostname: host.hostname,
         fleet: host.fleet,
-        serviceCount: 0, // 5e: real service count
+        serviceCount: 0,
         latestEvent: latest ? { kind: latest.kind, summary: latest.summary } : null,
       }
     })
@@ -36,19 +36,11 @@ const rows = computed(() => {
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-h-0">
-    <TopBar />
-    <header class="flex items-center justify-between px-4 py-3 border-b border-iso-border-subtle">
-      <div class="flex items-center gap-3">
-        <h1 class="font-mono text-base text-iso-text-primary">Stacks</h1>
-        <span class="text-xs text-iso-text-muted">
-          {{ rows.length }} {{ rows.length === 1 ? 'stack' : 'stacks' }}
-        </span>
-      </div>
-    </header>
+  <AppShell>
+    <PageHeader title="Stacks" :subtitle="`${rows.length} ${rows.length === 1 ? 'stack' : 'stacks'}`" />
     <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
       <TableSkeleton v-if="!stacksStore.loaded" :rows="6" :columns="[200, 170, 70, 70, 400, 90]" />
       <StacksTable v-else :rows="rows" class="flex-1 flex flex-col min-h-0" />
     </div>
-  </div>
+  </AppShell>
 </template>

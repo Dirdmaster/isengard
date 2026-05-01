@@ -56,43 +56,38 @@ function openEvent(e: { id: number }) {
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-h-0">
-    <TopBar />
-    <div class="flex items-center gap-2 px-4 py-3 border-b border-iso-border-subtle flex-wrap">
-      <span class="text-xs uppercase tracking-wider text-iso-text-faint mr-2">Filter</span>
-      <EventFilterChip
-        v-for="k in KINDS"
-        :key="k"
-        :label="k"
-        :count="counts[k]"
-        :active="activeKinds.has(k)"
-        @toggle="toggleKind(k)"
-      />
-      <select
-        v-model="activeHostId"
-        class="ml-2 bg-iso-bg-elevated border border-iso-border-subtle rounded px-2 py-1 text-xs"
-      >
-        <option :value="null">All hosts</option>
-        <option v-for="h in hostsStore.hosts" :key="h.id" :value="h.id">{{ h.hostname }}</option>
-      </select>
-      <span class="ml-auto text-xs text-iso-text-muted">
-        {{ filtered.length }} / {{ eventsStore.events.length }} events
-      </span>
-    </div>
+  <AppShell>
+    <PageHeader title="Events" :subtitle="`${filtered.length} of ${eventsStore.events.length}`">
+      <template #meta>
+        <div class="flex items-center gap-2 flex-wrap">
+          <EventFilterChip
+            v-for="k in KINDS"
+            :key="k"
+            :label="k"
+            :count="counts[k]"
+            :active="activeKinds.has(k)"
+            @toggle="toggleKind(k)"
+          />
+        </div>
+      </template>
+      <template #actions>
+        <select
+          v-model="activeHostId"
+          class="bg-iso-bg-elevated border border-iso-border-subtle rounded px-2 py-1 text-xs"
+        >
+          <option :value="null">All hosts</option>
+          <option v-for="h in hostsStore.hosts" :key="h.id" :value="h.id">{{ h.hostname }}</option>
+        </select>
+      </template>
+    </PageHeader>
 
     <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
-      <div
+      <EmptyState
         v-if="filtered.length === 0 && eventsStore.events.length === 0"
-        class="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-3"
-      >
-        <div class="w-16 h-16 rounded-full bg-iso-bg-elevated border border-iso-border-subtle flex items-center justify-center">
-          <Icon name="lucide:activity" class="w-7 h-7 text-iso-text-muted" />
-        </div>
-        <h2 class="font-mono text-base text-iso-text-primary">All quiet</h2>
-        <p class="text-sm text-iso-text-muted max-w-md text-center leading-relaxed">
-          Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed.
-        </p>
-      </div>
+        icon="activity"
+        title="All quiet"
+        description="Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed."
+      />
       <div
         v-else-if="filtered.length === 0"
         class="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-2"
@@ -110,5 +105,5 @@ function openEvent(e: { id: number }) {
         />
       </template>
     </div>
-  </div>
+  </AppShell>
 </template>

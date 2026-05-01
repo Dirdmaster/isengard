@@ -44,15 +44,12 @@ function lastSeenRelative(host: Host): string {
       <span>Agent</span>
       <span></span>
     </div>
-    <div v-if="hosts.length === 0" class="flex-1 flex flex-col items-center justify-center px-6 py-12 gap-3">
-      <div class="w-16 h-16 rounded-full bg-iso-bg-elevated border border-iso-border-subtle flex items-center justify-center">
-        <Icon name="lucide:server" class="w-7 h-7 text-iso-text-muted" />
-      </div>
-      <h2 class="font-mono text-base text-iso-text-primary">No hosts yet</h2>
-      <p class="text-sm text-iso-text-muted max-w-md text-center leading-relaxed">
-        Add your first host to start tracking containers across your fleet.
-      </p>
-    </div>
+    <EmptyState
+      v-if="hosts.length === 0"
+      icon="server"
+      title="No hosts yet"
+      description="Add your first host to start tracking containers across your fleet."
+    />
 
     <template v-else>
       <HostRow
