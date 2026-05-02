@@ -1,0 +1,552 @@
+<h2>Proposed direction: event-timeline home + ⌘K palette + Atlas toggle</h2>
+<p class="subtitle">The home view is the live event stream of what just happened across the fleet. Drill from an event into the host or container that produced it. ⌘K to jump anywhere. Atlas is a one-click flip to the spatial view (preserves the brand without gating daily work).</p>
+
+<style>
+  /* ============ Frame ============ */
+  .iso-frame {
+    background: #0b0d0f;
+    color: #e6e8eb;
+    font-family: 'Inter', -apple-system, sans-serif;
+    border: 1px solid #1c2024;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 16px;
+    height: 540px;
+    display: grid;
+    grid-template-rows: 44px 1fr 28px;
+    position: relative;
+  }
+
+  /* ============ Top bar ============ */
+  .iso-top {
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 16px;
+    border-bottom: 1px solid #1c2024;
+    font-size: 12px;
+  }
+  .iso-top .wm {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: #e6e8eb;
+  }
+  .iso-top .wm-tag {
+    color: #6f7680; font-weight: 400; font-size: 11px;
+  }
+  .iso-top .stats {
+    display: flex; gap: 18px;
+    color: #8a9099;
+    font-size: 11px;
+  }
+  .iso-top .stats strong { color: #e6e8eb; font-weight: 500; }
+  .iso-top .stats .ok { color: #4ade80; }
+  .iso-top .stats .warn { color: #fbbf24; }
+  .iso-top .right {
+    margin-left: auto;
+    display: flex; gap: 12px; align-items: center;
+  }
+  .iso-top .right .toggle {
+    display: flex; padding: 2px;
+    background: #15181b; border: 1px solid #1c2024;
+    border-radius: 6px;
+    font-size: 11px;
+  }
+  .iso-top .right .toggle button {
+    background: none; border: 0;
+    padding: 3px 10px; border-radius: 4px;
+    color: #8a9099;
+    cursor: pointer;
+    font-family: inherit; font-size: 11px;
+  }
+  .iso-top .right .toggle .active {
+    background: #1c2024; color: #e6e8eb;
+  }
+  .iso-top .right .cmdk {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px;
+    background: #15181b;
+    border: 1px solid #1c2024;
+    border-radius: 6px;
+    color: #8a9099;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .iso-top .right .cmdk kbd {
+    background: #0b0d0f;
+    border: 1px solid #2a2f35;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #b8bdc4;
+  }
+
+  /* ============ Main grid ============ */
+  .iso-main {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ===== Event timeline (left, primary) ===== */
+  .iso-timeline {
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  .iso-day {
+    padding: 14px 20px 6px;
+    color: #6f7680;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-weight: 500;
+  }
+  .iso-event {
+    display: grid;
+    grid-template-columns: 60px 90px 1fr auto;
+    gap: 14px; align-items: center;
+    padding: 8px 20px;
+    border-left: 2px solid transparent;
+    cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  .iso-event:hover { background: #11141700; background: rgba(255,255,255,0.02); border-left-color: rgba(255,255,255,0.1); }
+  .iso-event.selected {
+    background: rgba(74,222,128,0.04);
+    border-left-color: #4ade80;
+  }
+  .iso-event .ts {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #6f7680;
+  }
+  .iso-event .kind {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    text-align: left;
+  }
+  .iso-event .kind.success { color: #4ade80; }
+  .iso-event .kind.failed  { color: #f87171; }
+  .iso-event .kind.checked { color: #94a3b8; }
+  .iso-event .kind.pulling { color: #fbbf24; }
+  .iso-event .kind.disconnect { color: #c084fc; }
+  .iso-event .body {
+    font-size: 13px;
+    color: #d8dde2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .iso-event .body strong { color: #e6e8eb; font-weight: 500; }
+  .iso-event .body .mono {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #8a9099;
+  }
+  .iso-event .host {
+    font-size: 11px;
+    color: #6f7680;
+  }
+
+  /* ===== Right inspector ===== */
+  .iso-inspector {
+    border-left: 1px solid #1c2024;
+    background: #0e1114;
+    overflow-y: auto;
+    padding: 18px 18px;
+  }
+  .iso-inspector .sect-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #6f7680;
+    margin-bottom: 8px;
+  }
+  .iso-inspector h4 {
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    color: #e6e8eb;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .iso-inspector h4::before {
+    content: '';
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #4ade80;
+  }
+  .iso-inspector .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #8a9099;
+    margin-bottom: 18px;
+  }
+  .iso-inspector .kv {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 6px 12px;
+    font-size: 12px;
+    margin-bottom: 18px;
+  }
+  .iso-inspector .kv .k {
+    color: #6f7680;
+  }
+  .iso-inspector .kv .v {
+    color: #d8dde2;
+  }
+  .iso-inspector .kv .v.mono {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #b8bdc4;
+  }
+  .iso-inspector .kv .v.ok { color: #4ade80; }
+  .iso-inspector hr { border: 0; border-top: 1px solid #1c2024; margin: 18px 0; }
+  .iso-inspector .digest-line {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    background: #15181b;
+    border: 1px solid #1c2024;
+    border-radius: 4px;
+    padding: 6px 8px;
+    color: #b8bdc4;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .iso-inspector .digest-line.was { color: #6f7680; }
+  .iso-inspector .digest-line.now { color: #4ade80; border-color: rgba(74,222,128,0.2); }
+  .iso-inspector .arrow {
+    text-align: center; color: #6f7680; font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    margin: 4px 0;
+  }
+  .iso-inspector button.ghost {
+    width: 100%;
+    background: #15181b;
+    color: #d8dde2;
+    border: 1px solid #1c2024;
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit; font-size: 12px;
+    margin-top: 6px;
+  }
+  .iso-inspector button.ghost:hover { background: #1c2024; }
+
+  /* ===== Bottom status bar ===== */
+  .iso-bottom {
+    border-top: 1px solid #1c2024;
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 16px;
+    color: #6f7680;
+    font-size: 11px;
+    background: #0e1114;
+  }
+  .iso-bottom .live {
+    display: flex; align-items: center; gap: 6px;
+    color: #4ade80;
+  }
+  .iso-bottom .live::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.6);
+  }
+  .iso-bottom .right {
+    margin-left: auto;
+    display: flex; gap: 12px;
+  }
+
+  /* ===== ⌘K overlay (decorative, shown half-open) ===== */
+  .iso-cmdk-overlay {
+    position: absolute;
+    top: 76px; left: 50%;
+    transform: translateX(-50%);
+    width: 540px;
+    background: #15181b;
+    border: 1px solid #2a2f35;
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    overflow: hidden;
+    z-index: 20;
+  }
+  .iso-cmdk-overlay .cmdk-input {
+    padding: 12px 16px;
+    border-bottom: 1px solid #1c2024;
+    color: #e6e8eb;
+    font-size: 14px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .iso-cmdk-overlay .cmdk-input::before {
+    content: '⌘';
+    color: #6f7680;
+  }
+  .iso-cmdk-overlay .cmdk-input .cursor {
+    width: 1px; height: 16px;
+    background: #4ade80;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .iso-cmdk-overlay .cmdk-section {
+    padding: 8px 16px 4px;
+    color: #6f7680;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .iso-cmdk-overlay .cmdk-item {
+    padding: 7px 16px;
+    font-size: 13px;
+    color: #d8dde2;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .iso-cmdk-overlay .cmdk-item.hl {
+    background: #1c2024;
+    color: #e6e8eb;
+  }
+  .iso-cmdk-overlay .cmdk-item .glyph {
+    color: #6f7680;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    width: 18px;
+  }
+  .iso-cmdk-overlay .cmdk-item .meta {
+    margin-left: auto;
+    color: #6f7680;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+</style>
+
+<div class="iso-frame">
+
+  <!-- ============ TOP BAR ============ -->
+  <div class="iso-top">
+    <div class="wm">isengard <span class="wm-tag">· prod</span></div>
+    <div class="stats">
+      <span><strong>3</strong> hosts <span class="ok">●</span></span>
+      <span><strong>7</strong> containers</span>
+      <span><strong class="warn">1</strong> updating</span>
+    </div>
+    <div class="right">
+      <div class="toggle">
+        <button class="active">Timeline</button>
+        <button>Atlas</button>
+        <button>Hosts</button>
+      </div>
+      <div class="cmdk">
+        Search or jump… <kbd>⌘K</kbd>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ MAIN GRID ============ -->
+  <div class="iso-main">
+
+    <!-- ===== EVENT TIMELINE (left) ===== -->
+    <div class="iso-timeline">
+      <div class="iso-day">Today · April 30</div>
+
+      <div class="iso-event selected">
+        <span class="ts">14:22:18</span>
+        <span class="kind success">UPDATED</span>
+        <span class="body"><strong>web</strong> on prod-01 → <span class="mono">nginx:1.25-alpine</span></span>
+        <span class="host">prod-01</span>
+      </div>
+      <div class="iso-event">
+        <span class="ts">14:22:01</span>
+        <span class="kind pulling">PULLING</span>
+        <span class="body"><strong>cache</strong> on prod-02 → <span class="mono">redis:7.2</span></span>
+        <span class="host">prod-02</span>
+      </div>
+      <div class="iso-event">
+        <span class="ts">14:21:30</span>
+        <span class="kind failed">FAILED</span>
+        <span class="body"><strong>api</strong> on staging — <span class="mono">pull error: timeout</span></span>
+        <span class="host">staging</span>
+      </div>
+      <div class="iso-event">
+        <span class="ts">14:21:00</span>
+        <span class="kind checked">CHECKED</span>
+        <span class="body">cycle complete · 7 containers · 6 up to date · 1 needs update</span>
+        <span class="host">all</span>
+      </div>
+
+      <div class="iso-day">Today · April 30 · earlier</div>
+
+      <div class="iso-event">
+        <span class="ts">11:08:42</span>
+        <span class="kind success">UPDATED</span>
+        <span class="body"><strong>worker</strong> on prod-01 → <span class="mono">myorg/worker:1.4.2</span></span>
+        <span class="host">prod-01</span>
+      </div>
+      <div class="iso-event">
+        <span class="ts">09:14:00</span>
+        <span class="kind disconnect">DISCONNECT</span>
+        <span class="body"><strong>edge-01</strong> unreachable for over 4h</span>
+        <span class="host">edge-01</span>
+      </div>
+
+      <div class="iso-day">Yesterday · April 29</div>
+
+      <div class="iso-event">
+        <span class="ts">22:47:11</span>
+        <span class="kind success">UPDATED</span>
+        <span class="body"><strong>db</strong> on prod-01 → <span class="mono">postgres:16.2</span></span>
+        <span class="host">prod-01</span>
+      </div>
+      <div class="iso-event">
+        <span class="ts">19:03:55</span>
+        <span class="kind success">UPDATED</span>
+        <span class="body"><strong>nginx-lb</strong> on prod-02 → <span class="mono">nginx:1.25-alpine</span></span>
+        <span class="host">prod-02</span>
+      </div>
+    </div>
+
+    <!-- ===== RIGHT INSPECTOR ===== -->
+    <div class="iso-inspector">
+      <div class="sect-label">Selected event · 14:22:18</div>
+      <h4>web</h4>
+      <div class="meta">prod-01 · nginx:1.25-alpine</div>
+
+      <div class="kv">
+        <span class="k">Status</span><span class="v ok">running · update.success</span>
+        <span class="k">Container</span><span class="v mono">/web</span>
+        <span class="k">Image</span><span class="v mono">nginx:1.25-alpine</span>
+        <span class="k">Restart</span><span class="v">unless-stopped</span>
+        <span class="k">Ports</span><span class="v mono">80/tcp → 8080</span>
+      </div>
+
+      <div class="sect-label">Digest change</div>
+      <div class="digest-line was">was &nbsp;sha256:8b7f9f4e3a…</div>
+      <div class="arrow">↓</div>
+      <div class="digest-line now">now sha256:9a7c1e08fc…</div>
+
+      <hr>
+
+      <div class="sect-label">Quick actions</div>
+      <button class="ghost">Open container detail →</button>
+      <button class="ghost">Open prod-01 host →</button>
+      <button class="ghost">Filter timeline to this container</button>
+    </div>
+
+  </div>
+
+  <!-- ============ BOTTOM STATUS BAR ============ -->
+  <div class="iso-bottom">
+    <div class="live">live · 247 events today</div>
+    <span>controller v0.1.0-alpha</span>
+    <div class="right">
+      <span>↑↓ navigate · ⌘K command · ? help</span>
+    </div>
+  </div>
+
+  <!-- ============ ⌘K OVERLAY (decorative, shown to demonstrate the palette) ============ -->
+  <div class="iso-cmdk-overlay" style="display:none">
+    <div class="cmdk-input">
+      <span>prod</span>
+      <span class="cursor"></span>
+    </div>
+    <div class="cmdk-section">Hosts</div>
+    <div class="cmdk-item hl"><span class="glyph">▣</span>prod-01<span class="meta">3 containers</span></div>
+    <div class="cmdk-item"><span class="glyph">▣</span>prod-02<span class="meta">2 containers</span></div>
+    <div class="cmdk-section">Containers</div>
+    <div class="cmdk-item"><span class="glyph">◆</span>web on prod-01<span class="meta">nginx:1.25</span></div>
+    <div class="cmdk-item"><span class="glyph">◆</span>db on prod-01<span class="meta">postgres:16</span></div>
+    <div class="cmdk-section">Actions</div>
+    <div class="cmdk-item"><span class="glyph">⚡</span>Force update cycle now<span class="meta">⏎</span></div>
+  </div>
+
+</div>
+
+<!-- A second smaller mockup showing ⌘K open -->
+<h3 style="margin-top: 32px;">⌘K palette open (the primary nav)</h3>
+<p class="subtitle">Press ⌘K from anywhere → fuzzy-search hosts, containers, events, and actions. No sidebar maze.</p>
+
+<div class="iso-frame" style="height: 360px;">
+  <div class="iso-top">
+    <div class="wm">isengard <span class="wm-tag">· prod</span></div>
+    <div class="stats">
+      <span><strong>3</strong> hosts <span class="ok">●</span></span>
+      <span><strong>7</strong> containers</span>
+      <span><strong class="warn">1</strong> updating</span>
+    </div>
+    <div class="right">
+      <div class="toggle">
+        <button class="active">Timeline</button>
+        <button>Atlas</button>
+        <button>Hosts</button>
+      </div>
+      <div class="cmdk">
+        Search or jump… <kbd>⌘K</kbd>
+      </div>
+    </div>
+  </div>
+
+  <div class="iso-main" style="position: relative;">
+    <div class="iso-timeline" style="opacity: 0.25; filter: blur(2px); pointer-events:none;">
+      <div class="iso-day">Today · April 30</div>
+      <div class="iso-event">
+        <span class="ts">14:22:18</span><span class="kind success">UPDATED</span>
+        <span class="body"><strong>web</strong> on prod-01 → <span class="mono">nginx:1.25-alpine</span></span>
+        <span class="host">prod-01</span>
+      </div>
+      <div class="iso-event">
+        <span class="ts">14:22:01</span><span class="kind pulling">PULLING</span>
+        <span class="body"><strong>cache</strong> on prod-02 → <span class="mono">redis:7.2</span></span>
+        <span class="host">prod-02</span>
+      </div>
+    </div>
+    <div class="iso-inspector" style="opacity: 0.25; filter: blur(2px); pointer-events:none;"></div>
+
+    <div class="iso-cmdk-overlay">
+      <div class="cmdk-input">
+        <span>prod</span><span class="cursor"></span>
+      </div>
+      <div class="cmdk-section">Hosts</div>
+      <div class="cmdk-item hl"><span class="glyph">▣</span>prod-01<span class="meta">3 containers</span></div>
+      <div class="cmdk-item"><span class="glyph">▣</span>prod-02<span class="meta">2 containers</span></div>
+      <div class="cmdk-section">Containers on prod-*</div>
+      <div class="cmdk-item"><span class="glyph">◆</span>web on prod-01<span class="meta">nginx:1.25</span></div>
+      <div class="cmdk-item"><span class="glyph">◆</span>db on prod-01<span class="meta">postgres:16</span></div>
+      <div class="cmdk-item"><span class="glyph">◆</span>cache on prod-02<span class="meta">redis:7.2</span></div>
+      <div class="cmdk-section">Actions</div>
+      <div class="cmdk-item"><span class="glyph">⚡</span>Force update cycle now<span class="meta">⏎</span></div>
+    </div>
+  </div>
+  <div class="iso-bottom">
+    <div class="live">live · 247 events today</div>
+    <div class="right"><span>esc to close · ↑↓ to navigate · ⏎ to select</span></div>
+  </div>
+</div>
+
+<div style="margin-top: 28px; padding: 16px 18px; background: rgba(74,222,128,0.04); border: 1px solid rgba(74,222,128,0.15); border-radius: 6px; font-size: 13px; line-height: 1.6;">
+  <strong style="color:#4ade80;">What's distinctive here:</strong><br>
+  <strong>1. Event timeline IS the home.</strong> Not a list of containers. The journal we already maintain becomes the front door — what just changed across the fleet, sorted by time.<br>
+  <strong>2. ⌘K is the primary nav.</strong> No sidebar maze. Type to find any host / container / event / action. Linear-grade.<br>
+  <strong>3. Right inspector for context.</strong> Click an event → full container/host context appears without a page change. Zero click-depth tax.<br>
+  <strong>4. Atlas is a toggle, not the home.</strong> Top-right segmented control flips to the spatial fleet view when you want it. Brand surface preserved; daily friction removed.<br>
+  <br>
+  <em>This is genuinely new in container management. Closest existing analog is Vercel's deploy-history-as-home, but no container tool ships an event-stream-first dashboard with ⌘K nav. Click below to react, or push back in the terminal.</em>
+</div>
+
+<div class="options" style="margin-top: 18px;">
+  <div class="option" data-choice="love" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Love it — let's lock this direction</h3>
+      <p>Move to detailed screen designs (host detail, container detail, Atlas mode, ⌘K palette interactions)</p>
+    </div>
+  </div>
+  <div class="option" data-choice="adjust" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Direction is right, but adjust X</h3>
+      <p>Tell me what to change in the terminal — visual density, color choices, layout, what the inspector shows, etc.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="diff" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Wrong direction — try something else</h3>
+      <p>Push back in the terminal — what's missing or wrong, and what direction would be right.</p>
+    </div>
+  </div>
+</div>

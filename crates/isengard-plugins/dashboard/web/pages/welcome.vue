@@ -96,7 +96,8 @@ function takeMeToDashboard() {
       </button>
       <button
         v-else-if="wizard.step === 2"
-        class="flex items-center gap-1.5 px-4 py-2 rounded-md bg-iso-success/10 border border-iso-success text-sm font-medium text-iso-success hover:bg-iso-success/20"
+        class="flex items-center gap-1.5 px-4 py-2 rounded-md bg-iso-success/10 border border-iso-success text-sm font-medium text-iso-success hover:bg-iso-success/20 disabled:opacity-40 disabled:cursor-not-allowed"
+        :disabled="!wizard.installCommand"
         @click="iveRunIt"
       >
         I've run it

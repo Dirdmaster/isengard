@@ -111,13 +111,37 @@ async fn enroll_host(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<EnrollRequest>,
 ) -> Response {
+    // Fleet is required. The wizard prompts for it; there is no implicit
+    // 'default' fleet. Trim and validate before doing anything else.
+    let fleet = body
+        .fleet
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let Some(fleet) = fleet else {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "fleet is required (name a fleet to group your hosts)",
+        );
+    };
+
     let token = ulid::Ulid::new().to_string();
     let agent_id = ulid::Ulid::new().to_string();
+
+    // Create the fleet now so it shows up in /api/v1/fleets listings even
+    // before the agent first enrolls. Idempotent.
+    if let Err(e) = handles.inventory.create_fleet(&fleet).await {
+        return json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create_fleet: {e}"),
+        );
+    }
 
     // Persist token in settings (v1.x: dedicated enrollment_tokens table with TTL).
     let payload = serde_json::json!({
         "agent_id": agent_id,
-        "fleet": body.fleet.clone().unwrap_or_else(|| "default".into()),
+        "fleet": fleet,
         "hostname": body.hostname.clone(),
     });
     if let Err(e) = handles

@@ -1,0 +1,360 @@
+<h2>Pick the dashboard's visual direction</h2>
+<p class="subtitle">Same content (3 hosts, 7 containers, recent events) — four different visual languages. Click the one that feels right. Tell me what you love or hate about it in the terminal.</p>
+
+<style>
+  /* Common mockup container styling */
+  .direction-card {
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    height: 380px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .direction-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+  .direction-card .card-tag {
+    position: absolute; top: 12px; right: 12px;
+    background: rgba(0,0,0,0.6); color: #fff;
+    padding: 3px 10px; border-radius: 999px;
+    font-size: 11px; letter-spacing: 0.05em;
+    z-index: 10;
+    backdrop-filter: blur(6px);
+  }
+  .card-grid-2x2 {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 16px; margin-top: 24px;
+  }
+  .card-label {
+    padding: 12px 16px;
+    font-size: 13px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+
+  /* === A: Celestial Atlas === */
+  .vibe-atlas {
+    background:
+      radial-gradient(ellipse at 30% 40%, rgba(180, 100, 40, 0.18) 0%, transparent 55%),
+      radial-gradient(ellipse at 70% 65%, rgba(80, 100, 180, 0.12) 0%, transparent 55%),
+      linear-gradient(135deg, #1a1208 0%, #0f0a04 100%);
+    color: #d4b88c;
+    font-family: 'Georgia', serif;
+    position: relative;
+  }
+  .vibe-atlas .atlas-canvas {
+    flex: 1; position: relative; overflow: hidden;
+  }
+  .vibe-atlas .star {
+    position: absolute; border-radius: 50%;
+    background: radial-gradient(circle, #f4d599 0%, #c89048 60%, transparent 100%);
+    box-shadow: 0 0 16px rgba(244, 213, 153, 0.5);
+  }
+  .vibe-atlas .planet {
+    position: absolute; border-radius: 50%;
+    background: rgba(212, 184, 140, 0.7);
+  }
+  .vibe-atlas .orbit {
+    position: absolute; border: 1px dashed rgba(212, 184, 140, 0.18);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  .vibe-atlas .label {
+    position: absolute;
+    font-family: Georgia, serif; font-style: italic;
+    font-size: 9px; letter-spacing: 0.15em;
+    color: rgba(212, 184, 140, 0.65);
+    text-transform: uppercase;
+  }
+  .vibe-atlas .wordmark {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; letter-spacing: 0.4em;
+    color: rgba(212, 184, 140, 0.75);
+  }
+  .vibe-atlas .card-label {
+    background: rgba(20, 14, 6, 0.9);
+    color: #d4b88c;
+    font-family: Georgia, serif;
+    font-style: italic;
+  }
+
+  /* === B: Linear-minimal === */
+  .vibe-linear {
+    background: #fcfcfd;
+    color: #18181b;
+    font-family: -apple-system, 'Inter', sans-serif;
+    border: 1px solid #e4e4e7;
+  }
+  .vibe-linear .linear-bar {
+    padding: 10px 14px;
+    border-bottom: 1px solid #f4f4f5;
+    display: flex; gap: 8px; align-items: center;
+    font-size: 12px;
+  }
+  .vibe-linear .linear-bar .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #22c55e;
+  }
+  .vibe-linear .linear-section {
+    padding: 14px;
+  }
+  .vibe-linear .linear-row {
+    padding: 9px 14px;
+    border-bottom: 1px solid #f4f4f5;
+    display: grid; grid-template-columns: 1fr auto auto;
+    gap: 12px; align-items: center;
+    font-size: 12px;
+  }
+  .vibe-linear .linear-row:hover { background: #fafafa; }
+  .vibe-linear .pill {
+    display: inline-block;
+    padding: 1px 8px; border-radius: 999px;
+    font-size: 11px;
+    background: #ecfdf5; color: #047857; border: 1px solid #d1fae5;
+  }
+  .vibe-linear .pill.warn { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+  .vibe-linear .meta {
+    font-size: 11px; color: #71717a;
+  }
+  .vibe-linear .card-label {
+    background: #fafafa; color: #52525b;
+  }
+
+  /* === C: Terminal-modern (Fly.io vibe) === */
+  .vibe-terminal {
+    background: #0a0a0a;
+    color: #e5e5e5;
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    border: 1px solid #1f1f1f;
+  }
+  .vibe-terminal .term-bar {
+    padding: 8px 12px;
+    border-bottom: 1px solid #1f1f1f;
+    color: #71717a;
+    font-size: 11px;
+    display: flex; gap: 14px;
+  }
+  .vibe-terminal .term-bar .live {
+    color: #22d3ee; display: flex; align-items: center; gap: 5px;
+  }
+  .vibe-terminal .term-bar .live::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: #22d3ee; box-shadow: 0 0 6px #22d3ee;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  .vibe-terminal .term-line {
+    padding: 4px 12px;
+    font-size: 11px;
+    display: grid; grid-template-columns: 88px 64px 1fr;
+    gap: 12px;
+    color: #d4d4d4;
+  }
+  .vibe-terminal .term-line .ts { color: #71717a; }
+  .vibe-terminal .term-line .ok { color: #22c55e; }
+  .vibe-terminal .term-line .warn { color: #facc15; }
+  .vibe-terminal .term-line .err { color: #f87171; }
+  .vibe-terminal .term-line.host {
+    border-top: 1px solid #1f1f1f;
+    padding-top: 8px; margin-top: 8px;
+    grid-template-columns: 1fr;
+    color: #71717a;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .vibe-terminal .card-label {
+    background: #0a0a0a; color: #71717a;
+    border-top-color: #1f1f1f;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  }
+
+  /* === D: Telemetry-rich (Datadog/Grafana vibe with restraint) === */
+  .vibe-telemetry {
+    background: #0f1419;
+    color: #cbd5e1;
+    font-family: -apple-system, 'Inter', sans-serif;
+    border: 1px solid #1e293b;
+  }
+  .vibe-telemetry .tel-bar {
+    padding: 10px 14px;
+    border-bottom: 1px solid #1e293b;
+    font-size: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .vibe-telemetry .tel-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1px;
+    background: #1e293b;
+  }
+  .vibe-telemetry .tel-stat {
+    background: #0f1419;
+    padding: 10px 12px;
+  }
+  .vibe-telemetry .tel-stat .num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 22px; font-weight: 600;
+    color: #f1f5f9;
+  }
+  .vibe-telemetry .tel-stat .lbl {
+    font-size: 10px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-top: 2px;
+  }
+  .vibe-telemetry .tel-stat .num.up { color: #34d399; }
+  .vibe-telemetry .tel-stat .num.warn { color: #fbbf24; }
+  .vibe-telemetry .tel-host {
+    display: grid; grid-template-columns: 1fr auto auto;
+    padding: 8px 14px;
+    border-bottom: 1px solid #1e293b;
+    font-size: 12px;
+    align-items: center;
+  }
+  .vibe-telemetry .spark {
+    display: inline-flex; align-items: end;
+    gap: 1px; height: 18px;
+  }
+  .vibe-telemetry .spark span {
+    display: block; width: 3px; background: #34d399; border-radius: 1px;
+  }
+  .vibe-telemetry .pill {
+    font-size: 10px; padding: 1px 6px;
+    border-radius: 3px;
+    background: #064e3b; color: #34d399;
+  }
+  .vibe-telemetry .card-label {
+    background: #0f1419; color: #64748b;
+    border-top-color: #1e293b;
+  }
+</style>
+
+<div class="cards card-grid-2x2">
+
+  <!-- ===== OPTION A: Celestial Atlas ===== -->
+  <div class="card direction-card vibe-atlas" data-choice="atlas" onclick="toggleSelect(this)">
+    <div class="card-tag">A</div>
+    <div class="atlas-canvas">
+      <div class="wordmark">ISENGARD · ATLAS</div>
+      <!-- Star 1 -->
+      <div class="star" style="top: 38%; left: 22%; width: 18px; height: 18px;"></div>
+      <div class="label" style="top: 60%; left: 16%;">prod-01</div>
+      <div class="orbit" style="top: 25%; left: 8%; width: 90px; height: 90px;"></div>
+      <div class="planet" style="top: 30%; left: 8%; width: 5px; height: 5px;"></div>
+      <div class="planet" style="top: 50%; left: 38%; width: 4px; height: 4px;"></div>
+      <!-- Star 2 -->
+      <div class="star" style="top: 50%; left: 55%; width: 14px; height: 14px;"></div>
+      <div class="label" style="top: 70%; left: 50%;">prod-02</div>
+      <div class="orbit" style="top: 38%; left: 42%; width: 70px; height: 70px;"></div>
+      <div class="planet" style="top: 45%; left: 42%; width: 4px; height: 4px;"></div>
+      <div class="planet" style="top: 60%; left: 67%; width: 5px; height: 5px;"></div>
+      <!-- Star 3 -->
+      <div class="star" style="top: 30%; left: 78%; width: 12px; height: 12px;"></div>
+      <div class="label" style="top: 50%; left: 73%;">staging</div>
+      <div class="orbit" style="top: 18%; left: 65%; width: 56px; height: 56px;"></div>
+      <div class="planet" style="top: 22%; left: 70%; width: 4px; height: 4px;"></div>
+      <!-- Constellation lines -->
+      <svg style="position: absolute; top:0; left:0; width:100%; height:100%; pointer-events:none;">
+        <line x1="26%" y1="44%" x2="58%" y2="55%" stroke="rgba(212,184,140,0.2)" stroke-dasharray="2 4"/>
+        <line x1="60%" y1="54%" x2="82%" y2="34%" stroke="rgba(212,184,140,0.2)" stroke-dasharray="2 4"/>
+      </svg>
+    </div>
+    <div class="card-label">A · Celestial Atlas — beautiful, brand-strong, scenic</div>
+  </div>
+
+  <!-- ===== OPTION B: Linear-minimal ===== -->
+  <div class="card direction-card vibe-linear" data-choice="linear" onclick="toggleSelect(this)">
+    <div class="card-tag" style="background:#18181b;color:#fff;">B</div>
+    <div class="linear-bar">
+      <div class="dot"></div>
+      <strong>Isengard</strong>
+      <span style="color:#71717a;">·</span>
+      <span style="color:#71717a;">3 hosts · 7 containers · all healthy</span>
+      <span style="margin-left:auto;color:#a1a1aa;font-size:11px;">⌘K</span>
+    </div>
+    <div class="linear-row" style="font-weight:500;font-size:11px;color:#71717a;text-transform:uppercase;letter-spacing:.05em;">
+      <div>HOST / CONTAINER</div>
+      <div>STATUS</div>
+      <div>UPDATED</div>
+    </div>
+    <div class="linear-row">
+      <div><strong>prod-01</strong> <span class="meta">· web (nginx:1.25)</span></div>
+      <div><span class="pill">running</span></div>
+      <div class="meta">2m ago</div>
+    </div>
+    <div class="linear-row">
+      <div><strong>prod-01</strong> <span class="meta">· db (postgres:16)</span></div>
+      <div><span class="pill">running</span></div>
+      <div class="meta">3h ago</div>
+    </div>
+    <div class="linear-row">
+      <div><strong>prod-02</strong> <span class="meta">· cache (redis:7.2)</span></div>
+      <div><span class="pill warn">updating</span></div>
+      <div class="meta">now</div>
+    </div>
+    <div class="linear-row">
+      <div><strong>staging</strong> <span class="meta">· api (myorg/api:dev)</span></div>
+      <div><span class="pill">running</span></div>
+      <div class="meta">12m ago</div>
+    </div>
+    <div class="card-label">B · Linear-minimal — quiet, fast, trusted-tool feel</div>
+  </div>
+
+  <!-- ===== OPTION C: Terminal-modern ===== -->
+  <div class="card direction-card vibe-terminal" data-choice="terminal" onclick="toggleSelect(this)">
+    <div class="card-tag" style="background:#1f1f1f;color:#22d3ee;">C</div>
+    <div class="term-bar">
+      <span style="color:#22d3ee;">isengard</span>
+      <span>controller@<span style="color:#fff;">prod</span></span>
+      <span class="live" style="margin-left:auto;">live</span>
+    </div>
+    <div class="term-line host">─── prod-01 · 3 containers ──────────────────</div>
+    <div class="term-line"><span class="ts">14:22:18</span><span class="ok">UPDATED</span><span>web         nginx:1.25-alpine  →  sha256:9a7c</span></div>
+    <div class="term-line"><span class="ts">14:21:55</span><span class="ok">CHECKED</span><span>db          postgres:16        up to date</span></div>
+    <div class="term-line"><span class="ts">14:21:42</span><span class="ok">CHECKED</span><span>worker      myorg/worker:1.4   up to date</span></div>
+    <div class="term-line host">─── prod-02 · 2 containers ──────────────────</div>
+    <div class="term-line"><span class="ts">14:22:01</span><span class="warn">PULLING</span><span>cache       redis:7.2          new digest</span></div>
+    <div class="term-line"><span class="ts">14:21:59</span><span class="ok">CHECKED</span><span>nginx-lb    nginx:1.25         up to date</span></div>
+    <div class="term-line host">─── staging · 2 containers ──────────────────</div>
+    <div class="term-line"><span class="ts">14:21:30</span><span class="err">FAILED </span><span>api         myorg/api:dev      pull error: timeout</span></div>
+    <div class="card-label">C · Terminal-modern — Fly.io vibe, dense, ops-engineer tool</div>
+  </div>
+
+  <!-- ===== OPTION D: Telemetry-rich ===== -->
+  <div class="card direction-card vibe-telemetry" data-choice="telemetry" onclick="toggleSelect(this)">
+    <div class="card-tag" style="background:#1e293b;color:#34d399;">D</div>
+    <div class="tel-bar">
+      <span><strong style="color:#f1f5f9;">Isengard</strong> <span style="color:#64748b;margin-left:6px;">fleet</span></span>
+      <span style="color:#64748b;font-size:11px;">last sync · 8s ago</span>
+    </div>
+    <div class="tel-grid">
+      <div class="tel-stat"><div class="num up">3</div><div class="lbl">hosts up</div></div>
+      <div class="tel-stat"><div class="num">7</div><div class="lbl">containers</div></div>
+      <div class="tel-stat"><div class="num warn">1</div><div class="lbl">updating</div></div>
+    </div>
+    <div class="tel-host">
+      <div><strong style="color:#f1f5f9;">prod-01</strong> <span style="color:#64748b;font-size:11px;">3 ctrs</span></div>
+      <div class="spark">
+        <span style="height:6px"></span><span style="height:9px"></span><span style="height:7px"></span><span style="height:11px"></span><span style="height:9px"></span><span style="height:13px"></span><span style="height:8px"></span><span style="height:14px"></span>
+      </div>
+      <div><span class="pill">healthy</span></div>
+    </div>
+    <div class="tel-host">
+      <div><strong style="color:#f1f5f9;">prod-02</strong> <span style="color:#64748b;font-size:11px;">2 ctrs</span></div>
+      <div class="spark">
+        <span style="height:8px"></span><span style="height:7px"></span><span style="height:10px"></span><span style="height:6px"></span><span style="height:9px"></span><span style="height:12px;background:#fbbf24"></span><span style="height:11px;background:#fbbf24"></span><span style="height:13px;background:#fbbf24"></span>
+      </div>
+      <div><span class="pill" style="background:#451a03;color:#fbbf24;">updating</span></div>
+    </div>
+    <div class="tel-host">
+      <div><strong style="color:#f1f5f9;">staging</strong> <span style="color:#64748b;font-size:11px;">2 ctrs</span></div>
+      <div class="spark">
+        <span style="height:11px"></span><span style="height:9px"></span><span style="height:7px"></span><span style="height:10px"></span><span style="height:8px"></span><span style="height:12px"></span><span style="height:9px"></span><span style="height:6px"></span>
+      </div>
+      <div><span class="pill">healthy</span></div>
+    </div>
+    <div class="card-label">D · Telemetry-rich — Datadog/Grafana energy, sparklines + numbers</div>
+  </div>
+
+</div>
+
+<div style="margin-top: 24px; padding: 14px 16px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; font-size: 13px; line-height: 1.55;">
+  <strong>My take:</strong> The honest pick is <strong>B (Linear-minimal)</strong> — it's the visual language modern dev-tool dashboards have converged on for a reason: it gets out of the way. <strong>C</strong> is the second-best if you want it to feel more "ops engineer" / less "SaaS product". <strong>A</strong> is a brand surface, not a daily workspace — it could become the marketing screenshot or an optional "Atlas mode" toggle in v1.x. <strong>D</strong> is overkill until we actually have telemetry data to show.
+</div>

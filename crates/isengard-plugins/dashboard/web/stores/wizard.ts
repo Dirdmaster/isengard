@@ -10,7 +10,7 @@ const STORAGE_SKIPPED = 'isengard_setup_skipped'
 export const useWizardStore = defineStore('wizard', () => {
   const step = ref<WizardStep>(1)
   const hostname = ref('')
-  const fleet = ref('default')
+  const fleet = ref('')
   const hostId = ref<string | null>(null)
   const enrollmentToken = ref<string | null>(null)
   const installCommand = ref<string | null>(null)
@@ -33,7 +33,7 @@ export const useWizardStore = defineStore('wizard', () => {
   function reset() {
     step.value = 1
     hostname.value = ''
-    fleet.value = 'default'
+    fleet.value = ''
     hostId.value = null
     enrollmentToken.value = null
     installCommand.value = null
@@ -58,6 +58,13 @@ export const useWizardStore = defineStore('wizard', () => {
 
   async function issueToken(): Promise<void> {
     error.value = null
+    const trimmed = fleet.value.trim()
+    if (!trimmed) {
+      installCommand.value = null
+      hostId.value = null
+      enrollmentToken.value = null
+      return
+    }
     if (useMock.value) {
       hostId.value = 'mock-host-' + Math.random().toString(36).slice(2, 10)
       enrollmentToken.value = 'tok_' + Math.random().toString(36).slice(2, 14)
@@ -74,7 +81,7 @@ export const useWizardStore = defineStore('wizard', () => {
         enrollment_token: string
         install_command: string
       }>('/hosts', {
-        fleet: fleet.value,
+        fleet: trimmed,
         hostname: hostname.value || undefined,
       })
       hostId.value = dto.agent_id
@@ -85,6 +92,8 @@ export const useWizardStore = defineStore('wizard', () => {
       throw e
     }
   }
+
+  const canIssueToken = computed(() => fleet.value.trim().length > 0)
 
   function renderDockerRun(opts: { controllerUrl: string; token: string }) {
     const lines = [
@@ -222,6 +231,7 @@ export const useWizardStore = defineStore('wizard', () => {
     error,
     elapsedSeconds,
     useMock,
+    canIssueToken,
     next,
     back,
     skip,

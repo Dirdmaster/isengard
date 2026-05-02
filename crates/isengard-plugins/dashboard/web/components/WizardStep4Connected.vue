@@ -8,7 +8,7 @@ const nextSteps = [
     icon: 'lucide:server',
     title: 'Add another host',
     body: 'Build a fleet of two or more.',
-    action: () => wizard.$patch({ step: 2, installCommand: null, hostId: null, enrollmentToken: null }),
+    action: () => wizard.$patch({ step: 2, installCommand: null, hostId: null, enrollmentToken: null, fleet: '' }),
   },
   {
     icon: 'lucide:bell',
@@ -44,6 +44,9 @@ function discoverySummary(): string {
       <h1 class="font-mono text-[28px] font-semibold text-iso-text-primary">
         {{ wizard.enrolledHost?.hostname ?? wizard.hostname ?? 'Host' }} is connected
       </h1>
+      <p v-if="wizard.fleet" class="text-xs uppercase tracking-wider text-iso-text-faint">
+        added to fleet <span class="font-mono text-iso-text-secondary normal-case tracking-normal">{{ wizard.fleet }}</span>
+      </p>
       <p class="text-sm text-iso-text-muted">{{ discoverySummary() }}</p>
     </div>
 

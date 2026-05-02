@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useFleetsStore } from '~/stores/fleets'
 import { useToast } from '~/composables/useToast'
 
@@ -8,23 +8,27 @@ const emit = defineEmits<{ close: [] }>()
 const fleetsStore = useFleetsStore()
 if (!fleetsStore.loaded) await fleetsStore.load()
 
-const fleet = ref('default')
+const fleet = ref('')
 const hostname = ref('')
 const installCommand = ref('')
 const loading = ref(false)
 const error = ref('')
 const toast = useToast()
 
+const canGenerate = computed(() => fleet.value.trim().length > 0 && !loading.value)
+
 async function generate() {
+  if (!canGenerate.value) return
   loading.value = true
   error.value = ''
   try {
     const api = useApi()
     const dto = await api.post<{ install_command: string }>('/hosts', {
-      fleet: fleet.value,
+      fleet: fleet.value.trim(),
       hostname: hostname.value || undefined,
     })
     installCommand.value = dto.install_command
+    await fleetsStore.load()
     toast.info('Install command generated. Token expires in 30 min.')
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -65,17 +69,20 @@ function handleOpenChange(v: boolean) {
       <!-- Form (pre-generation) -->
       <div v-if="!installCommand" class="space-y-4">
         <div class="space-y-1.5">
-          <Label for="fleet" class="text-xs uppercase tracking-wider text-iso-text-faint">Fleet</Label>
-          <Select v-model="fleet">
-            <SelectTrigger id="fleet" class="font-mono bg-iso-bg-elevated border-iso-border-subtle">
-              <SelectValue placeholder="Select a fleet" />
-            </SelectTrigger>
-            <SelectContent class="bg-iso-bg-overlay border-iso-border-subtle">
-              <SelectItem v-for="f in fleetsStore.fleets" :key="f.name" :value="f.name" class="font-mono">
-                {{ f.name }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
+          <Label for="fleet" class="text-xs uppercase tracking-wider text-iso-text-faint">
+            Fleet <span class="text-iso-error">*</span>
+          </Label>
+          <Input
+            id="fleet"
+            v-model="fleet"
+            placeholder="prod, homelab, edge…"
+            list="existing-fleets"
+            autofocus
+            class="font-mono bg-iso-bg-elevated border-iso-border-subtle"
+          />
+          <datalist id="existing-fleets">
+            <option v-for="f in fleetsStore.fleets" :key="f.name" :value="f.name" />
+          </datalist>
         </div>
 
         <div class="space-y-1.5">
@@ -100,8 +107,8 @@ function handleOpenChange(v: boolean) {
         <Button variant="ghost" @click="emit('close')">Cancel</Button>
         <Button
           variant="outline"
-          :disabled="loading"
-          class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
+          :disabled="!canGenerate"
+          class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success disabled:opacity-40"
           @click="generate"
         >
           {{ loading ? 'Generating…' : 'Generate install command' }}

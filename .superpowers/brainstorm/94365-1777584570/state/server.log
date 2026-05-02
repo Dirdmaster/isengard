@@ -1,0 +1,3 @@
+{"type":"server-started","port":55056,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:55056","screen_dir":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/94365-1777584570/content","state_dir":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/94365-1777584570/state"}
+{"type":"screen-added","file":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/94365-1777584570/content/zellij-options.html"}
+{"type":"server-stopped","reason":"idle timeout"}

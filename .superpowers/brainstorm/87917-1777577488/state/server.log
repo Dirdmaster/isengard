@@ -1,0 +1,7 @@
+{"type":"server-started","port":64270,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:64270","screen_dir":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/content","state_dir":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/state"}
+{"type":"screen-added","file":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/content/direction-vibes.html"}
+{"type":"screen-added","file":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/content/researching.html"}
+{"type":"screen-added","file":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/content/proposed-direction.html"}
+{"type":"screen-added","file":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/content/moved-to-pencil.html"}
+{"type":"screen-added","file":"/Users/dirdmaster/Projects/isengard/.superpowers/brainstorm/87917-1777577488/content/state-strip-options.html"}
+{"type":"server-stopped","reason":"idle timeout"}
