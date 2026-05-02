@@ -65,6 +65,26 @@ async fn spawn_controller(state_dir: PathBuf) -> SocketAddr {
 async fn harness() -> Harness {
     let dir = TempDir::new().expect("temp dir");
     let addr = spawn_controller(dir.path().to_path_buf()).await;
+
+    // Seed the enrollment-token payload so the controller can resolve fleet
+    // for sample_request(). Tests that exercise the missing-token path use a
+    // request with `enrollment_token: None`.
+    use isengard_storage::Inventory;
+    let db = dir.path().join("isengard.db");
+    for _ in 0..200 {
+        if db.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let inv = Inventory::open(&db).await.expect("seed: open inventory");
+    inv.set_setting(
+        "enrollment.token.test-enroll-1234",
+        &serde_json::json!({ "fleet": "test", "hostname": null }),
+    )
+    .await
+    .expect("seed: set_setting");
+
     Harness { addr, _state: dir }
 }
 
@@ -76,6 +96,7 @@ fn sample_request() -> EnrollRequest {
         arch: "x86_64".into(),
         agent_version: "0.1.0-alpha".into(),
         docker_version: "27.4.0".into(),
+        enrollment_token: Some("test-enroll-1234".into()),
     }
 }
 

@@ -40,6 +40,23 @@ async fn spawn_controller(state_dir: std::path::PathBuf) -> SocketAddr {
     panic!("controller did not bind {addr} within 10s");
 }
 
+async fn seed_token(state_dir: &std::path::Path, token: &str, fleet: &str) {
+    let db = state_dir.join("isengard.db");
+    for _ in 0..200 {
+        if db.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let inv = Inventory::open(&db).await.expect("seed: open inventory");
+    inv.set_setting(
+        &format!("enrollment.token.{token}"),
+        &serde_json::json!({ "fleet": fleet, "hostname": null }),
+    )
+    .await
+    .expect("seed: set_setting");
+}
+
 async fn wait_for_state_file(path: &std::path::Path, timeout_ms: u64) -> bool {
     let polls = (timeout_ms / 50).max(1);
     for _ in 0..polls {
@@ -57,6 +74,7 @@ async fn agent_heartbeats_advance_last_seen_at() {
     let agent_state = TempDir::new().unwrap();
 
     let addr = spawn_controller(controller_state.path().to_path_buf()).await;
+    seed_token(controller_state.path(), TEST_TOKEN, "test").await;
 
     // Spawn the agent. It will enroll then open the sync stream and send
     // heartbeats. The handle leaks intentionally — test process exits at

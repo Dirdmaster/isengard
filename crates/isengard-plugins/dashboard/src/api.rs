@@ -661,6 +661,7 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "0.1.0".into(),
             docker_version: "27.0".into(),
+            fleet: "test".into(),
         }
     }
 
@@ -691,6 +692,7 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "v0.1.0".into(),
                 docker_version: "27".into(),
+                fleet: "test".into(),
             })
             .await
             .unwrap();
@@ -740,6 +742,7 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "v0.1.0".into(),
                 docker_version: "27".into(),
+                fleet: "test".into(),
             })
             .await
             .unwrap();

@@ -57,6 +57,23 @@ fn pick_free_port() -> u16 {
     port
 }
 
+async fn seed_token(state_dir: &std::path::Path, token: &str, fleet: &str) {
+    let db = state_dir.join("isengard.db");
+    for _ in 0..200 {
+        if db.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let inv = Inventory::open(&db).await.expect("seed: open inventory");
+    inv.set_setting(
+        &format!("enrollment.token.{token}"),
+        &serde_json::json!({ "fleet": fleet, "hostname": null }),
+    )
+    .await
+    .expect("seed: set_setting");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_survives_controller_restart() {
     let controller_state = TempDir::new().unwrap();
@@ -65,6 +82,7 @@ async fn agent_survives_controller_restart() {
 
     // Spawn controller A.
     let (addr, ctrl_a) = spawn_controller_on(port, controller_state.path().to_path_buf()).await;
+    seed_token(controller_state.path(), TEST_TOKEN, "test").await;
 
     // Spawn the agent against `addr`.
     let opts = AgentOptions {

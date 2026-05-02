@@ -46,7 +46,10 @@ impl HostInfo {
 }
 
 /// Issue an Enroll RPC against the configured controller. Returns the
-/// controller-assigned `agent_id` as a string.
+/// controller-assigned `agent_id` as a string. The `token` is used both as
+/// the bearer auth header AND embedded in the EnrollRequest as the
+/// `enrollment_token` so the controller can resolve which fleet the host
+/// belongs to (issued by the dashboard's POST /hosts handler during onboarding).
 pub async fn enroll(controller_url: &str, token: &str, info: HostInfo) -> Result<String> {
     let channel = Channel::from_shared(controller_url.to_string())
         .with_context(|| format!("invalid controller url {controller_url:?}"))?
@@ -70,6 +73,7 @@ pub async fn enroll(controller_url: &str, token: &str, info: HostInfo) -> Result
         arch: info.arch,
         agent_version: info.agent_version,
         docker_version: info.docker_version,
+        enrollment_token: Some(token.to_string()),
     };
 
     let resp = client

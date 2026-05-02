@@ -53,12 +53,19 @@ impl Inventory {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
+        // Ensure the fleet exists. Caller passes the fleet name (required —
+        // there is no implicit 'default' fleet).
+        sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES (?)")
+            .bind(&req.fleet)
+            .execute(&self.pool)
+            .await?;
+
         sqlx::query(
             r#"
             INSERT INTO hosts (
                 id, fingerprint, hostname, os, arch,
-                agent_version, docker_version, enrolled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                agent_version, docker_version, enrolled_at, fleet
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(id_bytes)
@@ -69,12 +76,9 @@ impl Inventory {
         .bind(&req.agent_version)
         .bind(&req.docker_version)
         .bind(enrolled_at)
+        .bind(&req.fleet)
         .execute(&self.pool)
         .await?;
-
-        sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES ('default')")
-            .execute(&self.pool)
-            .await?;
 
         Ok(id)
     }
@@ -568,6 +572,7 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "0.1.0-alpha".into(),
             docker_version: "27.4.0".into(),
+            fleet: "default".into(),
         }
     }
 
@@ -669,6 +674,7 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "test".into(),
             docker_version: "test".into(),
+            fleet: "default".into(),
         };
         let id = inv.enroll_host(enroll).await.unwrap();
         let removed = inv.delete_host(id).await.unwrap();
@@ -689,6 +695,7 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0.1.0".into(),
                 docker_version: "27.0".into(),
+            fleet: "default".into(),
             })
             .await
             .unwrap();
@@ -732,6 +739,7 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0.1.0".into(),
                 docker_version: "27.0".into(),
+            fleet: "default".into(),
             })
             .await
             .unwrap();
@@ -855,6 +863,7 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "0.1.0".into(),
             docker_version: "27.0".into(),
+            fleet: "default".into(),
         })
         .await
         .unwrap()

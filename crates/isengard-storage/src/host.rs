@@ -67,7 +67,9 @@ pub struct Host {
 }
 
 /// Request shape for inserting a new host. The controller calls this; the
-/// storage layer assigns a fresh [`HostId`] and `enrolled_at`.
+/// storage layer assigns a fresh [`HostId`] and `enrolled_at`. The `fleet`
+/// is required — every host belongs to exactly one fleet, named by the user
+/// during onboarding. There is no auto-`default` fleet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollHost {
     pub fingerprint: String,
@@ -76,6 +78,7 @@ pub struct EnrollHost {
     pub arch: String,
     pub agent_version: String,
     pub docker_version: String,
+    pub fleet: String,
 }
 
 #[cfg(test)]

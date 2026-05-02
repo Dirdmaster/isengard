@@ -28,6 +28,11 @@ message EnrollRequest {
   string arch            = 4; // e.g. "x86_64"
   string agent_version   = 5;
   string docker_version  = 6;
+  // Pre-issued enrollment token from the controller's onboarding endpoint
+  // (POST /api/v1/hosts). When present, the controller resolves the fleet
+  // assignment from the token's stored payload. Optional for backward compat
+  // with agents that hand-roll enrollment.
+  optional string enrollment_token = 7;
 }
 
 message EnrollResponse {

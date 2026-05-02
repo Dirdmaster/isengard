@@ -37,7 +37,38 @@ impl Controller for ControllerService {
     ) -> Result<Response<EnrollResponse>, Status> {
         let req = request.into_inner();
 
-        // Convert proto request → storage request.
+        // Resolve fleet from the optional enrollment_token. If the agent
+        // enrolled via the wizard, the token's payload (created by the
+        // dashboard's POST /hosts handler) carries the fleet name. Without a
+        // valid token, enrollment is rejected — every host belongs to a fleet
+        // the user explicitly named.
+        let token = req.enrollment_token.as_deref().unwrap_or_default();
+        if token.is_empty() {
+            return Err(Status::invalid_argument(
+                "enrollment_token required (issue one via the dashboard)",
+            ));
+        }
+        let key = format!("enrollment.token.{token}");
+        let fleet = match self.inventory.get_setting(&key).await {
+            Ok(Some(payload)) => payload
+                .get("fleet")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| {
+                    Status::invalid_argument("enrollment token payload missing fleet")
+                })?,
+            Ok(None) => {
+                return Err(Status::unauthenticated(
+                    "enrollment token unknown or expired",
+                ));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "enroll: settings lookup failed");
+                return Err(Status::internal("settings lookup failed"));
+            }
+        };
+
+        // Convert proto request → storage request, applying the resolved fleet.
         let enroll_req = isengard_storage::EnrollHost {
             fingerprint: req.fingerprint.clone(),
             hostname: req.hostname.clone(),
@@ -45,6 +76,7 @@ impl Controller for ControllerService {
             arch: req.arch,
             agent_version: req.agent_version,
             docker_version: req.docker_version,
+            fleet: fleet.clone(),
         };
 
         let id = match self.inventory.enroll_host(enroll_req).await {
