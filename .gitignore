@@ -17,3 +17,4 @@ www/bun.lock
 # Local env
 .env
 .env.local
+.superpowers/
