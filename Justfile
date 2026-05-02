@@ -115,7 +115,7 @@ concept name:
         FILE="design/concepts/${DATE}-{{name}}-v${N}.html"
     fi
     cp design/concepts/_shell.html "$FILE"
-    sed -i.bak "s/{{TITLE}}/{{name}}/g" "$FILE" && rm "$FILE.bak"
+    sed -i.bak "s/{{{{TITLE}}}}/{{name}}/g" "$FILE" && rm "$FILE.bak"
     echo "Created $FILE"
 
 # Scaffold a new dated decision (ADR) markdown file. Usage: just decision bottom-bar
