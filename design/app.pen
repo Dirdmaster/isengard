@@ -45546,6 +45546,7 @@
                     {
                       "type": "frame",
                       "id": "GMiNs",
+                      "width": "fill_container",
                       "fill": "#000000",
                       "cornerRadius": 6,
                       "stroke": {
@@ -46349,6 +46350,7 @@
                     {
                       "type": "frame",
                       "id": "mAbDG",
+                      "width": "fill_container",
                       "fill": "#000000",
                       "cornerRadius": 6,
                       "stroke": {
