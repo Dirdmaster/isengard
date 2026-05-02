@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Approvals queue v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1440px] h-[900px] flex flex-col rounded-iso-xl border border-iso-border overflow-hidden bg-iso-bg-base">
+
+  <header class="h-[52px] px-5 flex items-center gap-4 border-b border-iso-border shrink-0">
+    <div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-full bg-iso-success"></div><span class="text-sm font-semibold">isengard</span></div>
+    <div class="px-2.5 py-1 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-xs text-iso-text-secondary">All fleets</div>
+    <nav class="flex items-center">
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Home</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Hosts</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Stacks</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Events</a>
+    </nav>
+    <div class="flex-1"></div>
+  </header>
+
+  <main class="flex-1 p-6 flex flex-col gap-6 overflow-auto">
+    <div class="flex flex-col gap-1">
+      <h1 class="text-[22px] font-semibold">Approvals</h1>
+      <span class="text-xs text-iso-text-muted">3 pending updates · earliest 14 min ago</span>
+    </div>
+
+    <!-- Pending approval cards -->
+    <div class="flex flex-col gap-3">
+      <div class="rounded-iso-lg bg-iso-bg-elevated border border-iso-warn p-5 flex items-center gap-4">
+        <div class="w-2.5 h-2.5 rounded-full bg-iso-warn"></div>
+        <div class="flex flex-col gap-1">
+          <div class="flex items-center gap-2 text-sm">
+            <span class="font-medium">web-app</span>
+            <span class="text-iso-text-faint">·</span>
+            <span class="mono text-xs text-iso-text-muted">prod fleet</span>
+            <span class="text-iso-text-faint">·</span>
+            <span class="mono text-xs text-iso-text-muted">v2.4.0</span>
+            <span class="text-iso-text-muted">→</span>
+            <span class="mono text-xs font-medium text-iso-success">v2.4.1</span>
+          </div>
+          <span class="text-[11px] text-iso-text-muted">policy: prod-manual · patch · 14 min ago</span>
+        </div>
+        <div class="flex-1"></div>
+        <button class="px-3 py-1.5 rounded-iso-md bg-iso-bg-elevated border border-iso-border-strong text-xs font-medium">Defer 4h</button>
+        <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Approve</button>
+      </div>
+
+      <div class="rounded-iso-lg bg-iso-bg-elevated border border-iso-warn p-5 flex items-center gap-4">
+        <div class="w-2.5 h-2.5 rounded-full bg-iso-warn"></div>
+        <div class="flex flex-col gap-1">
+          <div class="flex items-center gap-2 text-sm">
+            <span class="font-medium">postgres</span>
+            <span class="text-iso-text-faint">·</span>
+            <span class="mono text-xs text-iso-text-muted">prod-01</span>
+            <span class="text-iso-text-faint">·</span>
+            <span class="mono text-xs text-iso-text-muted">v15.3</span>
+            <span class="text-iso-text-muted">→</span>
+            <span class="mono text-xs font-medium text-iso-success">v15.4</span>
+          </div>
+          <span class="text-[11px] text-iso-text-muted">policy: db-quarterly · minor · 32 min ago</span>
+        </div>
+        <div class="flex-1"></div>
+        <button class="px-3 py-1.5 rounded-iso-md bg-iso-bg-elevated border border-iso-border-strong text-xs font-medium">Defer 4h</button>
+        <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Approve</button>
+      </div>
+
+      <div class="rounded-iso-lg bg-iso-bg-elevated border border-iso-warn p-5 flex items-center gap-4">
+        <div class="w-2.5 h-2.5 rounded-full bg-iso-warn"></div>
+        <div class="flex flex-col gap-1">
+          <div class="flex items-center gap-2 text-sm">
+            <span class="font-medium">redis</span>
+            <span class="text-iso-text-faint">·</span>
+            <span class="mono text-xs text-iso-text-muted">prod fleet</span>
+            <span class="text-iso-text-faint">·</span>
+            <span class="mono text-xs text-iso-text-muted">v7.2</span>
+            <span class="text-iso-text-muted">→</span>
+            <span class="mono text-xs font-medium text-iso-success">v7.4</span>
+          </div>
+          <span class="text-[11px] text-iso-text-muted">policy: prod-manual · minor · 1h ago</span>
+        </div>
+        <div class="flex-1"></div>
+        <button class="px-3 py-1.5 rounded-iso-md bg-iso-bg-elevated border border-iso-border-strong text-xs font-medium">Defer 4h</button>
+        <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Approve</button>
+      </div>
+    </div>
+
+    <!-- Recently decided -->
+    <div class="text-[10px] font-semibold tracking-wider text-iso-text-faint uppercase mt-4">Recently decided</div>
+    <div class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated overflow-hidden">
+      <div class="grid grid-cols-[110px_200px_200px_200px_200px] px-4 py-2.5 text-[10px] font-semibold tracking-wider text-iso-text-muted border-b border-iso-border">
+        <div>DECISION</div><div>STACK</div><div>VERSION</div><div>WHO</div><div>WHEN</div>
+      </div>
+      <div class="grid grid-cols-[110px_200px_200px_200px_200px] px-4 py-3 text-xs border-b border-iso-border items-center">
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="text-iso-success">approved</span></div>
+        <div class="font-medium">metrics</div>
+        <div class="mono text-iso-text-muted">v10.2.1 → v10.2.2</div>
+        <div class="text-iso-text-muted">you @ telegram</div>
+        <div class="text-iso-text-muted">8h ago</div>
+      </div>
+      <div class="grid grid-cols-[110px_200px_200px_200px_200px] px-4 py-3 text-xs border-b border-iso-border items-center">
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-error"></div><span class="text-iso-error">rejected</span></div>
+        <div class="font-medium">old-monitor</div>
+        <div class="mono text-iso-text-muted">v2.45 → v3.0</div>
+        <div class="text-iso-text-muted">auto: failed-soak</div>
+        <div class="text-iso-text-muted">yesterday</div>
+      </div>
+      <div class="grid grid-cols-[110px_200px_200px_200px_200px] px-4 py-3 text-xs items-center">
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-text-muted"></div><span class="text-iso-text-muted">expired</span></div>
+        <div class="font-medium">blog</div>
+        <div class="mono text-iso-text-muted">v5.19 → v5.20</div>
+        <div class="text-iso-text-muted">auto: 24h timeout</div>
+        <div class="text-iso-text-muted">2 days ago</div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="h-[56px] bg-iso-bg-elevated border-t border-iso-border flex items-center shrink-0">
+    <div class="px-4 h-full flex items-center gap-2 border-r border-iso-border"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="mono text-xs text-iso-text-secondary">4 / 4 hosts</span></div>
+    <div class="flex-1 px-4 h-full flex items-center gap-2.5">
+      <svg class="w-3.5 h-3.5 text-iso-text-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <span class="mono text-sm">type a command, search, or jump to anything</span>
+    </div>
+    <div class="px-4 h-full flex items-center gap-3 border-l border-iso-border">
+      <span class="px-2 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border-strong mono text-[11px] text-iso-text-secondary">⌘K</span>
+      <span class="text-[11px] text-iso-text-muted">focus</span>
+    </div>
+  </footer>
+</div>
+</body>
+</html>

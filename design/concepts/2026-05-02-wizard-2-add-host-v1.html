@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wizard step 2 · Add host v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1920px] h-[1080px] flex items-center justify-center bg-iso-bg-base rounded-iso-xl border border-iso-border">
+
+  <div class="w-[720px] flex flex-col gap-6 p-12 rounded-iso-xl bg-iso-bg-elevated border border-iso-border">
+    <div class="flex items-center justify-center gap-2">
+      <div class="w-2 h-2 rounded-full bg-iso-text-muted"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-success"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-border"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-border"></div>
+    </div>
+
+    <h1 class="text-2xl font-semibold tracking-tight">Add your first host</h1>
+    <p class="text-sm text-iso-text-muted">Name a fleet, then run the install command on the host you want to manage.</p>
+
+    <!-- Fleet input -->
+    <div class="flex flex-col gap-1.5">
+      <label class="text-[11px] font-medium text-iso-text-muted tracking-wide">Fleet name</label>
+      <div class="px-3.5 py-2.5 rounded-iso-md bg-iso-bg-base border border-iso-success flex items-center gap-1.5">
+        <span class="mono text-sm">homelab</span>
+        <span class="w-px h-4 bg-iso-text-primary"></span>
+      </div>
+      <span class="text-[11px] text-iso-text-faint">e.g. prod, staging, edge, homelab</span>
+    </div>
+
+    <!-- Docker command box -->
+    <div class="rounded-iso-md bg-[#050505] border border-iso-border overflow-hidden">
+      <div class="px-4 py-2.5 border-b border-iso-border flex items-center justify-between">
+        <span class="text-[11px] font-medium text-iso-text-muted tracking-wide">Run on the host</span>
+        <span class="text-[11px] text-iso-info mono">⌘C  copy</span>
+      </div>
+      <div class="px-4 py-3.5 flex flex-col gap-1 mono text-xs">
+        <div><span class="text-iso-info">docker</span> run <span class="text-iso-warn">-d</span> <span class="text-iso-warn">--name</span> isengard-agent <span class="text-iso-text-muted">\</span></div>
+        <div><span class="text-iso-warn">  -e</span> ISENGARD_TOKEN=01HRM4...XYZ <span class="text-iso-text-muted">\</span></div>
+        <div><span class="text-iso-warn">  -e</span> ISENGARD_FLEET=homelab <span class="text-iso-text-muted">\</span></div>
+        <div><span class="text-iso-warn">  -v</span> <span class="text-iso-text-secondary">/var/run/docker.sock:/var/run/docker.sock</span> <span class="text-iso-text-muted">\</span></div>
+        <div class="text-iso-success">  ghcr.io/dirdmaster/isengard-agent:latest</div>
+      </div>
+    </div>
+
+    <!-- Waiting status -->
+    <div class="flex items-center justify-center gap-2">
+      <div class="w-2 h-2 rounded-full bg-iso-warn"></div>
+      <span class="text-xs text-iso-text-muted">Waiting for the agent to check in…</span>
+    </div>
+
+    <!-- Actions -->
+    <div class="flex items-center justify-center gap-3">
+      <button class="px-3 py-1.5 rounded-iso-md text-xs text-iso-text-secondary">Skip for now</button>
+      <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Continue →</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

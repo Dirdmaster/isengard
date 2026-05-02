@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Settings · Networking v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1440px] h-[900px] flex flex-col rounded-iso-xl border border-iso-border overflow-hidden bg-iso-bg-base">
+
+  <header class="h-[52px] px-5 flex items-center gap-4 border-b border-iso-border shrink-0">
+    <div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-full bg-iso-success"></div><span class="text-sm font-semibold">isengard</span></div>
+    <div class="px-2.5 py-1 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-xs text-iso-text-secondary">All fleets</div>
+    <nav class="flex items-center">
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Home</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Hosts</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Stacks</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Events</a>
+    </nav>
+    <div class="flex-1"></div>
+  </header>
+
+  <main class="flex-1 p-6 flex flex-col gap-6 overflow-auto">
+    <div class="flex items-center justify-between">
+      <div class="flex flex-col gap-1">
+        <h1 class="text-[22px] font-semibold">Settings</h1>
+        <span class="text-xs text-iso-text-muted">Networking · routing rules</span>
+      </div>
+      <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">+ Add routing rule</button>
+    </div>
+
+    <!-- Sub tabs -->
+    <div class="flex items-center border-b border-iso-border">
+      <a class="px-4 py-2.5 text-xs text-iso-text-muted">General</a>
+      <a class="px-4 py-2.5 text-xs font-medium border-b-2 border-iso-success">Networking</a>
+      <a class="px-4 py-2.5 text-xs text-iso-text-muted">Update policies</a>
+      <a class="px-4 py-2.5 text-xs text-iso-text-muted">Backup</a>
+      <a class="px-4 py-2.5 text-xs text-iso-text-muted">Webhooks</a>
+      <a class="px-4 py-2.5 text-xs text-iso-text-muted">Notifier</a>
+    </div>
+
+    <!-- Routing rules table -->
+    <div class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated overflow-hidden">
+      <div class="grid grid-cols-[240px_200px_100px_60px_130px_130px_100px] px-4 py-2.5 text-[10px] font-semibold tracking-wider text-iso-text-muted border-b border-iso-border">
+        <div>HOSTNAME</div><div>TARGET</div><div>ADAPTER</div><div>TLS</div><div>HEALTH</div><div>SOURCE</div><div>ACTIONS</div>
+      </div>
+      <div class="grid grid-cols-[240px_200px_100px_60px_130px_130px_100px] px-4 py-3 text-xs border-b border-iso-border items-center">
+        <div class="font-medium">isengard.local</div>
+        <div class="mono text-iso-text-muted">controller:9418</div>
+        <div class="text-iso-text-muted">raw</div>
+        <div class="text-iso-text-muted">off</div>
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="text-iso-success">healthy</span></div>
+        <div class="text-iso-info">ui</div>
+        <div class="text-iso-text-muted">edit · delete</div>
+      </div>
+      <div class="grid grid-cols-[240px_200px_100px_60px_130px_130px_100px] px-4 py-3 text-xs border-b border-iso-border items-center">
+        <div class="font-medium">blog.dirdmaster.dev</div>
+        <div class="mono text-iso-text-muted">blog@edge:8080</div>
+        <div class="text-iso-text-muted">cf-tunnel</div>
+        <div class="text-iso-success">auto</div>
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="text-iso-success">healthy</span></div>
+        <div class="text-iso-info">ui</div>
+        <div class="text-iso-text-muted">edit · delete</div>
+      </div>
+      <div class="grid grid-cols-[240px_200px_100px_60px_130px_130px_100px] px-4 py-3 text-xs border-b border-iso-border items-center">
+        <div class="font-medium">metrics.dirdmaster.dev</div>
+        <div class="mono text-iso-text-muted">grafana@staging:3000</div>
+        <div class="text-iso-text-muted">tailscale</div>
+        <div class="text-iso-success">auto</div>
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="text-iso-success">healthy</span></div>
+        <div class="text-iso-warn">label</div>
+        <div class="text-iso-text-muted">edit · delete</div>
+      </div>
+      <div class="grid grid-cols-[240px_200px_100px_60px_130px_130px_100px] px-4 py-3 text-xs border-b border-iso-border items-center">
+        <div class="font-medium">*.app.dirdmaster.dev</div>
+        <div class="mono text-iso-text-muted">web-app@prod:80</div>
+        <div class="text-iso-text-muted">cf-tunnel</div>
+        <div class="text-iso-success">auto</div>
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-warn"></div><span class="text-iso-warn">degraded</span></div>
+        <div class="text-iso-warn">label</div>
+        <div class="text-iso-text-muted">edit · delete</div>
+      </div>
+      <div class="grid grid-cols-[240px_200px_100px_60px_130px_130px_100px] px-4 py-3 text-xs items-center">
+        <div class="font-medium">old.dirdmaster.dev</div>
+        <div class="mono text-iso-text-muted">—</div>
+        <div class="text-iso-text-muted">—</div>
+        <div class="text-iso-text-muted">—</div>
+        <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-iso-error"></div><span class="text-iso-error">unreachable</span></div>
+        <div class="text-iso-text-muted">imported</div>
+        <div class="text-iso-text-muted">edit · delete</div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="h-[56px] bg-iso-bg-elevated border-t border-iso-border flex items-center shrink-0">
+    <div class="px-4 h-full flex items-center gap-2 border-r border-iso-border"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="mono text-xs text-iso-text-secondary">4 / 4 hosts</span></div>
+    <div class="flex-1 px-4 h-full flex items-center gap-2.5">
+      <svg class="w-3.5 h-3.5 text-iso-text-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <span class="mono text-sm">type a command, search, or jump to anything</span>
+    </div>
+    <div class="px-4 h-full flex items-center gap-3 border-l border-iso-border">
+      <span class="px-2 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border-strong mono text-[11px] text-iso-text-secondary">⌘K</span>
+      <span class="text-[11px] text-iso-text-muted">focus</span>
+    </div>
+  </footer>
+</div>
+</body>
+</html>

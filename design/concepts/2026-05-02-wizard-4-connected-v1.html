@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wizard step 4 · Connected v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1920px] h-[1080px] flex items-center justify-center bg-iso-bg-base rounded-iso-xl border border-iso-border">
+
+  <div class="w-[720px] flex flex-col items-center gap-6 p-12 rounded-iso-xl bg-iso-bg-elevated border border-iso-border">
+    <div class="flex items-center gap-2">
+      <div class="w-2 h-2 rounded-full bg-iso-text-muted"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-text-muted"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-text-muted"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-success"></div>
+    </div>
+
+    <div class="w-16 h-16 rounded-full bg-iso-success flex items-center justify-center">
+      <svg class="w-8 h-8 text-iso-bg-base" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
+    <h1 class="text-3xl font-semibold tracking-tight text-iso-success">Connected!</h1>
+    <p class="text-sm text-iso-text-secondary text-center">Your first host is enrolled and reporting live.</p>
+
+    <!-- Discovery summary -->
+    <div class="w-full p-4 rounded-iso-lg bg-iso-bg-base border border-iso-border flex flex-col gap-2.5">
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Hostname</span>
+        <span class="mono text-iso-text-primary">homelab-01</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Fleet</span>
+        <span class="mono text-iso-success">homelab</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">OS / Docker</span>
+        <span class="mono text-iso-text-secondary">Ubuntu 22.04 · 24.0.7</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Stacks discovered</span>
+        <span class="mono text-iso-text-primary">5</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Services</span>
+        <span class="mono text-iso-text-primary">12</span>
+      </div>
+    </div>
+
+    <!-- CTAs -->
+    <div class="flex items-center gap-3">
+      <button class="px-3 py-1.5 rounded-iso-md bg-iso-bg-elevated border border-iso-border-strong text-xs font-medium">Add another host</button>
+      <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Open dashboard →</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

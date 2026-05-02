@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wizard step 1 · Welcome v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<!-- Full-screen wizard, no chrome -->
+<div class="w-[1920px] h-[1080px] flex items-center justify-center bg-iso-bg-base rounded-iso-xl border border-iso-border">
+
+  <div class="w-[760px] flex flex-col items-center gap-6 p-12 rounded-iso-xl bg-iso-bg-elevated border border-iso-border">
+    <!-- Step dots -->
+    <div class="flex items-center gap-2">
+      <div class="w-2 h-2 rounded-full bg-iso-success"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-border"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-border"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-border"></div>
+    </div>
+
+    <div class="w-14 h-14 rounded-full bg-iso-success"></div>
+    <h1 class="text-3xl font-semibold tracking-tight">isengard</h1>
+    <p class="text-sm text-iso-text-muted text-center">A container and fleet manager for your servers.</p>
+
+    <!-- 3 feature cards -->
+    <div class="w-full grid grid-cols-3 gap-3.5 mt-2">
+      <div class="p-3.5 rounded-iso-md bg-iso-bg-base border border-iso-border flex flex-col gap-2">
+        <div class="text-[11px] font-medium text-iso-success">1</div>
+        <div class="text-[13px] font-medium">See every host</div>
+        <div class="text-[11px] text-iso-text-muted">Group servers into fleets, watch agent state in one place.</div>
+      </div>
+      <div class="p-3.5 rounded-iso-md bg-iso-bg-base border border-iso-border flex flex-col gap-2">
+        <div class="text-[11px] font-medium text-iso-success">2</div>
+        <div class="text-[13px] font-medium">Manage stacks</div>
+        <div class="text-[11px] text-iso-text-muted">Compose projects as first-class units across hosts.</div>
+      </div>
+      <div class="p-3.5 rounded-iso-md bg-iso-bg-base border border-iso-border flex flex-col gap-2">
+        <div class="text-[11px] font-medium text-iso-success">3</div>
+        <div class="text-[13px] font-medium">Live event feed</div>
+        <div class="text-[11px] text-iso-text-muted">Every check, every update, every issue. Filter, search, jump.</div>
+      </div>
+    </div>
+
+    <button class="mt-3 px-4 py-2 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Get started →</button>
+  </div>
+</div>
+</body>
+</html>

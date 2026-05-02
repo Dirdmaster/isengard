@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wizard step 3 · Listening v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1920px] h-[1080px] flex items-center justify-center bg-iso-bg-base rounded-iso-xl border border-iso-border">
+
+  <div class="w-[720px] flex flex-col items-center gap-6 p-12 rounded-iso-xl bg-iso-bg-elevated border border-iso-border">
+    <div class="flex items-center gap-2">
+      <div class="w-2 h-2 rounded-full bg-iso-text-muted"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-text-muted"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-success"></div>
+      <div class="w-2 h-2 rounded-full bg-iso-border"></div>
+    </div>
+
+    <div class="w-14 h-14 rounded-full bg-iso-warn"></div>
+    <h1 class="text-2xl font-semibold tracking-tight">Listening for your agent…</h1>
+    <p class="text-sm text-iso-text-muted text-center">Run the install command on the host you want to manage.<br>We'll detect the connection automatically.</p>
+
+    <!-- Status panel -->
+    <div class="w-full p-4 rounded-iso-lg bg-iso-bg-base border border-iso-border flex flex-col gap-3">
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Token</span>
+        <span class="mono text-iso-text-primary">01HRM4...XYZ</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Fleet</span>
+        <span class="mono text-iso-success">homelab</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Elapsed</span>
+        <span class="mono text-iso-text-primary">00:42</span>
+      </div>
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-iso-text-muted">Last check-in</span>
+        <span class="mono text-iso-text-muted">—</span>
+      </div>
+    </div>
+
+    <!-- Help links -->
+    <div class="flex items-center gap-4 text-xs">
+      <a class="text-iso-info">Show command again</a>
+      <span class="text-iso-text-faint">·</span>
+      <a class="text-iso-info">Troubleshoot connection</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>
