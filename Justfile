@@ -91,3 +91,61 @@ install-hooks:
     fi
     lefthook install
     @echo "✓ pre-push hook installed (fmt-check + clippy + test + cargo-deny)"
+
+# === Design ===
+
+# Open the design concepts index in your default browser
+design:
+    @bash design/regen-index.sh
+    @open design/concepts/_index.html
+
+# Regenerate design/concepts/_index.html (after adding/removing a concept)
+design-index:
+    @bash design/regen-index.sh
+
+# Scaffold a new dated concept HTML file. Usage: just concept hosts
+concept name:
+    #!/usr/bin/env bash
+    DATE=$(date +%Y-%m-%d)
+    FILE="design/concepts/${DATE}-{{name}}-v1.html"
+    if [ -f "$FILE" ]; then
+        # If v1 exists, find next available version
+        N=2
+        while [ -f "design/concepts/${DATE}-{{name}}-v${N}.html" ]; do N=$((N+1)); done
+        FILE="design/concepts/${DATE}-{{name}}-v${N}.html"
+    fi
+    cp design/concepts/_shell.html "$FILE"
+    sed -i.bak "s/{{TITLE}}/{{name}}/g" "$FILE" && rm "$FILE.bak"
+    echo "Created $FILE"
+
+# Scaffold a new dated decision (ADR) markdown file. Usage: just decision bottom-bar
+decision name:
+    #!/usr/bin/env bash
+    DATE=$(date +%Y-%m-%d)
+    FILE="design/decisions/${DATE}-{{name}}.md"
+    if [ -f "$FILE" ]; then
+        echo "Already exists: $FILE"
+        exit 1
+    fi
+    cat > "$FILE" <<'TPL'
+    ---
+    type: decision
+    status: draft
+    date: PLACEHOLDER_DATE
+    tags:
+      - design
+      - decision
+    ---
+
+    # {{name}}
+
+    ## Context
+
+    ## Options considered
+
+    ## Decision
+
+    ## Consequences
+    TPL
+    sed -i.bak "s/PLACEHOLDER_DATE/${DATE}/" "$FILE" && rm "$FILE.bak"
+    echo "Created $FILE"

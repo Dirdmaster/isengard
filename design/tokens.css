@@ -1,0 +1,65 @@
+/*
+ * Isengard design tokens — source of truth.
+ *
+ * Imported by:
+ *   - design/tw-config.js (concept HTML uses these via Tailwind CDN)
+ *   - design/concepts/*.html (via <link rel="stylesheet">)
+ *   - the production Tailwind config (crates/isengard-plugins/dashboard/web/tailwind.config.ts)
+ *
+ * Change a value here, every surface updates atomically.
+ *
+ * Renaming a token requires an ADR in design/decisions/.
+ */
+
+:root {
+  /* === Background === */
+  --iso-bg-base: #0A0B0F;
+  --iso-bg-elevated: #14161B;
+  --iso-bg-overlay: #1A1D24;
+
+  /* === Text === */
+  --iso-text-primary: #E8EBF1;
+  --iso-text-secondary: #B8BFCC;
+  --iso-text-muted: #7A8194;
+  --iso-text-faint: #4F5462;
+
+  /* === Accent === */
+  --iso-accent-success: #4ADE80;
+  --iso-accent-success-soft: #1B2E22;
+  --iso-accent-warn: #FBBF24;
+  --iso-accent-warn-soft: #2E2410;
+  --iso-accent-error: #F87171;
+  --iso-accent-error-soft: #2E1818;
+  --iso-accent-info: #60A5FA;
+  --iso-accent-info-soft: #16242E;
+
+  /* === Borders === */
+  --iso-border-subtle: #1F222A;
+  --iso-border-strong: #2E323D;
+
+  /* === Spacing scale === */
+  --iso-space-1: 4px;
+  --iso-space-2: 8px;
+  --iso-space-3: 12px;
+  --iso-space-4: 16px;
+  --iso-space-5: 20px;
+  --iso-space-6: 24px;
+  --iso-space-8: 32px;
+
+  /* === Border radius === */
+  --iso-radius-sm: 4px;
+  --iso-radius-md: 6px;
+  --iso-radius-lg: 8px;
+  --iso-radius-xl: 12px;
+  --iso-radius-full: 9999px;
+
+  /* === Layout dimensions === */
+  --iso-topbar-h: 52px;
+  --iso-bottombar-h: 56px;
+  --iso-modal-sm: 560px;
+  --iso-modal-lg: 760px;
+
+  /* === Typography === */
+  --iso-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --iso-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+}
