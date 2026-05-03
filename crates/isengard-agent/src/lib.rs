@@ -27,6 +27,12 @@ pub struct AgentOptions {
     /// Created if missing.
     pub state_dir: std::path::PathBuf,
     pub config: serde_json::Value,
+    /// Reverse-proxy ports (Phase 8b). If both are `None`, the proxy
+    /// supervisor is not spawned — useful for integration tests that don't
+    /// want to fight over port 8080/8443. Production passes `Some(8080)` /
+    /// `Some(8443)`. Plan B will read these from settings.
+    pub proxy_http_port: Option<u16>,
+    pub proxy_https_port: Option<u16>,
 }
 
 pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
@@ -94,16 +100,16 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     }
 
     // -- spawn the reverse-proxy supervisor (Phase 8b Task 10).
-    //    Hardcoded ports for v1; Plan B (Phase 8e) will read these from
-    //    settings. `proxy_state` is also threaded into the sync loop so
-    //    Task 13's `apply_config` can mutate the upstream registry when
-    //    the controller pushes a `ProxyConfig`.
+    //    Ports come from AgentOptions; Plan B (Phase 8e) will read them
+    //    from settings. `proxy_state` is also threaded into the sync loop
+    //    so Task 13's `apply_config` can mutate the upstream registry when
+    //    the controller pushes a `ProxyConfig`. If both ports are None,
+    //    the supervisor is not spawned (integration tests pass None to
+    //    avoid fighting over 8080/8443).
     let proxy_state = proxy::ProxyState::new();
     proxy_state.set_event_sink(proxy_event_tx);
-    {
+    if let (Some(http_port), Some(https_port)) = (opts.proxy_http_port, opts.proxy_https_port) {
         let ps = proxy_state.clone();
-        let http_port: u16 = 8080;
-        let https_port: u16 = 8443;
         tokio::spawn(async move {
             proxy::supervise(ps, http_port, https_port).await;
         });

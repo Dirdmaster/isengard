@@ -114,6 +114,8 @@ async fn run_test() {
         controller_url: agent_url.clone(),
         state_dir: agent_state.path().to_path_buf(),
         config: serde_json::Value::Object(Default::default()),
+        proxy_http_port: None,
+        proxy_https_port: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

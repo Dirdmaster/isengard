@@ -113,6 +113,8 @@ async fn main() -> Result<()> {
                 controller_url: controller,
                 state_dir,
                 config: serde_json::Value::Object(Default::default()),
+                proxy_http_port: Some(8080),
+                proxy_https_port: Some(8443),
             })
             .await
         }
