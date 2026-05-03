@@ -11,9 +11,20 @@ use isengard_core::networking::{
     AdapterContext, ExposeSpec, ExposedEndpoint, NetworkingAdapter, TlsStrategy,
 };
 use isengard_core::plugin::Plugin;
+use serde::Deserialize;
 
 pub mod api;
 pub mod cloudflared;
+
+#[derive(Deserialize)]
+struct CfTunnelConfig {
+    api_token: String,
+    account_id: String,
+    zone_id: String,
+    tunnel_id: Option<String>,
+    tunnel_name: Option<String>,
+    tunnel_token: Option<String>,
+}
 
 #[derive(Default)]
 pub struct CfTunnelAdapter;
@@ -43,22 +54,121 @@ impl NetworkingAdapter for CfTunnelAdapter {
         "cf-tunnel"
     }
 
-    async fn join(&self, _ctx: &AdapterContext) -> Result<()> {
-        Err(CoreError::Other(
-            "cf-tunnel join not yet implemented (Plan B 8g-2)".into(),
-        ))
+    async fn join(&self, ctx: &AdapterContext) -> Result<()> {
+        cloudflared::ensure_present()?;
+
+        let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
+            .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
+
+        let api = api::CfApi::new(cfg.api_token.clone());
+
+        let tunnel_token = if let Some(t) = cfg.tunnel_token.clone() {
+            t
+        } else {
+            // First-time setup: create the tunnel via API and surface the new
+            // tunnel_id + tunnel_token back to the caller via journal/log.
+            // (Persisting them back to adapter_config is a Plan C / settings-UI
+            // concern; for v1 the operator copy-pastes them into settings.)
+            let created = api
+                .create_tunnel(
+                    &cfg.account_id,
+                    cfg.tunnel_name.as_deref().unwrap_or("isengard"),
+                )
+                .await?;
+            tracing::info!(
+                tunnel_id = %created.id,
+                "cf-tunnel: created new tunnel; persist `tunnel_id` and `tunnel_token` to adapter_config to skip recreation on next start"
+            );
+            created.token
+        };
+
+        let token_for_supervisor = tunnel_token.clone();
+        tokio::spawn(async move {
+            cloudflared::supervise(token_for_supervisor).await;
+        });
+
+        let _ = ctx; // silence if unused
+        Ok(())
     }
+
     async fn leave(&self, _ctx: &AdapterContext) -> Result<()> {
         Ok(())
     }
-    async fn expose(&self, _ctx: &AdapterContext, _spec: &ExposeSpec) -> Result<ExposedEndpoint> {
-        Err(CoreError::Other(
-            "cf-tunnel expose not yet implemented (Plan B 8g-2)".into(),
-        ))
+
+    async fn expose(&self, ctx: &AdapterContext, spec: &ExposeSpec) -> Result<ExposedEndpoint> {
+        let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
+            .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
+        let api = api::CfApi::new(cfg.api_token.clone());
+
+        let tunnel_id = cfg.tunnel_id.clone().ok_or_else(|| {
+            CoreError::Other(
+                "expose called before tunnel_id was provisioned (run join first or set in settings)"
+                    .into(),
+            )
+        })?;
+
+        // Replace the entire ingress with our single hostname rule + a 404
+        // catch-all. Multi-rule per-tunnel support is a v1.x follow-up.
+        let ingress = vec![
+            api::IngressRule {
+                hostname: Some(spec.public_hostname.clone()),
+                service: format!("http://localhost:{}", spec.local_listener_port),
+            },
+            api::IngressRule {
+                hostname: None,
+                service: "http_status:404".into(),
+            },
+        ];
+        api.set_ingress(&cfg.account_id, &tunnel_id, ingress)
+            .await?;
+
+        let dns = api
+            .upsert_dns_cname(
+                &cfg.zone_id,
+                &spec.public_hostname,
+                &format!("{tunnel_id}.cfargotunnel.com"),
+            )
+            .await?;
+
+        Ok(ExposedEndpoint {
+            id: format!("cf-tunnel:{}", spec.public_hostname),
+            url: format!("https://{}", spec.public_hostname),
+            adapter_data: serde_json::json!({
+                "tunnel_id": tunnel_id,
+                "dns_record_id": dns.id,
+            }),
+        })
     }
-    async fn unexpose(&self, _ctx: &AdapterContext, _endpoint_id: &str) -> Result<()> {
+
+    async fn unexpose(&self, ctx: &AdapterContext, endpoint_id: &str) -> Result<()> {
+        let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
+            .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
+        let api = api::CfApi::new(cfg.api_token.clone());
+
+        let hostname = endpoint_id.trim_start_matches("cf-tunnel:");
+
+        if let Ok(records) = api.list_dns_records(&cfg.zone_id, hostname).await {
+            for r in records {
+                let _ = api.delete_dns_record(&cfg.zone_id, &r.id).await;
+            }
+        }
+
+        if let Some(tunnel_id) = cfg.tunnel_id.as_ref() {
+            let _ = api
+                .set_ingress(
+                    &cfg.account_id,
+                    tunnel_id,
+                    vec![api::IngressRule {
+                        hostname: None,
+                        service: "http_status:404".into(),
+                    }],
+                )
+                .await;
+        }
+
         Ok(())
     }
+
     fn tls_strategy(&self) -> TlsStrategy {
         TlsStrategy::EdgeTermination
     }
