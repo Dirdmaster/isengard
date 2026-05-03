@@ -5,8 +5,8 @@
 //!
 //! PC-T2 wires the rules CRUD endpoints (list/create/update/delete) against
 //! `Inventory`. PC-T3 wires per-field overrides (list + upsert). PC-T4 wires
-//! adapter-config GET/PUT against `Inventory`. The /test endpoint still
-//! returns a 501 stub until PC-T5 lands.
+//! adapter-config GET/PUT against `Inventory`. PC-T5 wires the /test endpoint
+//! with per-adapter validation logic (none/cf-tunnel/tailscale).
 
 use std::sync::Arc;
 
@@ -317,10 +317,86 @@ async fn upsert_adapter_config(
 }
 
 async fn test_adapter_config(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Path((_host_id, _adapter)): Path<(String, String)>,
+    Path((host_id_str, adapter)): Path<(String, String)>,
+    State(handles): State<Arc<ControllerHandles>>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "test_adapter_config: PC-T5").into_response()
+    let host_id = match host_id_str.parse::<ulid::Ulid>() {
+        Ok(u) => isengard_storage::HostId(u),
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid host_id").into_response(),
+    };
+    let cfg = match handles
+        .inventory
+        .get_adapter_config(host_id, &adapter)
+        .await
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, "no adapter config to test").into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("read adapter_config: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let result = match adapter.as_str() {
+        "none" => serde_json::json!({ "ok": true, "detail": null }),
+        "cf-tunnel" => {
+            let token = cfg
+                .config_json
+                .get("api_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let account_id = cfg
+                .config_json
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if token.is_empty() || account_id.is_empty() {
+                serde_json::json!({
+                    "ok": false,
+                    "error": "missing api_token or account_id",
+                })
+            } else {
+                let url = format!(
+                    "https://api.cloudflare.com/client/v4/accounts/{}/cfd_tunnel?per_page=1",
+                    account_id
+                );
+                match reqwest::Client::new()
+                    .get(&url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => serde_json::json!({
+                        "ok": true,
+                        "detail": null,
+                    }),
+                    Ok(resp) => serde_json::json!({
+                        "ok": false,
+                        "error": format!("CF API returned {}", resp.status()),
+                    }),
+                    Err(e) => serde_json::json!({
+                        "ok": false,
+                        "error": format!("CF API request failed: {e}"),
+                    }),
+                }
+            }
+        }
+        "tailscale" => serde_json::json!({
+            "ok": true,
+            "detail": "tailscale runtime status surfaces via agent heartbeat",
+        }),
+        other => serde_json::json!({
+            "ok": false,
+            "error": format!("unknown adapter: {other}"),
+        }),
+    };
+
+    Json(result).into_response()
 }
 
 #[cfg(test)]
@@ -592,5 +668,60 @@ mod tests {
         assert_eq!(cfg["config_json"]["api_token"], "secret");
         assert_eq!(cfg["config_json"]["account_id"], "acct-1");
         assert_eq!(cfg["config_json"]["zone_id"], "zone-1");
+    }
+
+    #[tokio::test]
+    async fn test_adapter_config_for_none_returns_ok_true() {
+        let handles = test_handles().await;
+        let host_id = seed_host(&handles).await;
+        handles
+            .inventory
+            .upsert_adapter_config(UpsertAdapterConfig {
+                host_id,
+                adapter: "none".into(),
+                config_json: serde_json::json!({}),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let path = format!("/networking/adapter-config/{}/none/test", host_id);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_adapter_config_for_unconfigured_returns_404() {
+        let handles = test_handles().await;
+        let host_id = seed_host(&handles).await;
+
+        let app = router(handles);
+        let path = format!("/networking/adapter-config/{}/cf-tunnel/test", host_id);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

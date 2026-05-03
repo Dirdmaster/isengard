@@ -18,6 +18,7 @@ isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-storage.workspace = true
 mime_guess.workspace = true
+reqwest.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true

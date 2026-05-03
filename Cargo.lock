@@ -1956,6 +1956,7 @@ dependencies = [
  "isengard-core",
  "isengard-storage",
  "mime_guess",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
