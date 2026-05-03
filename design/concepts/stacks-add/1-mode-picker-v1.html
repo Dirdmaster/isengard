@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Add stack · step 1 — mode picker — concept</title>
+  <link rel="stylesheet" href="../../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1440px] h-[900px] flex items-center justify-center bg-iso-bg-base rounded-iso-xl border border-iso-border">
+
+  <div class="w-[1040px] flex flex-col gap-7 p-12 rounded-iso-xl bg-iso-bg-elevated border border-iso-border">
+
+    <!-- Step indicator -->
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <span class="px-2 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-muted">step 1 of 3</span>
+        <h1 class="text-2xl font-semibold tracking-tight">Add a stack</h1>
+      </div>
+      <button class="text-xs text-iso-text-faint hover:text-iso-text-primary">✕ Cancel</button>
+    </div>
+    <p class="text-sm text-iso-text-muted -mt-3">How do you want to define this stack? You can change later.</p>
+
+    <!-- Three mode cards -->
+    <div class="grid grid-cols-3 gap-4">
+
+      <!-- Paste compose (selected) -->
+      <button class="text-left p-5 rounded-iso-lg border-2 border-iso-success bg-iso-bg-base flex flex-col gap-3 relative">
+        <div class="absolute top-3 right-3 w-5 h-5 rounded-full bg-iso-success flex items-center justify-center">
+          <svg class="w-3 h-3 text-iso-bg-base" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="w-10 h-10 rounded-iso-md bg-iso-success/10 border border-iso-success flex items-center justify-center mono text-iso-success font-semibold">{ }</div>
+        <div>
+          <div class="text-sm font-semibold mb-1">Paste compose</div>
+          <div class="text-xs text-iso-text-muted leading-relaxed">You already have a <span class="mono">docker-compose.yml</span>. Paste it, pick targets, deploy.</div>
+        </div>
+        <div class="mt-1 flex flex-wrap gap-1.5">
+          <span class="px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-[10px] text-iso-text-secondary">fastest</span>
+          <span class="px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-[10px] text-iso-text-secondary">YAML</span>
+        </div>
+      </button>
+
+      <!-- Form builder -->
+      <button class="text-left p-5 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-border-strong flex flex-col gap-3">
+        <div class="w-10 h-10 rounded-iso-md bg-iso-bg-elevated border border-iso-border flex items-center justify-center">
+          <svg class="w-5 h-5 text-iso-text-secondary" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="18" width="12" height="3" rx="1"/></svg>
+        </div>
+        <div>
+          <div class="text-sm font-semibold mb-1">Form builder</div>
+          <div class="text-xs text-iso-text-muted leading-relaxed">Click through services, ports, env, volumes. We generate the compose file for you.</div>
+        </div>
+        <div class="mt-1 flex flex-wrap gap-1.5">
+          <span class="px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-[10px] text-iso-text-secondary">no YAML</span>
+          <span class="px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-[10px] text-iso-text-secondary">guided</span>
+        </div>
+      </button>
+
+      <!-- Git sync -->
+      <button class="text-left p-5 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-border-strong flex flex-col gap-3">
+        <div class="w-10 h-10 rounded-iso-md bg-iso-bg-elevated border border-iso-border flex items-center justify-center">
+          <svg class="w-5 h-5 text-iso-text-secondary" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+        </div>
+        <div>
+          <div class="text-sm font-semibold mb-1">Git sync</div>
+          <div class="text-xs text-iso-text-muted leading-relaxed">Point at a repo + branch. Isengard pulls, deploys, and re-deploys on commits.</div>
+        </div>
+        <div class="mt-1 flex flex-wrap gap-1.5">
+          <span class="px-1.5 py-0.5 rounded-iso-sm bg-iso-info/10 border border-iso-info/40 mono text-[10px] text-iso-info">GitOps</span>
+          <span class="px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-[10px] text-iso-text-secondary">webhook</span>
+        </div>
+      </button>
+
+    </div>
+
+    <!-- Existing stacks hint -->
+    <div class="rounded-iso-md bg-iso-bg-base border border-iso-border px-4 py-3 flex items-center gap-3">
+      <svg class="w-4 h-4 text-iso-info shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+      <div class="text-xs text-iso-text-secondary">
+        Existing stacks running on your hosts (<span class="mono text-iso-text-primary">analytics</span> on <span class="mono text-iso-text-primary">prod-04</span>) appear automatically as <span class="text-iso-text-primary">discovered</span>. No need to add them here.
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="flex items-center justify-between pt-2 border-t border-iso-border -mx-4 px-4">
+      <span class="text-[11px] text-iso-text-faint mono">paste-compose · the MVP path</span>
+      <div class="flex items-center gap-2">
+        <button class="px-4 py-2 rounded-iso-md text-xs text-iso-text-muted">Back</button>
+        <button class="px-4 py-2 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">Continue →</button>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+</body>
+</html>
