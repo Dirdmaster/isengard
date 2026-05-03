@@ -4,28 +4,49 @@
 //! `run_for_test` binds only the HTTP listener on a caller-supplied port —
 //! used by integration tests.
 //!
-//! Pingora 0.4 caveat: `Server::run_forever` blocks the calling thread and
-//! ultimately calls `std::process::exit(0)` to shut down. There is no
-//! programmatic in-process shutdown API. The optional `shutdown_rx` parameter
-//! on `run_for_test` lets the caller race the proxy task with a cancellation
-//! signal, but the underlying Pingora thread will continue until the test
-//! process exits. Tests that care about clean teardown should therefore run
-//! the proxy in a process-per-test wrapper, or accept that the spawn_blocking
-//! thread is leaked for the duration of the test process.
+//! Pingora 0.8 supports programmatic shutdown via `RunArgs::shutdown_signal:
+//! Box<dyn ShutdownSignalWatch>`. We implement a custom watcher that resolves
+//! when a tokio oneshot fires, so tests can cleanly stop the server when
+//! their assertions are done. This avoids both the test-process hang we hit
+//! on 0.4 (where `run_forever` called `std::process::exit`) and the SIGINT
+//! workaround alternatives.
 
 use crate::proxy::ProxyState;
 use crate::proxy::router::IsengardProxy;
-use pingora_core::server::Server;
+use async_trait::async_trait;
 use pingora_core::server::configuration::ServerConf;
+use pingora_core::server::{RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
 use pingora_proxy::http_proxy_service;
+use std::sync::Mutex;
 use tokio::sync::oneshot;
+
+/// `ShutdownSignalWatch` impl backed by a tokio oneshot. Pingora's `run`
+/// will call `recv()` and shut down when our test sends on the channel.
+struct OneshotShutdown {
+    rx: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl ShutdownSignalWatch for OneshotShutdown {
+    async fn recv(&self) -> ShutdownSignal {
+        let taken = self.rx.lock().unwrap().take();
+        match taken {
+            Some(rx) => {
+                let _ = rx.await;
+            }
+            None => {
+                // Already consumed — park forever.
+                std::future::pending::<()>().await;
+            }
+        }
+        ShutdownSignal::FastShutdown
+    }
+}
 
 /// Run the proxy on a single HTTP port (test-only entrypoint).
 ///
-/// `shutdown_rx`, if `Some`, lets the caller cancel the *await* on the
-/// blocking pingora thread — but does not actually stop the pingora server
-/// itself (see module-level note). This is enough for integration tests that
-/// only need to release the await so the test future can complete.
+/// If `shutdown_rx` is `Some`, signalling on it triggers Pingora's
+/// graceful-shutdown path and `run_for_test` returns cleanly.
 pub async fn run_for_test(
     state: ProxyState,
     port: u16,
@@ -38,24 +59,20 @@ pub async fn run_for_test(
     svc.add_tcp(&format!("127.0.0.1:{port}"));
     server.add_service(svc);
 
-    // Pingora's `run_forever` blocks the current thread; spawn it in a
-    // blocking task so tokio can keep handling the test runtime.
-    let pingora_fut = tokio::task::spawn_blocking(move || server.run_forever());
-
-    match shutdown_rx {
-        Some(rx) => {
-            tokio::select! {
-                _ = pingora_fut => {}
-                _ = rx => {
-                    // Caller wants out. We can't actually stop pingora — best
-                    // we can do is return and let the test process exit.
-                }
-            }
-        }
-        None => {
-            let _ = pingora_fut.await;
-        }
-    }
+    // RunArgs holds a `Box<dyn ShutdownSignalWatch>` which isn't Send, so it
+    // can't be captured by the spawn_blocking closure. Construct it inside.
+    let _ = tokio::task::spawn_blocking(move || {
+        let run_args = match shutdown_rx {
+            Some(rx) => RunArgs {
+                shutdown_signal: Box::new(OneshotShutdown {
+                    rx: Mutex::new(Some(rx)),
+                }),
+            },
+            None => RunArgs::default(),
+        };
+        server.run(run_args);
+    })
+    .await;
 }
 
 pub async fn run(state: ProxyState, http_port: u16, _https_port: u16) {
@@ -68,7 +85,5 @@ pub async fn run(state: ProxyState, http_port: u16, _https_port: u16) {
     // accepted but unbound.
     server.add_service(svc);
 
-    tokio::task::spawn_blocking(move || server.run_forever())
-        .await
-        .ok();
+    let _ = tokio::task::spawn_blocking(move || server.run(RunArgs::default())).await;
 }
