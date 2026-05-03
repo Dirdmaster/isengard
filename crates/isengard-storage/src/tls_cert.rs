@@ -17,6 +17,9 @@ pub struct TlsCertMeta {
     pub last_renewed_at: Option<DateTime<Utc>>,
     pub next_renewal_at: DateTime<Utc>,
     pub serial: Option<String>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub attempt_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +71,8 @@ impl crate::inventory::Inventory {
         use sqlx::Row;
         let row = sqlx::query(
             "SELECT public_hostname, host_id, issuer, not_before, not_after, \
-             last_renewed_at, next_renewal_at, serial \
+             last_renewed_at, next_renewal_at, serial, \
+             last_attempt_at, last_error, attempt_count \
              FROM tls_certs WHERE public_hostname = ?",
         )
         .bind(public_hostname)
@@ -90,6 +94,12 @@ impl crate::inventory::Inventory {
         let last_renewed_at_str: Option<String> = r.try_get("last_renewed_at")?;
         let next_renewal_at_str: String = r.try_get("next_renewal_at")?;
         let serial: Option<String> = r.try_get("serial")?;
+        let last_attempt_at_str: Option<String> = r.try_get("last_attempt_at")?;
+        let last_error: Option<String> = r.try_get("last_error")?;
+        let attempt_count_i64: i64 = r.try_get("attempt_count")?;
+        let attempt_count: u32 = attempt_count_i64.try_into().map_err(|_| Error::Decode {
+            reason: format!("attempt_count out of range: {attempt_count_i64}"),
+        })?;
 
         let not_before = DateTime::parse_from_rfc3339(&not_before_str)
             .map_err(|e| Error::Decode {
@@ -116,6 +126,16 @@ impl crate::inventory::Inventory {
             ),
             None => None,
         };
+        let last_attempt_at = match last_attempt_at_str {
+            Some(s) => Some(
+                DateTime::parse_from_rfc3339(&s)
+                    .map_err(|e| Error::Decode {
+                        reason: format!("invalid last_attempt_at: {e}"),
+                    })?
+                    .with_timezone(&Utc),
+            ),
+            None => None,
+        };
 
         Ok(Some(TlsCertMeta {
             public_hostname,
@@ -126,6 +146,39 @@ impl crate::inventory::Inventory {
             last_renewed_at,
             next_renewal_at,
             serial,
+            last_attempt_at,
+            last_error,
+            attempt_count,
         }))
+    }
+
+    pub async fn record_tls_attempt(
+        &self,
+        public_hostname: &str,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        if success {
+            sqlx::query(
+                "UPDATE tls_certs SET last_attempt_at = ?, last_error = NULL, \
+                 attempt_count = attempt_count + 1 WHERE public_hostname = ?",
+            )
+            .bind(&now)
+            .bind(public_hostname)
+            .execute(self.pool())
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE tls_certs SET last_attempt_at = ?, last_error = ?, \
+                 attempt_count = attempt_count + 1 WHERE public_hostname = ?",
+            )
+            .bind(&now)
+            .bind(&error)
+            .bind(public_hostname)
+            .execute(self.pool())
+            .await?;
+        }
+        Ok(())
     }
 }
