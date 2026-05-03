@@ -15,6 +15,7 @@ pub mod routing_rule_override;
 pub mod service;
 pub mod setting;
 pub mod stack;
+pub mod tls_cert;
 
 pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
 pub use error::{Error, Result};
@@ -30,3 +31,4 @@ pub use routing_rule_override::RoutingRuleOverride;
 pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
+pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
