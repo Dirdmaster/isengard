@@ -3,6 +3,7 @@
 //! Phase 2b surface: hosts table only. Containers and journal land in
 //! later phases as new migrations.
 
+pub mod adapter_config;
 pub mod error;
 pub mod fleet;
 pub mod host;
@@ -15,6 +16,7 @@ pub mod service;
 pub mod setting;
 pub mod stack;
 
+pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
 pub use error::{Error, Result};
 pub use fleet::Fleet;
 pub use host::{EnrollHost, Host, HostId};
