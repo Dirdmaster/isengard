@@ -6,6 +6,7 @@ pub mod backoff;
 pub mod container_snapshot;
 pub mod enroll;
 pub mod events;
+pub mod proxy;
 pub mod sync;
 
 /// Convenience alias used throughout the agent.

@@ -63,6 +63,14 @@ chrono = { version = "0.4.39", default-features = false, features = ["serde", "c
 # HTTP server (dashboard)
 axum = { version = "0.8.1", default-features = false, features = ["http1", "http2", "tokio", "json", "ws", "macros", "query"] }
 
+# reverse proxy (Pingora)
+# pingora-core 0.4.0 declares `sfv = "0"` which now resolves to sfv 0.14 and
+# fails to compile (`Algorithm: From<&TokenRef>` not satisfied). sfv 0.9.4 is
+# pinned in Cargo.lock to keep the build green; revisit when Pingora cuts a
+# 0.4.x patch or we move to a newer minor.
+pingora-core = "0.4"
+pingora-proxy = "0.4"
+
 # embedded static assets (dashboard bundle)
 rust-embed = { version = "8.5.0", features = ["compression"] }
 
