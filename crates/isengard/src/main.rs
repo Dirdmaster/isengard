@@ -16,6 +16,8 @@ mod dev_plugin;
 #[allow(unused_imports)]
 use isengard_plugin_dashboard as _;
 #[allow(unused_imports)]
+use isengard_plugin_networking_none as _;
+#[allow(unused_imports)]
 use isengard_plugin_notifier as _;
 
 #[derive(Debug, Parser)]

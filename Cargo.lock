@@ -1433,6 +1433,7 @@ dependencies = [
  "isengard-controller",
  "isengard-core",
  "isengard-plugin-dashboard",
+ "isengard-plugin-networking-none",
  "isengard-plugin-notifier",
  "isengard-plugin-updater",
  "predicates",
@@ -1523,6 +1524,17 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "isengard-plugin-networking-none"
+version = "0.1.0-alpha"
+dependencies = [
+ "async-trait",
+ "inventory",
+ "isengard-core",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
