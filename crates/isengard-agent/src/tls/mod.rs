@@ -6,7 +6,9 @@
 //! `cert_store`, `acme`, and the SNI resolver.
 
 pub mod cert_store;
+pub mod challenge_state;
 pub mod storage;
 
 pub use cert_store::{CertEntry, CertStore};
+pub use challenge_state::ChallengeState;
 pub use storage::{CertFiles, TlsStorage};
