@@ -29,18 +29,20 @@ async fn spawn_origin() -> SocketAddr {
     addr
 }
 
-// KNOWN ISSUE (Plan A Task 9 → Task 10 follow-up):
-// Pingora 0.4's `Server::run_forever` installs signal handlers and blocks the
-// thread indefinitely. Even when spawned via `tokio::task::spawn_blocking`,
-// it doesn't drop cleanly when the tokio runtime is torn down at end of test —
-// the test process hangs after the assertion passes. Task 10 introduces the
-// supervisor pattern which gives us a `ShutdownWatch` we can signal to stop
-// the server; once that lands, this test will be reworked to use it.
-// For now: keep the test code as documentation of the expected end-to-end
-// behavior, but skip it. Verification of Task 9 routing logic is via code
-// review of `router.rs::upstream_peer` (Host-header lookup → HttpPeer).
+// KNOWN LIMITATION (confirmed in Task 10):
+// Pingora 0.4 has no programmatic in-process shutdown API. `Server::run_forever`
+// installs SIGINT/SIGTERM/SIGQUIT handlers and ultimately calls
+// `std::process::exit(0)` on graceful shutdown — there is no public sender on
+// the internal `ShutdownWatch` we could trigger from Rust code. Even with the
+// new `shutdown_rx` parameter on `run_for_test`, the spawn_blocking thread
+// running `run_forever` is leaked for the lifetime of the test process and
+// makes `cargo test` hang on this binary's teardown.
+// Real e2e proxy verification is planned via a process-per-test wrapper or a
+// container-based fixture (Plan B). For now this test stays #[ignore]'d as
+// documentation of the expected end-to-end behavior; correctness of the Task 9
+// routing logic is verified by code review of `router.rs::upstream_peer`.
 #[tokio::test]
-#[ignore = "hangs on Pingora run_forever shutdown — fixed in Task 10 with supervisor ShutdownWatch"]
+#[ignore = "Pingora 0.4 has no programmatic shutdown — see comment above"]
 async fn route_by_host_header_returns_origin_response() {
     let origin = spawn_origin().await;
 
@@ -59,8 +61,9 @@ async fn route_by_host_header_returns_origin_response() {
     }
 
     let st = state.clone();
-    tokio::spawn(async move {
-        isengard_agent::proxy::server::run_for_test(st, proxy_port).await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let proxy_task = tokio::spawn(async move {
+        isengard_agent::proxy::server::run_for_test(st, proxy_port, Some(shutdown_rx)).await;
     });
 
     // give pingora a moment to bind
@@ -77,4 +80,11 @@ async fn route_by_host_header_returns_origin_response() {
         .await
         .unwrap();
     assert_eq!(body, "hello-from-origin");
+
+    // Best-effort: signal `run_for_test` to stop awaiting and let the test
+    // future complete. The underlying pingora thread still leaks (see comment
+    // at the top of the file), so cargo test will still hang on teardown of
+    // this binary — the #[ignore] above keeps it out of the default run.
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), proxy_task).await;
 }

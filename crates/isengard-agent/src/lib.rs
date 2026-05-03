@@ -89,6 +89,21 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         started.push(plugin);
     }
 
+    // -- spawn the reverse-proxy supervisor (Phase 8b Task 10).
+    //    Hardcoded ports for v1; Plan B (Phase 8e) will read these from
+    //    settings. The proxy_state binding is kept in scope so Task 13's
+    //    apply_config can reach it via the agent's context plumbing.
+    let proxy_state = proxy::ProxyState::new();
+    {
+        let ps = proxy_state.clone();
+        let http_port: u16 = 8080;
+        let https_port: u16 = 8443;
+        tokio::spawn(async move {
+            proxy::supervise(ps, http_port, https_port).await;
+        });
+    }
+    let _proxy_state = proxy_state; // Task 13 will plumb this further.
+
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let token = std::env::var("ISENGARD_TOKEN")
         .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
