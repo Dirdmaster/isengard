@@ -105,6 +105,6 @@ inventory::submit! {
     isengard_core::registration::PluginRegistration {
         name: "networking-tailscale",
         capabilities: &[isengard_core::registration::Capability::Agent],
-        constructor: || Box::new(TailscaleAdapter::default()),
+        constructor: || Box::new(TailscaleAdapter),
     }
 }

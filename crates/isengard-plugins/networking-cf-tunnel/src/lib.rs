@@ -178,6 +178,6 @@ inventory::submit! {
     isengard_core::registration::PluginRegistration {
         name: "networking-cf-tunnel",
         capabilities: &[isengard_core::registration::Capability::Agent],
-        constructor: || Box::new(CfTunnelAdapter::default()),
+        constructor: || Box::new(CfTunnelAdapter),
     }
 }
