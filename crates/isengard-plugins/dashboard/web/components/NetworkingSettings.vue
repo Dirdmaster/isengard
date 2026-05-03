@@ -2,7 +2,14 @@
   <div class="space-y-8">
     <section>
       <h2 class="text-sm font-semibold text-iso-text-primary mb-4">Adapters</h2>
-      <div class="text-iso-text-muted text-sm">Adapter cards land in PC-T9.</div>
+      <div v-if="!firstHost" class="text-iso-text-muted text-xs mb-3">
+        No hosts enrolled yet. Add a host first, then configure adapters per-host.
+      </div>
+      <div v-else class="grid gap-4">
+        <AdapterCardNone />
+        <AdapterCardTailscale :host-id="firstHost.id" />
+        <AdapterCardCfTunnel :host-id="firstHost.id" />
+      </div>
     </section>
     <section>
       <RoutingRulesTable @add="onAdd" @edit="onEdit" />
@@ -13,14 +20,23 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { useHostsStore } from '~/stores/hosts'
 import RoutingRulesTable from '~/components/RoutingRulesTable.vue'
 import RoutingRuleEditModal from '~/components/RoutingRuleEditModal.vue'
+import AdapterCardNone from '~/components/AdapterCardNone.vue'
+import AdapterCardTailscale from '~/components/AdapterCardTailscale.vue'
+import AdapterCardCfTunnel from '~/components/AdapterCardCfTunnel.vue'
 import type { RoutingRule } from '~/composables/useRoutingRules'
+
+const hostsStore = useHostsStore()
+const firstHost = computed(() => hostsStore.hosts[0])
+onMounted(() => {
+  if (!hostsStore.loaded) hostsStore.load()
+})
 
 const modalOpen = ref(false)
 const editingRule = ref<RoutingRule | null>(null)
-
 function onAdd() {
   editingRule.value = null
   modalOpen.value = true

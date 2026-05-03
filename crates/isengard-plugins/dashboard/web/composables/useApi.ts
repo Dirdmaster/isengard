@@ -8,6 +8,9 @@ export function useApi() {
     post<T>(path: string, body?: any) {
       return $fetch<T>(`${API_BASE}${path}`, { method: 'POST', body })
     },
+    put<T>(path: string, body?: any) {
+      return $fetch<T>(`${API_BASE}${path}`, { method: 'PUT', body })
+    },
     patch<T>(path: string, body?: any) {
       return $fetch<T>(`${API_BASE}${path}`, { method: 'PATCH', body })
     },
