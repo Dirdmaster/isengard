@@ -56,6 +56,9 @@ async fn route_by_host_header_returns_origin_response() {
                 container_id: "test".into(),
                 addr: origin,
                 healthy: true,
+                health_path: None,
+                health_interval: Duration::from_secs(10),
+                consecutive_failures: 0,
             },
         );
     }

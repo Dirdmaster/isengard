@@ -66,3 +66,69 @@ impl HealthChecker {
         (200..300).contains(&status)
     }
 }
+
+/// Eviction threshold: this many failures in a row flips `healthy` to false.
+/// One success while unhealthy flips it back to true (no debounce on recovery).
+const FAIL_THRESHOLD: u32 = 3;
+
+/// Tick interval between full registry sweeps. Aggressive on purpose so the
+/// eviction test (which uses ~50ms `health_interval` on the upstream) sees
+/// state transitions in <500ms; production tuning can come later.
+const TICK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Spawn the healthcheck loop. One tokio task sweeps the registry on
+/// `TICK_INTERVAL`, fans probes out per-upstream, and updates each entry's
+/// `healthy` / `consecutive_failures` based on the result.
+///
+/// Designed to be spawned exactly once per `ProxyState` (the caller guards
+/// with a `OnceLock` in `apply_config`). The loop reads the registry under a
+/// snapshot to avoid holding the lock across the network probe.
+pub fn spawn_loops(state: crate::proxy::ProxyState) {
+    tokio::spawn(async move {
+        loop {
+            let snapshot: Vec<(String, SocketAddr, Option<String>, Duration)> = {
+                let r = state.upstreams.read().await;
+                r.iter()
+                    .map(|(host, up)| {
+                        (
+                            host.clone(),
+                            up.addr,
+                            up.health_path.clone(),
+                            up.health_interval,
+                        )
+                    })
+                    .collect()
+            };
+            for (host, addr, path, _interval) in snapshot {
+                let st = state.clone();
+                tokio::spawn(async move {
+                    let hc = match path {
+                        Some(p) => HealthChecker::new(p, Duration::from_secs(2)),
+                        None => HealthChecker::tcp_only(Duration::from_secs(2)),
+                    };
+                    let healthy = hc.check_once(addr).await;
+                    let mut w = st.upstreams.write().await;
+                    if let Some(up) = w.get_mut(&host) {
+                        if healthy {
+                            up.consecutive_failures = 0;
+                            if !up.healthy {
+                                up.healthy = true;
+                                tracing::info!(host = %host, "upstream recovered");
+                            }
+                        } else {
+                            up.consecutive_failures += 1;
+                            if up.consecutive_failures >= FAIL_THRESHOLD && up.healthy {
+                                up.healthy = false;
+                                tracing::warn!(
+                                    host = %host,
+                                    "upstream evicted (3 consecutive failures)"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+            tokio::time::sleep(TICK_INTERVAL).await;
+        }
+    });
+}

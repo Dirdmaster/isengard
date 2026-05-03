@@ -8,8 +8,8 @@
 //! - [`supervise`]: keeps the proxy task alive across crashes with a bounded
 //!   restart budget. Wired into agent startup so the proxy starts on boot.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -66,8 +66,10 @@ pub async fn apply_config(
     }
 
     let mut new_reg = UpstreamRegistry::new();
-    for rule in cfg.rules {
-        let Some(up) = rule.upstream else { continue };
+    for rule in &cfg.rules {
+        let Some(up) = rule.upstream.as_ref() else {
+            continue;
+        };
         let ip: std::net::IpAddr = if up.container_ip.is_empty() {
             "127.0.0.1".parse().expect("127.0.0.1 is a valid IpAddr")
         } else {
@@ -77,25 +79,51 @@ pub async fn apply_config(
         };
         let addr = std::net::SocketAddr::new(ip, up.container_port as u16);
         new_reg.set(
-            rule.public_hostname,
+            rule.public_hostname.clone(),
             Upstream {
-                container_id: up.container_id,
+                container_id: up.container_id.clone(),
                 addr,
                 healthy: true,
+                health_path: None,
+                health_interval: Duration::from_secs(10),
+                consecutive_failures: 0,
             },
         );
     }
 
+    // Swap registry, then layer per-rule health config on top so the
+    // healthcheck loop sees both in the same view.
     {
         let mut w = state.upstreams.write().await;
         *w = new_reg;
+        for rule in &cfg.rules {
+            if let Some(hc) = &rule.healthcheck {
+                let path = if hc.path.is_empty() {
+                    None
+                } else {
+                    Some(hc.path.clone())
+                };
+                let interval = Duration::from_secs(hc.interval_secs.max(1) as u64);
+                w.set_health_config(&rule.public_hostname, path, interval);
+            }
+        }
     }
+
+    // Spawn the healthcheck sweep exactly once per process; subsequent
+    // `apply_config` calls just refresh the registry it reads from.
+    HC_SPAWNED.get_or_init(|| {
+        healthcheck::spawn_loops(state.clone());
+    });
+
     state
         .last_generation
         .store(cfg.generation, Ordering::Release);
     tracing::info!(generation = cfg.generation, "proxy: ProxyConfig applied");
     Ok(())
 }
+
+/// Ensures `healthcheck::spawn_loops` runs at most once per process.
+static HC_SPAWNED: OnceLock<()> = OnceLock::new();
 
 /// Maximum proxy restarts allowed within [`RESTART_WINDOW`] before we give up
 /// and log a crashloop event. Keeps a runaway panic from spinning forever.
