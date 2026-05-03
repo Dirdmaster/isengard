@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Settings · Webhooks v1 — concept</title>
-  <link rel="stylesheet" href="../tokens.css">
+  <title>Settings · Notifier v1 — concept</title>
+  <link rel="stylesheet" href="../../tokens.css">
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="../tw-config.js"></script>
+  <script src="../../tw-config.js"></script>
   <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
 </head>
 <body class="bg-iso-bg-base text-iso-text-primary p-6">
@@ -28,9 +28,9 @@
     <div class="flex items-center justify-between">
       <div class="flex flex-col gap-1">
         <h1 class="text-[22px] font-semibold text-iso-text-primary">Settings</h1>
-        <span class="text-xs text-iso-text-muted">Webhooks · 3 outbound · 99.4% delivery rate (24h)</span>
+        <span class="text-xs text-iso-text-muted">Notifier · 2 channels active · approval callback URL configured</span>
       </div>
-      <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">+ Add webhook</button>
+      <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">+ Add channel</button>
     </div>
 
     <div class="flex items-center gap-1 border-b border-iso-border">
@@ -38,87 +38,96 @@
       <a class="px-3 py-2 text-xs text-iso-text-faint">Networking</a>
       <a class="px-3 py-2 text-xs text-iso-text-faint">Update policies</a>
       <a class="px-3 py-2 text-xs text-iso-text-faint">Backup</a>
-      <a class="px-3 py-2 text-xs font-medium text-iso-text-primary border-b-2 border-iso-text-primary">Webhooks</a>
-      <a class="px-3 py-2 text-xs text-iso-text-faint">Notifier</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Webhooks</a>
+      <a class="px-3 py-2 text-xs font-medium text-iso-text-primary border-b-2 border-iso-text-primary">Notifier</a>
       <a class="px-3 py-2 text-xs text-iso-text-faint">Authentication</a>
     </div>
 
-    <!-- Webhook cards -->
+    <!-- Approval callback banner -->
+    <section class="rounded-iso-lg border border-iso-success bg-iso-success-soft p-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <svg class="w-4 h-4 text-iso-success" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+        <div class="flex flex-col gap-0.5">
+          <span class="text-xs font-semibold text-iso-text-primary">Approval callback URL reachable</span>
+          <span class="text-[11px] text-iso-text-muted">Telegram + Discord can hit <span class="mono text-iso-text-secondary">https://isengard.dirdmaster.dev/api/v1/notifier/callback/*</span> for inline button approvals.</span>
+        </div>
+      </div>
+      <button class="px-2.5 py-1.5 rounded-iso-md bg-iso-bg-base border border-iso-border-strong text-xs text-iso-text-secondary">Copy URL</button>
+    </section>
+
+    <!-- Telegram channel card -->
     <section class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-5 flex flex-col gap-3">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
           <div class="w-2 h-2 rounded-full bg-iso-success"></div>
-          <span class="text-sm font-semibold text-iso-text-primary">pagerduty-update-failures</span>
+          <span class="text-sm font-semibold text-iso-text-primary">ops-team-chat <span class="text-iso-text-muted font-normal">· Telegram</span></span>
           <span class="px-2 py-0.5 rounded-iso-sm bg-iso-success-soft border border-iso-success mono text-[11px] text-iso-success">healthy</span>
         </div>
         <div class="flex items-center gap-2">
           <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary">Edit</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary">Test</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-info">View deliveries</button>
+          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-info">Send test</button>
           <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-faint">Disable</button>
         </div>
       </div>
-      <div class="mono text-[11px] text-iso-text-secondary">https://events.pagerduty.com/v2/enqueue</div>
+      <div class="grid grid-cols-3 gap-3 text-[11px]">
+        <div class="flex flex-col gap-0.5">
+          <span class="text-iso-text-muted">Bot</span>
+          <span class="mono text-iso-text-secondary">@isengard_ops_bot</span>
+        </div>
+        <div class="flex flex-col gap-0.5">
+          <span class="text-iso-text-muted">Chat ID</span>
+          <span class="mono text-iso-text-secondary">-100184…2103</span>
+        </div>
+        <div class="flex flex-col gap-0.5">
+          <span class="text-iso-text-muted">Last message</span>
+          <span class="mono text-iso-text-secondary">14:28 · 5m ago</span>
+        </div>
+      </div>
       <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-[11px] text-iso-text-muted">events:</span>
+        <span class="text-[11px] text-iso-text-muted">subscribed:</span>
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">update.pending_approval</span>
         <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">update.failed</span>
         <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">deployment.failed</span>
-        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">agent.disconnect_long</span>
-      </div>
-      <div class="flex items-center justify-between text-[11px] text-iso-text-muted">
-        <span>last delivery: <span class="mono text-iso-text-secondary">2h ago · 200 OK · 142ms</span></span>
-        <span class="mono text-iso-success">12 / 12 succeeded (24h)</span>
+        <span class="text-[11px] text-iso-text-faint">· fleet:</span>
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-info-soft mono text-[10px] text-iso-info">prod</span>
       </div>
     </section>
 
-    <section class="rounded-iso-lg border border-iso-warn bg-iso-bg-elevated p-5 flex flex-col gap-3">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <div class="w-2 h-2 rounded-full bg-iso-warn"></div>
-          <span class="text-sm font-semibold text-iso-text-primary">slack-deploys</span>
-          <span class="px-2 py-0.5 rounded-iso-sm bg-iso-warn-soft border border-iso-warn mono text-[11px] text-iso-warn">degraded</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary">Edit</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary">Test</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-info">View deliveries</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-faint">Pause</button>
-        </div>
-      </div>
-      <div class="mono text-[11px] text-iso-text-secondary">https://hooks.slack.com/services/T0…/B0…/xx</div>
-      <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-[11px] text-iso-text-muted">events:</span>
-        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">deployment.completed</span>
-      </div>
-      <div class="flex items-center justify-between text-[11px]">
-        <span class="text-iso-text-muted">last delivery: <span class="mono text-iso-warn">17m ago · timeout</span></span>
-        <span class="mono text-iso-warn">3 of last 10 failed</span>
-      </div>
-    </section>
-
+    <!-- Discord channel card -->
     <section class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-5 flex flex-col gap-3">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
           <div class="w-2 h-2 rounded-full bg-iso-success"></div>
-          <span class="text-sm font-semibold text-iso-text-primary">events-archive</span>
+          <span class="text-sm font-semibold text-iso-text-primary">homelab-alerts <span class="text-iso-text-muted font-normal">· Discord</span></span>
           <span class="px-2 py-0.5 rounded-iso-sm bg-iso-success-soft border border-iso-success mono text-[11px] text-iso-success">healthy</span>
         </div>
         <div class="flex items-center gap-2">
           <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary">Edit</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary">Test</button>
-          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-info">View deliveries</button>
+          <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-info">Send test</button>
           <button class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-faint">Disable</button>
         </div>
       </div>
-      <div class="mono text-[11px] text-iso-text-secondary">https://archive.dirdmaster.dev/isengard/events</div>
-      <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-[11px] text-iso-text-muted">events:</span>
-        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">*</span>
-        <span class="text-[11px] text-iso-text-faint">(all kinds, batched 30s)</span>
+      <div class="grid grid-cols-3 gap-3 text-[11px]">
+        <div class="flex flex-col gap-0.5">
+          <span class="text-iso-text-muted">Webhook URL</span>
+          <span class="mono text-iso-text-secondary truncate">discord.com/api/webhooks/…/xx</span>
+        </div>
+        <div class="flex flex-col gap-0.5">
+          <span class="text-iso-text-muted">Last message</span>
+          <span class="mono text-iso-text-secondary">14:11 · 22m ago</span>
+        </div>
+        <div class="flex flex-col gap-0.5">
+          <span class="text-iso-text-muted">Rate limit</span>
+          <span class="mono text-iso-text-secondary">min 30s between</span>
+        </div>
       </div>
-      <div class="flex items-center justify-between text-[11px] text-iso-text-muted">
-        <span>last delivery: <span class="mono text-iso-text-secondary">12s ago · 200 OK · 28ms</span></span>
-        <span class="mono text-iso-success">847 / 847 succeeded (24h)</span>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-[11px] text-iso-text-muted">subscribed:</span>
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">agent.disconnect_long</span>
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">routing.degraded</span>
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">backup.failed</span>
+        <span class="text-[11px] text-iso-text-faint">· fleet:</span>
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">all</span>
       </div>
     </section>
 
