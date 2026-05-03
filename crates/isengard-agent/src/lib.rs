@@ -34,6 +34,23 @@ pub struct AgentOptions {
     /// `Some(8443)`. Plan B will read these from settings.
     pub proxy_http_port: Option<u16>,
     pub proxy_https_port: Option<u16>,
+    /// TLS subsystem options (Plan B 8e). If `None`, the cert store + HTTPS
+    /// listener + ACME are all disabled — useful for integration tests.
+    /// Production passes `Some(TlsOptions { ... })`.
+    pub tls: Option<TlsOptions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TlsOptions {
+    /// Directory where issued cert/key pairs and the ACME account live
+    /// (e.g. `/var/lib/isengard/tls/`). Created if missing.
+    pub cert_dir: std::path::PathBuf,
+    /// Contact email registered with the ACME directory on first account
+    /// creation. Required by Let's Encrypt.
+    pub acme_contact_email: String,
+    /// ACME directory URL. Use [`tls::LE_STAGING_URL`] for development and
+    /// [`tls::LE_PRODUCTION_URL`] for live issuance.
+    pub acme_directory_url: String,
 }
 
 pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
@@ -109,6 +126,21 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    avoid fighting over 8080/8443).
     let proxy_state = proxy::ProxyState::new();
     proxy_state.set_event_sink(proxy_event_tx);
+
+    // -- TLS bring-up (Plan B Task 10). When `tls` is `Some`, install the
+    //    cert_store on the ProxyState so the HTTPS listener can bind once
+    //    `proxy::supervise` reads it. Production passes `Some(...)`; tests
+    //    pass `None` to skip 443 binding and on-disk cert state.
+    //
+    //    The renewal scheduler + AcmeClient construction land in PB-T12;
+    //    PB-T10 stops at installing the store.
+    if let Some(tls_opts) = opts.tls.as_ref() {
+        let storage = tls::TlsStorage::new(tls_opts.cert_dir.clone());
+        let cert_store = std::sync::Arc::new(tls::CertStore::new(storage));
+        proxy_state.install_cert_store(cert_store).await;
+        info!(cert_dir = ?tls_opts.cert_dir, "tls: cert store installed");
+    }
+
     if let (Some(http_port), Some(https_port)) = (opts.proxy_http_port, opts.proxy_https_port) {
         let ps = proxy_state.clone();
         tokio::spawn(async move {
@@ -195,6 +227,19 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 
     info!(agent_id = %agent_id, "agent exited cleanly");
     Ok(())
+}
+
+/// Open (creating if missing) the agent-side `Inventory` SQLite database at
+/// `<state_dir>/agent.db`. Plan B introduces an agent-side inventory used by
+/// the TLS subsystem (`tls_certs`, `acme_account`); other tables apply
+/// harmlessly. Wired into use by the renewal scheduler in PB-T12 — kept here
+/// in PB-T10 so the helper is ready to consume.
+#[allow(dead_code)]
+async fn open_agent_inventory(state_dir: &std::path::Path) -> Result<isengard_storage::Inventory> {
+    let db_path = state_dir.join("agent.db");
+    isengard_storage::Inventory::open(&db_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("opening agent inventory: {e}"))
 }
 
 #[cfg(test)]

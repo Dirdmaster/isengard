@@ -76,6 +76,15 @@ impl ProxyState {
             let _ = tx.try_send(ev);
         }
     }
+
+    /// Install (or replace) the `CertStore` consulted by the SNI cert
+    /// callback. Must be called before the proxy `run` entrypoint reads
+    /// `cert_store` at startup; once installed, the HTTPS listener binds.
+    /// `None` left in place keeps the listener disabled (HTTP-only).
+    pub async fn install_cert_store(&self, store: Arc<CertStore>) {
+        let mut w = self.cert_store.write().await;
+        *w = Some(store);
+    }
 }
 
 /// Apply a `ProxyConfig` from the controller: rebuild the upstream registry
