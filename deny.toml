@@ -10,6 +10,25 @@ ignore = [
     # We don't use rustls-pemfile directly. Bollard 0.19+ may swap it; revisit on next bollard bump.
     # https://rustsec.org/advisories/RUSTSEC-2025-0134
     "RUSTSEC-2025-0134",
+
+    # protobuf 2.28.0 stack overflow on untrusted input. Pulled in transitively
+    # via pingora-core 0.8 → prometheus 0.13 → protobuf 2.28. We don't expose
+    # this protobuf parser to untrusted input (our protobuf use is via prost
+    # for the controller↔agent gRPC). Fix waits on upstream prometheus bump.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0437
+    "RUSTSEC-2024-0437",
+
+    # derivative 2.2.0 is unmaintained. Pulled in transitively via pingora-core
+    # 0.8. No safe upgrade available; alternatives (derive_more, derive-where,
+    # educe) require pingora's own dep change. Revisit on next pingora bump.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0388
+    "RUSTSEC-2024-0388",
+
+    # daemonize is unmaintained (last activity June 2023). Pulled in transitively
+    # via pingora-core 0.8 for its optional daemonization mode (we don't use it
+    # — `conf.daemon` defaults to false). Revisit on next pingora bump.
+    # https://rustsec.org/advisories/RUSTSEC-2025-0069
+    "RUSTSEC-2025-0069",
 ]
 
 [licenses]
