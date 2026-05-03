@@ -1861,6 +1861,7 @@ dependencies = [
  "isengard-controller",
  "isengard-core",
  "isengard-plugin-dashboard",
+ "isengard-plugin-networking-cf-tunnel",
  "isengard-plugin-networking-none",
  "isengard-plugin-networking-tailscale",
  "isengard-plugin-notifier",
@@ -1962,6 +1963,22 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "isengard-plugin-networking-cf-tunnel"
+version = "0.1.0-alpha"
+dependencies = [
+ "async-trait",
+ "inventory",
+ "isengard-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "which",
+ "wiremock",
 ]
 
 [[package]]

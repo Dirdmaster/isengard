@@ -16,6 +16,9 @@ mod dev_plugin;
 #[allow(unused_imports)]
 use isengard_plugin_dashboard as _;
 #[allow(unused_imports)]
+#[cfg(feature = "cf-tunnel")]
+use isengard_plugin_networking_cf_tunnel as _;
+#[allow(unused_imports)]
 use isengard_plugin_networking_none as _;
 #[allow(unused_imports)]
 #[cfg(feature = "tailscale")]

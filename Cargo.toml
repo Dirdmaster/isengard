@@ -12,6 +12,7 @@ members = [
     "crates/isengard-plugins/notifier",
     "crates/isengard-plugins/networking-none",
     "crates/isengard-plugins/networking-tailscale",
+    "crates/isengard-plugins/networking-cf-tunnel",
 ]
 
 [workspace.package]
@@ -112,6 +113,7 @@ isengard-plugin-notifier = { path = "crates/isengard-plugins/notifier", version 
 isengard-plugin-dashboard = { path = "crates/isengard-plugins/dashboard", version = "0.1.0-alpha" }
 isengard-plugin-networking-none = { path = "crates/isengard-plugins/networking-none", version = "0.1.0-alpha" }
 isengard-plugin-networking-tailscale = { path = "crates/isengard-plugins/networking-tailscale", version = "0.1.0-alpha" }
+isengard-plugin-networking-cf-tunnel = { path = "crates/isengard-plugins/networking-cf-tunnel", version = "0.1.0-alpha" }
 
 # external CLI lookup (used by tailscale adapter to verify `tailscale` binary)
 which = "6"
