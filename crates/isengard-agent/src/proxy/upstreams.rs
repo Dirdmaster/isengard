@@ -18,10 +18,12 @@ pub struct Upstream {
     pub healthy: bool,
 }
 
-/// Container-id keyed registry of upstreams.
+/// Hostname-keyed registry of upstreams.
 ///
 /// Wrapped in `Arc<RwLock<_>>` at the `ProxyState` level so the docker watcher
-/// can mutate while the proxy hot-path reads.
+/// can mutate while the proxy hot-path reads. The router looks up entries by
+/// the request's `Host` header (Task 9) — a later task adds SNI-based lookup
+/// for the HTTPS listener.
 #[derive(Debug, Default)]
 pub struct UpstreamRegistry {
     map: HashMap<String, Upstream>,
@@ -32,17 +34,17 @@ impl UpstreamRegistry {
         Self::default()
     }
 
-    /// Insert or replace an upstream entry.
-    pub fn set(&mut self, upstream: Upstream) {
-        self.map.insert(upstream.container_id.clone(), upstream);
+    /// Insert or replace the upstream for a hostname.
+    pub fn set(&mut self, host: impl Into<String>, upstream: Upstream) {
+        self.map.insert(host.into(), upstream);
     }
 
-    pub fn get(&self, container_id: &str) -> Option<&Upstream> {
-        self.map.get(container_id)
+    pub fn get(&self, host: &str) -> Option<&Upstream> {
+        self.map.get(host)
     }
 
-    pub fn remove(&mut self, container_id: &str) -> Option<Upstream> {
-        self.map.remove(container_id)
+    pub fn remove(&mut self, host: &str) -> Option<Upstream> {
+        self.map.remove(host)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Upstream)> {

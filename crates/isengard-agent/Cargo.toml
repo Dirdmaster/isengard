@@ -29,3 +29,4 @@ tempfile = "3.14.0"
 chrono.workspace = true
 isengard-controller = { workspace = true }
 isengard-storage = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

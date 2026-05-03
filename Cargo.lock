@@ -1697,6 +1697,7 @@ dependencies = [
  "isengard-storage",
  "pingora-core",
  "pingora-proxy",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

@@ -18,7 +18,13 @@ pub use upstreams::{Upstream, UpstreamRegistry};
 /// Shared state passed into the `ProxyHttp` router. Cheap to clone (Arc).
 #[derive(Debug, Default, Clone)]
 pub struct ProxyState {
-    /// Container-id keyed registry of upstreams. Mutated by the docker watcher
+    /// Hostname-keyed registry of upstreams. Mutated by the docker watcher
     /// (Task 10), read by the router on each request.
     pub upstreams: Arc<RwLock<UpstreamRegistry>>,
+}
+
+impl ProxyState {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
