@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Home · Timeline v1 — concept</title>
+  <link rel="stylesheet" href="../../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1440px] h-[900px] flex flex-col rounded-iso-xl border border-iso-border overflow-hidden bg-iso-bg-base">
+
+  <header class="h-[52px] px-5 flex items-center gap-4 border-b border-iso-border shrink-0">
+    <div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-full bg-iso-success"></div><span class="text-sm font-semibold">isengard</span></div>
+    <div class="px-2.5 py-1 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-xs text-iso-text-secondary">All fleets</div>
+    <nav class="flex items-center">
+      <a class="px-3 py-1.5 text-xs font-medium text-iso-text-primary border-b-2 border-iso-info">Home</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Hosts</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Stacks</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Events</a>
+    </nav>
+    <div class="flex-1"></div>
+    <div class="flex items-center gap-2 px-2.5 py-1 rounded-iso-md bg-iso-bg-elevated border border-iso-border">
+      <div class="w-1.5 h-1.5 rounded-full bg-iso-success"></div>
+      <span class="text-[11px] mono text-iso-text-secondary">live · 14:33</span>
+    </div>
+    <div class="flex items-center gap-2 px-2.5 py-1 rounded-iso-md bg-iso-bg-elevated border border-iso-border">
+      <svg class="w-3 h-3 text-iso-text-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <span class="text-xs text-iso-text-faint">Search or jump…</span>
+      <span class="px-1.5 py-px rounded-sm bg-iso-bg-base border border-iso-border-strong mono text-[10px] text-iso-text-secondary">⌘K</span>
+    </div>
+  </header>
+
+  <!-- Body: timeline (3fr) + selected event (1fr) -->
+  <main class="flex-1 grid grid-cols-[2.4fr_1fr] overflow-hidden">
+
+    <!-- Left: fleet cards + timeline -->
+    <div class="flex flex-col overflow-auto border-r border-iso-border">
+
+      <!-- Fleet cards -->
+      <div class="px-5 pt-5 pb-4 flex flex-col gap-3 border-b border-iso-border">
+        <!-- prod fleet -->
+        <div class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-4 flex items-center gap-5">
+          <div class="flex flex-col gap-0.5 w-[120px]">
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-semibold">Fleet · prod</span>
+              <span class="px-1.5 py-px rounded-iso-sm bg-iso-warn/20 mono text-[9px] text-iso-warn">1 alert</span>
+            </div>
+            <span class="text-[10px] text-iso-text-muted">3 hosts · 1 updating</span>
+          </div>
+          <div class="flex-1 flex flex-col gap-0.5">
+            <span class="text-[10px] text-iso-text-faint">7 containers across 3 hosts · last cycle 22s ago</span>
+            <div class="flex items-center gap-1.5 mt-1">
+              <span class="px-1.5 py-px rounded-iso-sm bg-iso-warn/15 mono text-[10px] text-iso-warn">▲ NEEDS ATTENTION</span>
+              <span class="text-[10px] text-iso-text-secondary mono">cache on prod-01</span>
+              <span class="text-[10px] text-iso-text-faint">auth/jwt error · pull error · timeout</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <div class="w-1 h-1 rounded-full bg-iso-success"></div>
+              <span class="text-[10px] text-iso-text-secondary mono">api on staging</span>
+              <span class="text-[10px] text-iso-text-faint">healthy</span>
+            </div>
+          </div>
+          <!-- 7 status pips -->
+          <div class="flex items-center gap-1">
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-warn"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-error"></div>
+          </div>
+        </div>
+        <!-- staging fleet -->
+        <div class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-4 flex items-center gap-5">
+          <div class="flex flex-col gap-0.5 w-[120px]">
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-semibold">Fleet · staging</span>
+              <svg class="w-3 h-3 text-iso-success" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <span class="text-[10px] text-iso-text-muted">2 healthy · 0 alerts</span>
+          </div>
+          <div class="flex-1">
+            <span class="text-[10px] text-iso-text-faint">3 containers across 2 hosts · last cycle 9s ago</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+            <div class="w-3.5 h-5 rounded-iso-sm bg-iso-success"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Timeline -->
+      <div class="flex-1 px-5 py-4 flex flex-col gap-3">
+        <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted">TODAY · APRIL 26</div>
+
+        <div class="flex flex-col gap-px">
+          <!-- selected: highlighted -->
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md bg-iso-info-soft border border-iso-info text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">14:33</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-info/20 mono text-[10px] text-iso-info w-fit">UPDATED</span>
+            <span class="text-iso-text-primary truncate">web on prod-01 → nginx:1.25-alpine</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">prod-01</span>
+          </div>
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">14:31</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-warn/20 mono text-[10px] text-iso-warn w-fit">PULLING</span>
+            <span class="text-iso-text-secondary truncate">cache on prod-01 → redis:7.2</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">prod-01</span>
+          </div>
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">14:31</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-error/20 mono text-[10px] text-iso-error w-fit">FAILED</span>
+            <span class="text-iso-text-secondary truncate">api on staging · pull error · timeout</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">staging</span>
+          </div>
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">14:30</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-[10px] text-iso-text-muted w-fit">CHECKED</span>
+            <span class="text-iso-text-secondary truncate">cycle complete · 7 containers · 6 up to date · 1 needs update</span>
+            <span class="text-[10px] text-iso-text-faint text-right mono">all</span>
+          </div>
+        </div>
+
+        <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted mt-2">YESTERDAY · APRIL 25</div>
+
+        <div class="flex flex-col gap-px">
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">22:08</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-info/20 mono text-[10px] text-iso-info w-fit">UPDATED</span>
+            <span class="text-iso-text-secondary truncate">worker on prod-01 → ghcr.io/foo/wrk:1.4.2</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">prod-01</span>
+          </div>
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">21:54</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-error/20 mono text-[10px] text-iso-error w-fit">DISCONNECT</span>
+            <span class="text-iso-text-secondary truncate">edge-01 unreachable for over 4h</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">edge-01</span>
+          </div>
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">17:21</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-info/20 mono text-[10px] text-iso-info w-fit">UPDATED</span>
+            <span class="text-iso-text-secondary truncate">db on prod-01 → postgres:16.2</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">prod-01</span>
+          </div>
+          <div class="grid grid-cols-[60px_90px_1fr_120px] px-3 py-2 rounded-iso-md hover:bg-iso-bg-elevated text-xs items-center">
+            <span class="mono text-iso-text-faint text-[10px]">10:17</span>
+            <span class="px-1.5 py-px rounded-iso-sm bg-iso-info/20 mono text-[10px] text-iso-info w-fit">STARTED</span>
+            <span class="text-iso-text-secondary truncate">nginx-lb on prod-02 · nginx:1.25-alpine</span>
+            <span class="text-[10px] text-iso-text-muted text-right mono">prod-02</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: selected event panel -->
+    <aside class="overflow-auto bg-iso-bg-elevated/30 flex flex-col gap-4 p-5">
+      <div class="flex items-center justify-between">
+        <span class="text-[10px] font-semibold tracking-wider text-iso-text-muted">SELECTED EVENT · 14:33</span>
+        <button class="text-iso-text-muted">✕</button>
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-iso-info"></div>
+          <h2 class="text-xl font-semibold mono">web</h2>
+        </div>
+        <span class="text-[11px] text-iso-text-muted">prod-01 · nginx:1.25-alpine</span>
+      </div>
+
+      <div class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-4 flex flex-col gap-2">
+        <div class="grid grid-cols-2 gap-y-2 text-[11px]">
+          <span class="text-iso-text-muted">Status</span><span class="text-iso-success">running · update.success</span>
+          <span class="text-iso-text-muted">Container</span><span class="mono text-iso-text-primary">web</span>
+          <span class="text-iso-text-muted">Image</span><span class="mono text-iso-text-secondary text-right truncate">nginx:1.25-alpine</span>
+          <span class="text-iso-text-muted">Restart</span><span class="text-iso-text-secondary">unless-stopped</span>
+          <span class="text-iso-text-muted">Ports</span><span class="mono text-iso-text-secondary">80/tcp · 443</span>
+        </div>
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <span class="text-[10px] font-semibold tracking-wider text-iso-text-muted">DIGEST CHANGE</span>
+        <div class="rounded-iso-md bg-[#050505] border border-iso-border p-3 mono text-[10px] flex flex-col gap-1">
+          <div class="text-iso-error truncate">- sha256:7a8f33fd…ef10</div>
+          <div class="text-iso-success truncate">+ sha256:b412c01d…h7p2</div>
+        </div>
+      </div>
+
+      <div class="flex flex-col gap-2">
+        <span class="text-[10px] font-semibold tracking-wider text-iso-text-muted">QUICK ACTIONS</span>
+        <button class="px-3 py-2 rounded-iso-md bg-iso-bg-elevated border border-iso-border text-xs text-iso-text-secondary text-left">Open container detail →</button>
+        <button class="px-3 py-2 rounded-iso-md bg-iso-bg-elevated border border-iso-border text-xs text-iso-text-secondary text-left">Open prod-01 host →</button>
+        <button class="px-3 py-2 rounded-iso-md bg-iso-bg-elevated border border-iso-border text-xs text-iso-text-secondary text-left">Filter timeline to this container</button>
+      </div>
+    </aside>
+
+  </main>
+
+  <footer class="h-9 px-4 flex items-center justify-between border-t border-iso-border text-[11px] text-iso-text-muted bg-iso-bg-elevated">
+    <div class="flex items-center gap-3">
+      <span class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full bg-iso-success"></div>controller v0.4.1</span>
+      <span class="text-iso-text-faint">·</span>
+      <span class="mono text-[10px]">▮▮▮▮▮▮▮▮▮▮▮▮</span>
+      <span>147 events / 24h</span>
+      <span class="text-iso-text-faint">·</span>
+      <span class="text-iso-info">2 deploying</span>
+      <span class="text-iso-text-faint">·</span>
+      <span class="text-iso-warn">1 pending approval</span>
+      <span class="text-iso-text-faint">·</span>
+      <span>4 / 4 hosts up</span>
+    </div>
+    <div class="flex items-center gap-3 mono">
+      <span>command</span>
+      <span>top</span>
+      <span class="text-iso-info">⌘K</span>
+    </div>
+  </footer>
+
+</div>
+</body>
+</html>

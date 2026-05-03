@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Stacks · empty v1 — concept</title>
+  <link rel="stylesheet" href="../../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1440px] h-[900px] flex flex-col rounded-iso-xl border border-iso-border overflow-hidden bg-iso-bg-base">
+
+  <header class="h-[52px] px-5 flex items-center gap-4 border-b border-iso-border shrink-0">
+    <div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-full bg-iso-success"></div><span class="text-sm font-semibold">isengard</span></div>
+    <div class="px-2.5 py-1 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-xs text-iso-text-secondary">All fleets</div>
+    <nav class="flex items-center">
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Home</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Hosts</a>
+      <a class="px-3 py-1.5 text-xs font-medium text-iso-text-primary border-b-2 border-iso-info">Stacks</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Events</a>
+    </nav>
+    <div class="flex-1"></div>
+  </header>
+
+  <main class="flex-1 p-6 flex flex-col gap-6 overflow-auto">
+
+    <div class="flex items-end justify-between">
+      <div class="flex flex-col gap-1">
+        <h1 class="text-[22px] font-semibold">Stacks</h1>
+        <span class="text-xs text-iso-text-muted">0 stacks · 4 hosts ready to deploy on</span>
+      </div>
+      <button class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium">+ Add stack</button>
+    </div>
+
+    <div class="flex-1 rounded-iso-xl border border-dashed border-iso-border bg-iso-bg-elevated/40 flex items-center justify-center">
+
+      <div class="w-[820px] flex flex-col items-center gap-8 p-10 text-center">
+
+        <div class="w-14 h-14 rounded-iso-lg border border-iso-border-strong bg-iso-bg-base flex items-center justify-center mono text-iso-text-secondary text-xl font-semibold">{ }</div>
+
+        <div class="flex flex-col gap-2">
+          <h2 class="text-2xl font-semibold tracking-tight">Deploy your first stack</h2>
+          <p class="text-sm text-iso-text-muted leading-relaxed">A <span class="text-iso-text-primary">stack</span> is a docker-compose project running on one or more of your hosts. Pick how you want to define it.</p>
+        </div>
+
+        <!-- 3 mode mini-cards -->
+        <div class="grid grid-cols-3 gap-3 w-full">
+          <button class="text-left p-4 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-info flex flex-col gap-2">
+            <div class="flex items-center gap-2">
+              <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated border border-iso-border flex items-center justify-center mono text-xs text-iso-text-secondary">{ }</div>
+              <span class="text-xs font-semibold">Paste compose</span>
+            </div>
+            <div class="text-[10px] text-iso-text-muted leading-tight text-left">Already have a compose.yml? Paste, target hosts, deploy.</div>
+            <span class="text-[10px] text-iso-info text-left">→ start here (fastest)</span>
+          </button>
+          <button class="text-left p-4 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-info flex flex-col gap-2">
+            <div class="flex items-center gap-2">
+              <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated border border-iso-border flex items-center justify-center">
+                <svg class="w-4 h-4 text-iso-text-secondary" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/></svg>
+              </div>
+              <span class="text-xs font-semibold">Form builder</span>
+            </div>
+            <div class="text-[10px] text-iso-text-muted leading-tight text-left">Click through services, ports, env. We generate YAML.</div>
+            <span class="text-[10px] text-iso-text-faint text-left">→ no YAML required</span>
+          </button>
+          <button class="text-left p-4 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-info flex flex-col gap-2">
+            <div class="flex items-center gap-2">
+              <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated border border-iso-border flex items-center justify-center">
+                <svg class="w-4 h-4 text-iso-text-secondary" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+              </div>
+              <span class="text-xs font-semibold">Git sync</span>
+            </div>
+            <div class="text-[10px] text-iso-text-muted leading-tight text-left">Point at a repo. Re-deploy on every commit.</div>
+            <span class="text-[10px] text-iso-text-faint text-left">→ GitOps</span>
+          </button>
+        </div>
+
+        <div class="text-[11px] text-iso-text-muted">
+          Stacks already running on your hosts? They appear automatically as <a class="text-iso-info">discovered</a>.
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <footer class="h-9 px-4 flex items-center justify-between border-t border-iso-border text-[11px] text-iso-text-muted bg-iso-bg-elevated">
+    <div class="flex items-center gap-3">
+      <span class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full bg-iso-success"></div>controller v0.4.1</span>
+      <span class="text-iso-text-faint">·</span>
+      <span>4 hosts · 0 stacks</span>
+    </div>
+    <div class="mono">⌘K</div>
+  </footer>
+
+</div>
+</body>
+</html>

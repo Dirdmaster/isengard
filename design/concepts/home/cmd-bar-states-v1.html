@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Always-on cmd bar · states v1 — concept</title>
+  <link rel="stylesheet" href="../../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+<div class="w-[1440px] h-[900px] flex flex-col rounded-iso-xl border border-iso-border overflow-hidden bg-iso-bg-base p-8 gap-6 overflow-auto">
+
+  <div class="flex items-baseline justify-between">
+    <h1 class="text-[22px] font-semibold">Always-on cmd bar</h1>
+    <span class="text-xs text-iso-text-muted">4 states · always docked at the bottom of every page</span>
+  </div>
+
+  <!-- State 1: Idle -->
+  <section class="flex flex-col gap-2">
+    <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted">1 · IDLE — TYPE-AHEAD HINTS, NOTHING ACTIVE</div>
+    <div class="rounded-iso-md border border-iso-border bg-iso-bg-elevated px-4 py-2.5 flex items-center gap-3">
+      <span class="text-iso-text-faint mono text-[11px] flex items-center gap-1.5">
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        run
+      </span>
+      <input class="flex-1 bg-transparent outline-none mono text-sm text-iso-text-faint" placeholder="type a command, search, or jump to anything" />
+      <span class="text-[10px] mono text-iso-text-faint">⌘K to focus</span>
+      <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-info">help ?</span>
+    </div>
+    <span class="text-[10px] text-iso-text-faint">Always present even when empty. Hint copy disappears when typing. Esc unfocuses without closing.</span>
+  </section>
+
+  <!-- State 2: Type-ahead with suggestions inline -->
+  <section class="flex flex-col gap-2">
+    <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted">2 · FORWARD-EMPTY — LOOKAHEAD ENTRIES SHOWN ABOVE</div>
+    <div class="flex flex-col gap-px">
+      <div class="rounded-iso-md bg-iso-bg-elevated border-x border-t border-iso-border px-4 py-2 flex items-center gap-3 text-xs">
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-info-soft mono text-[10px] text-iso-info">@host</span>
+        <span class="mono">prod-01</span>
+        <span class="text-iso-text-faint">3 containers · last cycle 22s ago</span>
+      </div>
+      <div class="rounded-iso-md bg-iso-bg-elevated border-x border-t border-iso-border px-4 py-2 flex items-center gap-3 text-xs">
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-info-soft mono text-[10px] text-iso-info">@host</span>
+        <span class="mono">prod-02</span>
+        <span class="text-iso-text-faint">2 containers</span>
+      </div>
+      <div class="rounded-iso-md bg-iso-bg-elevated border-x border-t border-iso-border px-4 py-2 flex items-center gap-3 text-xs">
+        <span class="px-1.5 py-px rounded-iso-sm bg-iso-success-soft mono text-[10px] text-iso-success">action</span>
+        <span class="text-iso-text-secondary">Open shell on web @ prod-01</span>
+      </div>
+      <div class="rounded-iso-md bg-iso-info-soft border border-iso-info px-4 py-2.5 flex items-center gap-3">
+        <span class="text-iso-info mono text-[11px] flex items-center gap-1.5"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>run</span>
+        <span class="bg-transparent outline-none mono text-sm text-iso-text-primary flex-1">prod <span class="bg-iso-text-primary text-iso-bg-base px-px ml-px">|</span></span>
+        <span class="text-[10px] mono text-iso-text-muted">↑↓ navigate · enter open</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- State 3: Typing — mid-pipeline -->
+  <section class="flex flex-col gap-2">
+    <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted">3 · TYPING — MID-PIPELINE WITH PARAMETER + SUFFIX HINT</div>
+    <div class="rounded-iso-md border border-iso-info bg-iso-info-soft/40 px-4 py-2.5 flex items-center gap-3">
+      <span class="text-iso-info mono text-[11px] flex items-center gap-1.5"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>run</span>
+      <span class="mono text-sm">
+        <span class="text-iso-text-primary">force-update</span>
+        <span class="text-iso-text-secondary"> @prod-01 web</span>
+        <span class="bg-iso-text-primary text-iso-bg-base px-px ml-px">|</span>
+        <span class="text-iso-text-faint"> --confirm </span>
+      </span>
+      <div class="flex-1"></div>
+      <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-text-secondary">tab autocompletes</span>
+      <span class="px-1.5 py-px rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-[10px] text-iso-warn">↵ to confirm</span>
+    </div>
+    <span class="text-[10px] text-iso-text-faint">Argument tokens are colored by type: <span class="text-iso-info">@host</span>, <span class="text-iso-success">$stack</span>, <span class="text-iso-warn">--flag</span>. Suggestions update inline.</span>
+  </section>
+
+  <!-- State 4: Action confirmation -->
+  <section class="flex flex-col gap-2">
+    <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted">4 · ACTION CONFIRMATION — ⌘↵ TO COMMIT, FULL PAYLOAD VISIBLE, ESCAPE SAFE</div>
+    <div class="rounded-iso-md border border-iso-warn bg-iso-warn/5 overflow-hidden">
+      <div class="px-4 py-3 flex flex-col gap-2 border-b border-iso-warn/40">
+        <div class="flex items-center gap-3">
+          <svg class="w-4 h-4 text-iso-warn" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span class="text-xs font-semibold text-iso-warn">Confirm action</span>
+          <span class="text-[11px] text-iso-text-secondary">force-update on the prod fleet (3 hosts, 7 containers)</span>
+        </div>
+        <div class="rounded-iso-md bg-[#050505] border border-iso-border p-3 mono text-[11px] flex flex-col gap-0.5">
+          <div><span class="text-iso-warn">action:</span> <span class="text-iso-info">force-update</span></div>
+          <div><span class="text-iso-warn">scope:</span> <span class="text-iso-text-secondary">fleet=prod (3 hosts)</span></div>
+          <div><span class="text-iso-warn">container:</span> <span class="text-iso-text-secondary">all (7)</span></div>
+          <div><span class="text-iso-warn">approval:</span> <span class="text-iso-text-secondary">required (policy auto-block)</span></div>
+        </div>
+      </div>
+      <div class="px-4 py-2 flex items-center justify-between text-[11px]">
+        <span class="text-iso-text-muted">esc to cancel · this will pause auto-updates fleet-wide for the duration</span>
+        <div class="flex items-center gap-2">
+          <button class="px-2.5 py-1 rounded-iso-sm bg-iso-bg-elevated border border-iso-border text-[11px] text-iso-text-muted">Cancel</button>
+          <button class="px-3 py-1 rounded-iso-sm bg-iso-success text-iso-bg-base text-[11px] font-medium flex items-center gap-1.5">⌘↵ Run</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
