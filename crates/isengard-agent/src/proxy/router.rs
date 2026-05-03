@@ -57,6 +57,9 @@ impl ProxyHttp for IsengardProxy {
                 format!("no healthy upstream for {host}"),
             ));
         }
-        Ok(Box::new(HttpPeer::new(up.addr, false, String::new())))
+        // Pingora 0.4 quirk: even with tls=false the SNI string doubles as the
+        // upstream Host header. Empty SNI causes Pingora to 502 without
+        // attempting the upstream connection. Pass the original public hostname.
+        Ok(Box::new(HttpPeer::new(up.addr, false, host)))
     }
 }
