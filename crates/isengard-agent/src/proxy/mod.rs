@@ -214,6 +214,7 @@ mod tests {
     /// service that panics during bootstrap is hard to arrange portably; the
     /// simpler check is that the constants are in the expected ranges).
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn restart_budget_constants_are_sane() {
         assert!(MAX_RESTARTS >= 3, "want some headroom for transient flaps");
         assert!(

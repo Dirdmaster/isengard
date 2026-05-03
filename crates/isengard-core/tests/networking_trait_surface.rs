@@ -1,10 +1,7 @@
 //! Compile-only test: exercises that NetworkingAdapter is object-safe and
 //! that all the support types serde-roundtrip cleanly.
 
-use isengard_core::networking::{
-    AdapterContext, ExposeSpec, ExposedEndpoint, NetworkingAdapter, Protocol, TlsStrategy,
-};
-use isengard_core::{HostMode, Plugin, PluginContext};
+use isengard_core::networking::{ExposeSpec, NetworkingAdapter, Protocol, TlsStrategy};
 
 #[test]
 fn expose_spec_roundtrips_json() {

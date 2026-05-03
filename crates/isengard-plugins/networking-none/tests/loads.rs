@@ -3,13 +3,13 @@ use isengard_plugin_networking_none::NoneAdapter;
 
 #[test]
 fn id_is_none() {
-    let a = NoneAdapter::default();
+    let a = NoneAdapter;
     assert_eq!(a.id(), "none");
 }
 
 #[test]
 fn tls_strategy_is_pass_through() {
-    let a = NoneAdapter::default();
+    let a = NoneAdapter;
     assert!(matches!(a.tls_strategy(), TlsStrategy::PassThrough));
 }
 
@@ -18,7 +18,7 @@ async fn expose_returns_err() {
     use isengard_core::context::{HostMode, PluginContext};
     use isengard_core::networking::{AdapterContext, ExposeSpec, Protocol};
 
-    let a = NoneAdapter::default();
+    let a = NoneAdapter;
     let ctx = AdapterContext {
         host_id: "h-1".into(),
         settings: serde_json::Value::Null,
