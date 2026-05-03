@@ -16,12 +16,15 @@ bytes = "1"
 chrono.workspace = true
 futures-util.workspace = true
 hostname.workspace = true
+instant-acme = "0.7"
 isengard-core.workspace = true
 isengard-proto.workspace = true
+isengard-storage = { workspace = true }
 pingora-core = { workspace = true }
 pingora-http = "0.8"
 pingora-proxy = { workspace = true }
 pingora-boringssl = "0.8"
+rcgen = "0.13"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
@@ -32,6 +35,4 @@ tracing.workspace = true
 [dev-dependencies]
 tempfile = "3.14.0"
 isengard-controller = { workspace = true }
-isengard-storage = { workspace = true }
-rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
