@@ -5,19 +5,26 @@
 //! actually changes. Agents use the generation to discard stale pushes that
 //! arrive out of order.
 //!
-//! Tasks 14 / 16 / 17 will extend this with `register_sender`,
-//! `unregister_sender`, `push_to_host`, and `ingest_labels`. Today we only
-//! expose `build_for_host`, which is the foundation those layers reuse.
+//! Task 14: per-host sender registry. The Sync RPC handler registers its
+//! outbound `mpsc::Sender` here (keyed by `HostId`) on stream open and
+//! unregisters on close. `push_to_host` builds the latest `ProxyConfig` and
+//! shoves it down whichever sender is currently registered (best-effort —
+//! drop on full queue rather than block the caller).
+//!
+//! Task 17 will extend this with `ingest_labels` to translate
+//! `ContainerLabelsReport` payloads into routing rules.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use isengard_proto::pb::{
-    Healthcheck, ProxyConfig, ProxySettings, RoutingRule as ProtoRule, TlsMode, Upstream,
+    ControllerMessage, Healthcheck, ProxyConfig, ProxySettings, RoutingRule as ProtoRule, TlsMode,
+    Upstream, controller_message::Payload,
 };
 use isengard_storage::{HostId, Inventory, RoutingRule as StorageRule};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tonic::Status;
 
 #[derive(Default)]
 struct PerHostState {
@@ -28,11 +35,22 @@ struct PerHostState {
     last_hash: u64,
 }
 
+/// Outbound message type as carried on the Sync gRPC stream. The registry
+/// stores this directly (rather than a bare `Sender<ControllerMessage>`) so
+/// the Sync handler can hand its actual sender in without an adapter task.
+pub type OutboundSender = mpsc::Sender<Result<ControllerMessage, Status>>;
+
+#[derive(Default)]
+struct Senders {
+    by_host: HashMap<HostId, OutboundSender>,
+}
+
 /// Reconciler that turns storage `routing_rules` into proto `ProxyConfig`
 /// messages, one host at a time, with monotonic per-host generation.
 pub struct RoutingPusher {
     inv: Arc<Inventory>,
     by_host: Mutex<HashMap<HostId, PerHostState>>,
+    senders: Mutex<Senders>,
 }
 
 impl RoutingPusher {
@@ -40,6 +58,7 @@ impl RoutingPusher {
         Self {
             inv,
             by_host: Mutex::new(HashMap::new()),
+            senders: Mutex::new(Senders::default()),
         }
     }
 
@@ -67,6 +86,36 @@ impl RoutingPusher {
                 log_sample_rate: 0.0,
             }),
         })
+    }
+
+    /// Register the Sync outbound sender for a host. Replaces any previous
+    /// sender (last-writer-wins; a reconnecting agent supersedes its old
+    /// stream which is already torn down on the agent side).
+    pub async fn register_sender(&self, host: HostId, tx: OutboundSender) {
+        let mut s = self.senders.lock().await;
+        s.by_host.insert(host, tx);
+    }
+
+    /// Drop the registered sender for a host (called on stream close).
+    pub async fn unregister_sender(&self, host: HostId) {
+        let mut s = self.senders.lock().await;
+        s.by_host.remove(&host);
+    }
+
+    /// Push the latest `ProxyConfig` to the host's currently registered
+    /// sender (if any). Best-effort: a full queue drops the message rather
+    /// than blocking — the next `push_to_host` will carry the freshest
+    /// config anyway.
+    pub async fn push_to_host(&self, host: HostId) -> Result<()> {
+        let cfg = self.build_for_host(host).await?;
+        let senders = self.senders.lock().await;
+        if let Some(tx) = senders.by_host.get(&host) {
+            let msg = ControllerMessage {
+                payload: Some(Payload::ProxyConfig(cfg)),
+            };
+            let _ = tx.try_send(Ok(msg));
+        }
+        Ok(())
     }
 }
 

@@ -155,7 +155,12 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         std::env::var("ISENGARD_TOKEN").with_context(|| "ISENGARD_TOKEN env var must be set")?;
     let auth_layer = crate::auth::TokenAuthLayer::new(token);
 
-    let svc = ControllerServer::new(ControllerService::new(inventory, journal, bus));
+    let svc = ControllerServer::new(ControllerService::new(
+        inventory,
+        journal,
+        bus,
+        routing.clone(),
+    ));
 
     info!("gRPC server listening");
     let serve_fut = Server::builder()
