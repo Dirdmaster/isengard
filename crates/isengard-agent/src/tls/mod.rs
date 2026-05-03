@@ -5,6 +5,8 @@
 //! cert_store cache (warm-loads pairs at startup). Subsequent tasks add
 //! `cert_store`, `acme`, and the SNI resolver.
 
+pub mod cert_store;
 pub mod storage;
 
+pub use cert_store::CertStore;
 pub use storage::{CertFiles, TlsStorage};

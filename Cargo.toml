@@ -64,8 +64,8 @@ chrono = { version = "0.4.39", default-features = false, features = ["serde", "c
 axum = { version = "0.8.1", default-features = false, features = ["http1", "http2", "tokio", "json", "ws", "macros", "query"] }
 
 # reverse proxy (Pingora)
-pingora-core = "0.8"
-pingora-proxy = "0.8"
+pingora-core = { version = "0.8", default-features = false, features = ["rustls"] }
+pingora-proxy = { version = "0.8", default-features = false, features = ["rustls"] }
 
 # embedded static assets (dashboard bundle)
 rust-embed = { version = "8.5.0", features = ["compression"] }

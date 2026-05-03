@@ -16,11 +16,13 @@ use isengard_core::Event;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
+pub mod cert_resolver;
 pub mod healthcheck;
 pub mod router;
 pub mod server;
 pub mod upstreams;
 
+pub use cert_resolver::IsengardCertResolver;
 pub use upstreams::{Upstream, UpstreamRegistry};
 
 /// Shared state passed into the `ProxyHttp` router. Cheap to clone (Arc).

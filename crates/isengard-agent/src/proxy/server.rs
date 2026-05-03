@@ -56,6 +56,8 @@ pub async fn run_for_test(
     port: u16,
     shutdown_rx: Option<oneshot::Receiver<()>>,
 ) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut server = Server::new_with_opt_and_conf(None, ServerConf::default());
     server.bootstrap();
 
@@ -80,6 +82,8 @@ pub async fn run_for_test(
 }
 
 pub async fn run(state: ProxyState, http_port: u16, _https_port: u16) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut server = Server::new_with_opt_and_conf(None, ServerConf::default());
     server.bootstrap();
 
