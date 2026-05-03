@@ -11,7 +11,7 @@ description = "Tailscale (CLI-driven) NetworkingAdapter for Isengard"
 [dependencies]
 async-trait.workspace = true
 inventory.workspace = true
-isengard-core = { path = "../../isengard-core" }
+isengard-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3"
