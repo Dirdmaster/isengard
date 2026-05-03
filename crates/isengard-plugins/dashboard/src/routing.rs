@@ -4,8 +4,8 @@
 //! `docs/superpowers/specs/2026-05-04-phase-8h-8i-settings-ui-and-atomic-swap-design.md`.
 //!
 //! PC-T2 wires the rules CRUD endpoints (list/create/update/delete) against
-//! `Inventory`. Overrides + adapter-config still return 501 stubs until
-//! PC-T3/T4/T5 land.
+//! `Inventory`. PC-T3 wires per-field overrides (list + upsert). Adapter-config
+//! still returns 501 stubs until PC-T4/T5 land.
 
 use std::sync::Arc;
 
@@ -198,17 +198,50 @@ async fn delete_rule(
 }
 
 async fn list_overrides(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Path(_id): Path<i64>,
+    Path(id): Path<i64>,
+    State(handles): State<Arc<ControllerHandles>>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "list_overrides: PC-T3").into_response()
+    match handles
+        .inventory
+        .list_routing_rule_overrides(RoutingRuleId(id))
+        .await
+    {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list overrides: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpsertOverrideBody {
+    value_json: serde_json::Value,
 }
 
 async fn upsert_override(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Path((_id, _field)): Path<(i64, String)>,
+    Path((id, field)): Path<(i64, String)>,
+    State(handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<UpsertOverrideBody>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "upsert_override: PC-T3").into_response()
+    match handles
+        .inventory
+        .upsert_routing_rule_override(RoutingRuleId(id), &field, body.value_json.clone())
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "routing_rule_id": id,
+            "field": field,
+            "value_json": body.value_json,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("upsert override: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_adapter_config(
@@ -372,6 +405,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_overrides_returns_empty_for_new_rule() {
+        let handles = test_handles().await;
+        let host_id = seed_host(&handles).await;
+        let rule = seed_rule(&handles, host_id, "blog.example.com").await;
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/routing/rules/{}/overrides", rule.id.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let overrides: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(overrides.is_empty());
+    }
+
+    #[tokio::test]
+    async fn upsert_override_then_list_returns_value() {
+        let handles = test_handles().await;
+        let host_id = seed_host(&handles).await;
+        let rule = seed_rule(&handles, host_id, "blog.example.com").await;
+
+        let app = router(handles);
+        let put_body = serde_json::json!({"value_json": "manual"}).to_string();
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/routing/rules/{}/overrides/tls_mode", rule.id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(put_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_resp.status(), StatusCode::OK);
+
+        let list_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/routing/rules/{}/overrides", rule.id.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let overrides: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0]["field"], "tls_mode");
+        assert_eq!(overrides[0]["value_json"], "manual");
     }
 
     #[tokio::test]
