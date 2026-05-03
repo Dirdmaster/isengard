@@ -22,7 +22,12 @@ pub enum Protocol {
 /// How the adapter handles TLS for a hostname it exposes. Returned from
 /// `NetworkingAdapter::tls_strategy`. Pingora inspects this to decide whether
 /// to terminate TLS itself or pass plain HTTP through.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Serialised as a bare discriminant string (e.g. `"edge_termination"`),
+/// not as a tagged object. All variants are unit variants — no payload to
+/// serialise. The runtime callback for `AdapterProvided` is wired via a
+/// separate API, not through serde.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsStrategy {
     /// Adapter terminates TLS at its edge. Pingora listens on plain HTTP.
@@ -55,9 +60,20 @@ pub struct ExposedEndpoint {
 }
 
 /// Per-host context an adapter receives on every call. Built by the agent.
+///
+/// NOTE: `host_id` is typed as `String` rather than the canonical `HostId`
+/// because `HostId` currently lives in `isengard-storage`, which `isengard-core`
+/// cannot depend on (storage depends on core types, not the other way). When
+/// `HostId` (or a shared identifier crate) is hoisted into core, this field
+/// should be tightened to `HostId`.
 pub struct AdapterContext {
     pub host_id: String,
+    /// Host-scoped settings slice, opaque to core. Adapters parse what they
+    /// need (e.g. CF API token from `cf-tunnel.api_token`). Will be narrowed
+    /// to a typed `Settings` struct in a later phase.
     pub settings: serde_json::Value,
+    /// Carries the event emitter (via `plugin_ctx.events`) and host mode.
+    /// Bundles what the spec calls `event_emitter` as a top-level field.
     pub plugin_ctx: PluginContext,
 }
 
