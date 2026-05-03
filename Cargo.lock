@@ -1690,6 +1690,7 @@ dependencies = [
  "async-trait",
  "bollard",
  "chrono",
+ "futures-util",
  "hostname 0.4.2",
  "isengard-controller",
  "isengard-core",

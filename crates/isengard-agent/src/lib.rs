@@ -6,6 +6,7 @@ pub mod backoff;
 pub mod container_snapshot;
 pub mod enroll;
 pub mod events;
+pub mod labels;
 pub mod proxy;
 pub mod sync;
 
@@ -104,6 +105,26 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
+    // -- spawn the Docker label watcher (Phase 8b Task 16).
+    //    Pushes ContainerLabelsReport / ContainerLabelsRemoved up the sync
+    //    stream as containers come and go. Messages queue in `agent_msg_rx`
+    //    while the stream is down; the sync loop drains them on reconnect.
+    let (agent_msg_tx, mut agent_msg_rx) =
+        tokio::sync::mpsc::channel::<isengard_proto::pb::AgentMessage>(64);
+    match bollard::Docker::connect_with_local_defaults() {
+        Ok(docker) => {
+            let labels_out = agent_msg_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = labels::watch(docker, labels_out).await {
+                    tracing::error!(error = %e, "labels: watcher exited");
+                }
+            });
+        }
+        Err(e) => {
+            warn!(error = %e, "labels: failed to connect to Docker, watcher disabled");
+        }
+    }
+
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let token = std::env::var("ISENGARD_TOKEN")
         .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
@@ -126,6 +147,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             HEARTBEAT_INTERVAL_SECS,
             sync_cancel,
             &mut events_rx,
+            &mut agent_msg_rx,
             sync_proxy_state,
         )
         .await

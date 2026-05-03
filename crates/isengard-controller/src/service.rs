@@ -300,15 +300,41 @@ impl Controller for ControllerService {
                     None => {
                         tracing::debug!(agent = %agent_hostname, "empty payload, skipping");
                     }
-                    // Phase 8 proxy messages: handlers land in Tasks 13/14.
-                    // Drop with a debug for now so the stream stays open.
-                    Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsReport(_))
-                    | Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(_)) =>
-                    {
-                        tracing::debug!(
-                            agent = %agent_hostname,
-                            "received proxy label payload (handler pending Phase 8)"
-                        );
+                    Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsReport(
+                        report,
+                    )) => {
+                        if let Err(e) = routing.ingest_labels(host_id, report).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: ingest failed",
+                            );
+                        }
+                        if let Err(e) = routing.push_to_host(host_id).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: push_to_host after ingest failed",
+                            );
+                        }
+                    }
+                    Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(
+                        ev,
+                    )) => {
+                        if let Err(e) = routing.ingest_labels_removed(host_id, ev).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: ingest_removed failed",
+                            );
+                        }
+                        if let Err(e) = routing.push_to_host(host_id).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: push_to_host after ingest_removed failed",
+                            );
+                        }
                     }
                 }
             }

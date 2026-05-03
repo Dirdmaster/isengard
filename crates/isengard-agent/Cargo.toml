@@ -12,6 +12,7 @@ description = "Agent-mode runtime"
 anyhow.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
+futures-util.workspace = true
 hostname.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true

@@ -35,7 +35,10 @@ use crate::proxy::ProxyState;
 /// `events_rx` is borrowed (not moved) so that it survives reconnects: events
 /// emitted while the stream is down stay queued in the channel until the next
 /// stream comes up.
-#[instrument(skip(token, cancel, events_rx, proxy_state), fields(agent_id = %agent_id))]
+#[instrument(
+    skip(token, cancel, events_rx, agent_msg_rx, proxy_state),
+    fields(agent_id = %agent_id)
+)]
 pub async fn run_sync_loop(
     controller_url: String,
     token: String,
@@ -43,6 +46,7 @@ pub async fn run_sync_loop(
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
     events_rx: &mut mpsc::Receiver<CoreEvent>,
+    agent_msg_rx: &mut mpsc::Receiver<AgentMessage>,
     proxy_state: ProxyState,
 ) -> Result<()> {
     let channel = Channel::from_shared(controller_url.clone())
@@ -198,6 +202,17 @@ pub async fn run_sync_loop(
                     break Err(anyhow::anyhow!("outbound channel closed while sending event"));
                 }
             }
+            maybe_msg = agent_msg_rx.recv() => {
+                let Some(msg) = maybe_msg else {
+                    // Pre-built AgentMessage channel closed — treat like cancel.
+                    info!("agent_msg channel closed, shutting down sync");
+                    break Ok(());
+                };
+                if let Err(e) = tx.send(msg).await {
+                    warn!(error = %e, "failed to forward agent message over sync stream");
+                    break Err(anyhow::anyhow!("outbound channel closed while forwarding agent message"));
+                }
+            }
         }
     };
 
@@ -222,7 +237,10 @@ pub async fn run_sync_loop(
 ///
 /// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
 /// (proves the connection was healthy).
-#[instrument(skip(token, cancel, events_rx, proxy_state), fields(agent_id = %agent_id))]
+#[instrument(
+    skip(token, cancel, events_rx, agent_msg_rx, proxy_state),
+    fields(agent_id = %agent_id)
+)]
 pub async fn run_sync_with_reconnect(
     controller_url: String,
     token: String,
@@ -230,6 +248,7 @@ pub async fn run_sync_with_reconnect(
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
     events_rx: &mut mpsc::Receiver<CoreEvent>,
+    agent_msg_rx: &mut mpsc::Receiver<AgentMessage>,
     proxy_state: ProxyState,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
@@ -260,6 +279,7 @@ pub async fn run_sync_with_reconnect(
             interval_secs,
             cancel.clone(),
             events_rx,
+            agent_msg_rx,
             proxy_state.clone(),
         )
         .await;

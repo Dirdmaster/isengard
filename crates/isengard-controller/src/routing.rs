@@ -19,10 +19,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use isengard_proto::pb::{
-    ControllerMessage, Healthcheck, ProxyConfig, ProxySettings, RoutingRule as ProtoRule, TlsMode,
-    Upstream, controller_message::Payload,
+    ContainerLabelsRemoved, ContainerLabelsReport, ControllerMessage, Healthcheck, ProxyConfig,
+    ProxySettings, RoutingRule as ProtoRule, TlsMode, Upstream, controller_message::Payload,
 };
-use isengard_storage::{HostId, Inventory, RoutingRule as StorageRule};
+use isengard_storage::{
+    HostId, InsertRoutingRule, Inventory, RoutingRule as StorageRule, RoutingRuleSource,
+    RoutingRuleState,
+};
 use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
 
@@ -114,6 +117,80 @@ impl RoutingPusher {
                 payload: Some(Payload::ProxyConfig(cfg)),
             };
             let _ = tx.try_send(Ok(msg));
+        }
+        Ok(())
+    }
+
+    /// Translate a `ContainerLabelsReport` into routing rules. Any existing
+    /// label-source rules for the same container are deleted first, so the
+    /// report becomes the single source of truth — adds, edits and removals
+    /// of individual labels all converge to the same end state.
+    ///
+    /// `fleet` is hardcoded to "default" for v1; resolving the host's actual
+    /// fleet (and the `stack_id` from the container's compose project label)
+    /// is a TODO for Plan B.
+    pub async fn ingest_labels(
+        &self,
+        host_id: HostId,
+        report: ContainerLabelsReport,
+    ) -> Result<()> {
+        let existing = self.inv.list_routing_rules_for_host(host_id).await?;
+        for r in existing {
+            if r.source == RoutingRuleSource::Label
+                && r.source_container_id.as_deref() == Some(report.container_id.as_str())
+            {
+                self.inv.delete_routing_rule(r.id).await?;
+            }
+        }
+
+        let parsed = isengard_core::labels::parse_labels(&report.labels);
+        for rule in parsed {
+            let port = rule.port.unwrap_or(80);
+            let tls_mode = match rule.tls.as_deref() {
+                Some("edge") => isengard_storage::TlsMode::Edge,
+                Some("manual") => isengard_storage::TlsMode::Manual,
+                _ => isengard_storage::TlsMode::Acme,
+            };
+
+            self.inv
+                .insert_routing_rule(InsertRoutingRule {
+                    fleet: "default".into(),
+                    host_id,
+                    stack_id: None,
+                    service_name: report.container_name.clone(),
+                    container_port: port,
+                    public_hostname: rule.hostname,
+                    protocol: "http".into(),
+                    adapter: rule.adapter.unwrap_or_else(|| "none".into()),
+                    tls_mode,
+                    healthcheck_path: rule.health,
+                    healthcheck_interval_secs: 10,
+                    auth: rule.auth,
+                    state: RoutingRuleState::Pending,
+                    source: RoutingRuleSource::Label,
+                    source_container_id: Some(report.container_id.clone()),
+                    source_imported_from: None,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Drop every label-source rule whose `source_container_id` matches the
+    /// removed container. No-op if there are no such rules (e.g. the
+    /// container never carried `isengard.expose*` labels).
+    pub async fn ingest_labels_removed(
+        &self,
+        host_id: HostId,
+        ev: ContainerLabelsRemoved,
+    ) -> Result<()> {
+        let existing = self.inv.list_routing_rules_for_host(host_id).await?;
+        for r in existing {
+            if r.source == RoutingRuleSource::Label
+                && r.source_container_id.as_deref() == Some(ev.container_id.as_str())
+            {
+                self.inv.delete_routing_rule(r.id).await?;
+            }
         }
         Ok(())
     }
