@@ -18,6 +18,9 @@ use isengard_plugin_dashboard as _;
 #[allow(unused_imports)]
 use isengard_plugin_networking_none as _;
 #[allow(unused_imports)]
+#[cfg(feature = "tailscale")]
+use isengard_plugin_networking_tailscale as _;
+#[allow(unused_imports)]
 use isengard_plugin_notifier as _;
 
 #[derive(Debug, Parser)]
