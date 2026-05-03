@@ -9,6 +9,7 @@
 //!   restart budget. Wired into agent startup so the proxy starts on boot.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -25,14 +26,75 @@ pub use upstreams::{Upstream, UpstreamRegistry};
 #[derive(Debug, Default, Clone)]
 pub struct ProxyState {
     /// Hostname-keyed registry of upstreams. Mutated by the docker watcher
-    /// (Task 11+), read by the router on each request.
+    /// (Task 11+) and the controller's `ProxyConfig` push (Task 13), read by
+    /// the router on each request.
     pub upstreams: Arc<RwLock<UpstreamRegistry>>,
+    /// Last applied `ProxyConfig.generation`. The controller increments
+    /// monotonically; we drop any push with `generation <= last_generation`
+    /// to ignore reordered or replayed messages.
+    pub last_generation: Arc<AtomicU64>,
 }
 
 impl ProxyState {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// Apply a `ProxyConfig` from the controller: rebuild the upstream registry
+/// from the rules and bump `last_generation`. Older or duplicate generations
+/// are dropped silently (debug log).
+///
+/// Each `RoutingRule` becomes one entry in the registry, keyed by
+/// `public_hostname`. An empty `container_ip` defaults to `127.0.0.1` (the
+/// docker bridge IP isn't always populated in the controller's view yet).
+///
+/// Health is initialized to `true`; the healthcheck loop (later task) flips
+/// it once it has a real signal.
+pub async fn apply_config(
+    state: &ProxyState,
+    cfg: isengard_proto::pb::ProxyConfig,
+) -> anyhow::Result<()> {
+    let last = state.last_generation.load(Ordering::Acquire);
+    if cfg.generation <= last {
+        tracing::debug!(
+            new = cfg.generation,
+            last,
+            "proxy: dropping stale ProxyConfig"
+        );
+        return Ok(());
+    }
+
+    let mut new_reg = UpstreamRegistry::new();
+    for rule in cfg.rules {
+        let Some(up) = rule.upstream else { continue };
+        let ip: std::net::IpAddr = if up.container_ip.is_empty() {
+            "127.0.0.1".parse().expect("127.0.0.1 is a valid IpAddr")
+        } else {
+            up.container_ip
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad container_ip {}: {e}", up.container_ip))?
+        };
+        let addr = std::net::SocketAddr::new(ip, up.container_port as u16);
+        new_reg.set(
+            rule.public_hostname,
+            Upstream {
+                container_id: up.container_id,
+                addr,
+                healthy: true,
+            },
+        );
+    }
+
+    {
+        let mut w = state.upstreams.write().await;
+        *w = new_reg;
+    }
+    state
+        .last_generation
+        .store(cfg.generation, Ordering::Release);
+    tracing::info!(generation = cfg.generation, "proxy: ProxyConfig applied");
+    Ok(())
 }
 
 /// Maximum proxy restarts allowed within [`RESTART_WINDOW`] before we give up

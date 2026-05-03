@@ -91,8 +91,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 
     // -- spawn the reverse-proxy supervisor (Phase 8b Task 10).
     //    Hardcoded ports for v1; Plan B (Phase 8e) will read these from
-    //    settings. The proxy_state binding is kept in scope so Task 13's
-    //    apply_config can reach it via the agent's context plumbing.
+    //    settings. `proxy_state` is also threaded into the sync loop so
+    //    Task 13's `apply_config` can mutate the upstream registry when
+    //    the controller pushes a `ProxyConfig`.
     let proxy_state = proxy::ProxyState::new();
     {
         let ps = proxy_state.clone();
@@ -102,7 +103,6 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             proxy::supervise(ps, http_port, https_port).await;
         });
     }
-    let _proxy_state = proxy_state; // Task 13 will plumb this further.
 
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let token = std::env::var("ISENGARD_TOKEN")
@@ -117,6 +117,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_url = opts.controller_url.clone();
     let sync_agent_id = agent_id.clone();
     let sync_cancel = cancel.clone();
+    let sync_proxy_state = proxy_state.clone();
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_url,
@@ -125,6 +126,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             HEARTBEAT_INTERVAL_SECS,
             sync_cancel,
             &mut events_rx,
+            sync_proxy_state,
         )
         .await
     };

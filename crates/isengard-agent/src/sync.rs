@@ -27,6 +27,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::Result;
 use crate::backoff::Backoff;
+use crate::proxy::ProxyState;
 
 /// Open a Sync stream and run the heartbeat loop until the stream errors or
 /// `cancel` fires. Returns Ok on graceful cancel; Err on stream error.
@@ -34,7 +35,7 @@ use crate::backoff::Backoff;
 /// `events_rx` is borrowed (not moved) so that it survives reconnects: events
 /// emitted while the stream is down stay queued in the channel until the next
 /// stream comes up.
-#[instrument(skip(token, cancel, events_rx), fields(agent_id = %agent_id))]
+#[instrument(skip(token, cancel, events_rx, proxy_state), fields(agent_id = %agent_id))]
 pub async fn run_sync_loop(
     controller_url: String,
     token: String,
@@ -42,6 +43,7 @@ pub async fn run_sync_loop(
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
     events_rx: &mut mpsc::Receiver<CoreEvent>,
+    proxy_state: ProxyState,
 ) -> Result<()> {
     let channel = Channel::from_shared(controller_url.clone())
         .with_context(|| format!("invalid controller url {controller_url:?}"))?
@@ -119,7 +121,8 @@ pub async fn run_sync_loop(
         .context("Sync RPC failed")?;
     let mut inbound = response.into_inner();
 
-    // Read inbound messages (HeartbeatAck, future Command/ConfigUpdate).
+    // Read inbound messages (HeartbeatAck, ProxyConfig, future Command/ConfigUpdate).
+    let read_proxy_state = proxy_state.clone();
     let mut read_task = tokio::spawn(async move {
         while let Ok(Some(msg)) = inbound.message().await {
             match msg.payload {
@@ -136,6 +139,11 @@ pub async fn run_sync_loop(
                             payload = %action.payload_json,
                             "received pending action (execution deferred to v1.x)"
                         );
+                    }
+                }
+                Some(isengard_proto::pb::controller_message::Payload::ProxyConfig(cfg)) => {
+                    if let Err(e) = crate::proxy::apply_config(&read_proxy_state, cfg).await {
+                        warn!(error = %e, "proxy: apply_config failed");
                     }
                 }
                 _ => {
@@ -214,7 +222,7 @@ pub async fn run_sync_loop(
 ///
 /// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
 /// (proves the connection was healthy).
-#[instrument(skip(token, cancel, events_rx), fields(agent_id = %agent_id))]
+#[instrument(skip(token, cancel, events_rx, proxy_state), fields(agent_id = %agent_id))]
 pub async fn run_sync_with_reconnect(
     controller_url: String,
     token: String,
@@ -222,6 +230,7 @@ pub async fn run_sync_with_reconnect(
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
     events_rx: &mut mpsc::Receiver<CoreEvent>,
+    proxy_state: ProxyState,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -251,6 +260,7 @@ pub async fn run_sync_with_reconnect(
             interval_secs,
             cancel.clone(),
             events_rx,
+            proxy_state.clone(),
         )
         .await;
 
