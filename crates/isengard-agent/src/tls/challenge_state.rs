@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 /// from `/.well-known/acme-challenge/<token>` and returns the key
 /// authorization body. Entries are removed once the order completes
 /// (success or failure).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ChallengeState {
     inner: RwLock<HashMap<String, String>>,
 }

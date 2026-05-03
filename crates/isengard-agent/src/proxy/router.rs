@@ -29,6 +29,32 @@ impl ProxyHttp for IsengardProxy {
 
     fn new_ctx(&self) -> Self::CTX {}
 
+    /// Short-circuit `/.well-known/acme-challenge/<token>` requests on the
+    /// :8080 HTTP listener. Returns `Ok(true)` when we've fully written the
+    /// response (so Pingora skips upstream lookup). Unknown tokens get a 404
+    /// — the ACME server treats both as failures, but distinguishing in logs
+    /// is useful when triaging an order.
+    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        let path = session.req_header().uri.path();
+        const PREFIX: &str = "/.well-known/acme-challenge/";
+        if let Some(token) = path.strip_prefix(PREFIX) {
+            let token = token.to_string();
+            let key_auth = self.state.acme_challenges.lookup(&token).await;
+            let body = key_auth.unwrap_or_default();
+            let status = if body.is_empty() { 404 } else { 200 };
+
+            let mut resp = pingora_http::ResponseHeader::build(status, None)?;
+            resp.insert_header("Content-Type", "text/plain")?;
+            resp.insert_header("Content-Length", body.len().to_string())?;
+            session.write_response_header(Box::new(resp), false).await?;
+            session
+                .write_response_body(Some(bytes::Bytes::from(body.into_bytes())), true)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     async fn upstream_peer(
         &self,
         session: &mut Session,

@@ -12,12 +12,14 @@ description = "Agent-mode runtime"
 anyhow.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
+bytes = "1"
 chrono.workspace = true
 futures-util.workspace = true
 hostname.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
 pingora-core = { workspace = true }
+pingora-http = "0.8"
 pingora-proxy = { workspace = true }
 pingora-boringssl = "0.8"
 serde.workspace = true

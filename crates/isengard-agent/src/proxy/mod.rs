@@ -16,7 +16,7 @@ use isengard_core::Event;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
-use crate::tls::CertStore;
+use crate::tls::{CertStore, ChallengeState};
 
 pub mod cert_callback;
 pub mod healthcheck;
@@ -47,6 +47,9 @@ pub struct ProxyState {
     /// disabled (HTTP-only). The proxy `run` entrypoint reads this once at
     /// startup; install before calling `run` if you want TLS.
     pub cert_store: Arc<RwLock<Option<Arc<CertStore>>>>,
+    /// HTTP-01 challenge state for the :8080 listener. Shared with the ACME
+    /// order task. Empty in tests that don't exercise ACME.
+    pub acme_challenges: Arc<ChallengeState>,
 }
 
 impl ProxyState {
