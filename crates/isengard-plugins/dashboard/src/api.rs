@@ -670,10 +670,14 @@ mod tests {
         let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
         let jrnl = Arc::new(Journal::open_in_memory().await.unwrap());
         let bus = Arc::new(EventBus::new());
+        let routing = Arc::new(isengard_controller::routing::RoutingPusher::new(
+            inv.clone(),
+        ));
         Arc::new(ControllerHandles {
             inventory: inv,
             journal: jrnl,
             bus,
+            routing,
         })
     }
 
