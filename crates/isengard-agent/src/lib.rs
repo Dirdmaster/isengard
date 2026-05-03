@@ -137,8 +137,20 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     if let Some(tls_opts) = opts.tls.as_ref() {
         let storage = tls::TlsStorage::new(tls_opts.cert_dir.clone());
         let cert_store = std::sync::Arc::new(tls::CertStore::new(storage));
-        proxy_state.install_cert_store(cert_store).await;
+        proxy_state.install_cert_store(cert_store.clone()).await;
         info!(cert_dir = ?tls_opts.cert_dir, "tls: cert store installed");
+
+        // Spawn the renewal scheduler. Uses the agent-side Inventory at
+        // <state_dir>/agent.db (created by open_agent_inventory).
+        let inv = std::sync::Arc::new(open_agent_inventory(&opts.state_dir).await?);
+        let acme = std::sync::Arc::new(tls::AcmeClient::new(
+            inv.clone(),
+            proxy_state.acme_challenges.clone(),
+            tls_opts.acme_contact_email.clone(),
+            tls_opts.acme_directory_url.clone(),
+        ));
+        tls::renewal::spawn(inv, cert_store, acme, emitter.clone());
+        info!("tls: renewal scheduler spawned");
     }
 
     if let (Some(http_port), Some(https_port)) = (opts.proxy_http_port, opts.proxy_https_port) {
@@ -232,9 +244,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 /// Open (creating if missing) the agent-side `Inventory` SQLite database at
 /// `<state_dir>/agent.db`. Plan B introduces an agent-side inventory used by
 /// the TLS subsystem (`tls_certs`, `acme_account`); other tables apply
-/// harmlessly. Wired into use by the renewal scheduler in PB-T12 — kept here
-/// in PB-T10 so the helper is ready to consume.
-#[allow(dead_code)]
+/// harmlessly. Consumed by the renewal scheduler spawned in `run_agent`.
 async fn open_agent_inventory(state_dir: &std::path::Path) -> Result<isengard_storage::Inventory> {
     let db_path = state_dir.join("agent.db");
     isengard_storage::Inventory::open(&db_path)

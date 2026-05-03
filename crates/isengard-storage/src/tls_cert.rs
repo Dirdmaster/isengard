@@ -68,7 +68,6 @@ impl crate::inventory::Inventory {
     }
 
     pub async fn get_tls_cert_meta(&self, public_hostname: &str) -> Result<Option<TlsCertMeta>> {
-        use sqlx::Row;
         let row = sqlx::query(
             "SELECT public_hostname, host_id, issuer, not_before, not_after, \
              last_renewed_at, next_renewal_at, serial, \
@@ -79,77 +78,31 @@ impl crate::inventory::Inventory {
         .fetch_optional(self.pool())
         .await?;
 
-        let Some(r) = row else {
-            return Ok(None);
-        };
+        match row {
+            Some(r) => Ok(Some(decode_tls_cert_row(r)?)),
+            None => Ok(None),
+        }
+    }
 
-        let public_hostname: String = r.try_get("public_hostname")?;
-        let host_bytes: Vec<u8> = r.try_get("host_id")?;
-        let host_id = HostId::from_bytes(host_bytes.try_into().map_err(|_| Error::Decode {
-            reason: "bad host_id length".into(),
-        })?);
-        let issuer: String = r.try_get("issuer")?;
-        let not_before_str: String = r.try_get("not_before")?;
-        let not_after_str: String = r.try_get("not_after")?;
-        let last_renewed_at_str: Option<String> = r.try_get("last_renewed_at")?;
-        let next_renewal_at_str: String = r.try_get("next_renewal_at")?;
-        let serial: Option<String> = r.try_get("serial")?;
-        let last_attempt_at_str: Option<String> = r.try_get("last_attempt_at")?;
-        let last_error: Option<String> = r.try_get("last_error")?;
-        let attempt_count_i64: i64 = r.try_get("attempt_count")?;
-        let attempt_count: u32 = attempt_count_i64.try_into().map_err(|_| Error::Decode {
-            reason: format!("attempt_count out of range: {attempt_count_i64}"),
-        })?;
+    /// Return every cert whose `next_renewal_at` is at or before `before`.
+    /// The renewal scheduler calls this once an hour with `Utc::now()` to find
+    /// certs due for re-issuance.
+    pub async fn list_tls_certs_due(&self, before: DateTime<Utc>) -> Result<Vec<TlsCertMeta>> {
+        let cutoff = before.to_rfc3339();
+        let rows = sqlx::query(
+            r#"
+            SELECT public_hostname, host_id, issuer, not_before, not_after,
+                   last_renewed_at, next_renewal_at, serial,
+                   last_attempt_at, last_error, attempt_count
+            FROM tls_certs
+            WHERE next_renewal_at <= ?
+            "#,
+        )
+        .bind(&cutoff)
+        .fetch_all(self.pool())
+        .await?;
 
-        let not_before = DateTime::parse_from_rfc3339(&not_before_str)
-            .map_err(|e| Error::Decode {
-                reason: format!("invalid not_before: {e}"),
-            })?
-            .with_timezone(&Utc);
-        let not_after = DateTime::parse_from_rfc3339(&not_after_str)
-            .map_err(|e| Error::Decode {
-                reason: format!("invalid not_after: {e}"),
-            })?
-            .with_timezone(&Utc);
-        let next_renewal_at = DateTime::parse_from_rfc3339(&next_renewal_at_str)
-            .map_err(|e| Error::Decode {
-                reason: format!("invalid next_renewal_at: {e}"),
-            })?
-            .with_timezone(&Utc);
-        let last_renewed_at = match last_renewed_at_str {
-            Some(s) => Some(
-                DateTime::parse_from_rfc3339(&s)
-                    .map_err(|e| Error::Decode {
-                        reason: format!("invalid last_renewed_at: {e}"),
-                    })?
-                    .with_timezone(&Utc),
-            ),
-            None => None,
-        };
-        let last_attempt_at = match last_attempt_at_str {
-            Some(s) => Some(
-                DateTime::parse_from_rfc3339(&s)
-                    .map_err(|e| Error::Decode {
-                        reason: format!("invalid last_attempt_at: {e}"),
-                    })?
-                    .with_timezone(&Utc),
-            ),
-            None => None,
-        };
-
-        Ok(Some(TlsCertMeta {
-            public_hostname,
-            host_id,
-            issuer,
-            not_before,
-            not_after,
-            last_renewed_at,
-            next_renewal_at,
-            serial,
-            last_attempt_at,
-            last_error,
-            attempt_count,
-        }))
+        rows.into_iter().map(decode_tls_cert_row).collect()
     }
 
     pub async fn record_tls_attempt(
@@ -181,4 +134,79 @@ impl crate::inventory::Inventory {
         }
         Ok(())
     }
+}
+
+/// Decode one `tls_certs` row into a [`TlsCertMeta`]. Shared by
+/// [`Inventory::get_tls_cert_meta`] and [`Inventory::list_tls_certs_due`] so
+/// the column-by-column decoding logic lives in one place.
+fn decode_tls_cert_row(r: sqlx::sqlite::SqliteRow) -> Result<TlsCertMeta> {
+    use sqlx::Row;
+
+    let public_hostname: String = r.try_get("public_hostname")?;
+    let host_bytes: Vec<u8> = r.try_get("host_id")?;
+    let host_id = HostId::from_bytes(host_bytes.try_into().map_err(|_| Error::Decode {
+        reason: "bad host_id length".into(),
+    })?);
+    let issuer: String = r.try_get("issuer")?;
+    let not_before_str: String = r.try_get("not_before")?;
+    let not_after_str: String = r.try_get("not_after")?;
+    let last_renewed_at_str: Option<String> = r.try_get("last_renewed_at")?;
+    let next_renewal_at_str: String = r.try_get("next_renewal_at")?;
+    let serial: Option<String> = r.try_get("serial")?;
+    let last_attempt_at_str: Option<String> = r.try_get("last_attempt_at")?;
+    let last_error: Option<String> = r.try_get("last_error")?;
+    let attempt_count_i64: i64 = r.try_get("attempt_count")?;
+    let attempt_count: u32 = attempt_count_i64.try_into().map_err(|_| Error::Decode {
+        reason: format!("attempt_count out of range: {attempt_count_i64}"),
+    })?;
+
+    let not_before = DateTime::parse_from_rfc3339(&not_before_str)
+        .map_err(|e| Error::Decode {
+            reason: format!("invalid not_before: {e}"),
+        })?
+        .with_timezone(&Utc);
+    let not_after = DateTime::parse_from_rfc3339(&not_after_str)
+        .map_err(|e| Error::Decode {
+            reason: format!("invalid not_after: {e}"),
+        })?
+        .with_timezone(&Utc);
+    let next_renewal_at = DateTime::parse_from_rfc3339(&next_renewal_at_str)
+        .map_err(|e| Error::Decode {
+            reason: format!("invalid next_renewal_at: {e}"),
+        })?
+        .with_timezone(&Utc);
+    let last_renewed_at = match last_renewed_at_str {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| Error::Decode {
+                    reason: format!("invalid last_renewed_at: {e}"),
+                })?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let last_attempt_at = match last_attempt_at_str {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| Error::Decode {
+                    reason: format!("invalid last_attempt_at: {e}"),
+                })?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+
+    Ok(TlsCertMeta {
+        public_hostname,
+        host_id,
+        issuer,
+        not_before,
+        not_after,
+        last_renewed_at,
+        next_renewal_at,
+        serial,
+        last_attempt_at,
+        last_error,
+        attempt_count,
+    })
 }

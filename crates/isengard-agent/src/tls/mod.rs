@@ -8,9 +8,11 @@
 pub mod acme;
 pub mod cert_store;
 pub mod challenge_state;
+pub mod renewal;
 pub mod storage;
 
 pub use acme::{AcmeClient, IssuedCert, LE_PRODUCTION_URL, LE_STAGING_URL};
 pub use cert_store::{CertEntry, CertStore};
 pub use challenge_state::ChallengeState;
+pub use renewal::should_retry;
 pub use storage::{CertFiles, TlsStorage};
