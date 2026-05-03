@@ -9,6 +9,7 @@ pub mod events;
 pub mod labels;
 pub mod proxy;
 pub mod sync;
+pub mod tls;
 
 /// Convenience alias used throughout the agent.
 pub type Result<T> = anyhow::Result<T>;
