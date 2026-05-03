@@ -7,17 +7,26 @@
     <section>
       <RoutingRulesTable @add="onAdd" @edit="onEdit" />
     </section>
+
+    <RoutingRuleEditModal v-model:open="modalOpen" :rule="editingRule" />
   </div>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+import RoutingRulesTable from '~/components/RoutingRulesTable.vue'
+import RoutingRuleEditModal from '~/components/RoutingRuleEditModal.vue'
 import type { RoutingRule } from '~/composables/useRoutingRules'
 
+const modalOpen = ref(false)
+const editingRule = ref<RoutingRule | null>(null)
+
 function onAdd() {
-  // Modal hook lands in PC-T8.
-  alert('Add rule modal: PC-T8')
+  editingRule.value = null
+  modalOpen.value = true
 }
 function onEdit(r: RoutingRule) {
-  alert(`Edit rule modal: PC-T8 (id=${r.id})`)
+  editingRule.value = r
+  modalOpen.value = true
 }
 </script>
