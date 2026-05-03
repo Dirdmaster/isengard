@@ -152,7 +152,22 @@ impl RoutingPusher {
                 _ => isengard_storage::TlsMode::Acme,
             };
 
-            self.inv
+            // Conflict resolution: labels win the hostname.
+            // If a UI rule exists with this hostname on this host, snapshot its
+            // overrides and delete the UI rule before inserting the label rule.
+            let existing = self.inv.list_routing_rules_for_host(host_id).await?;
+            let mut preserved_overrides: Vec<(String, serde_json::Value)> = vec![];
+            for ex in existing {
+                if ex.public_hostname == rule.hostname && ex.source == RoutingRuleSource::Ui {
+                    for o in self.inv.list_routing_rule_overrides(ex.id).await? {
+                        preserved_overrides.push((o.field, o.value_json));
+                    }
+                    self.inv.delete_routing_rule(ex.id).await?;
+                }
+            }
+
+            let new_rule = self
+                .inv
                 .insert_routing_rule(InsertRoutingRule {
                     fleet: "default".into(),
                     host_id,
@@ -172,6 +187,12 @@ impl RoutingPusher {
                     source_imported_from: None,
                 })
                 .await?;
+
+            for (field, value) in preserved_overrides {
+                self.inv
+                    .upsert_routing_rule_override(new_rule.id, &field, value)
+                    .await?;
+            }
         }
         Ok(())
     }
