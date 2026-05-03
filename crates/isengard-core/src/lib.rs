@@ -4,6 +4,7 @@
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod labels;
 pub mod networking;
 pub mod plugin;
 pub mod registration;
