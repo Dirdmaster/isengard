@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Settings · General v1 — concept</title>
+  <link rel="stylesheet" href="../tokens.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../tw-config.js"></script>
+  <style>body{margin:0;font-family:var(--iso-font-sans)}.mono{font-family:var(--iso-font-mono)}</style>
+</head>
+<body class="bg-iso-bg-base text-iso-text-primary p-6">
+
+<div class="w-[1440px] h-[900px] flex flex-col rounded-iso-xl border border-iso-border overflow-hidden bg-iso-bg-base">
+
+  <!-- TopBar -->
+  <header class="h-[52px] px-5 flex items-center gap-4 border-b border-iso-border shrink-0">
+    <div class="flex items-center gap-2">
+      <div class="w-2.5 h-2.5 rounded-full bg-iso-success"></div>
+      <span class="text-sm font-semibold text-iso-text-primary">isengard</span>
+    </div>
+    <div class="px-2.5 py-1 rounded-iso-sm bg-iso-bg-elevated border border-iso-border mono text-xs text-iso-text-secondary">All fleets</div>
+    <nav class="flex items-center">
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Home</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Hosts</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Stacks</a>
+      <a class="px-3 py-1.5 text-xs text-iso-text-faint">Events</a>
+    </nav>
+    <div class="flex-1"></div>
+    <div class="flex items-center gap-2 px-2.5 py-1 rounded-iso-md bg-iso-bg-elevated border border-iso-border">
+      <svg class="w-3 h-3 text-iso-text-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <span class="text-xs text-iso-text-faint">Search or jump…</span>
+      <span class="px-1.5 py-px rounded-sm bg-iso-bg-base border border-iso-border-strong mono text-[10px] text-iso-text-secondary">⌘K</span>
+    </div>
+  </header>
+
+  <main class="flex-1 px-6 pt-5 pb-4 flex flex-col gap-4 overflow-auto">
+    <div class="flex flex-col gap-1">
+      <h1 class="text-[22px] font-semibold text-iso-text-primary">Settings</h1>
+      <span class="text-xs text-iso-text-muted">General · controller identity, telemetry, defaults</span>
+    </div>
+
+    <div class="flex items-center gap-1 border-b border-iso-border">
+      <a class="px-3 py-2 text-xs font-medium text-iso-text-primary border-b-2 border-iso-text-primary">General</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Networking</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Update policies</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Backup</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Webhooks</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Notifier</a>
+      <a class="px-3 py-2 text-xs text-iso-text-faint">Authentication</a>
+    </div>
+
+    <!-- Controller identity -->
+    <section class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-5 flex flex-col gap-4">
+      <span class="text-[10px] font-semibold text-iso-text-muted tracking-widest">CONTROLLER IDENTITY</span>
+      <div class="grid grid-cols-[180px_1fr] items-center gap-y-3 gap-x-6">
+        <label class="text-xs text-iso-text-muted">Public URL</label>
+        <div class="px-3 py-2 rounded-iso-md bg-iso-bg-base border border-iso-border mono text-xs text-iso-text-primary">https://isengard.dirdmaster.dev</div>
+        <label class="text-xs text-iso-text-muted">Instance name</label>
+        <div class="px-3 py-2 rounded-iso-md bg-iso-bg-base border border-iso-border text-xs text-iso-text-primary">homelab-controller</div>
+        <label class="text-xs text-iso-text-muted">Timezone</label>
+        <div class="px-3 py-2 rounded-iso-md bg-iso-bg-base border border-iso-border text-xs text-iso-text-primary">Europe/Zurich <span class="text-iso-text-faint">(used for maintenance windows)</span></div>
+      </div>
+    </section>
+
+    <!-- Defaults + Telemetry side-by-side -->
+    <div class="grid grid-cols-2 gap-4">
+      <section class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-5 flex flex-col gap-3">
+        <span class="text-[10px] font-semibold text-iso-text-muted tracking-widest">DEFAULTS FOR NEW HOSTS</span>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Default fleet</span>
+          <div class="px-2 py-1 rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-iso-text-primary">— required at enroll</div>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Update gate</span>
+          <span class="px-2 py-0.5 rounded-iso-sm bg-iso-success-soft border border-iso-success mono text-[11px] text-iso-success">auto</span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Update strategy</span>
+          <span class="px-2 py-0.5 rounded-iso-sm bg-iso-info-soft border border-iso-info mono text-[11px] text-iso-info">tag-only</span>
+        </div>
+      </section>
+
+      <section class="rounded-iso-lg border border-iso-border bg-iso-bg-elevated p-5 flex flex-col gap-3">
+        <span class="text-[10px] font-semibold text-iso-text-muted tracking-widest">UPDATES & TELEMETRY</span>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Update channel</span>
+          <span class="px-2 py-1 rounded-iso-sm bg-iso-bg-base border border-iso-border-strong mono text-iso-text-primary">stable ▾</span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Check for releases</span>
+          <span class="text-iso-text-secondary">weekly · last v0.4.1 (current)</span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Anonymous usage stats</span>
+          <span class="px-2 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-iso-text-faint">off</span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-iso-text-muted">Crash reports</span>
+          <span class="px-2 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border mono text-iso-text-faint">off</span>
+        </div>
+      </section>
+    </div>
+
+    <!-- Danger zone -->
+    <section class="rounded-iso-lg border border-iso-error bg-iso-error-soft p-5 flex flex-col gap-4">
+      <div class="flex items-center gap-2">
+        <span class="text-[10px] font-semibold text-iso-error tracking-widest">DANGER ZONE</span>
+      </div>
+      <div class="flex items-center justify-between p-3 rounded-iso-md bg-iso-bg-base border border-iso-border">
+        <div class="flex flex-col gap-0.5">
+          <span class="text-xs font-medium text-iso-text-primary">Reset welcome wizard</span>
+          <span class="text-[11px] text-iso-text-muted">Show the onboarding flow next time the dashboard loads.</span>
+        </div>
+        <button class="px-2.5 py-1.5 rounded-iso-md bg-iso-bg-elevated border border-iso-border-strong text-xs text-iso-text-secondary">Reset</button>
+      </div>
+      <div class="flex items-center justify-between p-3 rounded-iso-md bg-iso-bg-base border border-iso-error">
+        <div class="flex flex-col gap-0.5">
+          <span class="text-xs font-medium text-iso-error">Wipe inventory</span>
+          <span class="text-[11px] text-iso-text-muted">Disconnect all hosts, drop policies/routing rules, clear journal. Requires double confirmation.</span>
+        </div>
+        <button class="px-2.5 py-1.5 rounded-iso-md bg-iso-error text-iso-bg-base text-xs font-medium">Wipe…</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="h-[56px] bg-iso-bg-elevated border-t border-iso-border flex items-center shrink-0">
+    <div class="px-4 h-full flex items-center gap-2 border-r border-iso-border"><div class="w-2 h-2 rounded-full bg-iso-success"></div><span class="mono text-xs text-iso-text-secondary">5 / 5 hosts</span></div>
+    <div class="flex-1 px-4 h-full flex items-center gap-2.5"><svg class="w-3.5 h-3.5 text-iso-text-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><span class="text-xs text-iso-text-faint">type a command, search, or jump to anything</span></div>
+    <div class="px-4 h-full flex items-center gap-3 border-l border-iso-border"><span class="px-2 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border-strong mono text-[11px] text-iso-text-secondary">⌘K</span><span class="text-[11px] text-iso-text-muted">focus</span></div>
+  </footer>
+</div>
+</body>
+</html>
