@@ -77,6 +77,7 @@ async fn route_by_host_header_returns_origin_response() {
                 health_path: None,
                 health_interval: Duration::from_secs(10),
                 consecutive_failures: 0,
+                state: isengard_agent::proxy::upstreams::UpstreamState::Active,
             },
         );
     }

@@ -140,6 +140,7 @@ pub async fn apply_config(
                 health_path: None,
                 health_interval: Duration::from_secs(10),
                 consecutive_failures: 0,
+                state: upstreams::UpstreamState::Active,
             },
         );
     }

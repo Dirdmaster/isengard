@@ -6,6 +6,19 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+/// Lifecycle state for an upstream entry.
+///
+/// `Active` is the default — the router forwards traffic normally.
+/// `Draining` marks an upstream that's being swapped out (e.g. blue/green or
+/// healthcheck-driven eviction): existing in-flight requests should still
+/// complete, but the next reconcile pass calls `remove_if_draining` to drop
+/// the entry once it's safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamState {
+    Active,
+    Draining,
+}
+
 /// A single proxy backend: the container that exposes the application port.
 #[derive(Debug, Clone)]
 pub struct Upstream {
@@ -24,6 +37,9 @@ pub struct Upstream {
     /// Streak of consecutive failed probes. Reset on success. Used by the
     /// eviction state machine: 3 in a row → `healthy = false`.
     pub consecutive_failures: u32,
+    /// Lifecycle state. New upstreams default to `Active`; the swap path
+    /// flips them to `Draining` before `remove_if_draining` evicts them.
+    pub state: UpstreamState,
 }
 
 /// Identity-only equality so the registry comparison doesn't trigger on
@@ -79,7 +95,72 @@ impl UpstreamRegistry {
         self.map.remove(host)
     }
 
+    /// Update the lifecycle state for an existing upstream. No-op if the
+    /// hostname isn't in the registry.
+    pub fn set_state(&mut self, hostname: &str, state: UpstreamState) {
+        if let Some(u) = self.map.get_mut(hostname) {
+            u.state = state;
+        }
+    }
+
+    /// Drop an upstream only if it's currently in the `Draining` state.
+    /// Active entries are left alone — used by the swap reconcile pass to
+    /// finalise an in-progress drain.
+    pub fn remove_if_draining(&mut self, hostname: &str) {
+        if let Some(u) = self.map.get(hostname) {
+            if u.state == UpstreamState::Draining {
+                self.map.remove(hostname);
+            }
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Upstream)> {
         self.map.iter()
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    fn sample() -> Upstream {
+        Upstream {
+            container_id: "c".into(),
+            addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            healthy: true,
+            health_path: None,
+            health_interval: Duration::from_secs(10),
+            consecutive_failures: 0,
+            state: UpstreamState::Active,
+        }
+    }
+
+    #[test]
+    fn set_state_changes_state_field() {
+        let mut reg = UpstreamRegistry::new();
+        reg.set("h.test", sample());
+        reg.set_state("h.test", UpstreamState::Draining);
+        assert_eq!(reg.get("h.test").unwrap().state, UpstreamState::Draining);
+    }
+
+    #[test]
+    fn remove_if_draining_removes_only_draining_entries() {
+        let mut reg = UpstreamRegistry::new();
+        reg.set("a.test", sample());
+        reg.set("b.test", sample());
+        reg.set_state("b.test", UpstreamState::Draining);
+
+        reg.remove_if_draining("a.test"); // active → no-op
+        reg.remove_if_draining("b.test"); // draining → removed
+        assert!(reg.get("a.test").is_some(), "active should remain");
+        assert!(reg.get("b.test").is_none(), "draining should be removed");
+    }
+
+    #[test]
+    fn upstream_default_state_is_active() {
+        let u = sample();
+        assert_eq!(u.state, UpstreamState::Active);
     }
 }
