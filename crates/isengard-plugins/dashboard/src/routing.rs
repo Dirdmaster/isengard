@@ -4,8 +4,9 @@
 //! `docs/superpowers/specs/2026-05-04-phase-8h-8i-settings-ui-and-atomic-swap-design.md`.
 //!
 //! PC-T2 wires the rules CRUD endpoints (list/create/update/delete) against
-//! `Inventory`. PC-T3 wires per-field overrides (list + upsert). Adapter-config
-//! still returns 501 stubs until PC-T4/T5 land.
+//! `Inventory`. PC-T3 wires per-field overrides (list + upsert). PC-T4 wires
+//! adapter-config GET/PUT against `Inventory`. The /test endpoint still
+//! returns a 501 stub until PC-T5 lands.
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use axum::routing::{get, patch, post, put};
 use isengard_controller::ControllerHandles;
 use isengard_storage::{
     InsertRoutingRule, RoutingRule, RoutingRuleId, RoutingRuleSource, RoutingRuleState, TlsMode,
+    UpsertAdapterConfig,
 };
 
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
@@ -245,17 +247,73 @@ async fn upsert_override(
 }
 
 async fn get_adapter_config(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Path((_host_id, _adapter)): Path<(String, String)>,
+    Path((host_id_str, adapter)): Path<(String, String)>,
+    State(handles): State<Arc<ControllerHandles>>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "get_adapter_config: PC-T4").into_response()
+    let host_id = match host_id_str.parse::<ulid::Ulid>() {
+        Ok(u) => isengard_storage::HostId(u),
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid host_id").into_response(),
+    };
+    match handles
+        .inventory
+        .get_adapter_config(host_id, &adapter)
+        .await
+    {
+        Ok(Some(cfg)) => Json(cfg).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no adapter config for host+adapter").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("get adapter_config: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpsertAdapterBody {
+    config_json: serde_json::Value,
+    enabled: bool,
 }
 
 async fn upsert_adapter_config(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Path((_host_id, _adapter)): Path<(String, String)>,
+    Path((host_id_str, adapter)): Path<(String, String)>,
+    State(handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<UpsertAdapterBody>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "upsert_adapter_config: PC-T4").into_response()
+    let host_id = match host_id_str.parse::<ulid::Ulid>() {
+        Ok(u) => isengard_storage::HostId(u),
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid host_id").into_response(),
+    };
+    let ins = UpsertAdapterConfig {
+        host_id,
+        adapter: adapter.clone(),
+        config_json: body.config_json.clone(),
+        enabled: body.enabled,
+    };
+    if let Err(e) = handles.inventory.upsert_adapter_config(ins).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("upsert adapter_config: {e}"),
+        )
+            .into_response();
+    }
+    match handles
+        .inventory
+        .get_adapter_config(host_id, &adapter)
+        .await
+    {
+        Ok(Some(cfg)) => Json(cfg).into_response(),
+        Ok(None) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "upsert succeeded but get returned None",
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("get after upsert: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn test_adapter_config(
@@ -473,17 +531,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_config_get_returns_501_stub() {
-        let app = router(test_handles().await);
+    async fn get_adapter_config_returns_404_when_not_set() {
+        let handles = test_handles().await;
+        let host_id = seed_host(&handles).await;
+
+        let app = router(handles);
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/networking/adapter-config/01ARZ3NDEKTSV4RRFFQ69G5FAV/tailscale")
+                    .uri(format!("/networking/adapter-config/{}/cf-tunnel", host_id))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn upsert_then_get_adapter_config_returns_blob() {
+        let handles = test_handles().await;
+        let host_id = seed_host(&handles).await;
+        let path = format!("/networking/adapter-config/{}/cf-tunnel", host_id);
+
+        let app = router(handles);
+        let put_body = serde_json::json!({
+            "config_json": {
+                "api_token": "secret",
+                "account_id": "acct-1",
+                "zone_id": "zone-1",
+            },
+            "enabled": true,
+        })
+        .to_string();
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(put_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_resp.status(), StatusCode::OK);
+
+        let get_resp = app
+            .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(cfg["adapter"], "cf-tunnel");
+        assert_eq!(cfg["enabled"], true);
+        assert_eq!(cfg["config_json"]["api_token"], "secret");
+        assert_eq!(cfg["config_json"]["account_id"], "acct-1");
+        assert_eq!(cfg["config_json"]["zone_id"], "zone-1");
     }
 }
