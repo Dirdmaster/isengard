@@ -1984,6 +1984,7 @@ dependencies = [
  "isengard-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "which",

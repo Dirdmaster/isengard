@@ -14,6 +14,7 @@ inventory.workspace = true
 isengard-core = { path = "../../isengard-core" }
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3"
 tokio = { workspace = true, features = ["process", "io-util"] }
 tracing.workspace = true
 which = "6"

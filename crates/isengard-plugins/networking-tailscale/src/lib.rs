@@ -11,6 +11,7 @@ use isengard_core::networking::{
     AdapterContext, ExposeSpec, ExposedEndpoint, NetworkingAdapter, TlsStrategy,
 };
 use isengard_core::plugin::Plugin;
+use serde_json::json;
 
 pub mod cli;
 
@@ -58,13 +59,40 @@ impl NetworkingAdapter for TailscaleAdapter {
         Ok(())
     }
 
-    async fn expose(&self, _ctx: &AdapterContext, _spec: &ExposeSpec) -> Result<ExposedEndpoint> {
-        Err(CoreError::Other(
-            "tailscale expose not yet implemented (Plan B 8f-2)".into(),
-        ))
+    async fn expose(&self, _ctx: &AdapterContext, spec: &ExposeSpec) -> Result<ExposedEndpoint> {
+        cli::serve_https(spec.local_listener_port).await?;
+
+        let funnel_on = spec
+            .adapter_specific
+            .get("funnel")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if funnel_on {
+            cli::funnel_on().await?;
+        }
+
+        // Cert flow: fetch via `tailscale cert` so the first request to the
+        // hostname doesn't 503. Caller (controller's RoutingPusher or agent
+        // equivalent) reads the cert from adapter_data and writes it to the
+        // agent's CertStore via the existing install API. The cert pump
+        // hookup is a separate Phase 8c+ follow-up; for now the adapter just
+        // surfaces the cert.
+        let (cert_pem, key_pem) = cli::fetch_cert(&spec.public_hostname).await?;
+
+        Ok(ExposedEndpoint {
+            id: format!("tailscale:{}", spec.public_hostname),
+            url: format!("https://{}", spec.public_hostname),
+            adapter_data: json!({
+                "funnel": funnel_on,
+                "cert_pem": cert_pem,
+                "key_pem": key_pem,
+            }),
+        })
     }
 
     async fn unexpose(&self, _ctx: &AdapterContext, _endpoint_id: &str) -> Result<()> {
+        let _ = cli::serve_off().await;
+        let _ = cli::funnel_off().await;
         Ok(())
     }
 
