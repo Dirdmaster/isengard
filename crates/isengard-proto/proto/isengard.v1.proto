@@ -58,9 +58,11 @@ message Event {
 message AgentMessage {
   oneof payload {
     // First frame of every Sync stream. Identifies the agent post-enroll.
-    SyncHello   hello     = 1;
-    Heartbeat   heartbeat = 2;
-    Event       event     = 3;
+    SyncHello                hello                    = 1;
+    Heartbeat                heartbeat                = 2;
+    Event                    event                    = 3;
+    ContainerLabelsReport    container_labels_report  = 4;
+    ContainerLabelsRemoved   container_labels_removed = 5;
   }
 }
 
@@ -105,10 +107,81 @@ message ControllerMessage {
     HeartbeatAck heartbeat_ack = 1;
     // Phase 3+: Command       command       = 2;
     // Phase 4+: ConfigUpdate  config_update = 3;
+    ProxyConfig  proxy_config  = 4;
   }
 }
 
 message HeartbeatAck {
   uint64 server_time_ms = 1;
   repeated PendingAction pending_actions = 2;
+}
+
+// ============ PROXY (Phase 8) ============
+
+// How TLS is terminated for a given route.
+//   EDGE   = TLS terminates upstream (or unencrypted), proxy passes through
+//   ACME   = proxy obtains + manages a certificate via ACME (Let's Encrypt)
+//   MANUAL = operator-supplied certificate stored on the host
+enum TlsMode {
+  TLS_MODE_UNSPECIFIED = 0;
+  TLS_MODE_EDGE        = 1;
+  TLS_MODE_ACME        = 2;
+  TLS_MODE_MANUAL      = 3;
+}
+
+// Backend container the proxy forwards to.
+message Upstream {
+  string container_id   = 1;
+  string container_ip   = 2;
+  uint32 container_port = 3;
+}
+
+// Optional health check the proxy performs against the upstream.
+// Empty `path` means TCP-only liveness (connect + close).
+message Healthcheck {
+  string path          = 1;
+  uint32 interval_secs = 2;
+}
+
+// One public-hostname → upstream mapping plus the policy that surrounds it.
+message RoutingRule {
+  int64       id              = 1;
+  string      public_hostname = 2;
+  Upstream    upstream        = 3;
+  TlsMode     tls_mode        = 4;
+  Healthcheck healthcheck     = 5;
+  // Adapter id ("none", "websocket", future protocol shims). "none" by default.
+  string      adapter         = 6;
+}
+
+// Per-host proxy configuration knobs.
+message ProxySettings {
+  uint32 http_port           = 1;
+  uint32 https_port          = 2;
+  string acme_contact_email  = 3;
+  // Sampling rate in [0, 1] for verbose access logs. 0 = none, 1 = all.
+  double log_sample_rate     = 4;
+}
+
+// Full proxy configuration the controller pushes to an agent. Generation
+// monotonically increases; agents may ignore older generations on reorder.
+message ProxyConfig {
+  string                host_id    = 1;
+  uint64                generation = 2;
+  repeated RoutingRule  rules      = 3;
+  ProxySettings         settings   = 4;
+}
+
+// Agent → controller: container metadata snapshot used to derive routing rules
+// from labels (e.g. `isengard.proxy.host=blog.example.com`).
+message ContainerLabelsReport {
+  string              container_id   = 1;
+  string              container_name = 2;
+  string              image          = 3;
+  map<string, string> labels         = 4;
+}
+
+// Agent → controller: previously reported container is gone.
+message ContainerLabelsRemoved {
+  string container_id = 1;
 }

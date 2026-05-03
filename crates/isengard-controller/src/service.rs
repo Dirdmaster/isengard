@@ -278,6 +278,16 @@ impl Controller for ControllerService {
                     None => {
                         tracing::debug!(agent = %agent_hostname, "empty payload, skipping");
                     }
+                    // Phase 8 proxy messages: handlers land in Tasks 13/14.
+                    // Drop with a debug for now so the stream stays open.
+                    Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsReport(_))
+                    | Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(_)) =>
+                    {
+                        tracing::debug!(
+                            agent = %agent_hostname,
+                            "received proxy label payload (handler pending Phase 8)"
+                        );
+                    }
                 }
             }
 
