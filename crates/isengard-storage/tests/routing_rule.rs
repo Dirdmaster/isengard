@@ -92,9 +92,6 @@ async fn insert_unique_violation_returns_err() {
 
 #[tokio::test]
 async fn delete_routing_rule_removes_row() {
-    // NOTE: full cascade-overrides assertion lands in Task 4 alongside
-    // the override CRUD code. For this task we verify rule deletion + that
-    // the SQL FK cascade does not error when the parent is removed.
     let dir = tempdir().unwrap();
     let inv = Inventory::open(&dir.path().join("isengard.db"))
         .await
@@ -123,8 +120,57 @@ async fn delete_routing_rule_removes_row() {
         .await
         .unwrap();
 
+    inv.upsert_routing_rule_override(r.id, "tls_mode", serde_json::json!("manual"))
+        .await
+        .unwrap();
     inv.delete_routing_rule(r.id).await.unwrap();
 
     let still = inv.list_routing_rules_for_host(host_id).await.unwrap();
     assert!(still.is_empty(), "rule should be gone");
+
+    let overrides = inv.list_routing_rule_overrides(r.id).await.unwrap();
+    assert!(overrides.is_empty(), "overrides should cascade-delete");
+}
+
+#[tokio::test]
+async fn upsert_override_then_list_returns_value() {
+    let dir = tempdir().unwrap();
+    let inv = Inventory::open(&dir.path().join("isengard.db"))
+        .await
+        .unwrap();
+    let host = seed_host(&inv).await;
+
+    let r = inv
+        .insert_routing_rule(InsertRoutingRule {
+            fleet: "default".into(),
+            host_id: host,
+            stack_id: None,
+            service_name: "web".into(),
+            container_port: 80,
+            public_hostname: "ov.example.com".into(),
+            protocol: "http".into(),
+            adapter: "none".into(),
+            tls_mode: TlsMode::Acme,
+            healthcheck_path: None,
+            healthcheck_interval_secs: 10,
+            auth: None,
+            state: RoutingRuleState::Pending,
+            source: RoutingRuleSource::Label,
+            source_container_id: Some("cid-1".into()),
+            source_imported_from: None,
+        })
+        .await
+        .unwrap();
+
+    inv.upsert_routing_rule_override(r.id, "tls_mode", serde_json::json!("manual"))
+        .await
+        .unwrap();
+    inv.upsert_routing_rule_override(r.id, "tls_mode", serde_json::json!("edge"))
+        .await
+        .unwrap();
+
+    let list = inv.list_routing_rule_overrides(r.id).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].field, "tls_mode");
+    assert_eq!(list[0].value_json, serde_json::json!("edge"));
 }

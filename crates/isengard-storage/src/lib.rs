@@ -10,6 +10,7 @@ pub mod host_action;
 pub mod inventory;
 pub mod journal;
 pub mod routing_rule;
+pub mod routing_rule_override;
 pub mod service;
 pub mod setting;
 pub mod stack;
@@ -23,6 +24,7 @@ pub use journal::{EventRow, InsertEvent, Journal};
 pub use routing_rule::{
     InsertRoutingRule, RoutingRule, RoutingRuleId, RoutingRuleSource, RoutingRuleState, TlsMode,
 };
+pub use routing_rule_override::RoutingRuleOverride;
 pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
