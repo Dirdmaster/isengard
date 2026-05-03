@@ -22,6 +22,15 @@ impl OutboundEmitter {
         let (tx, rx) = mpsc::channel(OUTBOUND_CAPACITY);
         (Self { tx }, rx)
     }
+
+    /// Hand out a clone of the inner sender so non-plugin subsystems (e.g.
+    /// the proxy healthcheck loop) can publish onto the same outbound queue
+    /// the sync loop drains. They can't satisfy `EventEmitter`'s `Arc<dyn>`
+    /// shape because they live behind `&self` borrows, so they hold a raw
+    /// `Sender<Event>` instead.
+    pub fn sender(&self) -> mpsc::Sender<Event> {
+        self.tx.clone()
+    }
 }
 
 #[async_trait]

@@ -69,6 +69,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    this scope and is passed by &mut into the sync loop so events stay
     //    queued across reconnects.
     let (emitter, mut events_rx) = events::OutboundEmitter::new();
+    // Grab a sender clone before erasing the concrete type — the proxy
+    // healthcheck loop needs to publish through the same channel.
+    let proxy_event_tx = emitter.sender();
     let emitter: Arc<dyn EventEmitter> = Arc::new(emitter);
 
     // -- plugin lifecycle (unchanged from Phase 1) -----------------------
@@ -96,6 +99,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    Task 13's `apply_config` can mutate the upstream registry when
     //    the controller pushes a `ProxyConfig`.
     let proxy_state = proxy::ProxyState::new();
+    proxy_state.set_event_sink(proxy_event_tx);
     {
         let ps = proxy_state.clone();
         let http_port: u16 = 8080;

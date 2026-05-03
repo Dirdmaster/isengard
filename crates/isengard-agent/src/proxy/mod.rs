@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use isengard_core::Event;
+use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
 pub mod healthcheck;
@@ -33,11 +34,36 @@ pub struct ProxyState {
     /// monotonically; we drop any push with `generation <= last_generation`
     /// to ignore reordered or replayed messages.
     pub last_generation: Arc<AtomicU64>,
+    /// Optional outbound event sink. Wired in agent startup so subsystems
+    /// (healthcheck eviction, supervisor crashloop) can publish journal
+    /// events through the same channel `OutboundEmitter` drains. `None` in
+    /// unit-test setups that don't care about events.
+    pub event_tx: Arc<RwLock<Option<mpsc::Sender<Event>>>>,
 }
 
 impl ProxyState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install (or replace) the outbound event sink. Spawns a tiny task to
+    /// avoid forcing the caller into an `async` context — agent startup is
+    /// synchronous around the proxy bring-up.
+    pub fn set_event_sink(&self, tx: mpsc::Sender<Event>) {
+        let evt = self.event_tx.clone();
+        tokio::spawn(async move {
+            let mut w = evt.write().await;
+            *w = Some(tx);
+        });
+    }
+
+    /// Best-effort emit: drops the event silently if no sink is installed or
+    /// the channel is full. `try_send` keeps healthcheck ticks non-blocking.
+    pub async fn emit(&self, ev: Event) {
+        let r = self.event_tx.read().await;
+        if let Some(tx) = &*r {
+            let _ = tx.try_send(ev);
+        }
     }
 }
 

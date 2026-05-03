@@ -107,24 +107,51 @@ pub fn spawn_loops(state: crate::proxy::ProxyState) {
                         None => HealthChecker::tcp_only(Duration::from_secs(2)),
                     };
                     let healthy = hc.check_once(addr).await;
-                    let mut w = st.upstreams.write().await;
-                    if let Some(up) = w.get_mut(&host) {
-                        if healthy {
-                            up.consecutive_failures = 0;
-                            if !up.healthy {
-                                up.healthy = true;
-                                tracing::info!(host = %host, "upstream recovered");
+                    // Track transition + container_id under the write lock,
+                    // then drop the lock before awaiting `emit` so the
+                    // healthcheck loop can never block itself on the event
+                    // channel.
+                    let mut transition: Option<(bool, String)> = None;
+                    {
+                        let mut w = st.upstreams.write().await;
+                        if let Some(up) = w.get_mut(&host) {
+                            let was = up.healthy;
+                            if healthy {
+                                up.consecutive_failures = 0;
+                                if !up.healthy {
+                                    up.healthy = true;
+                                    tracing::info!(host = %host, "upstream recovered");
+                                }
+                            } else {
+                                up.consecutive_failures += 1;
+                                if up.consecutive_failures >= FAIL_THRESHOLD && up.healthy {
+                                    up.healthy = false;
+                                    tracing::warn!(
+                                        host = %host,
+                                        "upstream evicted (3 consecutive failures)"
+                                    );
+                                }
                             }
-                        } else {
-                            up.consecutive_failures += 1;
-                            if up.consecutive_failures >= FAIL_THRESHOLD && up.healthy {
-                                up.healthy = false;
-                                tracing::warn!(
-                                    host = %host,
-                                    "upstream evicted (3 consecutive failures)"
-                                );
+                            if was != up.healthy {
+                                transition = Some((up.healthy, up.container_id.clone()));
                             }
                         }
+                    }
+                    if let Some((now_healthy, container_id)) = transition {
+                        let summary = format!(
+                            "upstream {} on {} is now {}",
+                            container_id,
+                            host,
+                            if now_healthy { "healthy" } else { "unhealthy" }
+                        );
+                        st.emit(isengard_core::Event {
+                            kind: "routing.upstream.health_changed".into(),
+                            occurred_at: chrono::Utc::now(),
+                            summary,
+                            container_name: Some(host.clone()),
+                            ..Default::default()
+                        })
+                        .await;
                     }
                 });
             }
