@@ -22,8 +22,8 @@ async fn lookup_loads_from_filesystem_on_cache_miss() {
     storage.write("h.test", &cert_pem, &key_pem).await.unwrap();
 
     let store = Arc::new(CertStore::new(storage.clone()));
-    let key = store.lookup("h.test").await.expect("loads from disk");
-    assert!(key.cert.first().is_some(), "has at least one cert in chain");
+    let entry = store.lookup("h.test").await.expect("loads from disk");
+    assert!(!entry.leaf.to_pem().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -42,6 +42,6 @@ async fn install_then_lookup_serves_from_cache() {
 
     let (cert_pem, key_pem) = issue_self_signed("h.test");
     store.install("h.test", &cert_pem, &key_pem).await.unwrap();
-    let key = store.lookup("h.test").await.expect("served from cache");
-    assert!(key.cert.first().is_some());
+    let entry = store.lookup("h.test").await.expect("served from cache");
+    assert!(!entry.leaf.to_pem().unwrap().is_empty());
 }

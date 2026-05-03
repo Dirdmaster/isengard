@@ -8,5 +8,5 @@
 pub mod cert_store;
 pub mod storage;
 
-pub use cert_store::CertStore;
+pub use cert_store::{CertEntry, CertStore};
 pub use storage::{CertFiles, TlsStorage};

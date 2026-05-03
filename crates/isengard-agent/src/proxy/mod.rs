@@ -16,13 +16,15 @@ use isengard_core::Event;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
-pub mod cert_resolver;
+use crate::tls::CertStore;
+
+pub mod cert_callback;
 pub mod healthcheck;
 pub mod router;
 pub mod server;
 pub mod upstreams;
 
-pub use cert_resolver::IsengardCertResolver;
+pub use cert_callback::IsengardCertCallback;
 pub use upstreams::{Upstream, UpstreamRegistry};
 
 /// Shared state passed into the `ProxyHttp` router. Cheap to clone (Arc).
@@ -41,6 +43,10 @@ pub struct ProxyState {
     /// events through the same channel `OutboundEmitter` drains. `None` in
     /// unit-test setups that don't care about events.
     pub event_tx: Arc<RwLock<Option<mpsc::Sender<Event>>>>,
+    /// Optional `CertStore` for the HTTPS listener. `None` means HTTPS is
+    /// disabled (HTTP-only). The proxy `run` entrypoint reads this once at
+    /// startup; install before calling `run` if you want TLS.
+    pub cert_store: Arc<RwLock<Option<Arc<CertStore>>>>,
 }
 
 impl ProxyState {
