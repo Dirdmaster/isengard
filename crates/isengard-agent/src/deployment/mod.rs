@@ -15,7 +15,10 @@ use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeploy
 use isengard_storage::host::HostId;
 use isengard_storage::inventory::Inventory;
 use isengard_storage::stack::StackId;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
+use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 
 /// Typed trigger consumed by the [`DeploymentSupervisor`]. Built by the
@@ -63,6 +66,11 @@ pub struct DeploymentSupervisor {
     docker: Arc<bollard::Docker>,
     proxy_state: ProxyState,
     emitter: Arc<dyn EventEmitter>,
+    /// Live `CancellationToken`s keyed by deployment id. Inserted before
+    /// spawning a [`Driver`], removed when the driver task returns. Plan
+    /// B 10f's [`Self::handle_abort`] looks up the token and fires it,
+    /// driving the in-flight driver into its abort path.
+    abort_tokens: Arc<StdRwLock<HashMap<String, CancellationToken>>>,
 }
 
 impl DeploymentSupervisor {
@@ -77,6 +85,22 @@ impl DeploymentSupervisor {
             docker,
             proxy_state,
             emitter,
+            abort_tokens: Arc::new(StdRwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Cancel the [`CancellationToken`] for `deployment_id`, if one is
+    /// registered. Returns `true` if a token was found and cancelled,
+    /// `false` if no in-flight deployment matches (already finished, never
+    /// existed, or wrong host). The driver task observes the cancel at
+    /// the next state-machine race point. Plan B 10f.
+    pub async fn handle_abort(&self, deployment_id: &str) -> bool {
+        let tokens = self.abort_tokens.read().unwrap();
+        if let Some(token) = tokens.get(deployment_id) {
+            token.cancel();
+            true
+        } else {
+            false
         }
     }
 
@@ -166,11 +190,23 @@ impl DeploymentSupervisor {
                         metadata_json: None,
                     })
                     .await?;
+                // Register an abort token before spawn so the dashboard
+                // (via AbortDeployment) can cancel mid-flight. The driver
+                // races this token at every state-machine edge.
+                let abort_token = CancellationToken::new();
+                {
+                    let mut tokens = self.abort_tokens.write().unwrap();
+                    tokens.insert(id.clone(), abort_token.clone());
+                }
+                let proxy_events_rx = self.proxy_state.proxy_events.subscribe();
+
                 let deps = Arc::new(RealDriverDeps {
                     docker: self.docker.clone(),
                     proxy_state: self.proxy_state.clone(),
                 });
-                let driver = Driver::new(row, deps, self.inventory.clone(), self.emitter.clone());
+                let driver = Driver::new(row, deps, self.inventory.clone(), self.emitter.clone())
+                    .with_abort_token(abort_token)
+                    .with_proxy_events(proxy_events_rx);
                 tracing::info!(
                     deployment_id = %id,
                     host_id = %trigger.host_id,
@@ -178,10 +214,31 @@ impl DeploymentSupervisor {
                     image = %trigger.image_ref,
                     "deployment supervisor: blue-green driver spawned"
                 );
-                tokio::spawn(driver.run());
+
+                let tokens_for_cleanup = self.abort_tokens.clone();
+                let id_for_cleanup = id.clone();
+                tokio::spawn(async move {
+                    driver.run().await;
+                    tokens_for_cleanup.write().unwrap().remove(&id_for_cleanup);
+                });
                 Ok(SupervisorOutcome::BlueGreenSpawned { deployment_id: id })
             }
         }
+    }
+}
+
+impl DeploymentSupervisor {
+    /// Test-only: pre-register an abort token so integration tests can
+    /// exercise [`Self::handle_abort`] without spinning up a full driver.
+    /// The leading underscore + `#[doc(hidden)]` mark it as not part of
+    /// the public surface; production callers should let the BlueGreen
+    /// branch of [`Self::handle_update_trigger`] register tokens.
+    #[doc(hidden)]
+    pub fn _test_register_abort_token(&self, id: &str, token: CancellationToken) {
+        self.abort_tokens
+            .write()
+            .unwrap()
+            .insert(id.to_string(), token);
     }
 }
 

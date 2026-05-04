@@ -121,6 +121,28 @@ impl RoutingPusher {
         Ok(())
     }
 
+    /// Send an arbitrary `ControllerMessage` to a specific host. Returns
+    /// `Err` if the host isn't currently connected (no Sync stream
+    /// registered) or if the outbound channel rejects the send. Used by
+    /// the dashboard's abort endpoint (Plan B 10f) to deliver
+    /// `AbortDeployment` immediately rather than piggybacking on the next
+    /// proxy_config push.
+    pub async fn send_message_to_host(
+        &self,
+        host_id: HostId,
+        message: ControllerMessage,
+    ) -> Result<()> {
+        let senders = self.senders.lock().await;
+        let sender = senders
+            .by_host
+            .get(&host_id)
+            .ok_or_else(|| anyhow::anyhow!("host {host_id:?} not connected"))?;
+        sender
+            .try_send(Ok(message))
+            .map_err(|e| anyhow::anyhow!("send_to_host {host_id:?} failed: {e}"))?;
+        Ok(())
+    }
+
     /// Translate a `ContainerLabelsReport` into routing rules. Any existing
     /// label-source rules for the same container are deleted first, so the
     /// report becomes the single source of truth — adds, edits and removals

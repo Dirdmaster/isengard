@@ -104,11 +104,19 @@ message Heartbeat {
 
 message ControllerMessage {
   oneof payload {
-    HeartbeatAck heartbeat_ack = 1;
+    HeartbeatAck     heartbeat_ack     = 1;
     // Phase 3+: Command       command       = 2;
     // Phase 4+: ConfigUpdate  config_update = 3;
-    ProxyConfig  proxy_config  = 4;
+    ProxyConfig      proxy_config      = 4;
+    AbortDeployment  abort_deployment  = 5;
   }
+}
+
+// Controller → agent: cancel an in-flight blue-green deployment. The agent
+// looks up the matching `CancellationToken` on the supervisor and fires it,
+// driving the running [`Driver`] task into its abort path. Plan B 10f.
+message AbortDeployment {
+  string deployment_id = 1;
 }
 
 message HeartbeatAck {

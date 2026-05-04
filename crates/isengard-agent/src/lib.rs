@@ -142,6 +142,11 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let storage_host_id = isengard_storage::host::HostId(host_ulid);
     let core_host_id: isengard_core::HostId = host_ulid;
 
+    // Hold onto the supervisor `Arc` so the sync loop can dispatch
+    // `AbortDeployment` payloads into [`DeploymentSupervisor::handle_abort`].
+    // The dispatcher path consumes a clone via `SupervisorDispatcher`; the
+    // `supervisor_for_sync` clone is the second consumer.
+    let mut supervisor_for_sync: Option<Arc<DeploymentSupervisor>> = None;
     let update_dispatcher: Option<Arc<dyn UpdateDispatcher>> = match docker.as_ref() {
         Some(docker) => {
             let supervisor = Arc::new(DeploymentSupervisor::new(
@@ -164,6 +169,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                 supervisor: supervisor.clone(),
                 inventory: inventory.clone(),
             });
+            supervisor_for_sync = Some(supervisor);
             Some(dispatcher)
         }
         None => None,
@@ -257,6 +263,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_agent_id = agent_id.clone();
     let sync_cancel = cancel.clone();
     let sync_proxy_state = proxy_state.clone();
+    let sync_supervisor = supervisor_for_sync.clone();
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_url,
@@ -267,6 +274,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             &mut events_rx,
             &mut agent_msg_rx,
             sync_proxy_state,
+            sync_supervisor,
         )
         .await
     };
