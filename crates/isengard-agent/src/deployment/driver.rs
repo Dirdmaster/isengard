@@ -261,15 +261,34 @@ impl<D: DriverDeps> Driver<D> {
     /// Mark the deployment Aborted with `error_msg`, best-effort clean up
     /// `green_id` if present, and emit `deployment.aborted`. Used for every
     /// failure path that has already crossed the SpinningUp boundary.
+    ///
+    /// Cleanup is best-effort: a failed `stop_and_remove` doesn't block the
+    /// transition to Aborted (the row state is more important than green's
+    /// disposal), but it's logged at warn so persistent Docker issues are
+    /// observable in production logs instead of silently leaking.
     async fn abort(&mut self, error_msg: String, green_id: Option<String>) -> Result<()> {
         if let Some(gid) = green_id {
-            let _ = self.deps.stop_and_remove(&gid).await;
+            if let Err(e) = self.deps.stop_and_remove(&gid).await {
+                tracing::warn!(
+                    deployment_id = %self.deployment.id,
+                    green_container = %gid,
+                    error = %e,
+                    "deployment abort: green container cleanup failed (may leak)"
+                );
+            }
         }
         self.deployment.error = Some(error_msg.clone());
-        let _ = self
+        if let Err(e) = self
             .inventory
             .set_deployment_error(&self.deployment.id, &error_msg)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                deployment_id = %self.deployment.id,
+                error = %e,
+                "deployment abort: failed to persist error message to row"
+            );
+        }
         self.transition(DeploymentState::Aborted).await?;
         self.emit("deployment.aborted", Some(error_msg));
         Ok(())
