@@ -17,28 +17,41 @@ service Controller {
   //   client -> server: SyncHello (first frame), Heartbeat, then Phase 3+
   //   server -> client: HeartbeatAck, then Phase 3+ (Command, ConfigUpdate)
   rpc Sync(stream AgentMessage) returns (stream ControllerMessage);
+
+  // Phase 14: agent rotates its mTLS client cert before expiry. Authenticated
+  // by the existing cert presented on the connection.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 }
 
 // ============ ENROLL ============
 
 message EnrollRequest {
-  string fingerprint     = 1; // stable host id (hostname for v1; machine-id later)
-  string hostname        = 2;
-  string os              = 3; // e.g. "linux"
-  string arch            = 4; // e.g. "x86_64"
-  string agent_version   = 5;
-  string docker_version  = 6;
-  // Pre-issued enrollment token from the controller's onboarding endpoint
-  // (POST /api/v1/hosts). When present, the controller resolves the fleet
-  // assignment from the token's stored payload. Optional for backward compat
-  // with agents that hand-roll enrollment.
-  optional string enrollment_token = 7;
+  // Phase 14: replaces the bearer-token interceptor. Token is the
+  // base32-encoded short-lived enrollment token minted by the controller.
+  string token = 1;
+  string hostname = 2;
+  string os = 3;
+  string version = 4;
 }
 
 message EnrollResponse {
-  string agent_id                  = 1; // controller-assigned ULID
-  uint32 heartbeat_interval_secs   = 2; // default 10
-  uint64 server_time_ms            = 3;
+  bytes host_id = 1;
+  // Phase 14: cert bundle for mTLS.
+  string agent_cert_pem = 2;
+  string agent_key_pem = 3;
+  string ca_root_pem = 4;
+  uint32 heartbeat_interval_secs = 5;
+}
+
+message RenewCertRequest {
+  bytes host_id = 1;
+}
+
+message RenewCertResponse {
+  string agent_cert_pem = 1;
+  string agent_key_pem = 2;
+  // RFC3339
+  string expires_at = 3;
 }
 
 // ============ SYNC ============
