@@ -42,6 +42,14 @@ impl ProxyHttp for IsengardProxy {
             .map(|h| h.split(':').next().unwrap_or(h).to_string())
             .unwrap_or_default();
 
+        if host.is_empty() {
+            return Err(pingora_core::Error::because(
+                pingora_core::ErrorType::HTTPStatus(400),
+                "missing_host",
+                "request has no Host header (or it failed UTF-8 decode)",
+            ));
+        }
+
         let upstreams = self.state.upstreams.read().await;
         let Some(up) = upstreams.get(&host) else {
             return Err(pingora_core::Error::because(

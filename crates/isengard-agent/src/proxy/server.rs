@@ -22,6 +22,10 @@ use tokio::sync::oneshot;
 
 /// `ShutdownSignalWatch` impl backed by a tokio oneshot. Pingora's `run`
 /// will call `recv()` and shut down when our test sends on the channel.
+///
+/// Uses `std::sync::Mutex` (NOT `tokio::sync::Mutex`): the lock is only held
+/// briefly to do `.take()` on the inner Option, never across `.await`.
+/// Holding it across an await would deadlock — keep it that way.
 struct OneshotShutdown {
     rx: Mutex<Option<oneshot::Receiver<()>>>,
 }
