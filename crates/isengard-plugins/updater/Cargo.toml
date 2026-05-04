@@ -27,3 +27,4 @@ futures-util.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile.workspace = true
+ulid = { workspace = true }

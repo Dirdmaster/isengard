@@ -4,6 +4,7 @@
 pub mod agent_state;
 pub mod backoff;
 pub mod container_snapshot;
+pub mod deployment;
 pub mod enroll;
 pub mod events;
 pub mod labels;
@@ -16,8 +17,12 @@ pub type Result<T> = anyhow::Result<T>;
 
 use std::sync::Arc;
 
-use isengard_core::{EventEmitter, HostMode, Plugin, PluginContext, registrations_for};
+use isengard_core::{
+    EventEmitter, HostMode, Plugin, PluginContext, UpdateDispatcher, registrations_for,
+};
 use tracing::{info, instrument, warn};
+
+use crate::deployment::{DeploymentSupervisor, SupervisorDispatcher};
 
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
@@ -98,7 +103,73 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let proxy_event_tx = emitter.sender();
     let emitter: Arc<dyn EventEmitter> = Arc::new(emitter);
 
-    // -- plugin lifecycle (unchanged from Phase 1) -----------------------
+    // -- agent-side inventory (Phase 10): always opened so the
+    //    DeploymentSupervisor can record + reconcile blue-green rows.
+    //    Pre-Phase 10, only the TLS subsystem opened it (and only when TLS
+    //    was enabled). The handle is cheap to clone.
+    let inventory = open_agent_inventory(&opts.state_dir).await?;
+
+    // -- shared proxy state. Constructed before plugins so the supervisor
+    //    (and therefore the updater plugin's dispatcher) can hand it the
+    //    same upstream registry the proxy will eventually consult.
+    let proxy_state = proxy::ProxyState::new();
+    proxy_state.set_event_sink(proxy_event_tx);
+
+    // -- shared Docker handle. Used by the DeploymentSupervisor's blue-green
+    //    driver and by the labels watcher below. Best-effort: if Docker is
+    //    unreachable the supervisor is not built and the updater falls back
+    //    to its in-place behavior. The labels watcher is also skipped.
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => Some(Arc::new(d)),
+        Err(e) => {
+            warn!(error = %e, "docker: connect failed, deployment supervisor + labels watcher disabled");
+            None
+        }
+    };
+
+    // -- DeploymentSupervisor (Phase 10 Task 7). Build it BEFORE plugins so
+    //    its dispatcher can be threaded through PluginContext into the
+    //    updater plugin. Reconcile orphans from a previous run before any
+    //    plugin starts cycling, so we don't race the updater on a row this
+    //    process is about to mark Failed.
+    //
+    //    `agent_id` is the controller's stringified HostId (a Ulid). Parse
+    //    it back to feed both the storage HostId (for DB lookups) and the
+    //    core HostId (= ulid::Ulid, surfaced to plugins via PluginContext).
+    let host_ulid: ulid::Ulid = agent_id
+        .parse()
+        .map_err(|e| anyhow::anyhow!("agent_id {agent_id:?} is not a valid Ulid: {e}"))?;
+    let storage_host_id = isengard_storage::host::HostId(host_ulid);
+    let core_host_id: isengard_core::HostId = host_ulid;
+
+    let update_dispatcher: Option<Arc<dyn UpdateDispatcher>> = match docker.as_ref() {
+        Some(docker) => {
+            let supervisor = Arc::new(DeploymentSupervisor::new(
+                inventory.clone(),
+                docker.clone(),
+                proxy_state.clone(),
+                emitter.clone(),
+            ));
+            match supervisor.reconcile_orphans(storage_host_id).await {
+                Ok(0) => {}
+                Ok(n) => warn!(
+                    orphans = n,
+                    "marked orphan deployments as failed at startup"
+                ),
+                Err(e) => {
+                    tracing::error!(error = %e, "reconcile_orphans failed (continuing startup)")
+                }
+            }
+            let dispatcher: Arc<dyn UpdateDispatcher> = Arc::new(SupervisorDispatcher {
+                supervisor: supervisor.clone(),
+                inventory: inventory.clone(),
+            });
+            Some(dispatcher)
+        }
+        None => None,
+    };
+
+    // -- plugin lifecycle ----------------------------------------------
     let plugins = load_plugins();
     info!(plugin_count = plugins.len(), "plugins discovered");
 
@@ -110,22 +181,17 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             .get(&plugin_name)
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let ctx = PluginContext::new(HostMode::Agent, plugin_config).with_events(emitter.clone());
+        let mut ctx = PluginContext::new(HostMode::Agent, plugin_config)
+            .with_events(emitter.clone())
+            .with_host_id(core_host_id);
+        if let Some(d) = update_dispatcher.clone() {
+            ctx = ctx.with_update_dispatcher(d);
+        }
         plugin.init(&ctx).await?;
         plugin.start(&ctx).await?;
         info!(plugin = %plugin_name, "plugin started");
         started.push(plugin);
     }
-
-    // -- spawn the reverse-proxy supervisor (Phase 8b Task 10).
-    //    Ports come from AgentOptions; Plan B (Phase 8e) will read them
-    //    from settings. `proxy_state` is also threaded into the sync loop
-    //    so Task 13's `apply_config` can mutate the upstream registry when
-    //    the controller pushes a `ProxyConfig`. If both ports are None,
-    //    the supervisor is not spawned (integration tests pass None to
-    //    avoid fighting over 8080/8443).
-    let proxy_state = proxy::ProxyState::new();
-    proxy_state.set_event_sink(proxy_event_tx);
 
     // -- TLS bring-up (Plan B Task 10). When `tls` is `Some`, install the
     //    cert_store on the ProxyState so the HTTPS listener can bind once
@@ -140,9 +206,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         proxy_state.install_cert_store(cert_store.clone()).await;
         info!(cert_dir = ?tls_opts.cert_dir, "tls: cert store installed");
 
-        // Spawn the renewal scheduler. Uses the agent-side Inventory at
-        // <state_dir>/agent.db (created by open_agent_inventory).
-        let inv = std::sync::Arc::new(open_agent_inventory(&opts.state_dir).await?);
+        // Spawn the renewal scheduler. Reuses the agent-side Inventory
+        // already opened above.
+        let inv = std::sync::Arc::new(inventory.clone());
         let acme = std::sync::Arc::new(tls::AcmeClient::new(
             inv.clone(),
             proxy_state.acme_challenges.clone(),
@@ -164,20 +230,17 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    Pushes ContainerLabelsReport / ContainerLabelsRemoved up the sync
     //    stream as containers come and go. Messages queue in `agent_msg_rx`
     //    while the stream is down; the sync loop drains them on reconnect.
+    //    Reuses the shared `docker` handle opened earlier.
     let (agent_msg_tx, mut agent_msg_rx) =
         tokio::sync::mpsc::channel::<isengard_proto::pb::AgentMessage>(64);
-    match bollard::Docker::connect_with_local_defaults() {
-        Ok(docker) => {
-            let labels_out = agent_msg_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) = labels::watch(docker, labels_out).await {
-                    tracing::error!(error = %e, "labels: watcher exited");
-                }
-            });
-        }
-        Err(e) => {
-            warn!(error = %e, "labels: failed to connect to Docker, watcher disabled");
-        }
+    if let Some(docker) = docker.as_ref() {
+        let labels_docker = (**docker).clone();
+        let labels_out = agent_msg_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = labels::watch(labels_docker, labels_out).await {
+                tracing::error!(error = %e, "labels: watcher exited");
+            }
+        });
     }
 
     // -- run sync loop in background; ctrl_c triggers shutdown ----------

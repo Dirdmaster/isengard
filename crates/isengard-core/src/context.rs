@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::EventEmitter;
+use crate::{EventEmitter, HostId, UpdateDispatcher};
 
 /// Which mode the host is running in. Affects which capability sub-traits a
 /// plugin's lifecycle hooks are called through.
@@ -36,6 +36,16 @@ pub struct PluginContext {
     /// retained for backward compatibility — see TODO in isengard-controller for
     /// a future migration of ControllerHandles to isengard-core.
     pub bus: Option<Arc<dyn Any + Send + Sync>>,
+    /// Optional sink the updater plugin consults before recreating a
+    /// container. Wired by the agent host (Phase 10) so the
+    /// `DeploymentSupervisor` can intercept and run a blue-green driver
+    /// instead of an in-place recreate. `None` outside the agent.
+    pub update_dispatcher: Option<Arc<dyn UpdateDispatcher>>,
+    /// Stable identifier for the host running this plugin. Set by the
+    /// agent runtime once enrollment + local DB lookup have produced a
+    /// `HostId`; `None` outside the agent (controller mode, plugin loaders
+    /// in unit tests).
+    pub host_id: Option<HostId>,
 }
 
 impl PluginContext {
@@ -45,6 +55,8 @@ impl PluginContext {
             config,
             events: None,
             bus: None,
+            update_dispatcher: None,
+            host_id: None,
         }
     }
 
@@ -57,6 +69,16 @@ impl PluginContext {
         self.bus = Some(bus);
         self
     }
+
+    pub fn with_update_dispatcher(mut self, d: Arc<dyn UpdateDispatcher>) -> Self {
+        self.update_dispatcher = Some(d);
+        self
+    }
+
+    pub fn with_host_id(mut self, host_id: HostId) -> Self {
+        self.host_id = Some(host_id);
+        self
+    }
 }
 
 impl std::fmt::Debug for PluginContext {
@@ -66,6 +88,10 @@ impl std::fmt::Debug for PluginContext {
             .field("config", &self.config)
             .field("events", &self.events.as_ref().map(|_| "<emitter>"))
             .field("bus", &self.bus.as_ref().map(|_| "<bus>"))
+            .field(
+                "update_dispatcher",
+                &self.update_dispatcher.as_ref().map(|_| "<dispatcher>"),
+            )
             .finish()
     }
 }
