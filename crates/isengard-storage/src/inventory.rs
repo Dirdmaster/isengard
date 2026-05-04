@@ -243,7 +243,7 @@ impl Inventory {
         let rows = match stack_id {
             Some(s) => {
                 sqlx::query(
-                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at \
+                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at, deploy_strategy_override \
                      FROM services WHERE stack_id = ? ORDER BY name",
                 )
                 .bind(s.0)
@@ -252,7 +252,7 @@ impl Inventory {
             }
             None => {
                 sqlx::query(
-                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at \
+                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at, deploy_strategy_override \
                      FROM services ORDER BY name",
                 )
                 .fetch_all(&self.pool)
@@ -264,13 +264,60 @@ impl Inventory {
 
     pub async fn get_service(&self, id: ServiceId) -> Result<Option<Service>> {
         let row = sqlx::query(
-            "SELECT id, host_id, stack_id, name, image, state, last_seen_at \
+            "SELECT id, host_id, stack_id, name, image, state, last_seen_at, deploy_strategy_override \
              FROM services WHERE id = ?",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
         .await?;
         row.map(service_from_row).transpose()
+    }
+
+    pub async fn get_service_by_name(
+        &self,
+        host_id: HostId,
+        stack_id: Option<StackId>,
+        service_name: &str,
+    ) -> Result<Option<Service>> {
+        let row = match stack_id {
+            Some(sid) => {
+                sqlx::query(
+                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at, deploy_strategy_override \
+                     FROM services \
+                     WHERE host_id = ? AND stack_id = ? AND name = ?",
+                )
+                .bind(host_id.to_bytes().as_slice())
+                .bind(sid.0)
+                .bind(service_name)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, host_id, stack_id, name, image, state, last_seen_at, deploy_strategy_override \
+                     FROM services \
+                     WHERE host_id = ? AND stack_id IS NULL AND name = ?",
+                )
+                .bind(host_id.to_bytes().as_slice())
+                .bind(service_name)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        row.map(service_from_row).transpose()
+    }
+
+    pub async fn set_service_deploy_strategy_override(
+        &self,
+        service_id: ServiceId,
+        override_value: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE services SET deploy_strategy_override = ? WHERE id = ?")
+            .bind(override_value)
+            .bind(service_id.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn delete_service(&self, id: ServiceId) -> Result<bool> {
@@ -454,6 +501,9 @@ fn service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Service> {
         image: row.try_get("image")?,
         state: ServiceState::from_str(&row.try_get::<String, _>("state")?),
         last_seen_at: row.try_get("last_seen_at")?,
+        deploy_strategy_override: row
+            .try_get::<Option<String>, _>("deploy_strategy_override")
+            .unwrap_or(None),
     })
 }
 

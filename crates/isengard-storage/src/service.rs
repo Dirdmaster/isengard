@@ -54,6 +54,7 @@ pub struct Service {
     pub image: String,
     pub state: ServiceState,
     pub last_seen_at: DateTime<Utc>,
+    pub deploy_strategy_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,4 +64,88 @@ pub struct InsertService {
     pub name: String,
     pub image: String,
     pub state: ServiceState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::EnrollHost;
+    use crate::inventory::Inventory;
+    use crate::stack::{InsertStack, StackSource};
+
+    async fn setup() -> (Inventory, ServiceId) {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = inv
+            .enroll_host(EnrollHost {
+                hostname: "h".into(),
+                fingerprint: "fp".into(),
+                fleet: "default".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "0.1.0".into(),
+                docker_version: "24.0".into(),
+            })
+            .await
+            .unwrap();
+        let stack_id = inv
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+        let svc_id = inv
+            .insert_service(InsertService {
+                host_id,
+                stack_id: Some(stack_id),
+                name: "web".into(),
+                image: "nginx:alpine".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+        (inv, svc_id)
+    }
+
+    #[tokio::test]
+    async fn override_starts_null() {
+        let (inv, svc_id) = setup().await;
+        let svc = inv.get_service(svc_id).await.unwrap().unwrap();
+        assert_eq!(svc.deploy_strategy_override, None);
+    }
+
+    #[tokio::test]
+    async fn set_and_get_override() {
+        let (inv, svc_id) = setup().await;
+        inv.set_service_deploy_strategy_override(svc_id, Some("blue-green"))
+            .await
+            .unwrap();
+        let svc = inv.get_service(svc_id).await.unwrap().unwrap();
+        assert_eq!(svc.deploy_strategy_override.as_deref(), Some("blue-green"));
+
+        inv.set_service_deploy_strategy_override(svc_id, None)
+            .await
+            .unwrap();
+        let svc = inv.get_service(svc_id).await.unwrap().unwrap();
+        assert_eq!(svc.deploy_strategy_override, None);
+    }
+
+    #[tokio::test]
+    async fn lookup_by_name_returns_matching_service() {
+        let (inv, svc_id) = setup().await;
+        let svc = inv.get_service(svc_id).await.unwrap().unwrap();
+        let by_name = inv
+            .get_service_by_name(svc.host_id, svc.stack_id, "web")
+            .await
+            .unwrap()
+            .expect("service found by name");
+        assert_eq!(by_name.id, svc_id);
+
+        let missing = inv
+            .get_service_by_name(svc.host_id, svc.stack_id, "doesnotexist")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+    }
 }
