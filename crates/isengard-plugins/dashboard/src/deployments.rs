@@ -1,0 +1,125 @@
+//! REST endpoints for blue-green deployments. See spec §10e-rest.
+//!
+//! Phase 10 Plan B Task 5: read-only `GET /api/v1/deployments?stack_id=&state=`.
+//! Abort lands in Task 10.
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::Json;
+use axum::routing::get;
+use isengard_controller::ControllerHandles;
+use isengard_storage::deployment::Deployment;
+use isengard_storage::stack::StackId;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub stack_id: Option<i64>,
+    /// `"active"` (default) or `"history"`.
+    pub state: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeploymentDto {
+    pub id: String,
+    pub host_id: String,
+    pub stack_id: i64,
+    pub service_name: String,
+    pub strategy: String,
+    pub state: String,
+    pub blue_container: Option<String>,
+    pub green_container: Option<String>,
+    pub blue_digest: String,
+    pub green_digest: String,
+    pub public_hostname: Option<String>,
+    pub healthcheck_passed_at: Option<String>,
+    pub switched_at: Option<String>,
+    pub drained_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<Deployment> for DeploymentDto {
+    fn from(d: Deployment) -> Self {
+        DeploymentDto {
+            id: d.id,
+            host_id: d.host_id.0.to_string(),
+            stack_id: d.stack_id.0,
+            service_name: d.service_name,
+            strategy: d.strategy.as_str().to_string(),
+            state: d.state.as_str().to_string(),
+            blue_container: d.blue_container,
+            green_container: d.green_container,
+            blue_digest: d.blue_digest,
+            green_digest: d.green_digest,
+            public_hostname: d.public_hostname,
+            healthcheck_passed_at: d.healthcheck_passed_at.map(|t| t.to_rfc3339()),
+            switched_at: d.switched_at.map(|t| t.to_rfc3339()),
+            drained_at: d.drained_at.map(|t| t.to_rfc3339()),
+            finished_at: d.finished_at.map(|t| t.to_rfc3339()),
+            error: d.error,
+            created_at: d.created_at.to_rfc3339(),
+            updated_at: d.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+pub fn router(handles: Arc<ControllerHandles>) -> Router {
+    Router::new()
+        .route("/deployments", get(list_deployments))
+        // POST /:id/abort lands in Task 10.
+        .with_state(handles)
+}
+
+async fn list_deployments(
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<Vec<DeploymentDto>>, (StatusCode, String)> {
+    let limit = q.limit.unwrap_or(50).min(200);
+    let state_filter = q.state.as_deref().unwrap_or("active");
+
+    let deps = match (q.stack_id, state_filter) {
+        (Some(sid), "active") => {
+            // `list_deployments_by_stack` returns the most recent rows for
+            // a stack. Filter in-memory: small lists (<= limit, capped 200).
+            let all = handles
+                .inventory
+                .list_deployments_by_stack(StackId(sid), limit)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+            all.into_iter()
+                .filter(|d| !d.state.is_terminal())
+                .collect::<Vec<_>>()
+        }
+        (Some(sid), "history") => {
+            let all = handles
+                .inventory
+                .list_deployments_by_stack(StackId(sid), limit)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+            all.into_iter()
+                .filter(|d| d.state.is_terminal())
+                .collect::<Vec<_>>()
+        }
+        (Some(_), other) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown state filter: {other}"),
+            ));
+        }
+        (None, _) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "stack_id query param required".into(),
+            ));
+        }
+    };
+
+    Ok(Json(deps.into_iter().map(DeploymentDto::from).collect()))
+}
