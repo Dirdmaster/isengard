@@ -20,6 +20,17 @@ impl HostId {
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(ulid::Ulid::from_bytes(bytes))
     }
+
+    /// Decode a `host_id BLOB` column from a SQLite row. Returns
+    /// `Error::Decode` if the byte slice isn't exactly 16 bytes.
+    /// DRYs the `Vec<u8> -> [u8; 16] -> HostId` dance every entity that
+    /// stores `host_id` as BLOB has to do.
+    pub fn from_db_bytes(bytes: Vec<u8>) -> crate::error::Result<Self> {
+        let arr: [u8; 16] = bytes.try_into().map_err(|_| crate::error::Error::Decode {
+            reason: "host_id BLOB is not 16 bytes".into(),
+        })?;
+        Ok(Self::from_bytes(arr))
+    }
 }
 
 impl Default for HostId {

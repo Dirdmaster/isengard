@@ -70,9 +70,7 @@ impl crate::inventory::Inventory {
         };
 
         let host_bytes: Vec<u8> = r.try_get("host_id")?;
-        let host_id = HostId::from_bytes(host_bytes.try_into().map_err(|_| Error::Decode {
-            reason: "bad host_id length".into(),
-        })?);
+        let host_id = HostId::from_db_bytes(host_bytes)?;
         let adapter: String = r.try_get("adapter")?;
         let config_str: String = r.try_get("config_json")?;
         let config_json = serde_json::from_str(&config_str).map_err(|e| Error::Decode {

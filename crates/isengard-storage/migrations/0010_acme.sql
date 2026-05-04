@@ -5,11 +5,15 @@ ALTER TABLE tls_certs ADD COLUMN last_attempt_at TEXT;
 ALTER TABLE tls_certs ADD COLUMN last_error TEXT;
 ALTER TABLE tls_certs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
 
+-- Singleton by design: the agent uses one ACME account per process.
+-- Multi-account (e.g. staging + prod side-by-side, or per-fleet) would need
+-- a migration and a different lookup key.
 CREATE TABLE acme_account (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     contact_email   TEXT NOT NULL,
     directory_url   TEXT NOT NULL,
     account_key_pem TEXT NOT NULL,
     kid             TEXT,
-    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
