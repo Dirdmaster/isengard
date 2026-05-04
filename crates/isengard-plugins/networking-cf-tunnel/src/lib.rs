@@ -147,14 +147,35 @@ impl NetworkingAdapter for CfTunnelAdapter {
 
         let hostname = endpoint_id.trim_start_matches("cf-tunnel:");
 
-        if let Ok(records) = api.list_dns_records(&cfg.zone_id, hostname).await {
-            for r in records {
-                let _ = api.delete_dns_record(&cfg.zone_id, &r.id).await;
+        // DNS cleanup: list + delete records pointing at this hostname.
+        // We log on failure rather than swallow — a leaked DNS record points
+        // at an offline tunnel target and produces user-visible errors.
+        match api.list_dns_records(&cfg.zone_id, hostname).await {
+            Ok(records) => {
+                for r in records {
+                    if let Err(e) = api.delete_dns_record(&cfg.zone_id, &r.id).await {
+                        tracing::warn!(
+                            hostname = %hostname,
+                            record_id = %r.id,
+                            error = %e,
+                            "cf-tunnel: failed to delete DNS record (may leak in CF)"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    hostname = %hostname,
+                    error = %e,
+                    "cf-tunnel: failed to list DNS records during unexpose; not cleaning up"
+                );
             }
         }
 
+        // Reset ingress to the catch-all 404. Same warn-on-failure: a stale
+        // ingress rule points cloudflared at a port that may now be reused.
         if let Some(tunnel_id) = cfg.tunnel_id.as_ref() {
-            let _ = api
+            if let Err(e) = api
                 .set_ingress(
                     &cfg.account_id,
                     tunnel_id,
@@ -163,7 +184,15 @@ impl NetworkingAdapter for CfTunnelAdapter {
                         service: "http_status:404".into(),
                     }],
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    hostname = %hostname,
+                    tunnel_id = %tunnel_id,
+                    error = %e,
+                    "cf-tunnel: failed to reset ingress to catch-all"
+                );
+            }
         }
 
         Ok(())

@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 
 const CF_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
+/// Per-request timeout. CF's API typically responds in <1s; 30s is generous
+/// enough to ride out brief slowness without letting the agent's caller
+/// (`expose` / `unexpose`) hang indefinitely on a stuck connection. Without
+/// this, `reqwest::Client::new()`'s default of "never" would let a half-open
+/// TCP connection stall the whole flow.
+const CF_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct CfApi {
     client: reqwest::Client,
     api_token: String,
@@ -14,7 +21,7 @@ pub struct CfApi {
 impl CfApi {
     pub fn new(api_token: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_client(),
             api_token,
             base_url: CF_API_BASE.to_string(),
         }
@@ -23,7 +30,7 @@ impl CfApi {
     /// Test-only: override the API base URL (for wiremock).
     pub fn with_base_url(api_token: String, base_url: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_client(),
             api_token,
             base_url,
         }
@@ -206,4 +213,14 @@ pub struct DnsRecordSummary {
 pub struct IngressRule {
     pub hostname: Option<String>,
     pub service: String,
+}
+
+/// Build a reqwest client with the per-request timeout applied. Falls back
+/// to the default client if builder fails (in practice never — `build()`
+/// only fails on TLS init issues that would also break the default client).
+fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(CF_API_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
