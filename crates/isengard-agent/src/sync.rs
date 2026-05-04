@@ -27,6 +27,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::Result;
 use crate::backoff::Backoff;
+use crate::deployment::DeploymentSupervisor;
 use crate::proxy::ProxyState;
 
 /// Open a Sync stream and run the heartbeat loop until the stream errors or
@@ -36,9 +37,10 @@ use crate::proxy::ProxyState;
 /// emitted while the stream is down stay queued in the channel until the next
 /// stream comes up.
 #[instrument(
-    skip(token, cancel, events_rx, agent_msg_rx, proxy_state),
+    skip(token, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sync_loop(
     controller_url: String,
     token: String,
@@ -48,6 +50,7 @@ pub async fn run_sync_loop(
     events_rx: &mut mpsc::Receiver<CoreEvent>,
     agent_msg_rx: &mut mpsc::Receiver<AgentMessage>,
     proxy_state: ProxyState,
+    supervisor: Option<Arc<DeploymentSupervisor>>,
 ) -> Result<()> {
     let channel = Channel::from_shared(controller_url.clone())
         .with_context(|| format!("invalid controller url {controller_url:?}"))?
@@ -125,8 +128,10 @@ pub async fn run_sync_loop(
         .context("Sync RPC failed")?;
     let mut inbound = response.into_inner();
 
-    // Read inbound messages (HeartbeatAck, ProxyConfig, future Command/ConfigUpdate).
+    // Read inbound messages (HeartbeatAck, ProxyConfig, AbortDeployment,
+    // future Command/ConfigUpdate).
     let read_proxy_state = proxy_state.clone();
+    let read_supervisor = supervisor.clone();
     let mut read_task = tokio::spawn(async move {
         while let Ok(Some(msg)) = inbound.message().await {
             match msg.payload {
@@ -148,6 +153,19 @@ pub async fn run_sync_loop(
                 Some(isengard_proto::pb::controller_message::Payload::ProxyConfig(cfg)) => {
                     if let Err(e) = crate::proxy::apply_config(&read_proxy_state, cfg).await {
                         warn!(error = %e, "proxy: apply_config failed");
+                    }
+                }
+                Some(isengard_proto::pb::controller_message::Payload::AbortDeployment(abort)) => {
+                    if let Some(ref supervisor) = read_supervisor {
+                        let cancelled = supervisor.handle_abort(&abort.deployment_id).await;
+                        if !cancelled {
+                            warn!(
+                                deployment_id = %abort.deployment_id,
+                                "AbortDeployment received for unknown id"
+                            );
+                        }
+                    } else {
+                        warn!("AbortDeployment received but supervisor not wired");
                     }
                 }
                 _ => {
@@ -238,9 +256,10 @@ pub async fn run_sync_loop(
 /// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
 /// (proves the connection was healthy).
 #[instrument(
-    skip(token, cancel, events_rx, agent_msg_rx, proxy_state),
+    skip(token, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sync_with_reconnect(
     controller_url: String,
     token: String,
@@ -250,6 +269,7 @@ pub async fn run_sync_with_reconnect(
     events_rx: &mut mpsc::Receiver<CoreEvent>,
     agent_msg_rx: &mut mpsc::Receiver<AgentMessage>,
     proxy_state: ProxyState,
+    supervisor: Option<Arc<DeploymentSupervisor>>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -281,6 +301,7 @@ pub async fn run_sync_with_reconnect(
             events_rx,
             agent_msg_rx,
             proxy_state.clone(),
+            supervisor.clone(),
         )
         .await;
 

@@ -1900,6 +1900,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tracing",
  "ulid",
@@ -1955,6 +1956,7 @@ dependencies = [
  "inventory",
  "isengard-controller",
  "isengard-core",
+ "isengard-proto",
  "isengard-storage",
  "mime_guess",
  "reqwest",
@@ -4366,6 +4368,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

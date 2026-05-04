@@ -11,6 +11,9 @@
           <div v-else-if="activeTab === 'networking'">
             <NetworkingSettings />
           </div>
+          <div v-else-if="activeTab === 'deployments'">
+            <DeploymentsSettings />
+          </div>
           <div v-else-if="activeTab === 'notifier'">
             <NotifierSettings />
           </div>
@@ -24,6 +27,7 @@
 const tabs = [
   { key: 'general', label: 'General' },
   { key: 'networking', label: 'Networking' },
+  { key: 'deployments', label: 'Deployments' },
   { key: 'notifier', label: 'Notifier' },
 ]
 </script>

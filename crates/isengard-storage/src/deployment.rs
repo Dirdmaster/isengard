@@ -45,6 +45,10 @@ pub enum DeploymentState {
     Switching,
     Draining,
     DestroyingBlue,
+    /// Post-switch collapse recovery: green went unhealthy after the swap,
+    /// driver is rolling back to the snapshotted blue upstream. Non-terminal
+    /// (transitions to `Failed` once the swap-back completes). Phase 10f.
+    Recovering,
     Done,
     Aborted,
     Failed,
@@ -58,6 +62,7 @@ impl DeploymentState {
             Self::Switching => "switching",
             Self::Draining => "draining",
             Self::DestroyingBlue => "destroying_blue",
+            Self::Recovering => "recovering",
             Self::Done => "done",
             Self::Aborted => "aborted",
             Self::Failed => "failed",
@@ -78,6 +83,7 @@ impl FromStr for DeploymentState {
             "switching" => Self::Switching,
             "draining" => Self::Draining,
             "destroying_blue" => Self::DestroyingBlue,
+            "recovering" => Self::Recovering,
             "done" => Self::Done,
             "aborted" => Self::Aborted,
             "failed" => Self::Failed,
@@ -345,6 +351,51 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Upsert a Deployment row received from a remote source (controller-side use).
+    /// Idempotent INSERT OR REPLACE keyed on `id`. Each upsert carries the full row,
+    /// so latest-write-wins per field. Used by the controller's event subscriber.
+    pub async fn upsert_deployment_from_remote(&self, d: &Deployment) -> Result<()> {
+        let host_bytes = d.host_id.0.to_bytes().to_vec();
+        let to_rfc = |dt: Option<chrono::DateTime<chrono::Utc>>| dt.map(|t| t.to_rfc3339());
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO deployments (
+                id, host_id, stack_id, service_name, strategy, state,
+                blue_container, green_container, blue_digest, green_digest,
+                public_hostname, health_path, container_port,
+                healthcheck_started_at, healthcheck_passed_at, switched_at,
+                drained_at, finished_at, error, metadata_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&d.id)
+        .bind(&host_bytes)
+        .bind(d.stack_id.0)
+        .bind(&d.service_name)
+        .bind(d.strategy.as_str())
+        .bind(d.state.as_str())
+        .bind(&d.blue_container)
+        .bind(&d.green_container)
+        .bind(&d.blue_digest)
+        .bind(&d.green_digest)
+        .bind(&d.public_hostname)
+        .bind(&d.health_path)
+        .bind(d.container_port)
+        .bind(to_rfc(d.healthcheck_started_at))
+        .bind(to_rfc(d.healthcheck_passed_at))
+        .bind(to_rfc(d.switched_at))
+        .bind(to_rfc(d.drained_at))
+        .bind(to_rfc(d.finished_at))
+        .bind(&d.error)
+        .bind(&d.metadata_json)
+        .bind(d.created_at.to_rfc3339())
+        .bind(d.updated_at.to_rfc3339())
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn mark_orphan_deployments_failed(
         &self,
         host_id: HostId,
@@ -554,6 +605,50 @@ mod tests {
         assert!(inv.get_deployment(&d.id).await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn upsert_from_remote_inserts_or_replaces() {
+        let (inv, host_id, stack_id) = setup().await;
+
+        // Build a Deployment as if it arrived from a remote agent.
+        let mut d = Deployment {
+            id: ulid::Ulid::new().to_string(),
+            host_id,
+            stack_id,
+            service_name: "web".into(),
+            strategy: DeployStrategy::BlueGreen,
+            state: DeploymentState::SpinningUp,
+            blue_container: Some("c-blue".into()),
+            green_container: None,
+            blue_digest: "sha256:aaa".into(),
+            green_digest: "sha256:bbb".into(),
+            public_hostname: Some("blog.test".into()),
+            health_path: Some("/healthz".into()),
+            container_port: Some(8080),
+            healthcheck_started_at: None,
+            healthcheck_passed_at: None,
+            switched_at: None,
+            drained_at: None,
+            finished_at: None,
+            error: None,
+            metadata_json: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // First upsert: insert.
+        inv.upsert_deployment_from_remote(&d).await.unwrap();
+        let back = inv.get_deployment(&d.id).await.unwrap().unwrap();
+        assert_eq!(back.state, DeploymentState::SpinningUp);
+
+        // Second upsert with state change: replace.
+        d.state = DeploymentState::Done;
+        d.green_container = Some("c-green".into());
+        inv.upsert_deployment_from_remote(&d).await.unwrap();
+        let back = inv.get_deployment(&d.id).await.unwrap().unwrap();
+        assert_eq!(back.state, DeploymentState::Done);
+        assert_eq!(back.green_container.as_deref(), Some("c-green"));
+    }
+
     #[test]
     fn deployment_state_is_terminal_covers_three_terminals() {
         assert!(DeploymentState::Done.is_terminal());
@@ -564,6 +659,7 @@ mod tests {
         assert!(!DeploymentState::Switching.is_terminal());
         assert!(!DeploymentState::Draining.is_terminal());
         assert!(!DeploymentState::DestroyingBlue.is_terminal());
+        assert!(!DeploymentState::Recovering.is_terminal());
     }
 
     #[test]
@@ -574,6 +670,7 @@ mod tests {
             DeploymentState::Switching,
             DeploymentState::Draining,
             DeploymentState::DestroyingBlue,
+            DeploymentState::Recovering,
             DeploymentState::Done,
             DeploymentState::Aborted,
             DeploymentState::Failed,

@@ -144,11 +144,26 @@ pub fn spawn_loops(state: crate::proxy::ProxyState) {
                             host,
                             if now_healthy { "healthy" } else { "unhealthy" }
                         );
+                        // In-process fan-out: the deployment driver
+                        // subscribes during deploy planning and reacts to
+                        // post-switch collapse without waiting for the
+                        // controller round-trip via the journal.
+                        st.proxy_events
+                            .publish(crate::proxy::ProxyEvent::UpstreamHealthChanged {
+                                public_hostname: host.clone(),
+                                container_id: container_id.clone(),
+                                healthy: now_healthy,
+                            });
                         st.emit(isengard_core::Event {
                             kind: "routing.upstream.health_changed".into(),
                             occurred_at: chrono::Utc::now(),
                             summary,
                             container_name: Some(host.clone()),
+                            metadata: serde_json::json!({
+                                "public_hostname": host,
+                                "container_id": container_id,
+                                "healthy": now_healthy,
+                            }),
                             ..Default::default()
                         })
                         .await;

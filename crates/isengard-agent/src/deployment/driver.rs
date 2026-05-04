@@ -17,10 +17,10 @@
 //! §`driver.rs`.
 
 use crate::deployment::healthcheck::DeploymentHealthcheck;
-use crate::proxy::ProxyState;
 use crate::proxy::healthcheck::HealthChecker;
 use crate::proxy::swap::swap_upstream;
 use crate::proxy::upstreams::{Upstream, UpstreamState};
+use crate::proxy::{ProxyEvent, ProxyState};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -30,6 +30,8 @@ use isengard_storage::inventory::Inventory;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// All side effects the driver performs. Production uses [`RealDriverDeps`];
 /// tests swap in a mock that records calls and returns canned results.
@@ -59,6 +61,18 @@ pub trait DriverDeps: Send + Sync + 'static {
         green_addr: SocketAddr,
         grace: Duration,
     ) -> Result<()>;
+
+    /// Snapshot the upstream currently routing for this deployment's hostname.
+    /// Returned `None` means there's nothing to recover to (no public_hostname,
+    /// or the registry has no entry yet). Used by [`Driver::recover_to_blue`]
+    /// when a post-switch collapse forces a rollback. Phase 10f.
+    async fn snapshot_current_upstream(&self, deployment: &Deployment) -> Option<Upstream>;
+
+    /// Instant swap back to a previously-snapshotted blue upstream. Called
+    /// during post-switch collapse recovery (`Recovering` state) and during
+    /// abort-during-drain. Uses a zero grace because the green upstream is
+    /// already failing — there's nothing in-flight to preserve. Phase 10f.
+    async fn swap_back_to_blue(&self, hostname: &str, blue: &Upstream) -> Result<()>;
 }
 
 /// Default healthcheck cadence: 5s between probes, 2 consecutive passes
@@ -78,6 +92,19 @@ const DEFAULT_SWAP_GRACE: Duration = Duration::from_secs(60);
 /// own timer can never race blue's destruction past in-flight requests.
 const DRAIN_BUFFER: Duration = Duration::from_secs(5);
 
+/// Outcome of the 3-way race during the drain window. See
+/// [`Driver::race_drain`]. Phase 10f.
+#[derive(Debug, PartialEq, Eq)]
+enum DrainOutcome {
+    /// Grace + buffer elapsed cleanly: proceed to DestroyingBlue → Done.
+    Completed,
+    /// Abort token fired: roll back to blue, kill green, mark Aborted.
+    Aborted,
+    /// Green container went unhealthy mid-drain: roll back to blue, kill
+    /// green, transition Recovering → Failed with `post_switch_collapse_recovered`.
+    GreenUnhealthy,
+}
+
 /// Per-deployment state-machine driver. One instance per [`Deployment`] row;
 /// `run` consumes self and walks the machine to a terminal state.
 pub struct Driver<D: DriverDeps> {
@@ -90,6 +117,20 @@ pub struct Driver<D: DriverDeps> {
     pub hc_deadline: Duration,
     pub swap_grace: Duration,
     pub drain_buffer: Duration,
+    /// Cooperative cancel signal: when fired, the driver short-circuits to
+    /// `Aborted`, cleans up green if it was started, and rolls back any
+    /// post-switch routing change. Defaults to a fresh, non-cancelled token
+    /// so existing call sites work unchanged. Phase 10f.
+    pub abort_token: CancellationToken,
+    /// Optional subscription to the proxy event bus. When present, the
+    /// driver listens for `UpstreamHealthChanged` during the drain window
+    /// and triggers `recover_to_blue` if green flips unhealthy. `None`
+    /// keeps the drain a plain sleep (pre-Plan-B behaviour). Phase 10f.
+    pub proxy_events_rx: Option<broadcast::Receiver<ProxyEvent>>,
+    /// Snapshotted blue upstream taken just before `swap_upstream_to_green`,
+    /// used by `recover_to_blue` to roll back. `None` until the snapshot is
+    /// taken (i.e. before reaching `Switching`). Phase 10f.
+    pub blue_upstream_snapshot: Option<Upstream>,
 }
 
 impl<D: DriverDeps> Driver<D> {
@@ -109,6 +150,9 @@ impl<D: DriverDeps> Driver<D> {
             hc_deadline: DEFAULT_HC_DEADLINE,
             swap_grace: DEFAULT_SWAP_GRACE,
             drain_buffer: DRAIN_BUFFER,
+            abort_token: CancellationToken::new(),
+            proxy_events_rx: None,
+            blue_upstream_snapshot: None,
         }
     }
 
@@ -117,6 +161,20 @@ impl<D: DriverDeps> Driver<D> {
     pub fn with_drain_overrides(mut self, swap_grace: Duration, drain_buffer: Duration) -> Self {
         self.swap_grace = swap_grace;
         self.drain_buffer = drain_buffer;
+        self
+    }
+
+    /// Install a cancellation token the driver checks at every state edge
+    /// and races against the spinup, healthcheck, and drain phases. Phase 10f.
+    pub fn with_abort_token(mut self, token: CancellationToken) -> Self {
+        self.abort_token = token;
+        self
+    }
+
+    /// Subscribe the driver to a proxy event bus so the drain race can
+    /// react to `UpstreamHealthChanged` for the green container. Phase 10f.
+    pub fn with_proxy_events(mut self, rx: broadcast::Receiver<ProxyEvent>) -> Self {
+        self.proxy_events_rx = Some(rx);
         self
     }
 
@@ -162,14 +220,32 @@ impl<D: DriverDeps> Driver<D> {
     }
 
     async fn run_inner(&mut self) -> Result<()> {
-        // SpinningUp: create + start green.
+        // Top-level abort: if the user cancelled before we started, mark the
+        // row Aborted without ever touching Docker.
+        if self.abort_token.is_cancelled() {
+            self.abort("aborted_by_user".to_string(), None).await?;
+            return Ok(());
+        }
+
+        // SpinningUp: create + start green, racing the abort token so a
+        // cancel during a slow image pull doesn't have to wait for the
+        // pull to finish.
         self.transition(DeploymentState::SpinningUp).await?;
-        let (green_id, green_addr) = match self.deps.start_green(&self.deployment).await {
-            Ok(p) => p,
-            Err(e) => {
-                let msg = format!("spinup_failed: {e}");
-                self.abort(msg, None).await?;
+        let (green_id, green_addr) = tokio::select! {
+            biased;
+            _ = self.abort_token.cancelled() => {
+                self.abort("aborted_by_user".to_string(), None).await?;
                 return Ok(());
+            }
+            result = self.deps.start_green(&self.deployment) => {
+                match result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let msg = format!("spinup_failed: {e}");
+                        self.abort(msg, None).await?;
+                        return Ok(());
+                    }
+                }
             }
         };
         self.deployment.green_container = Some(green_id.clone());
@@ -177,12 +253,22 @@ impl<D: DriverDeps> Driver<D> {
             .set_deployment_green_container(&self.deployment.id, &green_id)
             .await?;
 
-        // Healthcheck: wait for green to go healthy.
+        // Healthcheck: wait for green to go healthy. Racing the abort token
+        // means a stuck-on-startup container can't keep us pinned for the
+        // full 120s deadline once the user clicks Cancel.
         let hc = DeploymentHealthcheck::new(self.deps.build_health_checker(&self.deployment))
             .with_interval(self.hc_interval)
             .with_success_threshold(self.hc_success_threshold)
             .with_deadline(self.hc_deadline);
-        match hc.wait_for_healthy(green_addr).await {
+        let hc_result = tokio::select! {
+            biased;
+            _ = self.abort_token.cancelled() => {
+                self.abort("aborted_by_user".to_string(), Some(green_id.clone())).await?;
+                return Ok(());
+            }
+            r = hc.wait_for_healthy(green_addr) => r,
+        };
+        match hc_result {
             Ok(passed_at) => {
                 self.deployment.healthcheck_passed_at = Some(passed_at);
                 let _ = self
@@ -199,6 +285,10 @@ impl<D: DriverDeps> Driver<D> {
                 return Ok(());
             }
         }
+
+        // Snapshot the current upstream (blue) before we overwrite it. If
+        // green collapses post-switch we'll swap back to this exact entry.
+        self.blue_upstream_snapshot = self.deps.snapshot_current_upstream(&self.deployment).await;
 
         // Switching: atomic swap to green.
         self.transition(DeploymentState::Switching).await?;
@@ -218,33 +308,158 @@ impl<D: DriverDeps> Driver<D> {
             .set_deployment_switched(&self.deployment.id, switched_at)
             .await;
 
-        // Draining: let in-flight requests on blue complete.
+        // Draining: let in-flight requests on blue complete. 3-way race —
+        // either the grace+buffer sleep finishes (happy path), the user
+        // aborts, or the proxy event bus tells us green flipped unhealthy
+        // (post-switch collapse).
         self.transition(DeploymentState::Draining).await?;
-        tokio::time::sleep(self.swap_grace + self.drain_buffer).await;
-        let drained_at = Utc::now();
-        self.deployment.drained_at = Some(drained_at);
-        let _ = self
-            .inventory
-            .set_deployment_drained(&self.deployment.id, drained_at)
-            .await;
+        let drain_outcome = self.race_drain(&green_id).await;
+        match drain_outcome {
+            DrainOutcome::Completed => {
+                // Happy path — no abort, no green collapse — proceed to
+                // destroying_blue → done as before.
+                let drained_at = Utc::now();
+                self.deployment.drained_at = Some(drained_at);
+                let _ = self
+                    .inventory
+                    .set_deployment_drained(&self.deployment.id, drained_at)
+                    .await;
 
-        // DestroyingBlue: stop + rm the old container.
-        self.transition(DeploymentState::DestroyingBlue).await?;
-        if let Some(blue_id) = self.deployment.blue_container.clone() {
-            // Best-effort: a missing blue (user removed it manually) is fine.
-            let _ = self.deps.stop_and_remove(&blue_id).await;
+                self.transition(DeploymentState::DestroyingBlue).await?;
+                if let Some(blue_id) = self.deployment.blue_container.clone() {
+                    let _ = self.deps.stop_and_remove(&blue_id).await;
+                }
+
+                let finished_at = Utc::now();
+                self.deployment.finished_at = Some(finished_at);
+                let _ = self
+                    .inventory
+                    .set_deployment_finished(&self.deployment.id, finished_at)
+                    .await;
+                self.transition(DeploymentState::Done).await?;
+                self.emit("deployment.completed", None);
+            }
+            DrainOutcome::Aborted => {
+                // User clicked abort mid-drain. Roll routing back to blue,
+                // tear down green, mark the row Aborted.
+                self.recover_to_blue("aborted_during_drain").await;
+                let _ = self.deps.stop_and_remove(&green_id).await;
+                self.deployment.error = Some("aborted_during_drain".to_string());
+                let _ = self
+                    .inventory
+                    .set_deployment_error(&self.deployment.id, "aborted_during_drain")
+                    .await;
+                self.transition(DeploymentState::Aborted).await?;
+                self.emit("deployment.aborted", Some("aborted_during_drain".into()));
+            }
+            DrainOutcome::GreenUnhealthy => {
+                // Post-switch collapse. Transition to Recovering so the UI
+                // can show the rollback in flight, swap routing back to
+                // blue, kill green, mark Failed with the recovery reason.
+                self.transition(DeploymentState::Recovering).await?;
+                self.recover_to_blue("post_switch_collapse_recovered").await;
+                let _ = self.deps.stop_and_remove(&green_id).await;
+                self.transition(DeploymentState::Failed).await?;
+                self.emit(
+                    "deployment.failed",
+                    Some("post_switch_collapse_recovered".into()),
+                );
+            }
         }
+        Ok(())
+    }
 
-        // Done.
-        let finished_at = Utc::now();
-        self.deployment.finished_at = Some(finished_at);
+    /// 3-way race during the drain window. Returns whichever signal arrives
+    /// first: the grace+buffer sleep elapsing, the abort token firing, or a
+    /// proxy event reporting our green container as unhealthy. Spurious
+    /// events (different hostname, different container, blue going
+    /// unhealthy) are ignored — the loop continues. If the proxy event
+    /// channel closes (sender dropped), the listener is dropped and the
+    /// race degrades to abort + sleep only. Phase 10f.
+    async fn race_drain(&mut self, green_id: &str) -> DrainOutcome {
+        let total_drain = self.swap_grace + self.drain_buffer;
+        let abort_token = self.abort_token.clone();
+        let hostname = self.deployment.public_hostname.clone();
+        let mut rx = self.proxy_events_rx.take();
+        let sleep = tokio::time::sleep(total_drain);
+        tokio::pin!(sleep);
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = abort_token.cancelled() => return DrainOutcome::Aborted,
+                event = async {
+                    match rx.as_mut() {
+                        Some(rx) => rx.recv().await.ok(),
+                        None => std::future::pending().await,
+                    }
+                }, if rx.is_some() => {
+                    match event {
+                        Some(ProxyEvent::UpstreamHealthChanged {
+                            public_hostname, container_id, healthy,
+                        }) => {
+                            if !healthy
+                                && hostname.as_deref() == Some(public_hostname.as_str())
+                                && container_id == green_id
+                            {
+                                return DrainOutcome::GreenUnhealthy;
+                            }
+                            // Spurious event (different host, different
+                            // container, or healthy=true): keep racing.
+                            continue;
+                        }
+                        None => {
+                            // Channel closed (lagged or sender dropped).
+                            // Stop listening; fall back to abort + sleep.
+                            rx = None;
+                        }
+                    }
+                }
+                _ = &mut sleep => return DrainOutcome::Completed,
+            }
+        }
+    }
+
+    /// Roll routing back to the snapshotted blue upstream. Records `reason`
+    /// on the deployment row regardless of whether the swap-back succeeded.
+    /// Idempotent and best-effort: if there's no snapshot or no public
+    /// hostname, we still set the error string so the UI sees why we
+    /// couldn't recover. Phase 10f.
+    async fn recover_to_blue(&mut self, reason: &str) {
+        let Some(blue) = self.blue_upstream_snapshot.clone() else {
+            let msg = format!("{reason} (no_blue_snapshot)");
+            self.deployment.error = Some(msg.clone());
+            let _ = self
+                .inventory
+                .set_deployment_error(&self.deployment.id, &msg)
+                .await;
+            return;
+        };
+        let Some(hostname) = self.deployment.public_hostname.clone() else {
+            let msg = format!("{reason} (no_public_hostname)");
+            self.deployment.error = Some(msg.clone());
+            let _ = self
+                .inventory
+                .set_deployment_error(&self.deployment.id, &msg)
+                .await;
+            return;
+        };
+        if let Err(e) = self.deps.swap_back_to_blue(&hostname, &blue).await {
+            let msg = format!("{reason}_unrecoverable: {e}");
+            self.deployment.error = Some(msg.clone());
+            let _ = self
+                .inventory
+                .set_deployment_error(&self.deployment.id, &msg)
+                .await;
+            return;
+        }
+        // Successful swap-back — record the reason as the row's error so
+        // the dashboard can explain the rollback.
+        self.deployment.error = Some(reason.to_string());
         let _ = self
             .inventory
-            .set_deployment_finished(&self.deployment.id, finished_at)
+            .set_deployment_error(&self.deployment.id, reason)
             .await;
-        self.transition(DeploymentState::Done).await?;
-        self.emit("deployment.completed", None);
-        Ok(())
     }
 
     /// Move the row to `new` and emit `deployment.<state>`.
@@ -296,23 +511,31 @@ impl<D: DriverDeps> Driver<D> {
 
     /// Fire-and-forget event emission. Spawned so the state machine never
     /// blocks on emitter latency (network, journal flush, etc.).
+    ///
+    /// The full [`Deployment`] row is serialized into `metadata.deployment`
+    /// so subscribers (dashboard, journal, abort UI) get the entire context
+    /// without needing a follow-up storage lookup.
     fn emit(&self, kind: &str, error: Option<String>) {
-        let emitter = self.emitter.clone();
+        let deployment_json =
+            serde_json::to_value(&self.deployment).unwrap_or_else(|_| serde_json::json!({}));
         let event = Event {
             kind: kind.to_string(),
             occurred_at: Utc::now(),
             host_id: Some(self.deployment.host_id.0),
             summary: format!(
-                "deployment {} ({}): {}",
-                self.deployment.id, self.deployment.service_name, kind
+                "{} {} {}",
+                self.deployment.service_name, self.deployment.green_digest, kind
             ),
-            container_name: self.deployment.green_container.clone(),
-            old_digest: Some(self.deployment.blue_digest.clone()),
-            new_digest: Some(self.deployment.green_digest.clone()),
             error,
+            metadata: serde_json::json!({
+                "deployment": deployment_json,
+            }),
             ..Default::default()
         };
-        tokio::spawn(async move { emitter.emit(event).await });
+        let emitter = self.emitter.clone();
+        tokio::spawn(async move {
+            emitter.emit(event).await;
+        });
     }
 }
 
@@ -513,6 +736,24 @@ impl DriverDeps for RealDriverDeps {
         };
         swap_upstream(&self.proxy_state, hostname, upstream, grace).await
     }
+
+    async fn snapshot_current_upstream(&self, deployment: &Deployment) -> Option<Upstream> {
+        let host = deployment.public_hostname.as_deref()?;
+        let r = self.proxy_state.upstreams.read().await;
+        r.get(host).cloned()
+    }
+
+    async fn swap_back_to_blue(&self, hostname: &str, blue: &Upstream) -> Result<()> {
+        // Zero grace: the green upstream is failing, there's nothing in
+        // flight on it worth preserving — switch back instantly.
+        swap_upstream(
+            &self.proxy_state,
+            hostname,
+            blue.clone(),
+            Duration::from_secs(0),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -629,6 +870,12 @@ mod tests {
             self.swap_called.store(true, Ordering::SeqCst);
             Ok(())
         }
+        async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+            None
+        }
+        async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -697,6 +944,12 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+            None
+        }
+        async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -749,6 +1002,12 @@ mod tests {
             _addr: SocketAddr,
             _grace: Duration,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+            None
+        }
+        async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
             Ok(())
         }
     }
@@ -820,6 +1079,12 @@ mod tests {
         ) -> Result<()> {
             Err(anyhow!("registry write contention"))
         }
+        async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+            None
+        }
+        async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -854,6 +1119,382 @@ mod tests {
             last_stop_id.lock().unwrap().as_deref(),
             Some("green-id"),
             "the cleaned container is green (blue still serving)"
+        );
+    }
+
+    // ---- Test 5: emit places the full Deployment row in event metadata ----
+
+    #[tokio::test]
+    async fn emit_includes_full_deployment_in_metadata() {
+        use isengard_core::Event;
+        use std::sync::Mutex as StdMutex;
+
+        struct CaptureEmitter {
+            events: Arc<StdMutex<Vec<Event>>>,
+        }
+        #[async_trait::async_trait]
+        impl EventEmitter for CaptureEmitter {
+            async fn emit(&self, event: Event) {
+                self.events.lock().unwrap().push(event);
+            }
+        }
+
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let emitter: Arc<dyn EventEmitter> = Arc::new(CaptureEmitter {
+            events: captured.clone(),
+        });
+
+        let (inv, d) = setup_inventory_and_row(DeploymentState::Pending).await;
+
+        struct NoopDeps;
+        #[async_trait::async_trait]
+        impl DriverDeps for NoopDeps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                Ok(("g".into(), "127.0.0.1:0".parse().unwrap()))
+            }
+            async fn stop_and_remove(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(10))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                None
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let driver = Driver::new(d.clone(), Arc::new(NoopDeps), inv, emitter);
+        driver.emit("deployment.spinning_up", None);
+        // emit() spawns the actual delivery — give the runtime a tick to flush.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.kind, "deployment.spinning_up");
+        let dep = e
+            .metadata
+            .get("deployment")
+            .expect("deployment in metadata");
+        assert_eq!(dep.get("id").and_then(|v| v.as_str()), Some(d.id.as_str()));
+        assert_eq!(dep.get("state").and_then(|v| v.as_str()), Some("pending"));
+        assert_eq!(
+            dep.get("service_name").and_then(|v| v.as_str()),
+            Some("web")
+        );
+        assert_eq!(
+            dep.get("green_digest").and_then(|v| v.as_str()),
+            Some("sha256:bbb")
+        );
+    }
+
+    // ---- Tests 6-9: Plan B abort + post-switch collapse recovery ----
+
+    /// Helper: build a synthetic blue Upstream the snapshot mocks can return.
+    fn synthetic_blue() -> Upstream {
+        Upstream {
+            container_id: "blue-id".into(),
+            addr: "127.0.0.1:9999".parse().unwrap(),
+            healthy: true,
+            health_path: None,
+            health_interval: Duration::from_secs(5),
+            consecutive_failures: 0,
+            state: UpstreamState::Active,
+        }
+    }
+
+    /// Pre-cancelled abort: driver should mark Aborted without ever calling
+    /// `start_green` (the panic in the mock catches any regression).
+    #[tokio::test]
+    async fn abort_during_pending_marks_aborted_without_starting_green() {
+        let (inv, d) = setup_inventory_and_row(DeploymentState::Pending).await;
+        let id = d.id.clone();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        struct Deps;
+        #[async_trait]
+        impl DriverDeps for Deps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                panic!("start_green must not be called when aborted before spinup");
+            }
+            async fn stop_and_remove(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(10))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                None
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let driver = Driver::new(d, Arc::new(Deps), inv.clone(), Arc::new(NoopEmitter))
+            .with_abort_token(token);
+        driver.run().await;
+
+        let after = inv.get_deployment(&id).await.unwrap().expect("row exists");
+        assert_eq!(after.state, DeploymentState::Aborted);
+        let err = after.error.expect("error recorded");
+        assert!(
+            err.contains("aborted_by_user"),
+            "expected aborted_by_user, got {err:?}"
+        );
+        assert!(after.green_container.is_none(), "green never assigned");
+    }
+
+    /// Abort fires during a slow `start_green`. The biased select on the
+    /// abort branch must win the race; the driver records Aborted and
+    /// never assigns a green container.
+    #[tokio::test]
+    async fn abort_during_spinup_cleans_green_and_marks_aborted() {
+        let (inv, d) = setup_inventory_and_row(DeploymentState::Pending).await;
+        let id = d.id.clone();
+        let token = CancellationToken::new();
+        let token_for_cancel = token.clone();
+
+        struct Deps;
+        #[async_trait]
+        impl DriverDeps for Deps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                // Long-running spinup: only resolves if the driver doesn't
+                // race-win on the abort branch.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok(("g".into(), "127.0.0.1:1".parse().unwrap()))
+            }
+            async fn stop_and_remove(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(10))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                None
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let driver = Driver::new(d, Arc::new(Deps), inv.clone(), Arc::new(NoopEmitter))
+            .with_abort_token(token);
+        let driver_task = tokio::spawn(driver.run());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token_for_cancel.cancel();
+        driver_task.await.unwrap();
+
+        let after = inv.get_deployment(&id).await.unwrap().expect("row exists");
+        assert_eq!(after.state, DeploymentState::Aborted);
+        let err = after.error.expect("error recorded");
+        assert!(
+            err.contains("aborted_by_user"),
+            "expected aborted_by_user, got {err:?}"
+        );
+        assert!(after.green_container.is_none(), "green never assigned");
+    }
+
+    /// Abort fires while the driver is in the drain window. The 3-way race
+    /// returns `Aborted`, `recover_to_blue` swaps routing back, green is
+    /// removed, the row is marked Aborted with `aborted_during_drain`.
+    #[tokio::test]
+    async fn abort_during_drain_swaps_back_and_marks_aborted() {
+        let (inv, d) = setup_inventory_and_row(DeploymentState::Pending).await;
+        let id = d.id.clone();
+        let (addr, _accept) = live_addr();
+        let token = CancellationToken::new();
+        let token_for_cancel = token.clone();
+
+        struct Deps {
+            addr: SocketAddr,
+            swap_back_called: Arc<AtomicBool>,
+            green_removed: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl DriverDeps for Deps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                Ok(("green-id".into(), self.addr))
+            }
+            async fn stop_and_remove(&self, container_id: &str) -> Result<()> {
+                if container_id == "green-id" {
+                    self.green_removed.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(50))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                Some(synthetic_blue())
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                self.swap_back_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let swap_back_called = Arc::new(AtomicBool::new(false));
+        let green_removed = Arc::new(AtomicBool::new(false));
+        let deps = Arc::new(Deps {
+            addr,
+            swap_back_called: swap_back_called.clone(),
+            green_removed: green_removed.clone(),
+        });
+        // Long drain window so the test gets a deterministic chance to
+        // fire the abort token while we're parked in race_drain.
+        let driver = Driver::new(d, deps, inv.clone(), Arc::new(NoopEmitter))
+            .with_healthcheck_overrides(Duration::from_millis(10), 1, Duration::from_millis(500))
+            .with_drain_overrides(Duration::from_secs(10), Duration::from_secs(1))
+            .with_abort_token(token);
+
+        let driver_task = tokio::spawn(driver.run());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        token_for_cancel.cancel();
+        driver_task.await.unwrap();
+
+        assert!(
+            swap_back_called.load(Ordering::SeqCst),
+            "swap_back_to_blue should fire on abort-during-drain"
+        );
+        assert!(
+            green_removed.load(Ordering::SeqCst),
+            "green should be cleaned up after rollback"
+        );
+        let after = inv.get_deployment(&id).await.unwrap().expect("row exists");
+        assert_eq!(after.state, DeploymentState::Aborted);
+        let err = after.error.expect("error recorded");
+        assert!(
+            err.contains("aborted_during_drain"),
+            "expected aborted_during_drain, got {err:?}"
+        );
+    }
+
+    /// Green container flips unhealthy during the drain window. The driver
+    /// transitions Recovering → Failed, swaps routing back to blue, kills
+    /// green, and records `post_switch_collapse_recovered`.
+    #[tokio::test]
+    async fn green_unhealthy_during_drain_recovers_and_marks_failed() {
+        let (inv, d) = setup_inventory_and_row(DeploymentState::Pending).await;
+        let id = d.id.clone();
+        let (addr, _accept) = live_addr();
+
+        struct Deps {
+            addr: SocketAddr,
+            swap_back_called: Arc<AtomicBool>,
+            green_removed: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl DriverDeps for Deps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                Ok(("green-id".into(), self.addr))
+            }
+            async fn stop_and_remove(&self, container_id: &str) -> Result<()> {
+                if container_id == "green-id" {
+                    self.green_removed.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(50))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                Some(synthetic_blue())
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                self.swap_back_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let bus = crate::proxy::ProxyEventBus::new();
+        let rx = bus.subscribe();
+        let swap_back_called = Arc::new(AtomicBool::new(false));
+        let green_removed = Arc::new(AtomicBool::new(false));
+        let deps = Arc::new(Deps {
+            addr,
+            swap_back_called: swap_back_called.clone(),
+            green_removed: green_removed.clone(),
+        });
+        let driver = Driver::new(d, deps, inv.clone(), Arc::new(NoopEmitter))
+            .with_healthcheck_overrides(Duration::from_millis(10), 1, Duration::from_millis(500))
+            .with_drain_overrides(Duration::from_secs(10), Duration::from_secs(1))
+            .with_proxy_events(rx);
+
+        let driver_task = tokio::spawn(driver.run());
+        // Wait for entry into the drain window, then publish the unhealthy
+        // event the race_drain loop is listening for.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        bus.publish(crate::proxy::ProxyEvent::UpstreamHealthChanged {
+            public_hostname: "blog.test".into(),
+            container_id: "green-id".into(),
+            healthy: false,
+        });
+        driver_task.await.unwrap();
+
+        assert!(
+            swap_back_called.load(Ordering::SeqCst),
+            "swap_back_to_blue should fire on green collapse"
+        );
+        assert!(
+            green_removed.load(Ordering::SeqCst),
+            "green should be cleaned up after rollback"
+        );
+        let after = inv.get_deployment(&id).await.unwrap().expect("row exists");
+        assert_eq!(after.state, DeploymentState::Failed);
+        let err = after.error.expect("error recorded");
+        assert!(
+            err.contains("post_switch_collapse_recovered"),
+            "expected post_switch_collapse_recovered, got {err:?}"
         );
     }
 }

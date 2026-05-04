@@ -143,6 +143,58 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     ));
     let disconnect_handle = disconnect_monitor.start();
 
+    // Background task: subscribe to `deployment.*` events on the bus and mirror
+    // the embedded Deployment row into the controller-local `deployments` table.
+    // Agent-side is the source of truth; the controller's copy backs the UI list
+    // queries and gets refreshed on every state-change event.
+    let deployment_handler_inv = inventory.clone();
+    let mut deployment_rx = bus.subscribe();
+    let deployment_handle = tokio::spawn(async move {
+        loop {
+            match deployment_rx.recv().await {
+                Ok(event) => {
+                    if !event.kind.starts_with("deployment.") {
+                        continue;
+                    }
+                    let Some(dep_value) = event.metadata.get("deployment") else {
+                        tracing::warn!(
+                            kind = %event.kind,
+                            "deployment event missing metadata.deployment"
+                        );
+                        continue;
+                    };
+                    let dep: isengard_storage::deployment::Deployment =
+                        match serde_json::from_value(dep_value.clone()) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                tracing::warn!(
+                                    kind = %event.kind,
+                                    error = %e,
+                                    "deployment metadata parse failed"
+                                );
+                                continue;
+                            }
+                        };
+                    if let Err(e) = deployment_handler_inv
+                        .upsert_deployment_from_remote(&dep)
+                        .await
+                    {
+                        tracing::warn!(
+                            kind = %event.kind,
+                            error = %e,
+                            "upsert_deployment_from_remote failed"
+                        );
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "deployment event subscriber lagged");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     // -- gRPC server ----------------------------------------------------------
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
@@ -178,6 +230,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     // -- shutdown -------------------------------------------------------------
     disconnect_handle.abort();
+    deployment_handle.abort();
 
     // -- plugin stop ----------------------------------------------------------
     plugin_host::stop_controller_plugins(&mut controller_plugins).await;
