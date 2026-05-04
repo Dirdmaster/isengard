@@ -29,6 +29,7 @@ RUN apt-get update \
         clang \
         libclang-dev \
         perl \
+        git \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=planner /build/recipe.json recipe.json
