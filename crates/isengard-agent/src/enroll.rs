@@ -1,20 +1,21 @@
 //! Agent → controller enrollment.
 //!
-//! Builds a tonic Channel, attaches the bearer-token interceptor, calls the
-//! `Enroll` RPC once, and returns the controller-assigned `agent_id`.
+//! NOTE(task-10): This module is stubbed out while Task 10 lands the
+//! `cert_store` module. The Phase 14 proto refactor (Task 5) renamed
+//! `EnrollRequest`/`EnrollResponse` fields, so the old hostname/fingerprint
+//! flow no longer compiles. Task 11 will rewrite this module against the new
+//! token-redemption flow that returns a cert bundle, and re-wire `run_agent`
+//! to persist the bundle via `cert_store::save`.
 
 #![allow(clippy::result_large_err)]
-
-use anyhow::Context;
-use isengard_proto::pb::EnrollRequest;
-use isengard_proto::pb::controller_client::ControllerClient;
-use tonic::Request;
-use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+#![allow(dead_code)]
 
 use crate::Result;
 
 /// Resolved host metadata included in the EnrollRequest.
+///
+/// Kept around as a placeholder so other modules that import the type still
+/// compile. Task 11 will rewrite the body to match the new proto.
 pub struct HostInfo {
     pub fingerprint: String,
     pub hostname: String,
@@ -25,9 +26,9 @@ pub struct HostInfo {
 }
 
 impl HostInfo {
-    /// Best-effort: hostname from the OS, OS/arch from rustc consts, agent
-    /// version from cargo, docker version blank for now (Phase 3 queries
-    /// the docker daemon).
+    /// Best-effort host detection. Stubbed pending Task 11; the values are
+    /// still populated so the type behaves sensibly if anything constructs
+    /// one in the meantime.
     pub fn detect() -> Self {
         let hostname = hostname::get()
             .ok()
@@ -35,56 +36,22 @@ impl HostInfo {
             .unwrap_or_else(|| "unknown-host".into());
 
         Self {
-            fingerprint: hostname.clone(), // Phase 2d uses hostname as fingerprint; machine-id later
+            fingerprint: hostname.clone(),
             hostname,
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            docker_version: String::new(), // Phase 3
+            docker_version: String::new(),
         }
     }
 }
 
-/// Issue an Enroll RPC against the configured controller. Returns the
-/// controller-assigned `agent_id` as a string. The `token` is used both as
-/// the bearer auth header AND embedded in the EnrollRequest as the
-/// `enrollment_token` so the controller can resolve which fleet the host
-/// belongs to (issued by the dashboard's POST /hosts handler during onboarding).
-pub async fn enroll(controller_url: &str, token: &str, info: HostInfo) -> Result<String> {
-    let channel = Channel::from_shared(controller_url.to_string())
-        .with_context(|| format!("invalid controller url {controller_url:?}"))?
-        .connect()
-        .await
-        .with_context(|| format!("connecting to controller at {controller_url}"))?;
-
-    let bearer: MetadataValue<_> = format!("Bearer {token}")
-        .parse()
-        .context("token contains characters not legal in a Bearer header")?;
-
-    let mut client = ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
-        req.metadata_mut().insert("authorization", bearer.clone());
-        Ok(req)
-    });
-
-    let req = EnrollRequest {
-        fingerprint: info.fingerprint,
-        hostname: info.hostname,
-        os: info.os,
-        arch: info.arch,
-        agent_version: info.agent_version,
-        docker_version: info.docker_version,
-        enrollment_token: Some(token.to_string()),
-    };
-
-    let resp = client
-        .enroll(req)
-        .await
-        .context("Enroll RPC failed")?
-        .into_inner();
-
-    if resp.agent_id.is_empty() {
-        anyhow::bail!("controller returned empty agent_id");
-    }
-
-    Ok(resp.agent_id)
+/// Issue an Enroll RPC against the configured controller.
+///
+/// TODO(task-11): rewrite for the new proto. The Phase 14 flow takes a
+/// one-time enrollment token, returns a signed cert bundle, and the agent
+/// persists it via `cert_store::save`. Until that lands this just panics if
+/// called — `run_agent` itself is also stubbed in Task 11.
+pub async fn enroll(_controller_url: &str, _token: &str, _info: HostInfo) -> Result<String> {
+    unimplemented!("rewritten in task 11")
 }
