@@ -5,6 +5,7 @@ import { useServicesStore } from '~/stores/services'
 import { useEventsStore } from '~/stores/events'
 import ServiceExposeModal from '~/components/ServiceExposeModal.vue'
 import DeploymentInProgressPanel from '~/components/DeploymentInProgressPanel.vue'
+import DeploymentAbortedPanel from '~/components/DeploymentAbortedPanel.vue'
 import { useDeployments } from '~/composables/useDeployments'
 
 const route = useRoute()
@@ -43,13 +44,44 @@ const recentEvents = computed(() => {
 
 // Live deployments for this stack. Most recently created `active` deployment
 // is shown above the services section (Plan B Phase 10 Task 6).
-const { active: activeDeployments } = useDeployments(stackId)
+// When no active deployment exists but a recent terminal one (aborted/failed)
+// surfaced in the last 5 minutes, the aborted panel takes its slot until the
+// user dismisses it (Task 10).
+const { active: activeDeployments, history: deploymentHistory } = useDeployments(stackId)
 const visibleDeployment = computed(() => {
   if (!activeDeployments.value.length) return null
   return [...activeDeployments.value].sort((a, b) => {
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   })[0]
 })
+
+const dismissedAborted = ref(new Set<string>())
+const visibleAborted = computed(() => {
+  if (visibleDeployment.value) return null
+  const now = Date.now()
+  const fiveMinutes = 5 * 60 * 1000
+  // Sort newest first by finished_at|updated_at then take first non-done,
+  // non-dismissed, recent row.
+  const rows = [...deploymentHistory.value].sort((a, b) => {
+    const ta = new Date(a.finished_at || a.updated_at).getTime()
+    const tb = new Date(b.finished_at || b.updated_at).getTime()
+    return tb - ta
+  })
+  for (const d of rows) {
+    if (dismissedAborted.value.has(d.id)) continue
+    if (d.state === 'done') continue
+    const ts = new Date(d.finished_at || d.updated_at).getTime()
+    if (now - ts > fiveMinutes) continue
+    return d
+  }
+  return null
+})
+
+function dismissAborted(id: string) {
+  dismissedAborted.value.add(id)
+  // Trigger reactivity on the Set wrapper.
+  dismissedAborted.value = new Set(dismissedAborted.value)
+}
 
 async function forceUpdate() {
   try {
@@ -87,8 +119,14 @@ function openExposeFor(hostId: string, serviceName: string, port: number) {
       <div class="px-6 pt-6" v-if="visibleDeployment">
         <DeploymentInProgressPanel :deployment="visibleDeployment" />
       </div>
+      <div class="px-6 pt-6" v-else-if="visibleAborted">
+        <DeploymentAbortedPanel
+          :deployment="visibleAborted"
+          @dismiss="dismissAborted(visibleAborted.id)"
+        />
+      </div>
 
-      <div class="grid grid-cols-2 gap-6 p-6" :class="{ 'pt-0': visibleDeployment }">
+      <div class="grid grid-cols-2 gap-6 p-6" :class="{ 'pt-0': visibleDeployment || visibleAborted }">
         <section>
           <h2 class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">Services</h2>
           <div class="flex flex-wrap gap-2 items-center">

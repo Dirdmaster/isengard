@@ -1956,6 +1956,7 @@ dependencies = [
  "inventory",
  "isengard-controller",
  "isengard-core",
+ "isengard-proto",
  "isengard-storage",
  "mime_guess",
  "reqwest",

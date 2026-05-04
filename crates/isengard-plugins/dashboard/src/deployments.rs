@@ -1,15 +1,15 @@
 //! REST endpoints for blue-green deployments. See spec §10e-rest.
 //!
 //! Phase 10 Plan B Task 5: read-only `GET /api/v1/deployments?stack_id=&state=`.
-//! Abort lands in Task 10.
+//! Phase 10 Plan B Task 10: `POST /api/v1/deployments/:id/abort`.
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use axum::routing::get;
+use axum::routing::{get, post};
 use isengard_controller::ControllerHandles;
 use isengard_storage::deployment::Deployment;
 use isengard_storage::stack::StackId;
@@ -70,10 +70,22 @@ impl From<Deployment> for DeploymentDto {
     }
 }
 
+/// Response body for `POST /deployments/:id/abort`.
+///
+/// `noop = true` indicates the deployment was already in a terminal state
+/// when the request arrived; `reason` carries a human-readable hint such as
+/// `deployment_already_terminal: done`. `noop = false` means an
+/// `AbortDeployment` message was successfully delivered to the host.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AbortResponse {
+    pub noop: bool,
+    pub reason: Option<String>,
+}
+
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/deployments", get(list_deployments))
-        // POST /:id/abort lands in Task 10.
+        .route("/deployments/{id}/abort", post(abort_deployment))
         .with_state(handles)
 }
 
@@ -122,4 +134,69 @@ async fn list_deployments(
     };
 
     Ok(Json(deps.into_iter().map(DeploymentDto::from).collect()))
+}
+
+/// `POST /deployments/:id/abort` — request that the agent abort an
+/// in-flight deployment.
+///
+/// Returns `202 Accepted` with `{ noop: false }` once the
+/// `AbortDeployment` proto has been handed to the routing pusher. If the
+/// deployment is already terminal, returns `200 OK` with
+/// `{ noop: true, reason: ... }`. If the host is currently disconnected,
+/// returns `503 Service Unavailable`.
+async fn abort_deployment(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(deployment_id): Path<String>,
+) -> Result<(StatusCode, Json<AbortResponse>), (StatusCode, String)> {
+    let dep = handles
+        .inventory
+        .get_deployment(&deployment_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("deployment {deployment_id} not found"),
+        ))?;
+
+    if dep.state.is_terminal() {
+        return Ok((
+            StatusCode::OK,
+            Json(AbortResponse {
+                noop: true,
+                reason: Some(format!(
+                    "deployment_already_terminal: {}",
+                    dep.state.as_str()
+                )),
+            }),
+        ));
+    }
+
+    let msg = isengard_proto::pb::ControllerMessage {
+        payload: Some(
+            isengard_proto::pb::controller_message::Payload::AbortDeployment(
+                isengard_proto::pb::AbortDeployment {
+                    deployment_id: deployment_id.clone(),
+                },
+            ),
+        ),
+    };
+
+    handles
+        .routing
+        .send_message_to_host(dep.host_id, msg)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("agent offline: {e}"),
+            )
+        })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AbortResponse {
+            noop: false,
+            reason: None,
+        }),
+    ))
 }

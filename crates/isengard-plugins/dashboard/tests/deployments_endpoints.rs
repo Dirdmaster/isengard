@@ -11,7 +11,7 @@ use axum::http::{Request, StatusCode};
 use isengard_controller::ControllerHandles;
 use isengard_controller::bus::EventBus;
 use isengard_controller::routing::RoutingPusher;
-use isengard_plugin_dashboard::deployments::{self, DeploymentDto};
+use isengard_plugin_dashboard::deployments::{self, AbortResponse, DeploymentDto};
 use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeployment};
 use isengard_storage::host::{EnrollHost, HostId};
 use isengard_storage::inventory::Inventory;
@@ -137,4 +137,49 @@ async fn list_history_returns_only_terminal() {
     let dtos: Vec<DeploymentDto> = serde_json::from_slice(&body).unwrap();
     assert_eq!(dtos.len(), 1);
     assert_eq!(dtos[0].state, "done");
+}
+
+#[tokio::test]
+async fn abort_returns_noop_for_terminal_deployment() {
+    let (app, inv, host, stack) = setup_app().await;
+    let dep = inv
+        .insert_deployment(sample_dep(host, stack, DeploymentState::Pending))
+        .await
+        .unwrap();
+    inv.update_deployment_state(&dep.id, DeploymentState::Done)
+        .await
+        .unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/deployments/{}/abort", dep.id))
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let r: AbortResponse = serde_json::from_slice(&body).unwrap();
+    assert!(r.noop);
+    assert!(
+        r.reason
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("deployment_already_terminal:")
+    );
+}
+
+#[tokio::test]
+async fn abort_returns_404_for_unknown_deployment() {
+    let (app, _inv, _host, _stack) = setup_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/deployments/unknown-id/abort")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
