@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use isengard_controller::ControllerHandles;
 use isengard_storage::{
-    InsertRoutingRule, RoutingRule, RoutingRuleId, RoutingRuleSource, RoutingRuleState, TlsMode,
+    InsertRoutingRule, RoutingRuleId, RoutingRuleSource, RoutingRuleState, TlsMode,
     UpsertAdapterConfig,
 };
 
@@ -70,25 +70,16 @@ struct UpdateRuleBody {
 }
 
 async fn list_rules(State(handles): State<Arc<ControllerHandles>>) -> Response {
-    // For v1 we list across all hosts. Fleet-scoping comes when the
-    // active-fleet query param lands.
-    let hosts = match handles.inventory.list_hosts().await {
-        Ok(h) => h,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list hosts: {e}"),
-            )
-                .into_response();
-        }
-    };
-    let mut out: Vec<RoutingRule> = Vec::new();
-    for h in hosts {
-        if let Ok(mut rules) = handles.inventory.list_routing_rules_for_host(h.id).await {
-            out.append(&mut rules);
-        }
+    // Single fleet-wide query. Fleet-scoping comes when the active-fleet
+    // query param lands; until then the frontend can filter client-side.
+    match handles.inventory.list_all_routing_rules().await {
+        Ok(rules) => Json(rules).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list rules: {e}"),
+        )
+            .into_response(),
     }
-    Json(out).into_response()
 }
 
 async fn create_rule(
@@ -155,35 +146,31 @@ async fn update_rule(
                 .into_response();
         }
     }
-    // Re-fetch and return the updated rule. PC-T3 introduces a direct
-    // `get_routing_rule(id)` helper; until then we fan out by host.
-    let hosts = handles.inventory.list_hosts().await.unwrap_or_default();
-    for h in hosts {
-        if let Ok(rules) = handles.inventory.list_routing_rules_for_host(h.id).await {
-            if let Some(r) = rules.into_iter().find(|r| r.id.0 == id) {
-                return Json(r).into_response();
-            }
-        }
+    match handles.inventory.get_routing_rule(RoutingRuleId(id)).await {
+        Ok(Some(r)) => Json(r).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "rule not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("get after update: {e}"),
+        )
+            .into_response(),
     }
-    (StatusCode::NOT_FOUND, "rule not found").into_response()
 }
 
 async fn delete_rule(
     Path(id): Path<i64>,
     State(handles): State<Arc<ControllerHandles>>,
 ) -> Response {
-    let hosts = handles.inventory.list_hosts().await.unwrap_or_default();
-    let mut found = false;
-    for h in hosts {
-        if let Ok(rules) = handles.inventory.list_routing_rules_for_host(h.id).await {
-            if rules.iter().any(|r| r.id.0 == id) {
-                found = true;
-                break;
-            }
+    match handles.inventory.get_routing_rule(RoutingRuleId(id)).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, "rule not found").into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("lookup before delete: {e}"),
+            )
+                .into_response();
         }
-    }
-    if !found {
-        return (StatusCode::NOT_FOUND, "rule not found").into_response();
     }
     match handles
         .inventory
@@ -365,12 +352,14 @@ async fn test_adapter_config(
                     "https://api.cloudflare.com/client/v4/accounts/{}/cfd_tunnel?per_page=1",
                     account_id
                 );
-                match reqwest::Client::new()
-                    .get(&url)
-                    .bearer_auth(token)
-                    .send()
-                    .await
-                {
+                // 30s timeout: a stuck CF API connection would otherwise hang
+                // the dashboard request handler indefinitely (no per-request
+                // budget on `reqwest::Client::new()`'s default config).
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                match client.get(&url).bearer_auth(token).send().await {
                     Ok(resp) if resp.status().is_success() => serde_json::json!({
                         "ok": true,
                         "detail": null,
@@ -405,7 +394,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use isengard_controller::bus::EventBus;
-    use isengard_storage::{EnrollHost, HostId, Inventory, Journal};
+    use isengard_storage::{EnrollHost, HostId, Inventory, Journal, RoutingRule};
     use tower::ServiceExt;
 
     async fn test_handles() -> Arc<ControllerHandles> {
