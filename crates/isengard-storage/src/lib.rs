@@ -3,6 +3,7 @@
 //! Phase 2b surface: hosts table only. Containers and journal land in
 //! later phases as new migrations.
 
+pub mod acme_account;
 pub mod adapter_config;
 pub mod error;
 pub mod fleet;
@@ -17,6 +18,7 @@ pub mod setting;
 pub mod stack;
 pub mod tls_cert;
 
+pub use acme_account::{AcmeAccount, UpsertAcmeAccount};
 pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
 pub use error::{Error, Result};
 pub use fleet::Fleet;

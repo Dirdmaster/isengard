@@ -91,6 +91,7 @@ async fn agent_survives_controller_restart() {
         config: serde_json::Value::Object(Default::default()),
         proxy_http_port: None,
         proxy_https_port: None,
+        tls: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

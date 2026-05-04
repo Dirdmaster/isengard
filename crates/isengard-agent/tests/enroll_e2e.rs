@@ -95,6 +95,7 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
         config: serde_json::Value::Object(Default::default()),
         proxy_http_port: None,
         proxy_https_port: None,
+        tls: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
@@ -140,6 +141,7 @@ async fn second_run_is_idempotent_no_re_enroll() {
         config: serde_json::Value::Object(Default::default()),
         proxy_http_port: None,
         proxy_https_port: None,
+        tls: None,
     };
 
     // First run: spawn, wait for enroll, abort.

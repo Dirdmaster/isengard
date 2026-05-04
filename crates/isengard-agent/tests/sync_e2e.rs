@@ -85,6 +85,7 @@ async fn agent_heartbeats_advance_last_seen_at() {
         config: serde_json::Value::Object(Default::default()),
         proxy_http_port: None,
         proxy_https_port: None,
+        tls: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

@@ -17,6 +17,9 @@ pub struct TlsCertMeta {
     pub last_renewed_at: Option<DateTime<Utc>>,
     pub next_renewal_at: DateTime<Utc>,
     pub serial: Option<String>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub attempt_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +34,18 @@ pub struct UpsertTlsCertMeta {
 }
 
 impl crate::inventory::Inventory {
+    /// Upsert the metadata for a successfully-issued cert.
+    ///
+    /// Sets `last_renewed_at = CURRENT_TIMESTAMP` on both INSERT and UPDATE
+    /// — calling this means we just got a fresh cert from the issuer, so
+    /// "renewed at" is now in either case.
+    ///
+    /// **Caller contract:** this method does NOT touch `attempt_count` or
+    /// `last_error`. After a successful issuance, also call
+    /// [`Inventory::record_tls_attempt`] with `success = true` so the
+    /// attempt counter and error string reflect the success. Doing them
+    /// separately is intentional: the renewal scheduler can record an
+    /// attempt without a fresh cert (failure path) and vice versa.
     pub async fn upsert_tls_cert_meta(&self, ins: UpsertTlsCertMeta) -> Result<()> {
         let host_bytes = ins.host_id.to_bytes().to_vec();
         let nb = ins.not_before.to_rfc3339();
@@ -40,8 +55,8 @@ impl crate::inventory::Inventory {
             r#"
             INSERT INTO tls_certs (
               public_hostname, host_id, issuer, not_before, not_after,
-              next_renewal_at, serial
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              next_renewal_at, last_renewed_at, serial
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             ON CONFLICT (public_hostname) DO UPDATE SET
               host_id = excluded.host_id,
               issuer = excluded.issuer,
@@ -65,67 +80,141 @@ impl crate::inventory::Inventory {
     }
 
     pub async fn get_tls_cert_meta(&self, public_hostname: &str) -> Result<Option<TlsCertMeta>> {
-        use sqlx::Row;
         let row = sqlx::query(
             "SELECT public_hostname, host_id, issuer, not_before, not_after, \
-             last_renewed_at, next_renewal_at, serial \
+             last_renewed_at, next_renewal_at, serial, \
+             last_attempt_at, last_error, attempt_count \
              FROM tls_certs WHERE public_hostname = ?",
         )
         .bind(public_hostname)
         .fetch_optional(self.pool())
         .await?;
 
-        let Some(r) = row else {
-            return Ok(None);
-        };
-
-        let public_hostname: String = r.try_get("public_hostname")?;
-        let host_bytes: Vec<u8> = r.try_get("host_id")?;
-        let host_id = HostId::from_bytes(host_bytes.try_into().map_err(|_| Error::Decode {
-            reason: "bad host_id length".into(),
-        })?);
-        let issuer: String = r.try_get("issuer")?;
-        let not_before_str: String = r.try_get("not_before")?;
-        let not_after_str: String = r.try_get("not_after")?;
-        let last_renewed_at_str: Option<String> = r.try_get("last_renewed_at")?;
-        let next_renewal_at_str: String = r.try_get("next_renewal_at")?;
-        let serial: Option<String> = r.try_get("serial")?;
-
-        let not_before = DateTime::parse_from_rfc3339(&not_before_str)
-            .map_err(|e| Error::Decode {
-                reason: format!("invalid not_before: {e}"),
-            })?
-            .with_timezone(&Utc);
-        let not_after = DateTime::parse_from_rfc3339(&not_after_str)
-            .map_err(|e| Error::Decode {
-                reason: format!("invalid not_after: {e}"),
-            })?
-            .with_timezone(&Utc);
-        let next_renewal_at = DateTime::parse_from_rfc3339(&next_renewal_at_str)
-            .map_err(|e| Error::Decode {
-                reason: format!("invalid next_renewal_at: {e}"),
-            })?
-            .with_timezone(&Utc);
-        let last_renewed_at = match last_renewed_at_str {
-            Some(s) => Some(
-                DateTime::parse_from_rfc3339(&s)
-                    .map_err(|e| Error::Decode {
-                        reason: format!("invalid last_renewed_at: {e}"),
-                    })?
-                    .with_timezone(&Utc),
-            ),
-            None => None,
-        };
-
-        Ok(Some(TlsCertMeta {
-            public_hostname,
-            host_id,
-            issuer,
-            not_before,
-            not_after,
-            last_renewed_at,
-            next_renewal_at,
-            serial,
-        }))
+        match row {
+            Some(r) => Ok(Some(decode_tls_cert_row(r)?)),
+            None => Ok(None),
+        }
     }
+
+    /// Return every cert whose `next_renewal_at` is at or before `before`.
+    /// The renewal scheduler calls this once an hour with `Utc::now()` to find
+    /// certs due for re-issuance.
+    pub async fn list_tls_certs_due(&self, before: DateTime<Utc>) -> Result<Vec<TlsCertMeta>> {
+        let cutoff = before.to_rfc3339();
+        let rows = sqlx::query(
+            r#"
+            SELECT public_hostname, host_id, issuer, not_before, not_after,
+                   last_renewed_at, next_renewal_at, serial,
+                   last_attempt_at, last_error, attempt_count
+            FROM tls_certs
+            WHERE next_renewal_at <= ?
+            "#,
+        )
+        .bind(&cutoff)
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter().map(decode_tls_cert_row).collect()
+    }
+
+    /// Record a renewal attempt outcome. On success, `attempt_count` resets
+    /// to 0 — the field tracks CONSECUTIVE FAILURES (analogous to Plan A's
+    /// healthcheck eviction counter), not "total attempts ever". Without
+    /// this reset, the backoff window in `tls/renewal.rs::should_retry`
+    /// continues to grow even after a successful renewal, which means a
+    /// long-lived agent eventually hits the 24h cap and won't renew on time.
+    pub async fn record_tls_attempt(
+        &self,
+        public_hostname: &str,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        if success {
+            sqlx::query(
+                "UPDATE tls_certs SET last_attempt_at = ?, last_error = NULL, \
+                 attempt_count = 0 WHERE public_hostname = ?",
+            )
+            .bind(&now)
+            .bind(public_hostname)
+            .execute(self.pool())
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE tls_certs SET last_attempt_at = ?, last_error = ?, \
+                 attempt_count = attempt_count + 1 WHERE public_hostname = ?",
+            )
+            .bind(&now)
+            .bind(&error)
+            .bind(public_hostname)
+            .execute(self.pool())
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Parse a timestamp written either explicitly as RFC3339 (our `to_rfc3339()`
+/// binds) or implicitly by SQLite's `CURRENT_TIMESTAMP` default (which uses
+/// `"YYYY-MM-DD HH:MM:SS"`). Tries RFC3339 first, falls back to SQLite's
+/// format, and returns `Error::Decode` with the field name if both fail.
+fn parse_db_timestamp(s: &str, field: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                .map(|n| n.and_utc().fixed_offset())
+        })
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| Error::Decode {
+            reason: format!("invalid {field} '{s}': {e}"),
+        })
+}
+
+/// Decode one `tls_certs` row into a [`TlsCertMeta`]. Shared by
+/// [`Inventory::get_tls_cert_meta`] and [`Inventory::list_tls_certs_due`] so
+/// the column-by-column decoding logic lives in one place.
+fn decode_tls_cert_row(r: sqlx::sqlite::SqliteRow) -> Result<TlsCertMeta> {
+    use sqlx::Row;
+
+    let public_hostname: String = r.try_get("public_hostname")?;
+    let host_bytes: Vec<u8> = r.try_get("host_id")?;
+    let host_id = HostId::from_db_bytes(host_bytes)?;
+    let issuer: String = r.try_get("issuer")?;
+    let not_before_str: String = r.try_get("not_before")?;
+    let not_after_str: String = r.try_get("not_after")?;
+    let last_renewed_at_str: Option<String> = r.try_get("last_renewed_at")?;
+    let next_renewal_at_str: String = r.try_get("next_renewal_at")?;
+    let serial: Option<String> = r.try_get("serial")?;
+    let last_attempt_at_str: Option<String> = r.try_get("last_attempt_at")?;
+    let last_error: Option<String> = r.try_get("last_error")?;
+    let attempt_count_i64: i64 = r.try_get("attempt_count")?;
+    let attempt_count: u32 = attempt_count_i64.try_into().map_err(|_| Error::Decode {
+        reason: format!("attempt_count out of range: {attempt_count_i64}"),
+    })?;
+
+    let not_before = parse_db_timestamp(&not_before_str, "not_before")?;
+    let not_after = parse_db_timestamp(&not_after_str, "not_after")?;
+    let next_renewal_at = parse_db_timestamp(&next_renewal_at_str, "next_renewal_at")?;
+    let last_renewed_at = match last_renewed_at_str {
+        Some(s) => Some(parse_db_timestamp(&s, "last_renewed_at")?),
+        None => None,
+    };
+    let last_attempt_at = match last_attempt_at_str {
+        Some(s) => Some(parse_db_timestamp(&s, "last_attempt_at")?),
+        None => None,
+    };
+
+    Ok(TlsCertMeta {
+        public_hostname,
+        host_id,
+        issuer,
+        not_before,
+        not_after,
+        last_renewed_at,
+        next_renewal_at,
+        serial,
+        last_attempt_at,
+        last_error,
+        attempt_count,
+    })
 }

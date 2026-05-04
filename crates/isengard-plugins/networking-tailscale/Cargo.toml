@@ -1,0 +1,23 @@
+[package]
+name = "isengard-plugin-networking-tailscale"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tailscale (CLI-driven) NetworkingAdapter for Isengard"
+
+[dependencies]
+async-trait.workspace = true
+inventory.workspace = true
+isengard-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["process", "io-util"] }
+tracing.workspace = true
+which = "6"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

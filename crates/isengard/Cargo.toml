@@ -13,11 +13,17 @@ name = "isengard"
 path = "src/main.rs"
 
 [features]
-default = ["dev"]
+default = ["dev", "tailscale", "cf-tunnel"]
 # `dev`: compiles in a no-op plugin so the host has something to load while
 # real plugins (updater, dashboard, notifier) are not yet implemented. Removed
 # from the default feature set when those land.
 dev = []
+# `tailscale`: links the tailscale NetworkingAdapter (CLI-driven). On by default;
+# the adapter is inert unless an agent picks it via config.
+tailscale = ["dep:isengard-plugin-networking-tailscale"]
+# `cf-tunnel`: links the Cloudflare Tunnel NetworkingAdapter. On by default;
+# the adapter is inert unless an agent picks it via config.
+cf-tunnel = ["dep:isengard-plugin-networking-cf-tunnel"]
 
 [dependencies]
 anyhow.workspace = true
@@ -29,6 +35,8 @@ isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-plugin-dashboard.workspace = true
 isengard-plugin-networking-none.workspace = true
+isengard-plugin-networking-tailscale = { workspace = true, optional = true }
+isengard-plugin-networking-cf-tunnel = { workspace = true, optional = true }
 isengard-plugin-notifier.workspace = true
 isengard-plugin-updater.workspace = true
 serde_json.workspace = true

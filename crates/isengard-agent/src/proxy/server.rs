@@ -79,15 +79,38 @@ pub async fn run_for_test(
     .await;
 }
 
-pub async fn run(state: ProxyState, http_port: u16, _https_port: u16) {
+pub async fn run(state: ProxyState, http_port: u16, https_port: u16) {
+    let cert_store_opt = state.cert_store.read().await.clone();
+
     let mut server = Server::new_with_opt_and_conf(None, ServerConf::default());
     server.bootstrap();
 
-    let mut svc = http_proxy_service(&server.configuration, IsengardProxy::new(state));
+    let mut svc = http_proxy_service(&server.configuration, IsengardProxy::new(state.clone()));
     svc.add_tcp(&format!("0.0.0.0:{http_port}"));
-    // HTTPS listener wired in Plan B (Phase 8e). For now `https_port` is
-    // accepted but unbound.
-    server.add_service(svc);
 
+    if let Some(cert_store) = cert_store_opt {
+        use pingora_core::listeners::tls::TlsSettings;
+        let callback = Box::new(crate::proxy::IsengardCertCallback::new(cert_store));
+        match TlsSettings::with_callbacks(callback) {
+            Ok(tls_settings) => {
+                svc.add_tls_with_settings(&format!("0.0.0.0:{https_port}"), None, tls_settings);
+                tracing::info!(
+                    http_port,
+                    https_port,
+                    "proxy: HTTPS listener configured (boringssl)"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "proxy: failed to build TlsSettings; HTTPS disabled");
+            }
+        }
+    } else {
+        tracing::info!(
+            http_port,
+            "proxy: HTTPS listener disabled (no cert_store installed)"
+        );
+    }
+
+    server.add_service(svc);
     let _ = tokio::task::spawn_blocking(move || server.run(RunArgs::default())).await;
 }

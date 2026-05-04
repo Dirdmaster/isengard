@@ -16,7 +16,13 @@ mod dev_plugin;
 #[allow(unused_imports)]
 use isengard_plugin_dashboard as _;
 #[allow(unused_imports)]
+#[cfg(feature = "cf-tunnel")]
+use isengard_plugin_networking_cf_tunnel as _;
+#[allow(unused_imports)]
 use isengard_plugin_networking_none as _;
+#[allow(unused_imports)]
+#[cfg(feature = "tailscale")]
+use isengard_plugin_networking_tailscale as _;
 #[allow(unused_imports)]
 use isengard_plugin_notifier as _;
 
@@ -115,6 +121,13 @@ async fn main() -> Result<()> {
                 config: serde_json::Value::Object(Default::default()),
                 proxy_http_port: Some(8080),
                 proxy_https_port: Some(8443),
+                tls: Some(isengard_agent::TlsOptions {
+                    cert_dir: "/var/lib/isengard/tls".into(),
+                    acme_contact_email: std::env::var("ISENGARD_ACME_EMAIL")
+                        .unwrap_or_else(|_| "ops@example.com".into()),
+                    acme_directory_url: std::env::var("ISENGARD_ACME_DIRECTORY")
+                        .unwrap_or_else(|_| isengard_agent::tls::LE_STAGING_URL.to_string()),
+                }),
             })
             .await
         }

@@ -16,11 +16,15 @@ use isengard_core::Event;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
+use crate::tls::{CertStore, ChallengeState};
+
+pub mod cert_callback;
 pub mod healthcheck;
 pub mod router;
 pub mod server;
 pub mod upstreams;
 
+pub use cert_callback::IsengardCertCallback;
 pub use upstreams::{Upstream, UpstreamRegistry};
 
 /// Shared state passed into the `ProxyHttp` router. Cheap to clone (Arc).
@@ -39,6 +43,13 @@ pub struct ProxyState {
     /// events through the same channel `OutboundEmitter` drains. `None` in
     /// unit-test setups that don't care about events.
     pub event_tx: Arc<RwLock<Option<mpsc::Sender<Event>>>>,
+    /// Optional `CertStore` for the HTTPS listener. `None` means HTTPS is
+    /// disabled (HTTP-only). The proxy `run` entrypoint reads this once at
+    /// startup; install before calling `run` if you want TLS.
+    pub cert_store: Arc<RwLock<Option<Arc<CertStore>>>>,
+    /// HTTP-01 challenge state for the :8080 listener. Shared with the ACME
+    /// order task. Empty in tests that don't exercise ACME.
+    pub acme_challenges: Arc<ChallengeState>,
 }
 
 impl ProxyState {
@@ -64,6 +75,15 @@ impl ProxyState {
         if let Some(tx) = &*r {
             let _ = tx.try_send(ev);
         }
+    }
+
+    /// Install (or replace) the `CertStore` consulted by the SNI cert
+    /// callback. Must be called before the proxy `run` entrypoint reads
+    /// `cert_store` at startup; once installed, the HTTPS listener binds.
+    /// `None` left in place keeps the listener disabled (HTTP-only).
+    pub async fn install_cert_store(&self, store: Arc<CertStore>) {
+        let mut w = self.cert_store.write().await;
+        *w = Some(store);
     }
 }
 
