@@ -27,11 +27,12 @@ use crate::deployment::{DeploymentSupervisor, SupervisorDispatcher};
 
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
-    /// URL of the controller, e.g. `http://controller.example.com:9417`.
-    /// Required — Phase 2d removes the `Option` wrapper from Phase 1.
+    /// URL of the controller, e.g. `https://controller.example.com:9417`.
+    /// Required — Phase 2d removes the `Option` wrapper from Phase 1. Must be
+    /// `https://` post-Phase-14 since the gRPC server is mTLS-only.
     pub controller_url: String,
-    /// Directory where the agent persists its state (`agent.json` etc).
-    /// Created if missing.
+    /// Directory where the agent persists its state (`agent.json` +
+    /// `certs/{ca,agent.crt,agent.key}` etc). Created if missing.
     pub state_dir: std::path::PathBuf,
     pub config: serde_json::Value,
     /// Reverse-proxy ports (Phase 8b). If both are `None`, the proxy
@@ -44,6 +45,11 @@ pub struct AgentOptions {
     /// listener + ACME are all disabled — useful for integration tests.
     /// Production passes `Some(TlsOptions { ... })`.
     pub tls: Option<TlsOptions>,
+    /// One-time enrollment token (Phase 14). Used only on first boot when
+    /// `agent.json` does not yet exist. The runtime also falls back to the
+    /// `ISENGARD_ENROLL_TOKEN` env var. Once an agent has a persisted cert
+    /// bundle, this is ignored.
+    pub enroll_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,30 +76,69 @@ pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
 pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     info!(state_dir = ?opts.state_dir, "starting agent");
 
-    // -- determine agent_id ----------------------------------------------
-    let existing = agent_state::load(&opts.state_dir).await?;
-    let agent_id = match existing {
+    // Make sure state_dir exists before the cert store / agent.json writes
+    // hit it. The CLI also does this, but other entry points (tests) may not.
+    std::fs::create_dir_all(&opts.state_dir)
+        .map_err(|e| anyhow::anyhow!("creating state dir {:?}: {e}", opts.state_dir))?;
+
+    // -- determine agent_id + cert bundle --------------------------------
+    //    Phase 14: first boot reads ISENGARD_ENROLL_TOKEN (or
+    //    AgentOptions::enroll_token), exchanges it for a signed cert bundle
+    //    via Enroll, and persists both the bundle and agent.json. Subsequent
+    //    boots refuse to start if agent.json exists without certs.
+    let (agent_id, heartbeat_interval_secs) = match agent_state::load(&opts.state_dir).await? {
         Some(state) => {
+            if !cert_store::exists(&opts.state_dir) {
+                anyhow::bail!(
+                    "agent.json present but no cert bundle in {}/certs — wipe state and re-enroll",
+                    opts.state_dir.display(),
+                );
+            }
             info!(agent_id = %state.agent_id, "already enrolled, skipping enroll");
-            state.agent_id
+            let hb = state
+                .heartbeat_interval_secs
+                .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS);
+            (state.agent_id, hb)
         }
         None => {
             info!("no agent.json found, enrolling with controller");
-            let token = std::env::var("ISENGARD_TOKEN")
-                .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
+            let enroll_token = std::env::var("ISENGARD_ENROLL_TOKEN")
+                .ok()
+                .or_else(|| opts.enroll_token.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ISENGARD_ENROLL_TOKEN env var (or --enroll-token) required for \
+                         first-time enrollment. Mint one with `isengard controller token mint`."
+                    )
+                })?;
             let host_info = enroll::HostInfo::detect();
-            let id = enroll::enroll(&opts.controller_url, &token, host_info).await?;
+            let outcome = enroll::enroll(&opts.controller_url, &enroll_token, host_info).await?;
+            // Drop the plaintext token from memory once the bundle is in hand.
+            drop(enroll_token);
+
+            cert_store::save(&opts.state_dir, &outcome.bundle)
+                .map_err(|e| anyhow::anyhow!("persisting cert bundle: {e}"))?;
+            let agent_id_str = outcome.host_id.to_string();
             agent_state::save(
                 &opts.state_dir,
                 &agent_state::AgentState {
-                    agent_id: id.clone(),
+                    agent_id: agent_id_str.clone(),
+                    controller_url: Some(opts.controller_url.clone()),
+                    heartbeat_interval_secs: Some(outcome.heartbeat_interval_secs),
                 },
             )
             .await?;
-            info!(agent_id = %id, "enrolled");
-            id
+            info!(agent_id = %agent_id_str, "enrolled");
+            (agent_id_str, outcome.heartbeat_interval_secs)
         }
     };
+
+    // -- build the mTLS endpoint reused by the sync stream + any future
+    //    direct RPC the agent issues (RenewCert, etc). One Endpoint, many
+    //    `connect()` calls — sync's reconnect loop dials per attempt.
+    let bundle = cert_store::load(&opts.state_dir)
+        .map_err(|e| anyhow::anyhow!("loading cert bundle: {e}"))?;
+    let endpoint = build_mtls_endpoint(&opts.controller_url, &bundle)?;
 
     // -- build the outbound EventEmitter (mpsc-backed). Receiver lives in
     //    this scope and is passed by &mut into the sync loop so events stay
@@ -251,26 +296,19 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     }
 
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
-    let token = std::env::var("ISENGARD_TOKEN")
-        .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
     let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
 
-    // Phase 2e hardcodes 10s heartbeat interval. Phase 2e+ honors
-    // heartbeat_interval_secs from EnrollResponse.
-    const HEARTBEAT_INTERVAL_SECS: u32 = 10;
-
     // The sync loop borrows `events_rx` for its lifetime — own it here.
-    let sync_url = opts.controller_url.clone();
+    let sync_endpoint = endpoint.clone();
     let sync_agent_id = agent_id.clone();
     let sync_cancel = cancel.clone();
     let sync_proxy_state = proxy_state.clone();
     let sync_supervisor = supervisor_for_sync.clone();
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
-            sync_url,
-            token,
+            sync_endpoint,
             sync_agent_id,
-            HEARTBEAT_INTERVAL_SECS,
+            heartbeat_interval_secs,
             sync_cancel,
             &mut events_rx,
             &mut agent_msg_rx,
@@ -324,11 +362,113 @@ async fn open_agent_inventory(state_dir: &std::path::Path) -> Result<isengard_st
         .map_err(|e| anyhow::anyhow!("opening agent inventory: {e}"))
 }
 
+/// Fallback heartbeat interval when the persisted `agent.json` predates Phase
+/// 14 (no `heartbeat_interval_secs` field). Production agents enrolled on
+/// Phase 14+ get this value from the EnrollResponse.
+const DEFAULT_HEARTBEAT_INTERVAL_SECS: u32 = 10;
+
+/// Build the reusable mTLS [`tonic::transport::Endpoint`] every post-enroll
+/// RPC dials through. The endpoint is cheap to clone and each `connect()`
+/// call produces a fresh transport — sync's reconnect loop relies on this.
+fn build_mtls_endpoint(
+    controller_url: &str,
+    bundle: &cert_store::CertBundle,
+) -> Result<tonic::transport::Endpoint> {
+    let dns = controller_dns_from_url(controller_url)
+        .ok_or_else(|| anyhow::anyhow!("controller_url {controller_url:?} has no host part"))?;
+    let tls = tonic::transport::ClientTlsConfig::new()
+        .ca_certificate(tonic::transport::Certificate::from_pem(
+            bundle.ca_pem.as_bytes(),
+        ))
+        .identity(tonic::transport::Identity::from_pem(
+            bundle.cert_pem.as_bytes(),
+            bundle.key_pem.as_bytes(),
+        ))
+        .domain_name(dns);
+    let endpoint = tonic::transport::Endpoint::from_shared(controller_url.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid controller_url {controller_url:?}: {e}"))?
+        .tls_config(tls)
+        .map_err(|e| anyhow::anyhow!("install agent mTLS config: {e}"))?;
+    Ok(endpoint)
+}
+
+/// Extract the DNS host from a controller URL, e.g.
+/// `https://controller.local:9417/foo` → `Some("controller.local")`.
+/// Used as the SNI / cert-verification name for the mTLS channel.
+///
+/// Tiny manual parser — pulling in `url` for one call wasn't worth it.
+fn controller_dns_from_url(url: &str) -> Option<String> {
+    let after_scheme = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => url,
+    };
+    let after_userinfo = match after_scheme.split_once('@') {
+        Some((_, rest)) => rest,
+        None => after_scheme,
+    };
+    let host_with_port = after_userinfo
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_userinfo);
+    let host = if let Some(rest) = host_with_port.strip_prefix('[') {
+        // IPv6 literal: take everything before the closing bracket.
+        rest.split(']').next()?.to_string()
+    } else {
+        // host[:port] — drop the port if present.
+        host_with_port
+            .split_once(':')
+            .map(|(h, _)| h.to_string())
+            .unwrap_or_else(|| host_with_port.to_string())
+    };
+    if host.is_empty() { None } else { Some(host) }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::controller_dns_from_url;
+
     #[test]
-    fn dummy() {
-        // placeholder; real tests come in Tasks 2-4 of Phase 2d
-        assert_eq!(2 + 2, 4);
+    fn dns_from_url_strips_scheme_and_port() {
+        assert_eq!(
+            controller_dns_from_url("https://controller.local:9417").as_deref(),
+            Some("controller.local"),
+        );
+    }
+
+    #[test]
+    fn dns_from_url_strips_path() {
+        assert_eq!(
+            controller_dns_from_url("https://controller.example.com:9417/foo/bar").as_deref(),
+            Some("controller.example.com"),
+        );
+    }
+
+    #[test]
+    fn dns_from_url_handles_no_scheme() {
+        assert_eq!(
+            controller_dns_from_url("controller.local:9417").as_deref(),
+            Some("controller.local"),
+        );
+    }
+
+    #[test]
+    fn dns_from_url_handles_userinfo() {
+        assert_eq!(
+            controller_dns_from_url("https://user:pass@controller.local:9417").as_deref(),
+            Some("controller.local"),
+        );
+    }
+
+    #[test]
+    fn dns_from_url_handles_ipv6_literal() {
+        assert_eq!(
+            controller_dns_from_url("https://[::1]:9417").as_deref(),
+            Some("::1"),
+        );
+    }
+
+    #[test]
+    fn dns_from_url_returns_none_for_empty() {
+        assert_eq!(controller_dns_from_url("https://").as_deref(), None);
     }
 }

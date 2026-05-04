@@ -1,5 +1,10 @@
 //! Phase 2e e2e: agent runs, sends heartbeats, controller's last_seen_at
 //! advances visibly.
+//!
+//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). The Phase 2
+//! bootstrap (`http://`, bearer token, `seed_token` writing settings rows)
+//! does not match the mTLS surface; test left in tree as documentation and
+//! marked `#[ignore]`.
 
 #![allow(clippy::result_large_err)]
 
@@ -69,6 +74,7 @@ async fn wait_for_state_file(path: &std::path::Path, timeout_ms: u64) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "phase-14 task-11: superseded by auth_e2e.rs (Task 15)"]
 async fn agent_heartbeats_advance_last_seen_at() {
     let controller_state = TempDir::new().unwrap();
     let agent_state = TempDir::new().unwrap();
@@ -86,6 +92,7 @@ async fn agent_heartbeats_advance_last_seen_at() {
         proxy_http_port: None,
         proxy_https_port: None,
         tls: None,
+        enroll_token: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

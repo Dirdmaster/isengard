@@ -33,9 +33,7 @@ clap.workspace = true
 hex = "0.4"
 humantime = "2.1"
 inventory.workspace = true
-# isengard-agent intentionally NOT a dep right now: Task 11 will reintroduce
-# it once the enroll module is ported to the new EnrollRequest schema. Until
-# then `Command::Agent` returns an error and the binary builds without it.
+isengard-agent.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-plugin-dashboard.workspace = true

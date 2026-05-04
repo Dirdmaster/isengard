@@ -13,7 +13,20 @@ const STATE_FILENAME: &str = "agent.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentState {
+    /// Stable host identifier returned by the controller at enrollment.
+    /// Stored as a ULID string so the file stays human-readable.
     pub agent_id: String,
+    /// URL of the controller this agent enrolled against. Captured here so
+    /// later boots can validate they're not being repointed silently. Set on
+    /// first boot; older state files predating this field deserialize with
+    /// `None` and the agent moves on (the next save will populate it).
+    #[serde(default)]
+    pub controller_url: Option<String>,
+    /// Heartbeat interval the controller asked us to use, in seconds. `None`
+    /// for state files written before Phase 14 task 11; the agent then falls
+    /// back to its compiled-in default.
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<u32>,
 }
 
 /// Load the state file from `<state_dir>/agent.json`. Returns `Ok(None)` if the
@@ -68,6 +81,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let original = AgentState {
             agent_id: "01J7XYZAGENTID000000000000".into(),
+            controller_url: Some("https://controller.local:9417".into()),
+            heartbeat_interval_secs: Some(10),
         };
 
         save(dir.path(), &original).await.expect("save");
@@ -95,9 +110,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let first = AgentState {
             agent_id: "first".into(),
+            controller_url: None,
+            heartbeat_interval_secs: None,
         };
         let second = AgentState {
             agent_id: "second".into(),
+            controller_url: Some("https://controller.local:9417".into()),
+            heartbeat_interval_secs: Some(20),
         };
         save(dir.path(), &first).await.unwrap();
         save(dir.path(), &second).await.unwrap();

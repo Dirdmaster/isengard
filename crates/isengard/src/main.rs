@@ -154,9 +154,6 @@ async fn main() -> Result<()> {
             }) => run_agent_revoke(state_dir, host_id, reason).await,
             Some(ControllerAction::Agent { op: AgentOp::List }) => run_agent_list(state_dir).await,
         },
-        // TODO: fix in Task 11 — the agent crate currently does not compile
-        // (its enroll module references stale proto field names). The CLI
-        // surface lands here so tests / docs can already reference it.
         Command::Agent {
             controller,
             state_dir,
@@ -270,17 +267,29 @@ async fn run_agent_list(state_dir: std::path::PathBuf) -> Result<()> {
     Ok(())
 }
 
-#[allow(unused_variables)]
 async fn run_agent_mode(
     controller: String,
     state_dir: std::path::PathBuf,
     enroll_token: Option<String>,
 ) -> Result<()> {
-    // TODO: fix in Task 11 — the isengard-agent crate currently does not
-    // compile (its enroll module references stale proto fields). Once Task
-    // 11 lands, plumb `enroll_token` into the agent's enroll bootstrap and
-    // restore the proxy / TLS option wiring that previously lived here.
-    Err(anyhow!(
-        "agent mode is temporarily disabled while Task 11 refactors the enroll path"
-    ))
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
+
+    tracing::info!(%controller, ?state_dir, "agent mode");
+    isengard_agent::run_agent(isengard_agent::AgentOptions {
+        controller_url: controller,
+        state_dir,
+        config: serde_json::Value::Object(Default::default()),
+        proxy_http_port: Some(8080),
+        proxy_https_port: Some(8443),
+        tls: Some(isengard_agent::TlsOptions {
+            cert_dir: "/var/lib/isengard/tls".into(),
+            acme_contact_email: std::env::var("ISENGARD_ACME_EMAIL")
+                .unwrap_or_else(|_| "ops@example.com".into()),
+            acme_directory_url: std::env::var("ISENGARD_ACME_DIRECTORY")
+                .unwrap_or_else(|_| isengard_agent::tls::LE_STAGING_URL.to_string()),
+        }),
+        enroll_token,
+    })
+    .await
 }
