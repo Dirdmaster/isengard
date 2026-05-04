@@ -16,6 +16,7 @@ use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeploy
 use isengard_storage::host::{EnrollHost, HostId};
 use isengard_storage::inventory::Inventory;
 use isengard_storage::journal::Journal;
+use isengard_storage::service::{InsertService, ServiceState};
 use isengard_storage::stack::{InsertStack, StackId, StackSource};
 use tower::ServiceExt;
 use ulid::Ulid;
@@ -182,4 +183,47 @@ async fn abort_returns_404_for_unknown_deployment() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn put_service_strategy_persists() {
+    let (app, inv, host, stack) = setup_app().await;
+    let svc_id = inv
+        .insert_service(InsertService {
+            host_id: host,
+            stack_id: Some(stack),
+            name: "web".into(),
+            image: "nginx:alpine".into(),
+            state: ServiceState::Running,
+        })
+        .await
+        .unwrap();
+
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/services/{}/deploy-strategy", svc_id.0))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"override_value":"blue-green"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let after = inv.get_service(svc_id).await.unwrap().unwrap();
+    assert_eq!(
+        after.deploy_strategy_override.as_deref(),
+        Some("blue-green")
+    );
+}
+
+#[tokio::test]
+async fn put_service_strategy_rejects_unknown_value() {
+    let (app, _inv, _host, _stack) = setup_app().await;
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/services/1/deploy-strategy")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"override_value":"bogus"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

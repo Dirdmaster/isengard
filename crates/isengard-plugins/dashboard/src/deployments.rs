@@ -9,9 +9,10 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use isengard_controller::ControllerHandles;
 use isengard_storage::deployment::Deployment;
+use isengard_storage::service::ServiceId;
 use isengard_storage::stack::StackId;
 use serde::{Deserialize, Serialize};
 
@@ -82,10 +83,33 @@ pub struct AbortResponse {
     pub reason: Option<String>,
 }
 
+/// Per-service deploy strategy override row, surfaced by the
+/// `Settings → Deployments` tab. `override_value` is `None` when the service
+/// follows the controller default (auto-blue-green if the service is
+/// HTTP-routed, otherwise in-place).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServiceDeployStrategyDto {
+    pub service_id: i64,
+    pub host_id: String,
+    pub stack_id: Option<i64>,
+    pub stack_name: Option<String>,
+    pub service_name: String,
+    pub override_value: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PutOverrideBody {
+    /// One of `"auto"`, `"blue-green"`, `"in-place"`. `"auto"` (or `null`)
+    /// clears the override.
+    pub override_value: Option<String>,
+}
+
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/deployments", get(list_deployments))
         .route("/deployments/{id}/abort", post(abort_deployment))
+        .route("/services/deploy-strategy", get(list_service_strategies))
+        .route("/services/{id}/deploy-strategy", put(put_service_strategy))
         .with_state(handles)
 }
 
@@ -199,4 +223,63 @@ async fn abort_deployment(
             reason: None,
         }),
     ))
+}
+
+/// `GET /services/deploy-strategy` — list every service with its current
+/// per-service strategy override (or `None` when following the default).
+async fn list_service_strategies(
+    State(handles): State<Arc<ControllerHandles>>,
+) -> Result<Json<Vec<ServiceDeployStrategyDto>>, (StatusCode, String)> {
+    let services = handles
+        .inventory
+        .list_services(None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+
+    let mut dtos = Vec::with_capacity(services.len());
+    for s in services {
+        let stack_name = match s.stack_id {
+            Some(sid) => handles
+                .inventory
+                .get_stack(sid)
+                .await
+                .ok()
+                .flatten()
+                .map(|st| st.name),
+            None => None,
+        };
+        dtos.push(ServiceDeployStrategyDto {
+            service_id: s.id.0,
+            host_id: s.host_id.to_string(),
+            stack_id: s.stack_id.map(|s| s.0),
+            stack_name,
+            service_name: s.name,
+            override_value: s.deploy_strategy_override,
+        });
+    }
+    Ok(Json(dtos))
+}
+
+/// `PUT /services/{id}/deploy-strategy` — set or clear the per-service
+/// strategy override. `"auto"` (or `null`) clears; `"blue-green"` and
+/// `"in-place"` are the only other accepted values.
+async fn put_service_strategy(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(service_id): Path<i64>,
+    Json(body): Json<PutOverrideBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if let Some(v) = body.override_value.as_deref() {
+        if !["auto", "blue-green", "in-place"].contains(&v) {
+            return Err((StatusCode::BAD_REQUEST, format!("invalid override: {v}")));
+        }
+    }
+    handles
+        .inventory
+        .set_service_deploy_strategy_override(
+            ServiceId(service_id),
+            body.override_value.as_deref().filter(|v| *v != "auto"),
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
