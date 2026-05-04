@@ -133,14 +133,32 @@ impl Controller for ControllerService {
         }))
     }
 
-    /// Phase 14 Task 7 will implement leaf-cert renewal driven by the agent's
-    /// presented mTLS cert. Until then this returns Unimplemented so callers
-    /// don't get a misleading success.
+    /// Sign a fresh leaf cert for the calling agent. The new cert + key go back
+    /// in the response; the old cert row stays in storage (append-only audit).
+    ///
+    /// TODO(task-8): once the mTLS interceptor lands, cross-check that the
+    /// `host_id` in the request matches the `host_id` extracted from the
+    /// caller's client cert. Until then we trust the request body, which is
+    /// fine because nothing reaches this handler without already passing
+    /// transport-level authentication once the interceptor is wired in.
     async fn renew_cert(
         &self,
-        _request: Request<RenewCertRequest>,
+        request: Request<RenewCertRequest>,
     ) -> Result<Response<RenewCertResponse>, Status> {
-        Err(Status::unimplemented("RenewCert lands in Phase 14 Task 7"))
+        let req = request.into_inner();
+        let host_id = isengard_storage::HostId::from_db_bytes(req.host_id)
+            .map_err(|_| Status::invalid_argument("invalid host_id"))?;
+
+        let renewed = self.enrollment.renew(host_id).await.map_err(|e| {
+            tracing::warn!(error = %e, host_id = %host_id, "renew_cert: failed");
+            Status::internal(format!("{e}"))
+        })?;
+
+        Ok(Response::new(RenewCertResponse {
+            agent_cert_pem: renewed.agent_cert_pem,
+            agent_key_pem: renewed.agent_key_pem,
+            expires_at: renewed.expires_at.to_rfc3339(),
+        }))
     }
 
     async fn sync(

@@ -72,6 +72,16 @@ pub struct EnrollResponse {
     pub heartbeat_interval_secs: u32,
 }
 
+/// Bundle returned on a successful renew. Same shape as the cert half of
+/// [`EnrollResponse`], minus the bootstrap-only fields (host_id and CA root
+/// are already known to the caller).
+#[derive(Debug, Clone)]
+pub struct RenewedCert {
+    pub agent_cert_pem: String,
+    pub agent_key_pem: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct EnrollmentService {
     inventory: Arc<Inventory>,
     ca: Arc<Authority>,
@@ -158,6 +168,44 @@ impl EnrollmentService {
             agent_key_pem: leaf.key_pem,
             ca_root_pem: self.ca.root_cert_pem().to_string(),
             heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+        })
+    }
+
+    /// Sign a fresh leaf cert for an already-enrolled host. The previous cert
+    /// row stays in storage with `revoked_at = NULL`: the agent_certs table is
+    /// an append-only audit trail, and the old cert remains valid until either
+    /// it expires naturally or it's revoked explicitly. The agent simply
+    /// switches to presenting the new key/cert pair.
+    pub async fn renew(&self, host_id: HostId) -> Result<RenewedCert> {
+        let host = self
+            .inventory
+            .get_host(host_id)
+            .await
+            .context("host lookup")?
+            .ok_or_else(|| anyhow!("unknown host"))?;
+
+        let leaf = self
+            .ca
+            .sign_agent_leaf(host_id, &host.hostname, Duration::days(LEAF_TTL_DAYS))
+            .context("sign leaf cert")?;
+
+        self.inventory
+            .insert_agent_cert(AgentCert {
+                serial: leaf.serial.clone(),
+                host_id,
+                cert_pem: leaf.cert_pem.clone(),
+                issued_at: chrono::Utc::now(),
+                expires_at: leaf.expires_at,
+                revoked_at: None,
+                revoke_reason: None,
+            })
+            .await
+            .context("persist renewed cert")?;
+
+        Ok(RenewedCert {
+            agent_cert_pem: leaf.cert_pem,
+            agent_key_pem: leaf.key_pem,
+            expires_at: leaf.expires_at,
         })
     }
 }
