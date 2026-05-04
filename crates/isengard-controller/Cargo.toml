@@ -11,6 +11,7 @@ description = "Controller-mode runtime"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base32.workspace = true
 chrono.workspace = true
 http.workspace = true
 isengard-core.workspace = true

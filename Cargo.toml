@@ -96,6 +96,9 @@ reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tl
 # base64 (decode docker config auth blobs)
 base64 = "0.22.1"
 
+# base32 (encode short-lived enrollment tokens)
+base32 = "0.5"
+
 # user dirs (locate ~/.docker/config.json cross-platform)
 dirs = "6.0.0"
 
