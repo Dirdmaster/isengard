@@ -9,16 +9,35 @@ use instant_acme::{
 use isengard_storage::{Inventory, UpsertAcmeAccount};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::sync::OnceCell;
+use tokio::time::{Instant, sleep};
 
 pub const LE_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 pub const LE_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
+/// Wall-clock budgets for the order lifecycle.
+const ORDER_FINALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+const CERT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Thin wrapper around `instant-acme`. The `Account` is initialised lazily on
+/// the first `order()` call and cached for the lifetime of the client (next
+/// `order()` reuses it; restart-survival comes from the persisted credentials
+/// in `acme_account`).
+///
+/// **Caller contract:** the function returns `Err` on rate-limit and other
+/// transient ACME errors. The caller MUST apply backoff before retrying —
+/// the renewal scheduler in `tls/renewal.rs` is the production caller and
+/// implements this. Calling `order()` in a tight loop on failure will burn
+/// LE's per-domain order quota.
 pub struct AcmeClient {
     inventory: Arc<Inventory>,
     challenges: Arc<ChallengeState>,
     contact_email: String,
     directory_url: String,
+    /// Cached `Account` so we don't hit the storage layer (and possibly LE
+    /// for kid validation) on every `order()` call. Initialised on first use.
+    account_cache: OnceCell<Account>,
 }
 
 pub struct IssuedCert {
@@ -38,12 +57,20 @@ impl AcmeClient {
             challenges,
             contact_email,
             directory_url,
+            account_cache: OnceCell::new(),
         }
     }
 
     /// Get or create the LE account, persisted in storage so we don't
-    /// re-register on restarts.
-    async fn account(&self) -> Result<Account> {
+    /// re-register on restarts. Cached after first call so concurrent
+    /// `order()` invocations share one `Account` instance.
+    async fn account(&self) -> Result<&Account> {
+        self.account_cache
+            .get_or_try_init(|| async { self.load_or_register_account().await })
+            .await
+    }
+
+    async fn load_or_register_account(&self) -> Result<Account> {
         if let Some(saved) = self.inventory.get_acme_account().await? {
             // We stored the AccountCredentials JSON in the account_key_pem
             // column (slight name mismatch — kept the column name from
@@ -78,6 +105,11 @@ impl AcmeClient {
             })
             .await?;
 
+        tracing::info!(
+            directory = %self.directory_url,
+            email = %self.contact_email,
+            "ACME: registered new account"
+        );
         Ok(account)
     }
 
@@ -98,45 +130,64 @@ impl AcmeClient {
             .await
             .context("fetching authorizations")?;
 
+        // Install all HTTP-01 challenges. Track installed tokens so a
+        // mid-loop failure can clean them up — otherwise they'd leak in
+        // the in-memory ChallengeState until process restart.
+        let mut installed_tokens: Vec<String> = Vec::new();
         for authz in &authorizations {
-            let challenge = authz
+            let challenge = match authz
                 .challenges
                 .iter()
                 .find(|c| c.r#type == ChallengeType::Http01)
-                .ok_or_else(|| anyhow!("no HTTP-01 challenge for {hostname}"))?;
+            {
+                Some(c) => c,
+                None => {
+                    cleanup_tokens(&self.challenges, &installed_tokens).await;
+                    return Err(anyhow!("no HTTP-01 challenge for {hostname}"));
+                }
+            };
             let key_auth = order.key_authorization(challenge);
             self.challenges
                 .install(&challenge.token, key_auth.as_str())
                 .await;
-            order
+            installed_tokens.push(challenge.token.clone());
+            if let Err(e) = order
                 .set_challenge_ready(&challenge.url)
                 .await
-                .context("ack challenge ready")?;
+                .context("ack challenge ready")
+            {
+                cleanup_tokens(&self.challenges, &installed_tokens).await;
+                return Err(e);
+            }
         }
 
-        let mut attempts = 0;
+        // Wall-clock deadline (not poll-count) so a long network round-trip
+        // counts toward the budget consistently.
+        let order_deadline = Instant::now() + ORDER_FINALIZE_TIMEOUT;
         loop {
-            attempts += 1;
-            if attempts > 30 {
-                return Err(anyhow!("ACME order did not finalize after 30 polls"));
+            if Instant::now() >= order_deadline {
+                cleanup_tokens(&self.challenges, &installed_tokens).await;
+                return Err(anyhow!(
+                    "ACME order did not finalize within {}s for {hostname}",
+                    ORDER_FINALIZE_TIMEOUT.as_secs()
+                ));
             }
-            sleep(Duration::from_secs(2)).await;
+            sleep(POLL_INTERVAL).await;
             let state = order.refresh().await.context("refresh order")?;
+            tracing::debug!(hostname = %hostname, status = ?state.status, "ACME order poll");
             match state.status {
                 OrderStatus::Ready | OrderStatus::Valid => break,
                 OrderStatus::Invalid => {
-                    return Err(anyhow!("ACME order invalid: {:?}", state));
+                    cleanup_tokens(&self.challenges, &installed_tokens).await;
+                    return Err(anyhow!("ACME order invalid for {hostname}: {state:?}"));
                 }
                 OrderStatus::Pending | OrderStatus::Processing => continue,
             }
         }
 
-        // Cleanup challenge tokens.
-        for authz in &authorizations {
-            for c in &authz.challenges {
-                self.challenges.remove(&c.token).await;
-            }
-        }
+        // Cleanup challenge tokens — order is past the validation gate, so
+        // the in-memory entries are no longer needed.
+        cleanup_tokens(&self.challenges, &installed_tokens).await;
 
         // Generate CSR + finalize.
         let mut params = rcgen::CertificateParams::new(vec![hostname.to_string()])?;
@@ -148,21 +199,35 @@ impl AcmeClient {
 
         order.finalize(csr.der()).await.context("finalize order")?;
 
-        // Download cert chain.
+        // Download cert chain (separate deadline; LE sometimes takes a beat
+        // after finalize before the cert chain is retrievable).
+        let download_deadline = Instant::now() + CERT_DOWNLOAD_TIMEOUT;
         let cert_pem = loop {
-            attempts += 1;
-            if attempts > 60 {
-                return Err(anyhow!("ACME cert download did not arrive"));
+            if Instant::now() >= download_deadline {
+                return Err(anyhow!(
+                    "ACME cert download did not arrive within {}s for {hostname}",
+                    CERT_DOWNLOAD_TIMEOUT.as_secs()
+                ));
             }
-            sleep(Duration::from_secs(2)).await;
+            sleep(POLL_INTERVAL).await;
             if let Some(pem) = order.certificate().await.context("get certificate")? {
                 break pem;
             }
         };
 
+        tracing::info!(hostname = %hostname, "ACME: cert issued");
         Ok(IssuedCert {
             cert_pem,
             key_pem: key_pair.serialize_pem(),
         })
+    }
+}
+
+/// Best-effort cleanup of installed ChallengeState tokens. Called from every
+/// error-return path and from the success path after the order is past
+/// validation. Removing a missing token is a no-op.
+async fn cleanup_tokens(challenges: &ChallengeState, tokens: &[String]) {
+    for t in tokens {
+        challenges.remove(t).await;
     }
 }
