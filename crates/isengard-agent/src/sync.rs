@@ -40,6 +40,7 @@ use crate::proxy::ProxyState;
     skip(token, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sync_loop(
     controller_url: String,
     token: String,
@@ -258,6 +259,7 @@ pub async fn run_sync_loop(
     skip(token, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_sync_with_reconnect(
     controller_url: String,
     token: String,
