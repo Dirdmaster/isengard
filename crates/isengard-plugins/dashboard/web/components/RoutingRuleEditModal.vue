@@ -55,20 +55,24 @@
       </div>
 
       <DialogFooter>
-        <button class="px-3 py-1.5 text-sm text-iso-text-muted" @click="emit('update:open', false)">
+        <button class="px-3 py-1.5 text-sm text-iso-text-muted" :disabled="saving" @click="emit('update:open', false)">
           Cancel
         </button>
         <button class="px-3 py-1.5 text-sm bg-iso-info text-iso-bg-base rounded font-medium"
-                :disabled="!canSave" @click="onSave">
-          {{ rule ? 'Save' : 'Create' }}
+                :disabled="!canSave || saving" @click="onSave">
+          {{ saving ? 'Saving…' : (rule ? 'Save' : 'Create') }}
         </button>
       </DialogFooter>
+
+      <p v-if="saveError" class="text-xs text-iso-error pt-2 px-1">
+        {{ saveError }}
+      </p>
     </DialogContent>
   </Dialog>
 </template>
 
 <script setup lang="ts">
-import { reactive, computed, watch } from 'vue'
+import { reactive, computed, ref, watch } from 'vue'
 import { useRoutingRules, type RoutingRule } from '~/composables/useRoutingRules'
 
 const props = defineProps<{ open: boolean; rule?: RoutingRule | null; defaultHostId?: string }>()
@@ -101,14 +105,36 @@ watch(() => props.rule, (r) => {
 
 const canSave = computed(() => !!form.public_hostname && !!form.service_name && !!form.container_port)
 
-async function onSave() {
-  const body: any = { ...form }
-  if (props.defaultHostId && !body.host_id) body.host_id = props.defaultHostId
-  if (props.rule) {
-    await updateRule(props.rule.id, body)
-  } else {
-    await createRule(body)
+const saving = ref(false)
+const saveError = ref<string | null>(null)
+
+// Clear transient state when the modal opens. The watcher on props.rule above
+// doesn't catch repeated opens of the same rule (rule reference unchanged).
+watch(() => props.open, (open) => {
+  if (open) {
+    saveError.value = null
+    saving.value = false
   }
-  emit('update:open', false)
+})
+
+async function onSave() {
+  saveError.value = null
+  saving.value = true
+  try {
+    const body: any = { ...form }
+    if (props.defaultHostId && !body.host_id) body.host_id = props.defaultHostId
+    if (props.rule) {
+      await updateRule(props.rule.id, body)
+    } else {
+      await createRule(body)
+    }
+    emit('update:open', false)
+  } catch (e: any) {
+    // Backend returns 409 for hostname conflicts and 400 for validation
+    // errors — surface the message inline rather than swallowing.
+    saveError.value = e?.data?.message || e?.message || String(e)
+  } finally {
+    saving.value = false
+  }
 }
 </script>
