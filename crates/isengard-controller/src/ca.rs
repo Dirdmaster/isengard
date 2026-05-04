@@ -52,8 +52,8 @@ impl Authority {
     pub async fn load_or_init(inventory: &Inventory) -> Result<Self> {
         if let Some(row) = inventory.get_ca().await.context("ca lookup")? {
             let key_pair = KeyPair::from_pem(&row.root_key_pem).context("parse ca key")?;
-            let params = CertificateParams::from_ca_cert_pem(&row.root_cert_pem)
-                .context("parse ca cert")?;
+            let params =
+                CertificateParams::from_ca_cert_pem(&row.root_cert_pem).context("parse ca cert")?;
             let cert = params.self_signed(&key_pair).context("rebuild ca cert")?;
             return Ok(Authority {
                 cert_pem: row.root_cert_pem,
@@ -63,8 +63,7 @@ impl Authority {
             });
         }
 
-        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-            .context("generate ca key")?;
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generate ca key")?;
         let mut params = CertificateParams::new(vec![]).context("ca params")?;
         params
             .distinguished_name
@@ -120,15 +119,15 @@ impl Authority {
         hostname: &str,
         ttl: Duration,
     ) -> Result<IssuedLeaf> {
-        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-            .context("generate leaf key")?;
+        let leaf_key =
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generate leaf key")?;
         let mut params = CertificateParams::new(vec![]).context("leaf params")?;
         params
             .distinguished_name
             .push(DnType::CommonName, host_id.to_string());
-        params
-            .subject_alt_names
-            .push(SanType::DnsName(hostname.try_into().context("hostname not ia5")?));
+        params.subject_alt_names.push(SanType::DnsName(
+            hostname.try_into().context("hostname not ia5")?,
+        ));
         params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
             KeyUsagePurpose::KeyEncipherment,
