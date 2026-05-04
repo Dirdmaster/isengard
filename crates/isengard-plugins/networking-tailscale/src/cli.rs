@@ -112,7 +112,10 @@ pub async fn funnel_off() -> Result<()> {
 }
 
 /// Run `tailscale cert <hostname>` from a temp dir; returns (cert_pem, key_pem).
+/// Validates `hostname` against a path-traversal-safe charset before
+/// interpolating into the temp path.
 pub async fn fetch_cert(hostname: &str) -> Result<(String, String)> {
+    validate_hostname(hostname)?;
     let tmp = tempfile::tempdir().map_err(|e| CoreError::Other(format!("tempdir: {e}")))?;
 
     let out = Command::new("tailscale")
@@ -129,9 +132,36 @@ pub async fn fetch_cert(hostname: &str) -> Result<(String, String)> {
         )));
     }
 
-    let cert = std::fs::read_to_string(tmp.path().join(format!("{hostname}.crt")))
+    // Async fs reads — never block the executor on disk IO. The cert is
+    // small (a few KB) but we're inside the agent's tokio runtime alongside
+    // the proxy's request hot path.
+    let cert = tokio::fs::read_to_string(tmp.path().join(format!("{hostname}.crt")))
+        .await
         .map_err(|e| CoreError::Other(format!("reading cert: {e}")))?;
-    let key = std::fs::read_to_string(tmp.path().join(format!("{hostname}.key")))
+    let key = tokio::fs::read_to_string(tmp.path().join(format!("{hostname}.key")))
+        .await
         .map_err(|e| CoreError::Other(format!("reading key: {e}")))?;
     Ok((cert, key))
+}
+
+/// Reject hostnames that would escape the temp dir or break the
+/// `tailscale cert` invocation. Allows DNS labels (alnum, dot, hyphen).
+fn validate_hostname(hostname: &str) -> Result<()> {
+    if hostname.is_empty() {
+        return Err(CoreError::Other("hostname is empty".into()));
+    }
+    if hostname.contains('/') || hostname.contains('\\') || hostname.contains("..") {
+        return Err(CoreError::Other(format!(
+            "hostname {hostname:?} contains path-traversal characters"
+        )));
+    }
+    if let Some(c) = hostname
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '.' || *c == '-'))
+    {
+        return Err(CoreError::Other(format!(
+            "hostname {hostname:?} contains invalid character {c:?}"
+        )));
+    }
+    Ok(())
 }

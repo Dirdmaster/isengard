@@ -90,8 +90,18 @@ impl NetworkingAdapter for TailscaleAdapter {
         })
     }
 
+    /// **v1 limitation:** `tailscale serve --https=443 off` is GLOBAL per
+    /// port — it tears down ALL serve config on 443, not just the one for
+    /// `endpoint_id`. For multi-hostname-per-host setups this is wrong.
+    /// Per-hostname unexpose would need `--set-path=/<unique>` or different
+    /// ports; deferred until we actually have a multi-hostname tailscale user.
     async fn unexpose(&self, _ctx: &AdapterContext, _endpoint_id: &str) -> Result<()> {
-        let _ = cli::serve_off().await;
+        if let Err(e) = cli::serve_off().await {
+            // Worth logging — if serve_off fails, the tailscale config still
+            // routes 443 to a port that may now be reused. Funnel teardown
+            // is best-effort (idempotent).
+            tracing::warn!(error = %e, "tailscale: serve_off failed during unexpose");
+        }
         let _ = cli::funnel_off().await;
         Ok(())
     }
