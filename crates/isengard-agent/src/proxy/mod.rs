@@ -19,6 +19,7 @@ use tracing::{error, info, warn};
 use crate::tls::{CertStore, ChallengeState};
 
 pub mod cert_callback;
+pub mod events;
 pub mod healthcheck;
 pub mod router;
 pub mod server;
@@ -26,6 +27,7 @@ pub mod swap;
 pub mod upstreams;
 
 pub use cert_callback::IsengardCertCallback;
+pub use events::{ProxyEvent, ProxyEventBus};
 pub use swap::swap_upstream;
 pub use upstreams::{Upstream, UpstreamRegistry, UpstreamState};
 
@@ -52,6 +54,10 @@ pub struct ProxyState {
     /// HTTP-01 challenge state for the :8080 listener. Shared with the ACME
     /// order task. Empty in tests that don't exercise ACME.
     pub acme_challenges: Arc<ChallengeState>,
+    /// In-process broadcast bus for proxy lifecycle events. The deployment
+    /// driver subscribes here to react to post-switch upstream collapse
+    /// without round-tripping the controller.
+    pub proxy_events: ProxyEventBus,
 }
 
 impl ProxyState {
