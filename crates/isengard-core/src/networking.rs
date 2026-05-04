@@ -61,11 +61,19 @@ pub struct ExposedEndpoint {
 
 /// Per-host context an adapter receives on every call. Built by the agent.
 ///
+/// `Clone` so adapters can hand it to spawned sub-tasks (e.g. `cf-tunnel`'s
+/// `cloudflared` supervisor, `tailscale serve` pollers) without juggling
+/// references across `'static` boundaries. `Debug` is intentionally NOT
+/// derived because `PluginContext` carries `Arc<dyn EventEmitter>` whose
+/// trait object isn't `Debug`. Implement a custom `Debug` if you ever need
+/// one.
+///
 /// NOTE: `host_id` is typed as `String` rather than the canonical `HostId`
 /// because `HostId` currently lives in `isengard-storage`, which `isengard-core`
 /// cannot depend on (storage depends on core types, not the other way). When
 /// `HostId` (or a shared identifier crate) is hoisted into core, this field
 /// should be tightened to `HostId`.
+#[derive(Clone)]
 pub struct AdapterContext {
     pub host_id: String,
     /// Host-scoped settings slice, opaque to core. Adapters parse what they
@@ -87,6 +95,15 @@ pub trait NetworkingAdapter: Plugin {
     async fn leave(&self, ctx: &AdapterContext) -> Result<()>;
 
     async fn expose(&self, ctx: &AdapterContext, spec: &ExposeSpec) -> Result<ExposedEndpoint>;
+
+    /// Tear down what `expose` previously created for this `endpoint_id`.
+    ///
+    /// **Contract:** the adapter is responsible for persisting whatever it
+    /// needs to perform a clean teardown (DNS record name, ingress rule id,
+    /// tunnel uuid, etc.) keyed by `endpoint_id`. The agent does not call
+    /// `unexpose` with the original `ExposeSpec` — only the id returned from
+    /// `expose`. If your adapter needs the spec to unexpose correctly, store
+    /// it inside `ExposedEndpoint.adapter_data` and look it up on `unexpose`.
     async fn unexpose(&self, ctx: &AdapterContext, endpoint_id: &str) -> Result<()>;
 
     fn tls_strategy(&self) -> TlsStrategy;
