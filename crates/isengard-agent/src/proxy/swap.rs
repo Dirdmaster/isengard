@@ -19,26 +19,32 @@ use std::time::Duration;
 /// Replace the upstream for `hostname` with `new_upstream`. The old entry is
 /// flipped to `Draining` and removed after `grace_period` (only if still
 /// draining at that point), giving in-flight requests time to complete.
+///
+/// **Atomic from the router's view:** the Draining flip and the new-upstream
+/// install happen under a single write lock, so the router never observes a
+/// transient `Draining` state for the swapped hostname (which would cause a
+/// 503 between the two operations). `spawn_drain_cleanup` only schedules a
+/// tokio task — no lock contention while held.
 pub async fn swap_upstream(
     state: &ProxyState,
     hostname: &str,
     new_upstream: Upstream,
     grace_period: Duration,
 ) -> Result<()> {
-    {
-        let mut w = state.upstreams.write().await;
-        w.set_state(hostname, UpstreamState::Draining);
-    }
-
-    spawn_drain_cleanup(state.clone(), hostname.to_string(), grace_period);
-
     let mut new_active = new_upstream;
     new_active.state = UpstreamState::Active;
-    state
-        .upstreams
-        .write()
-        .await
-        .set(hostname.to_string(), new_active);
+
+    let mut w = state.upstreams.write().await;
+    // Mark the old entry draining first so the cleanup task (scheduled below)
+    // has the right state to compare against.
+    w.set_state(hostname, UpstreamState::Draining);
+    // tokio::spawn doesn't take the lock — holding the write lock across this
+    // call is microsecond-cheap.
+    spawn_drain_cleanup(state.clone(), hostname.to_string(), grace_period);
+    // Install the new upstream under the SAME lock. The router's next read
+    // sees `Active` directly — no Draining window from its perspective.
+    w.set(hostname.to_string(), new_active);
+    drop(w);
 
     Ok(())
 }
