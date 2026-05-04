@@ -31,6 +31,8 @@ pub use auth::TokenAuthLayer;
 pub use service::ControllerService;
 
 use crate::bus::EventBus;
+use crate::ca::Authority;
+use crate::enrollment::EnrollmentService;
 
 /// Bundle of references controller-side plugins need to access controller state.
 /// Passed via `PluginContext.bus` (downcast from `Arc<dyn Any>`).
@@ -119,6 +121,16 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     let bus = Arc::new(crate::bus::EventBus::new());
 
     let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
+
+    // Phase 14: internal CA + enrollment service. CA is loaded-or-initialized
+    // from the `ca` row (single-row table); the EnrollmentService owns the
+    // mint/redeem flow and signs leaf certs via the CA.
+    let ca = Arc::new(
+        Authority::load_or_init(&inventory)
+            .await
+            .context("loading or initializing CA")?,
+    );
+    let enrollment = Arc::new(EnrollmentService::new(inventory.clone(), ca.clone()));
 
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
@@ -215,6 +227,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         journal,
         bus,
         routing.clone(),
+        ca,
+        enrollment,
     ));
 
     info!("gRPC server listening");

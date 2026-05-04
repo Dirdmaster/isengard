@@ -1,22 +1,30 @@
-//! `Controller` gRPC service. `enroll` (Phase 2c) and `sync` (Phase 2e) are real.
+//! `Controller` gRPC service. `enroll` (Phase 2c, refactored Phase 14 Task 6)
+//! and `sync` (Phase 2e) are real.
 
 use std::sync::Arc;
 
 use isengard_proto::pb::controller_server::Controller;
-use isengard_proto::pb::{AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse};
+use isengard_proto::pb::{
+    AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, RenewCertRequest,
+    RenewCertResponse,
+};
 use isengard_storage::{Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::bus::EventBus;
+use crate::ca::Authority;
+use crate::enrollment::{EnrollmentService, HostInfo};
 use crate::routing::RoutingPusher;
 
 #[derive(Clone)]
 pub struct ControllerService {
-    inventory: Arc<Inventory>,
-    journal: Arc<Journal>,
-    bus: Arc<EventBus>,
-    routing: Arc<RoutingPusher>,
+    pub inventory: Arc<Inventory>,
+    pub journal: Arc<Journal>,
+    pub bus: Arc<EventBus>,
+    pub routing: Arc<RoutingPusher>,
+    pub ca: Arc<Authority>,
+    pub enrollment: Arc<EnrollmentService>,
 }
 
 impl ControllerService {
@@ -25,12 +33,42 @@ impl ControllerService {
         journal: Arc<Journal>,
         bus: Arc<EventBus>,
         routing: Arc<RoutingPusher>,
+        ca: Arc<Authority>,
+        enrollment: Arc<EnrollmentService>,
     ) -> Self {
         Self {
             inventory,
             journal,
             bus,
             routing,
+            ca,
+            enrollment,
+        }
+    }
+
+    /// Test constructor: stubs the bus, journal, and routing pusher with
+    /// fresh in-memory instances. Caller supplies the inventory + CA +
+    /// enrollment service it wants to exercise. Used by Phase 14 task tests
+    /// that only care about the enrollment / cert flows.
+    pub async fn new_for_test(
+        inventory: Arc<Inventory>,
+        ca: Arc<Authority>,
+        enrollment: Arc<EnrollmentService>,
+    ) -> Self {
+        let journal = Arc::new(
+            Journal::open_in_memory()
+                .await
+                .expect("journal open_in_memory in test"),
+        );
+        let bus = Arc::new(EventBus::new());
+        let routing = Arc::new(RoutingPusher::new(inventory.clone()));
+        Self {
+            inventory,
+            journal,
+            bus,
+            routing,
+            ca,
+            enrollment,
         }
     }
 }
@@ -45,79 +83,26 @@ impl Controller for ControllerService {
     ) -> Result<Response<EnrollResponse>, Status> {
         let req = request.into_inner();
 
-        // Resolve fleet from the optional enrollment_token. If the agent
-        // enrolled via the wizard, the token's payload (created by the
-        // dashboard's POST /hosts handler) carries the fleet name. Without a
-        // valid token, enrollment is rejected — every host belongs to a fleet
-        // the user explicitly named.
-        let token = req.enrollment_token.as_deref().unwrap_or_default();
-        if token.is_empty() {
-            return Err(Status::invalid_argument(
-                "enrollment_token required (issue one via the dashboard)",
-            ));
-        }
-        let key = format!("enrollment.token.{token}");
-        let fleet = match self.inventory.get_setting(&key).await {
-            Ok(Some(payload)) => payload
-                .get("fleet")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .ok_or_else(|| {
-                    Status::invalid_argument("enrollment token payload missing fleet")
-                })?,
-            Ok(None) => {
-                return Err(Status::unauthenticated(
-                    "enrollment token unknown or expired",
-                ));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "enroll: settings lookup failed");
-                return Err(Status::internal("settings lookup failed"));
-            }
-        };
-
-        // Convert proto request → storage request, applying the resolved fleet.
-        let enroll_req = isengard_storage::EnrollHost {
-            fingerprint: req.fingerprint.clone(),
+        let host_info = HostInfo {
             hostname: req.hostname.clone(),
             os: req.os,
-            arch: req.arch,
-            agent_version: req.agent_version,
-            docker_version: req.docker_version,
-            fleet: fleet.clone(),
+            version: req.version,
         };
 
-        let id = match self.inventory.enroll_host(enroll_req).await {
-            Ok(id) => id,
-            Err(isengard_storage::Error::Db(sqlx_err)) => {
-                // UNIQUE violation on fingerprint maps to AlreadyExists.
-                let is_unique_violation = sqlx_err
-                    .as_database_error()
-                    .map(|db_err| {
-                        db_err.message().contains("UNIQUE")
-                            || db_err.code().as_deref() == Some("2067")
-                            || db_err.code().as_deref() == Some("19")
-                    })
-                    .unwrap_or(false);
-                if is_unique_violation {
-                    return Err(Status::already_exists(format!(
-                        "host with fingerprint {:?} is already enrolled",
-                        req.fingerprint,
-                    )));
-                }
-                tracing::error!(error = %sqlx_err, "Enroll: db error");
-                return Err(Status::internal("database error"));
-            }
-            Err(other) => {
-                tracing::error!(error = %other, "Enroll: unexpected error");
-                return Err(Status::internal("storage error"));
-            }
-        };
-
-        let server_time_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        // EnrollmentService.redeem owns: token validation (lookup by hash,
+        // expiry/consumed checks), HostId allocation, leaf cert signing,
+        // cert persistence, and token consumption. Any failure surfaces as
+        // an `Unauthenticated` gRPC status — the most common cause is an
+        // unknown / expired / already-consumed token, and we deliberately
+        // don't leak which.
+        let resp = self
+            .enrollment
+            .redeem(&req.token, host_info)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, hostname = %req.hostname, "enroll: redeem failed");
+                Status::unauthenticated(format!("{e}"))
+            })?;
 
         // Emit agent.enroll event so dashboard subscribers (e.g. the
         // onboarding wizard's listening step) can react in real time.
@@ -129,14 +114,10 @@ impl Controller for ControllerService {
         let event = isengard_core::Event {
             kind: "agent.enroll".to_string(),
             occurred_at: chrono::Utc::now(),
-            host_id: Some(id.0),
-            summary: format!(
-                "{} enrolled (fingerprint {})",
-                display_name,
-                req.fingerprint.chars().take(12).collect::<String>(),
-            ),
+            host_id: Some(resp.host_id.0),
+            summary: format!("{} enrolled", display_name),
             metadata: serde_json::json!({
-                "fingerprint": req.fingerprint,
+                "host_id": resp.host_id.to_string(),
                 "hostname": req.hostname,
             }),
             ..Default::default()
@@ -144,10 +125,22 @@ impl Controller for ControllerService {
         crate::persist_and_broadcast(&self.journal, &self.bus, event).await;
 
         Ok(Response::new(EnrollResponse {
-            agent_id: id.to_string(),
-            heartbeat_interval_secs: 10,
-            server_time_ms,
+            host_id: resp.host_id.to_bytes().to_vec(),
+            agent_cert_pem: resp.agent_cert_pem,
+            agent_key_pem: resp.agent_key_pem,
+            ca_root_pem: resp.ca_root_pem,
+            heartbeat_interval_secs: resp.heartbeat_interval_secs,
         }))
+    }
+
+    /// Phase 14 Task 7 will implement leaf-cert renewal driven by the agent's
+    /// presented mTLS cert. Until then this returns Unimplemented so callers
+    /// don't get a misleading success.
+    async fn renew_cert(
+        &self,
+        _request: Request<RenewCertRequest>,
+    ) -> Result<Response<RenewCertResponse>, Status> {
+        Err(Status::unimplemented("RenewCert lands in Phase 14 Task 7"))
     }
 
     async fn sync(
