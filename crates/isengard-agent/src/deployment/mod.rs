@@ -90,6 +90,13 @@ impl DeploymentSupervisor {
             .inventory
             .mark_orphan_deployments_failed(host_id, "agent_restarted_during_deployment")
             .await?;
+        if n > 0 {
+            tracing::warn!(
+                host_id = %host_id,
+                orphans = n,
+                "deployment supervisor: marked orphan deployments as failed at startup"
+            );
+        }
         Ok(n)
     }
 
@@ -145,6 +152,13 @@ impl DeploymentSupervisor {
                     proxy_state: self.proxy_state.clone(),
                 });
                 let driver = Driver::new(row, deps, self.inventory.clone(), self.emitter.clone());
+                tracing::info!(
+                    deployment_id = %id,
+                    host_id = %trigger.host_id,
+                    service = %trigger.service_name,
+                    image = %trigger.image_ref,
+                    "deployment supervisor: blue-green driver spawned"
+                );
                 tokio::spawn(driver.run());
                 Ok(SupervisorOutcome::BlueGreenSpawned { deployment_id: id })
             }
@@ -180,7 +194,17 @@ impl UpdateDispatcher for SupervisorDispatcher {
             .await
         {
             Ok(rs) => rs,
-            Err(_) => return DispatchOutcome::PerformInPlace,
+            Err(e) => {
+                // Degrade to in-place rather than leave the container stale,
+                // but surface the underlying issue so it's debuggable.
+                tracing::warn!(
+                    host_id = %storage_host_id,
+                    service = %info.service_name,
+                    error = %e,
+                    "supervisor dispatcher: routing-rule lookup failed, falling back to in-place"
+                );
+                return DispatchOutcome::PerformInPlace;
+            }
         };
 
         // Match by service_name AND container_port (a single service can
