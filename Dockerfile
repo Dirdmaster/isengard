@@ -24,6 +24,11 @@ RUN apt-get update \
         protobuf-compiler \
         ca-certificates \
         build-essential \
+        cmake \
+        golang-go \
+        clang \
+        libclang-dev \
+        perl \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=planner /build/recipe.json recipe.json
