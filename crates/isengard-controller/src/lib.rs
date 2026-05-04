@@ -5,6 +5,7 @@ mod auth;
 mod service;
 
 pub mod bus;
+pub mod ca;
 pub mod disconnect_monitor;
 pub mod pending_actions;
 pub mod plugin_host;

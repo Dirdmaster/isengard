@@ -79,6 +79,10 @@ mime_guess = "2.0.5"
 # crypto helpers
 subtle = "2.6.1"
 sha2 = "0.10"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "x509-parser", "ring"] }
+rand = "0.8"
+x509-parser = "0.16"
+time = { version = "0.3", default-features = false, features = ["std"] }
 
 # system info
 hostname = "0.4.0"
