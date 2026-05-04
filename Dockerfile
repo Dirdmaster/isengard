@@ -6,7 +6,7 @@
 #   docker run ghcr.io/dirdmaster/isengard-controller:latest
 # instead of having to remember a subcommand.
 
-ARG RUST_VERSION=1.86
+ARG RUST_VERSION=1.90
 
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS chef
 WORKDIR /build
