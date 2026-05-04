@@ -56,14 +56,28 @@ impl CertStore {
                     .insert(hostname.to_string(), e.clone());
                 Some(e)
             }
-            Err(_) => None,
+            Err(e) => {
+                // Log at warn so a corrupt cert is observable in production
+                // logs (otherwise lookups silently miss and the cert callback
+                // declines, with no signal pointing at the actual problem).
+                tracing::warn!(
+                    hostname = %hostname,
+                    error = %e,
+                    "tls: cert load from disk failed"
+                );
+                None
+            }
         }
     }
 
-    /// Install a new cert for `hostname`: writes to disk + updates cache.
+    /// Install a new cert for `hostname`. Parses the PEM material BEFORE
+    /// writing to disk so a malformed input is rejected without leaving
+    /// half-state on disk; updates the cache last so a parse failure can't
+    /// leave cache and disk disagreeing.
     pub async fn install(&self, hostname: &str, cert_pem: &str, key_pem: &str) -> Result<()> {
+        let entry =
+            parse_entry(cert_pem, key_pem).with_context(|| format!("parse cert for {hostname}"))?;
         self.storage.write(hostname, cert_pem, key_pem).await?;
-        let entry = parse_entry(cert_pem, key_pem)?;
         self.cache
             .write()
             .await

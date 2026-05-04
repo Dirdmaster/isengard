@@ -22,7 +22,10 @@ impl IsengardCertCallback {
 impl TlsAccept for IsengardCertCallback {
     async fn certificate_callback(&self, ssl: &mut SslRef) {
         let sni = match ssl.servername(NameType::HOST_NAME) {
-            Some(s) => s.to_string(),
+            // DNS is case-insensitive; ACME-issued certs are stored under
+            // the lowercased hostname. Normalize the client's SNI so a
+            // mixed-case `Foo.Com` request resolves the same cert as `foo.com`.
+            Some(s) => s.to_lowercase(),
             None => {
                 debug!("tls: handshake without SNI; declining cert");
                 return;
@@ -34,6 +37,9 @@ impl TlsAccept for IsengardCertCallback {
             return;
         };
 
+        // Bail on the first failure rather than continuing — a half-installed
+        // ssl context (cert set but chain incomplete or key missing) yields a
+        // more confusing handshake failure than declining the cert outright.
         if let Err(e) = ssl.set_certificate(&entry.leaf) {
             warn!(sni = %sni, error = %e, "tls: set_certificate failed");
             return;
@@ -41,6 +47,7 @@ impl TlsAccept for IsengardCertCallback {
         for c in &entry.chain {
             if let Err(e) = ssl.add_chain_cert(c) {
                 warn!(sni = %sni, error = %e, "tls: add_chain_cert failed");
+                return;
             }
         }
         if let Err(e) = ssl.set_private_key(&entry.key) {
