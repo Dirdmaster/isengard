@@ -9,7 +9,8 @@ use crate::deployment::driver::{Driver, RealDriverDeps};
 use crate::deployment::eligibility::{ContainerSpec, Decision, classify};
 use crate::proxy::ProxyState;
 use anyhow::Result;
-use isengard_core::EventEmitter;
+use async_trait::async_trait;
+use isengard_core::{DispatchOutcome, EventEmitter, UpdateDispatcher, UpdateTriggerInfo};
 use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeployment};
 use isengard_storage::host::HostId;
 use isengard_storage::inventory::Inventory;
@@ -147,6 +148,69 @@ impl DeploymentSupervisor {
                 tokio::spawn(driver.run());
                 Ok(SupervisorOutcome::BlueGreenSpawned { deployment_id: id })
             }
+        }
+    }
+}
+
+/// Adapter that lets the updater plugin consult the supervisor across the
+/// crate boundary. The updater hands us an [`UpdateTriggerInfo`]; we look
+/// up the matching routing rule (if any) so that `public_hostname` /
+/// `health_path` are populated, then delegate to
+/// [`DeploymentSupervisor::handle_update_trigger`] and translate its
+/// outcome into a [`DispatchOutcome`] the updater understands.
+///
+/// On any inventory failure we degrade gracefully: return
+/// `DispatchOutcome::PerformInPlace` so the updater still does *something*
+/// useful instead of leaving the container stale.
+pub struct SupervisorDispatcher {
+    pub supervisor: Arc<DeploymentSupervisor>,
+    pub inventory: Inventory,
+}
+
+#[async_trait]
+impl UpdateDispatcher for SupervisorDispatcher {
+    async fn dispatch(&self, info: UpdateTriggerInfo) -> DispatchOutcome {
+        // The updater speaks the core HostId (= ulid::Ulid). Storage uses
+        // a newtype around the same Ulid; convert before any DB call.
+        let storage_host_id = HostId(info.host_id);
+
+        let routing_rules = match self
+            .inventory
+            .list_routing_rules_for_host(storage_host_id)
+            .await
+        {
+            Ok(rs) => rs,
+            Err(_) => return DispatchOutcome::PerformInPlace,
+        };
+
+        // Match by service_name AND container_port (a single service can
+        // expose multiple ports with different routing rules; we want the
+        // rule that lines up with the port we observed).
+        let rule = routing_rules.iter().find(|r| {
+            r.service_name == info.service_name && info.container_port == Some(r.container_port)
+        });
+
+        let trigger = UpdateTrigger {
+            container_id: info.container_id,
+            host_id: storage_host_id,
+            stack_id: StackId(info.stack_id),
+            service_name: info.service_name,
+            blue_digest: info.blue_digest,
+            green_digest: info.green_digest,
+            image_ref: info.image_ref,
+            public_hostname: rule.map(|r| r.public_hostname.clone()),
+            container_port: info.container_port,
+            health_path: rule.and_then(|r| r.healthcheck_path.clone()),
+            has_healthcheck: info.has_healthcheck,
+            rw_volume_mounts: info.rw_volume_mounts,
+            label_strategy: info.label_strategy,
+        };
+
+        match self.supervisor.handle_update_trigger(trigger).await {
+            Ok(SupervisorOutcome::BlueGreenSpawned { .. }) => DispatchOutcome::Handled,
+            Ok(SupervisorOutcome::AlreadyInFlight) => DispatchOutcome::Handled,
+            Ok(SupervisorOutcome::InPlaceForUpdater) => DispatchOutcome::PerformInPlace,
+            Err(_) => DispatchOutcome::PerformInPlace,
         }
     }
 }

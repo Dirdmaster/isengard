@@ -8,6 +8,7 @@ pub mod labels;
 pub mod networking;
 pub mod plugin;
 pub mod registration;
+pub mod update_dispatch;
 
 /// Stable, monotonic, unique host identifier. Aliased to `ulid::Ulid` so core
 /// can reference it without depending on the storage crate. Storage's
@@ -19,3 +20,4 @@ pub use error::{CoreError, Result};
 pub use event::{Event, EventEmitter, NoopEmitter, arc_emitter};
 pub use plugin::{AgentPlugin, ControllerPlugin, EventSubscriber, HttpHandler, Plugin};
 pub use registration::{Capability, PluginRegistration, registrations_for};
+pub use update_dispatch::{DispatchOutcome, UpdateDispatcher, UpdateTriggerInfo};

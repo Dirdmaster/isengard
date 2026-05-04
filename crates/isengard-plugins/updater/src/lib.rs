@@ -8,6 +8,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod auth;
+pub mod dispatch_helpers;
 pub mod image_ref;
 pub mod labels;
 pub mod recreate;
@@ -23,8 +24,8 @@ use bollard::Docker;
 use bollard::container::ListContainersOptions;
 use chrono::Utc;
 use isengard_core::{
-    AgentPlugin, Capability, CoreError, Event, EventEmitter, Plugin, PluginContext,
-    PluginRegistration, Result,
+    AgentPlugin, Capability, CoreError, DispatchOutcome, Event, EventEmitter, HostId, Plugin,
+    PluginContext, PluginRegistration, Result, UpdateDispatcher, UpdateTriggerInfo,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -46,6 +47,14 @@ pub struct Updater {
     registry: Option<Arc<RegistryClient>>,
     cycle_interval: Duration,
     emitter: Option<Arc<dyn EventEmitter>>,
+    /// Set in `init` from `PluginContext::update_dispatcher`. When `Some`,
+    /// the cycle consults it before recreating any non-self container —
+    /// the dispatcher may take ownership and spawn a blue-green driver.
+    dispatcher: Option<Arc<dyn UpdateDispatcher>>,
+    /// Set in `init` from `PluginContext::host_id`. Forwarded into every
+    /// `UpdateTriggerInfo` so the dispatcher's downstream lookups
+    /// (routing rules, deployment dedupe) target the right host.
+    host_id: Option<HostId>,
     cancel: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -57,6 +66,8 @@ impl Updater {
             registry: None,
             cycle_interval: Duration::from_secs(DEFAULT_CYCLE_INTERVAL_SECS),
             emitter: None,
+            dispatcher: None,
+            host_id: None,
             cancel: Arc::new(Notify::new()),
             task: None,
         }
@@ -97,10 +108,18 @@ async fn emit(emitter: Option<&Arc<dyn EventEmitter>>, event: Event) {
 
 /// One cycle of work. Filter candidates by `isengard.enable=true`, compare
 /// each one's local digest against its remote registry digest, classify, log.
+///
+/// `dispatcher` is consulted on the non-self `needs_update` path: if it
+/// returns `Handled`, the in-place recreate is skipped (a blue-green driver
+/// has taken over). If it returns `PerformInPlace`, we fall through to the
+/// existing `recreate::update_container` call. `host_id` is forwarded into
+/// every `UpdateTriggerInfo`.
 async fn do_cycle(
     docker: &Docker,
     registry: &RegistryClient,
     emitter: Option<&Arc<dyn EventEmitter>>,
+    dispatcher: Option<&Arc<dyn UpdateDispatcher>>,
+    host_id: Option<HostId>,
 ) -> anyhow::Result<()> {
     let opts = ListContainersOptions::<String> {
         all: false,
@@ -196,6 +215,43 @@ async fn do_cycle(
                     warn!(container = %name, "no container ID; cannot update");
                     continue;
                 };
+
+                // Dispatcher hand-off: if the agent has installed an
+                // UpdateDispatcher (i.e. blue-green is wired up), inspect
+                // the container, build an UpdateTriggerInfo, and let the
+                // dispatcher decide. If it returns Handled, a driver has
+                // taken over and we must NOT recreate.
+                if let Some(disp) = dispatcher {
+                    match docker.inspect_container(container_id, None).await {
+                        Ok(inspect) => {
+                            let info = UpdateTriggerInfo {
+                                container_id: container_id.to_string(),
+                                service_name: dispatch_helpers::service_name(c, &inspect),
+                                stack_id: 0,
+                                host_id: host_id.unwrap_or_else(HostId::nil),
+                                blue_digest: local.to_string(),
+                                green_digest: remote.to_string(),
+                                image_ref: image_str.to_string(),
+                                container_port: dispatch_helpers::first_container_port(&inspect),
+                                has_healthcheck: dispatch_helpers::has_healthcheck(&inspect),
+                                rw_volume_mounts: dispatch_helpers::rw_volume_mounts(&inspect),
+                                label_strategy: dispatch_helpers::label_strategy(&inspect),
+                            };
+                            match disp.dispatch(info).await {
+                                DispatchOutcome::Handled => {
+                                    debug!(container = %name, "dispatcher handled — skipping in-place recreate");
+                                    continue;
+                                }
+                                DispatchOutcome::PerformInPlace => {
+                                    debug!(container = %name, "dispatcher said in-place — falling through to recreate");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(container = %name, error = %e, "inspect for dispatcher failed; falling through to in-place recreate");
+                        }
+                    }
+                }
 
                 match recreate::update_container(docker, container_id, &image_ref).await {
                     Ok(()) => {
@@ -343,6 +399,13 @@ impl Plugin for Updater {
         if self.emitter.is_some() {
             info!("updater wired to event emitter");
         }
+        // Optional blue-green hand-off (Phase 10). When present, the cycle
+        // consults the dispatcher before recreating any container.
+        self.dispatcher = ctx.update_dispatcher.clone();
+        if self.dispatcher.is_some() {
+            info!("updater wired to update dispatcher (blue-green path enabled)");
+        }
+        self.host_id = ctx.host_id;
         Ok(())
     }
 
@@ -356,6 +419,8 @@ impl Plugin for Updater {
             .clone()
             .ok_or_else(|| start_err("updater started before init"))?;
         let emitter = self.emitter.clone();
+        let dispatcher = self.dispatcher.clone();
+        let host_id = self.host_id;
         let cancel = self.cancel.clone();
         let interval = self.cycle_interval;
 
@@ -368,7 +433,13 @@ impl Plugin for Updater {
                         break;
                     }
                     _ = ticker.tick() => {
-                        if let Err(e) = do_cycle(&docker, &registry, emitter.as_ref()).await {
+                        if let Err(e) = do_cycle(
+                            &docker,
+                            &registry,
+                            emitter.as_ref(),
+                            dispatcher.as_ref(),
+                            host_id,
+                        ).await {
                             // Don't crash the task on a single bad cycle; just log
                             // and try again next tick. Phase 3b adds retry policy.
                             warn!(error = %e, "updater cycle failed");
@@ -411,9 +482,15 @@ impl AgentPlugin for Updater {
             .registry
             .as_ref()
             .ok_or_else(|| init_err("run_cycle before init"))?;
-        do_cycle(docker, registry, self.emitter.as_ref())
-            .await
-            .map_err(|e| init_err(format!("cycle failed: {e}")))
+        do_cycle(
+            docker,
+            registry,
+            self.emitter.as_ref(),
+            self.dispatcher.as_ref(),
+            self.host_id,
+        )
+        .await
+        .map_err(|e| init_err(format!("cycle failed: {e}")))
     }
 }
 
