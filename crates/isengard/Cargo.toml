@@ -28,6 +28,7 @@ isengard-agent.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-plugin-dashboard.workspace = true
+isengard-plugin-networking-none.workspace = true
 isengard-plugin-notifier.workspace = true
 isengard-plugin-updater.workspace = true
 serde_json.workspace = true

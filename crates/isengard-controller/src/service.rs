@@ -9,20 +9,28 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::bus::EventBus;
+use crate::routing::RoutingPusher;
 
 #[derive(Clone)]
 pub struct ControllerService {
     inventory: Arc<Inventory>,
     journal: Arc<Journal>,
     bus: Arc<EventBus>,
+    routing: Arc<RoutingPusher>,
 }
 
 impl ControllerService {
-    pub fn new(inventory: Arc<Inventory>, journal: Arc<Journal>, bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        inventory: Arc<Inventory>,
+        journal: Arc<Journal>,
+        bus: Arc<EventBus>,
+        routing: Arc<RoutingPusher>,
+    ) -> Self {
         Self {
             inventory,
             journal,
             bus,
+            routing,
         }
     }
 }
@@ -179,14 +187,28 @@ impl Controller for ControllerService {
 
         tracing::info!(agent = %host.hostname, "agent connected for sync");
 
-        // Build outbound channel. Controller uses this to send HeartbeatAcks
-        // (and Phase 3+ commands).
+        // Build outbound channel. Controller uses this to send HeartbeatAcks,
+        // ProxyConfig pushes (Phase 8), and Phase 3+ commands.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ControllerMessage, Status>>(16);
         let outbound = ReceiverStream::new(rx);
+
+        // Register the outbound sender with the routing pusher so it can push
+        // ProxyConfig at any time (rule changes, label reports, manual edits).
+        // Push the current config immediately so a reconnecting agent catches
+        // up without waiting for the next rule change.
+        self.routing.register_sender(host_id, tx.clone()).await;
+        if let Err(e) = self.routing.push_to_host(host_id).await {
+            tracing::warn!(
+                error = %e,
+                agent = %host.hostname,
+                "initial proxy_config push failed",
+            );
+        }
 
         let inventory = self.inventory.clone();
         let journal = self.journal.clone();
         let bus = self.bus.clone();
+        let routing = self.routing.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -278,9 +300,48 @@ impl Controller for ControllerService {
                     None => {
                         tracing::debug!(agent = %agent_hostname, "empty payload, skipping");
                     }
+                    Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsReport(
+                        report,
+                    )) => {
+                        if let Err(e) = routing.ingest_labels(host_id, report).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: ingest failed",
+                            );
+                        }
+                        if let Err(e) = routing.push_to_host(host_id).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: push_to_host after ingest failed",
+                            );
+                        }
+                    }
+                    Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(
+                        ev,
+                    )) => {
+                        if let Err(e) = routing.ingest_labels_removed(host_id, ev).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: ingest_removed failed",
+                            );
+                        }
+                        if let Err(e) = routing.push_to_host(host_id).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "labels: push_to_host after ingest_removed failed",
+                            );
+                        }
+                    }
                 }
             }
 
+            // Stream is over: drop the registered sender so push_to_host
+            // becomes a no-op for this host until it reconnects.
+            routing.unregister_sender(host_id).await;
             tracing::info!(agent = %agent_hostname, "agent stream closed");
         });
 

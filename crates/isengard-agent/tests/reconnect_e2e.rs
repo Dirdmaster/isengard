@@ -89,6 +89,8 @@ async fn agent_survives_controller_restart() {
         controller_url: format!("http://{addr}"),
         state_dir: agent_state.path().to_path_buf(),
         config: serde_json::Value::Object(Default::default()),
+        proxy_http_port: None,
+        proxy_https_port: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

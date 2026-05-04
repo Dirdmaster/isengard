@@ -67,10 +67,13 @@ mod tests {
 
     #[tokio::test]
     async fn load_controller_plugins_runs_without_panic() {
+        let inventory = Arc::new(Inventory::open_in_memory().await.unwrap());
+        let routing = Arc::new(crate::routing::RoutingPusher::new(inventory.clone()));
         let handles = Arc::new(ControllerHandles {
-            inventory: Arc::new(Inventory::open_in_memory().await.unwrap()),
+            inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),
             bus: Arc::new(EventBus::new()),
+            routing,
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into

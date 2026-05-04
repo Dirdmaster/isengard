@@ -1,0 +1,18 @@
+[package]
+name = "isengard-plugin-networking-none"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "No-op networking adapter for Isengard (baseline)"
+
+[dependencies]
+async-trait.workspace = true
+inventory.workspace = true
+isengard-core.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

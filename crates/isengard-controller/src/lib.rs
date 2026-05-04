@@ -8,6 +8,7 @@ pub mod bus;
 pub mod disconnect_monitor;
 pub mod pending_actions;
 pub mod plugin_host;
+pub mod routing;
 pub mod sync_services;
 pub mod sync_stacks;
 
@@ -35,6 +36,7 @@ pub struct ControllerHandles {
     pub inventory: Arc<Inventory>,
     pub journal: Arc<Journal>,
     pub bus: Arc<EventBus>,
+    pub routing: Arc<routing::RoutingPusher>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -113,12 +115,15 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     let bus = Arc::new(crate::bus::EventBus::new());
 
+    let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
+
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
         journal: journal.clone(),
         bus: bus.clone(),
+        routing: routing.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -150,7 +155,12 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         std::env::var("ISENGARD_TOKEN").with_context(|| "ISENGARD_TOKEN env var must be set")?;
     let auth_layer = crate::auth::TokenAuthLayer::new(token);
 
-    let svc = ControllerServer::new(ControllerService::new(inventory, journal, bus));
+    let svc = ControllerServer::new(ControllerService::new(
+        inventory,
+        journal,
+        bus,
+        routing.clone(),
+    ));
 
     info!("gRPC server listening");
     let serve_fut = Server::builder()

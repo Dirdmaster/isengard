@@ -12,9 +12,13 @@ description = "Agent-mode runtime"
 anyhow.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
 hostname.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
+pingora-core = { workspace = true }
+pingora-proxy = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
@@ -24,6 +28,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3.14.0"
-chrono.workspace = true
 isengard-controller = { workspace = true }
 isengard-storage = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

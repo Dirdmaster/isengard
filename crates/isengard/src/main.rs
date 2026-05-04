@@ -16,6 +16,8 @@ mod dev_plugin;
 #[allow(unused_imports)]
 use isengard_plugin_dashboard as _;
 #[allow(unused_imports)]
+use isengard_plugin_networking_none as _;
+#[allow(unused_imports)]
 use isengard_plugin_notifier as _;
 
 #[derive(Debug, Parser)]
@@ -111,6 +113,8 @@ async fn main() -> Result<()> {
                 controller_url: controller,
                 state_dir,
                 config: serde_json::Value::Object(Default::default()),
+                proxy_http_port: Some(8080),
+                proxy_https_port: Some(8443),
             })
             .await
         }

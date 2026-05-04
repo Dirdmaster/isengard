@@ -93,6 +93,8 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
         controller_url: format!("http://{addr}"),
         state_dir: agent_state.path().to_path_buf(),
         config: serde_json::Value::Object(Default::default()),
+        proxy_http_port: None,
+        proxy_https_port: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
@@ -136,6 +138,8 @@ async fn second_run_is_idempotent_no_re_enroll() {
         controller_url: format!("http://{addr}"),
         state_dir: agent_state.path().to_path_buf(),
         config: serde_json::Value::Object(Default::default()),
+        proxy_http_port: None,
+        proxy_https_port: None,
     };
 
     // First run: spawn, wait for enroll, abort.

@@ -6,6 +6,8 @@ pub mod backoff;
 pub mod container_snapshot;
 pub mod enroll;
 pub mod events;
+pub mod labels;
+pub mod proxy;
 pub mod sync;
 
 /// Convenience alias used throughout the agent.
@@ -25,6 +27,12 @@ pub struct AgentOptions {
     /// Created if missing.
     pub state_dir: std::path::PathBuf,
     pub config: serde_json::Value,
+    /// Reverse-proxy ports (Phase 8b). If both are `None`, the proxy
+    /// supervisor is not spawned — useful for integration tests that don't
+    /// want to fight over port 8080/8443. Production passes `Some(8080)` /
+    /// `Some(8443)`. Plan B will read these from settings.
+    pub proxy_http_port: Option<u16>,
+    pub proxy_https_port: Option<u16>,
 }
 
 pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
@@ -67,6 +75,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    this scope and is passed by &mut into the sync loop so events stay
     //    queued across reconnects.
     let (emitter, mut events_rx) = events::OutboundEmitter::new();
+    // Grab a sender clone before erasing the concrete type — the proxy
+    // healthcheck loop needs to publish through the same channel.
+    let proxy_event_tx = emitter.sender();
     let emitter: Arc<dyn EventEmitter> = Arc::new(emitter);
 
     // -- plugin lifecycle (unchanged from Phase 1) -----------------------
@@ -88,6 +99,42 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         started.push(plugin);
     }
 
+    // -- spawn the reverse-proxy supervisor (Phase 8b Task 10).
+    //    Ports come from AgentOptions; Plan B (Phase 8e) will read them
+    //    from settings. `proxy_state` is also threaded into the sync loop
+    //    so Task 13's `apply_config` can mutate the upstream registry when
+    //    the controller pushes a `ProxyConfig`. If both ports are None,
+    //    the supervisor is not spawned (integration tests pass None to
+    //    avoid fighting over 8080/8443).
+    let proxy_state = proxy::ProxyState::new();
+    proxy_state.set_event_sink(proxy_event_tx);
+    if let (Some(http_port), Some(https_port)) = (opts.proxy_http_port, opts.proxy_https_port) {
+        let ps = proxy_state.clone();
+        tokio::spawn(async move {
+            proxy::supervise(ps, http_port, https_port).await;
+        });
+    }
+
+    // -- spawn the Docker label watcher (Phase 8b Task 16).
+    //    Pushes ContainerLabelsReport / ContainerLabelsRemoved up the sync
+    //    stream as containers come and go. Messages queue in `agent_msg_rx`
+    //    while the stream is down; the sync loop drains them on reconnect.
+    let (agent_msg_tx, mut agent_msg_rx) =
+        tokio::sync::mpsc::channel::<isengard_proto::pb::AgentMessage>(64);
+    match bollard::Docker::connect_with_local_defaults() {
+        Ok(docker) => {
+            let labels_out = agent_msg_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = labels::watch(docker, labels_out).await {
+                    tracing::error!(error = %e, "labels: watcher exited");
+                }
+            });
+        }
+        Err(e) => {
+            warn!(error = %e, "labels: failed to connect to Docker, watcher disabled");
+        }
+    }
+
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let token = std::env::var("ISENGARD_TOKEN")
         .map_err(|_| anyhow::anyhow!("ISENGARD_TOKEN env var must be set"))?;
@@ -101,6 +148,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_url = opts.controller_url.clone();
     let sync_agent_id = agent_id.clone();
     let sync_cancel = cancel.clone();
+    let sync_proxy_state = proxy_state.clone();
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_url,
@@ -109,6 +157,8 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             HEARTBEAT_INTERVAL_SECS,
             sync_cancel,
             &mut events_rx,
+            &mut agent_msg_rx,
+            sync_proxy_state,
         )
         .await
     };
