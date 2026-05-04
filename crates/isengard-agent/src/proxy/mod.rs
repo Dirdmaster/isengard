@@ -81,6 +81,7 @@ pub async fn apply_config(
     state: &ProxyState,
     cfg: isengard_proto::pb::ProxyConfig,
 ) -> anyhow::Result<()> {
+    // Lock-free pre-check to skip the build for obviously-stale configs.
     let last = state.last_generation.load(Ordering::Acquire);
     if cfg.generation <= last {
         tracing::debug!(
@@ -97,6 +98,12 @@ pub async fn apply_config(
             continue;
         };
         let ip: std::net::IpAddr = if up.container_ip.is_empty() {
+            tracing::warn!(
+                hostname = %rule.public_hostname,
+                container_id = %up.container_id,
+                "proxy: ProxyConfig rule has empty container_ip; falling back to 127.0.0.1 \
+                 (the controller failed to populate the bridge IP for this rule)"
+            );
             "127.0.0.1".parse().expect("127.0.0.1 is a valid IpAddr")
         } else {
             up.container_ip
@@ -117,10 +124,24 @@ pub async fn apply_config(
         );
     }
 
-    // Swap registry, then layer per-rule health config on top so the
-    // healthcheck loop sees both in the same view.
+    // Critical section: re-check generation under the write lock, install,
+    // and bump the counter atomically. Without the re-check, two concurrent
+    // `apply_config(N)` and `apply_config(N+1)` calls can both pass the
+    // lock-free pre-check and race on the install — and whichever acquires
+    // the write lock SECOND wins, even if it carries the older generation.
+    // The recheck below ensures the installed registry always matches the
+    // stored last_generation at the moment of release.
     {
         let mut w = state.upstreams.write().await;
+        let last_now = state.last_generation.load(Ordering::Acquire);
+        if cfg.generation <= last_now {
+            tracing::debug!(
+                new = cfg.generation,
+                last = last_now,
+                "proxy: lost generation race; dropping ProxyConfig"
+            );
+            return Ok(());
+        }
         *w = new_reg;
         for rule in &cfg.rules {
             if let Some(hc) = &rule.healthcheck {
@@ -133,6 +154,9 @@ pub async fn apply_config(
                 w.set_health_config(&rule.public_hostname, path, interval);
             }
         }
+        state
+            .last_generation
+            .store(cfg.generation, Ordering::Release);
     }
 
     // Spawn the healthcheck sweep exactly once per process; subsequent
@@ -141,9 +165,6 @@ pub async fn apply_config(
         healthcheck::spawn_loops(state.clone());
     });
 
-    state
-        .last_generation
-        .store(cfg.generation, Ordering::Release);
     tracing::info!(generation = cfg.generation, "proxy: ProxyConfig applied");
     Ok(())
 }
