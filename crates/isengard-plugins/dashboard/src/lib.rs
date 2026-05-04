@@ -7,6 +7,7 @@
 
 mod api;
 mod dto;
+pub mod routing;
 mod ws;
 
 use std::net::SocketAddr;
@@ -90,7 +91,8 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
             .with_state(h.clone());
 
         router = router
-            .nest("/api/v1", api::router(h))
+            .nest("/api/v1", api::router(h.clone()))
+            .nest("/api/v1", routing::router(h))
             .merge(ws_router)
             .merge(install_router);
     }

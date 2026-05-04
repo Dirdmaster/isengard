@@ -91,6 +91,13 @@ impl ProxyHttp for IsengardProxy {
                 format!("no healthy upstream for {host}"),
             ));
         }
+        if up.state == crate::proxy::UpstreamState::Draining {
+            return Err(pingora_core::Error::because(
+                pingora_core::ErrorType::HTTPStatus(503),
+                "upstream_draining",
+                format!("upstream for {host} is draining"),
+            ));
+        }
         // Pingora 0.4 quirk: even with tls=false the SNI string doubles as the
         // upstream Host header. Empty SNI causes Pingora to 502 without
         // attempting the upstream connection. Pass the original public hostname.

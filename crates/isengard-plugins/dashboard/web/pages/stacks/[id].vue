@@ -3,6 +3,7 @@ import { useStacksStore } from '~/stores/stacks'
 import { useHostsStore } from '~/stores/hosts'
 import { useServicesStore } from '~/stores/services'
 import { useEventsStore } from '~/stores/events'
+import ServiceExposeModal from '~/components/ServiceExposeModal.vue'
 
 const route = useRoute()
 const stackId = computed(() => route.params.id as string)
@@ -47,6 +48,17 @@ async function forceUpdate() {
     useToast().error(`Force update failed: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
+
+const exposeModalOpen = ref(false)
+const exposeModalHostId = ref('')
+const exposeModalServiceName = ref('')
+const exposeModalPort = ref(0)
+function openExposeFor(hostId: string, serviceName: string, port: number) {
+  exposeModalHostId.value = hostId
+  exposeModalServiceName.value = serviceName
+  exposeModalPort.value = port
+  exposeModalOpen.value = true
+}
 </script>
 
 <template>
@@ -63,13 +75,18 @@ async function forceUpdate() {
       <div class="grid grid-cols-2 gap-6 p-6">
         <section>
           <h2 class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">Services</h2>
-          <div class="flex flex-wrap gap-2">
-            <ServiceChip
-              v-for="svc in services"
-              :key="svc.name"
-              :name="svc.name"
-              :state="svc.state"
-            />
+          <div class="flex flex-wrap gap-2 items-center">
+            <template v-for="svc in services" :key="svc.name">
+              <div class="flex items-center gap-1">
+                <ServiceChip :name="svc.name" :state="svc.state" />
+                <button
+                  class="text-[10px] text-iso-text-muted hover:text-iso-info underline px-1"
+                  @click="openExposeFor(svc.host_id, svc.name, 0)"
+                >
+                  Expose
+                </button>
+              </div>
+            </template>
             <span v-if="services.length === 0" class="text-sm text-iso-text-faint">
               No services reported (waiting for next heartbeat).
             </span>
@@ -96,5 +113,13 @@ async function forceUpdate() {
     <div v-else class="p-6 text-iso-text-muted">
       Stack not found.
     </div>
+
+    <ServiceExposeModal
+      v-if="exposeModalOpen"
+      v-model:open="exposeModalOpen"
+      :host-id="exposeModalHostId"
+      :service-name="exposeModalServiceName"
+      :container-port="exposeModalPort"
+    />
   </div>
 </template>

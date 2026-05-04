@@ -8,7 +8,7 @@
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use isengard_agent::proxy::{ProxyState, Upstream};
+use isengard_agent::proxy::{ProxyState, Upstream, upstreams::UpstreamState};
 
 async fn fail_responder() -> std::net::SocketAddr {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -51,6 +51,7 @@ async fn evicting_upstream_emits_health_changed_event() {
                 health_path: Some("/h".into()),
                 health_interval: Duration::from_millis(50),
                 consecutive_failures: 0,
+                state: UpstreamState::Active,
             },
         );
     }

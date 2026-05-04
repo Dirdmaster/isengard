@@ -206,6 +206,44 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(routing_rule_from_row).collect()
     }
 
+    /// Fleet-wide listing. Returns ALL rules across hosts, ordered by host
+    /// then id. Replaces the per-host fan-out the dashboard's `list_rules`
+    /// endpoint did before — one query instead of N+1.
+    pub async fn list_all_routing_rules(&self) -> Result<Vec<RoutingRule>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, fleet, host_id, stack_id, service_name, container_port,
+                   public_hostname, protocol, adapter, tls_mode, healthcheck_path,
+                   healthcheck_interval_secs, auth, state, source,
+                   source_container_id, source_imported_from
+            FROM routing_rules
+            ORDER BY host_id ASC, id ASC
+            "#,
+        )
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(routing_rule_from_row).collect()
+    }
+
+    /// Look up a single rule by its primary key. Replaces the dashboard's
+    /// "fan out by host then filter" find-pattern in update/delete handlers.
+    pub async fn get_routing_rule(&self, id: RoutingRuleId) -> Result<Option<RoutingRule>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, fleet, host_id, stack_id, service_name, container_port,
+                   public_hostname, protocol, adapter, tls_mode, healthcheck_path,
+                   healthcheck_interval_secs, auth, state, source,
+                   source_container_id, source_imported_from
+            FROM routing_rules
+            WHERE id = ?
+            "#,
+        )
+        .bind(id.0)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(routing_rule_from_row).transpose()
+    }
+
     pub async fn delete_routing_rule(&self, id: RoutingRuleId) -> Result<()> {
         sqlx::query("DELETE FROM routing_rules WHERE id = ?")
             .bind(id.0)

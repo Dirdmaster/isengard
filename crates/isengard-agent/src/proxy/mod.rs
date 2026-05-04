@@ -22,10 +22,12 @@ pub mod cert_callback;
 pub mod healthcheck;
 pub mod router;
 pub mod server;
+pub mod swap;
 pub mod upstreams;
 
 pub use cert_callback::IsengardCertCallback;
-pub use upstreams::{Upstream, UpstreamRegistry};
+pub use swap::swap_upstream;
+pub use upstreams::{Upstream, UpstreamRegistry, UpstreamState};
 
 /// Shared state passed into the `ProxyHttp` router. Cheap to clone (Arc).
 #[derive(Debug, Default, Clone)]
@@ -140,6 +142,7 @@ pub async fn apply_config(
                 health_path: None,
                 health_interval: Duration::from_secs(10),
                 consecutive_failures: 0,
+                state: upstreams::UpstreamState::Active,
             },
         );
     }

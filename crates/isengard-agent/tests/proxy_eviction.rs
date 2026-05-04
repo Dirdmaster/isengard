@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
-use isengard_agent::proxy::{ProxyState, Upstream};
+use isengard_agent::proxy::{ProxyState, Upstream, upstreams::UpstreamState};
 
 async fn spawn(toggle: tokio::sync::watch::Receiver<bool>) -> SocketAddr {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -50,6 +50,7 @@ async fn eviction_after_three_failures_then_recovery_after_one_success() {
                 health_path: None,
                 health_interval: Duration::from_millis(50),
                 consecutive_failures: 0,
+                state: UpstreamState::Active,
             },
         );
         up.set_health_config("h.test", Some("/healthz".into()), Duration::from_millis(50));
