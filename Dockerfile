@@ -30,7 +30,14 @@ RUN apt-get update \
         libclang-dev \
         perl \
         git \
+        curl \
+        unzip \
  && rm -rf /var/lib/apt/lists/*
+
+# Install bun — the dashboard plugin's build.rs runs `bun install` + `bun run build`
+# to generate the Nuxt static bundle that gets embedded via rust-embed.
+RUN curl -fsSL https://bun.sh/install | bash \
+ && ln -s /root/.bun/bin/bun /usr/local/bin/bun
 
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --bin isengard
