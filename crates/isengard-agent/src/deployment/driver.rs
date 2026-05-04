@@ -296,23 +296,31 @@ impl<D: DriverDeps> Driver<D> {
 
     /// Fire-and-forget event emission. Spawned so the state machine never
     /// blocks on emitter latency (network, journal flush, etc.).
+    ///
+    /// The full [`Deployment`] row is serialized into `metadata.deployment`
+    /// so subscribers (dashboard, journal, abort UI) get the entire context
+    /// without needing a follow-up storage lookup.
     fn emit(&self, kind: &str, error: Option<String>) {
-        let emitter = self.emitter.clone();
+        let deployment_json =
+            serde_json::to_value(&self.deployment).unwrap_or_else(|_| serde_json::json!({}));
         let event = Event {
             kind: kind.to_string(),
             occurred_at: Utc::now(),
             host_id: Some(self.deployment.host_id.0),
             summary: format!(
-                "deployment {} ({}): {}",
-                self.deployment.id, self.deployment.service_name, kind
+                "{} {} {}",
+                self.deployment.service_name, self.deployment.green_digest, kind
             ),
-            container_name: self.deployment.green_container.clone(),
-            old_digest: Some(self.deployment.blue_digest.clone()),
-            new_digest: Some(self.deployment.green_digest.clone()),
             error,
+            metadata: serde_json::json!({
+                "deployment": deployment_json,
+            }),
             ..Default::default()
         };
-        tokio::spawn(async move { emitter.emit(event).await });
+        let emitter = self.emitter.clone();
+        tokio::spawn(async move {
+            emitter.emit(event).await;
+        });
     }
 }
 
@@ -854,6 +862,78 @@ mod tests {
             last_stop_id.lock().unwrap().as_deref(),
             Some("green-id"),
             "the cleaned container is green (blue still serving)"
+        );
+    }
+
+    // ---- Test 5: emit places the full Deployment row in event metadata ----
+
+    #[tokio::test]
+    async fn emit_includes_full_deployment_in_metadata() {
+        use isengard_core::Event;
+        use std::sync::Mutex as StdMutex;
+
+        struct CaptureEmitter {
+            events: Arc<StdMutex<Vec<Event>>>,
+        }
+        #[async_trait::async_trait]
+        impl EventEmitter for CaptureEmitter {
+            async fn emit(&self, event: Event) {
+                self.events.lock().unwrap().push(event);
+            }
+        }
+
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let emitter: Arc<dyn EventEmitter> = Arc::new(CaptureEmitter {
+            events: captured.clone(),
+        });
+
+        let (inv, d) = setup_inventory_and_row(DeploymentState::Pending).await;
+
+        struct NoopDeps;
+        #[async_trait::async_trait]
+        impl DriverDeps for NoopDeps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                Ok(("g".into(), "127.0.0.1:0".parse().unwrap()))
+            }
+            async fn stop_and_remove(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(10))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let driver = Driver::new(d.clone(), Arc::new(NoopDeps), inv, emitter);
+        driver.emit("deployment.spinning_up", None);
+        // emit() spawns the actual delivery — give the runtime a tick to flush.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.kind, "deployment.spinning_up");
+        let dep = e
+            .metadata
+            .get("deployment")
+            .expect("deployment in metadata");
+        assert_eq!(dep.get("id").and_then(|v| v.as_str()), Some(d.id.as_str()));
+        assert_eq!(dep.get("state").and_then(|v| v.as_str()), Some("pending"));
+        assert_eq!(
+            dep.get("service_name").and_then(|v| v.as_str()),
+            Some("web")
+        );
+        assert_eq!(
+            dep.get("green_digest").and_then(|v| v.as_str()),
+            Some("sha256:bbb")
         );
     }
 }

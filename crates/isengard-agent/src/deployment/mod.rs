@@ -117,12 +117,31 @@ impl DeploymentSupervisor {
             return Ok(SupervisorOutcome::AlreadyInFlight);
         }
 
+        // Consult the stored service-level override as a fallback. Container
+        // label always wins; the stored override is for cases where the user
+        // set a strategy via the UI/CLI without redeploying with new labels.
+        // Lookup is best-effort — a missing service row or DB hiccup must
+        // not block the deploy, so we swallow errors and treat them as "no
+        // override".
+        let stored_override = self
+            .inventory
+            .get_service_by_name(
+                trigger.host_id,
+                Some(trigger.stack_id),
+                &trigger.service_name,
+            )
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.deploy_strategy_override);
+        let effective_strategy: Option<String> = trigger.label_strategy.clone().or(stored_override);
+
         let mounts = trigger.rw_volume_mounts.clone();
         let spec = ContainerSpec {
             has_routing_rule: trigger.public_hostname.is_some(),
             has_healthcheck: trigger.has_healthcheck,
             rw_volume_mounts: &mounts,
-            label_strategy: trigger.label_strategy.as_deref(),
+            label_strategy: effective_strategy.as_deref(),
         };
         match classify(&spec) {
             Decision::InPlace { .. } => Ok(SupervisorOutcome::InPlaceForUpdater),
@@ -347,6 +366,66 @@ mod supervisor_tests {
             .await
             .unwrap();
         assert_eq!(outcome, SupervisorOutcome::AlreadyInFlight);
+    }
+
+    #[tokio::test]
+    async fn supervisor_consults_service_deploy_strategy_override() {
+        use isengard_storage::service::{InsertService, ServiceState};
+
+        let (sup, host, stack, inv) = setup().await;
+
+        // Insert a service row with an "in-place" override stored.
+        let svc_id = inv
+            .insert_service(InsertService {
+                host_id: host,
+                stack_id: Some(stack),
+                name: "web".into(),
+                image: "nginx:alpine".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+        inv.set_service_deploy_strategy_override(svc_id, Some("in-place"))
+            .await
+            .unwrap();
+
+        // Trigger has the full BG-eligible shape (routing rule + healthcheck)
+        // and NO container label — the stored "in-place" override should
+        // win and route to InPlaceForUpdater anyway.
+        let mut t = trigger(host, stack, true);
+        t.label_strategy = None;
+        let outcome = sup.handle_update_trigger(t).await.unwrap();
+        assert_eq!(outcome, SupervisorOutcome::InPlaceForUpdater);
+    }
+
+    #[tokio::test]
+    async fn container_label_wins_over_stored_service_override() {
+        use isengard_storage::service::{InsertService, ServiceState};
+
+        let (sup, host, stack, inv) = setup().await;
+
+        // Service has stored "blue-green" override (would normally route to
+        // BlueGreen)...
+        let svc_id = inv
+            .insert_service(InsertService {
+                host_id: host,
+                stack_id: Some(stack),
+                name: "web".into(),
+                image: "nginx:alpine".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+        inv.set_service_deploy_strategy_override(svc_id, Some("blue-green"))
+            .await
+            .unwrap();
+
+        // ...but the container label explicitly forces "in-place". Label
+        // wins, so this should NOT trigger the BG driver-spawn path.
+        let mut t = trigger(host, stack, true);
+        t.label_strategy = Some("in-place".into());
+        let outcome = sup.handle_update_trigger(t).await.unwrap();
+        assert_eq!(outcome, SupervisorOutcome::InPlaceForUpdater);
     }
 
     #[tokio::test]
