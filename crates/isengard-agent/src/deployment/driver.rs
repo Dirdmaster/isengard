@@ -21,7 +21,7 @@ use crate::proxy::ProxyState;
 use crate::proxy::healthcheck::HealthChecker;
 use crate::proxy::swap::swap_upstream;
 use crate::proxy::upstreams::{Upstream, UpstreamState};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use isengard_core::{Event, EventEmitter};
@@ -300,11 +300,6 @@ impl<D: DriverDeps> Driver<D> {
 /// Production [`DriverDeps`] binding: bollard for Docker, the
 /// [`HealthChecker`] primitive for probes, and [`swap_upstream`] for the
 /// traffic shift.
-///
-/// `start_green` currently bails — Task 8 wires up the actual `docker
-/// create` path (image pull + network attach + label propagation). Until
-/// then, real-Docker e2e tests in Plan A drive the driver via mock deps,
-/// not this struct.
 pub struct RealDriverDeps {
     pub docker: Arc<bollard::Docker>,
     pub proxy_state: ProxyState,
@@ -312,10 +307,126 @@ pub struct RealDriverDeps {
 
 #[async_trait]
 impl DriverDeps for RealDriverDeps {
-    async fn start_green(&self, _deployment: &Deployment) -> Result<(String, SocketAddr)> {
-        Err(anyhow!(
-            "RealDriverDeps::start_green: not implemented — Task 8 wires the docker create path"
-        ))
+    async fn start_green(&self, deployment: &Deployment) -> Result<(String, SocketAddr)> {
+        use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
+        use bollard::image::CreateImageOptions;
+        use futures_util::StreamExt;
+
+        let blue_id = deployment
+            .blue_container
+            .as_deref()
+            .ok_or_else(|| anyhow!("no blue container to base green on"))?;
+        let blue = self
+            .docker
+            .inspect_container(blue_id, None)
+            .await
+            .with_context(|| format!("inspect blue {blue_id}"))?;
+
+        let image = blue
+            .config
+            .as_ref()
+            .and_then(|c| c.image.clone())
+            .ok_or_else(|| anyhow!("blue has no image"))?;
+        // For BG, the green image is the same name with the new digest. The
+        // updater detected the digest change against the registry; the image
+        // tag is unchanged. Pulling re-fetches the new digest under that tag.
+        let pull_opts = CreateImageOptions {
+            from_image: image.as_str(),
+            ..Default::default()
+        };
+        let mut stream = self.docker.create_image(Some(pull_opts), None, None);
+        while let Some(item) = stream.next().await {
+            item.with_context(|| format!("pulling {image}"))?;
+        }
+
+        // Build green Config from blue (mirror updater's recreate.rs::capture_config
+        // pattern, but DON'T set image to a new tag — we're keeping the tag, just
+        // running the new digest).
+        let cfg_in = blue.config.clone().unwrap_or_default();
+        let host_cfg = blue.host_config.clone().unwrap_or_default();
+        let cfg: Config<String> = Config {
+            image: Some(image.clone()),
+            cmd: cfg_in.cmd,
+            entrypoint: cfg_in.entrypoint,
+            env: cfg_in.env,
+            labels: cfg_in.labels,
+            working_dir: cfg_in.working_dir,
+            user: cfg_in.user,
+            exposed_ports: cfg_in.exposed_ports,
+            host_config: Some(host_cfg),
+            healthcheck: cfg_in.healthcheck,
+            ..Default::default()
+        };
+
+        // Green container name: <service>-green-<deployment_id_prefix>
+        let id_short = &deployment.id[..deployment.id.len().min(8)];
+        let green_name = format!("{}-green-{}", deployment.service_name, id_short);
+        let create = self
+            .docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: green_name.clone(),
+                    platform: None,
+                }),
+                cfg,
+            )
+            .await
+            .with_context(|| format!("create container {green_name}"))?;
+
+        // Reconnect to non-bridge networks (mirror recreate.rs).
+        if let Some(ns) = blue
+            .network_settings
+            .as_ref()
+            .and_then(|s| s.networks.as_ref())
+        {
+            for (net_name, settings) in ns {
+                if net_name == "bridge" {
+                    continue;
+                }
+                let _ = self
+                    .docker
+                    .connect_network(
+                        net_name,
+                        bollard::network::ConnectNetworkOptions {
+                            container: create.id.clone(),
+                            endpoint_config: settings.clone(),
+                        },
+                    )
+                    .await; // best-effort; some networks may have changed
+            }
+        }
+
+        self.docker
+            .start_container(&create.id, None::<StartContainerOptions<String>>)
+            .await
+            .with_context(|| format!("start container {green_name}"))?;
+
+        // Re-inspect to get the assigned IP.
+        let started = self.docker.inspect_container(&create.id, None).await?;
+        let ip = started
+            .network_settings
+            .as_ref()
+            .and_then(|s| s.ip_address.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                // Fall back to the first network's IP.
+                started
+                    .network_settings
+                    .as_ref()
+                    .and_then(|s| s.networks.as_ref())
+                    .and_then(|nets| {
+                        nets.values().find_map(|settings| {
+                            settings.ip_address.clone().filter(|s| !s.is_empty())
+                        })
+                    })
+            })
+            .ok_or_else(|| anyhow!("green container has no IP"))?;
+        let port = deployment.container_port.unwrap_or(8080) as u16;
+        let addr: SocketAddr = format!("{ip}:{port}")
+            .parse()
+            .with_context(|| format!("parse addr {ip}:{port}"))?;
+
+        Ok((create.id, addr))
     }
 
     async fn stop_and_remove(&self, container_id: &str) -> Result<()> {

@@ -17,7 +17,9 @@ pub type Result<T> = anyhow::Result<T>;
 
 use std::sync::Arc;
 
-use isengard_core::{EventEmitter, HostMode, Plugin, PluginContext, UpdateDispatcher, registrations_for};
+use isengard_core::{
+    EventEmitter, HostMode, Plugin, PluginContext, UpdateDispatcher, registrations_for,
+};
 use tracing::{info, instrument, warn};
 
 use crate::deployment::{DeploymentSupervisor, SupervisorDispatcher};
@@ -134,9 +136,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    `agent_id` is the controller's stringified HostId (a Ulid). Parse
     //    it back to feed both the storage HostId (for DB lookups) and the
     //    core HostId (= ulid::Ulid, surfaced to plugins via PluginContext).
-    let host_ulid: ulid::Ulid = agent_id.parse().map_err(|e| {
-        anyhow::anyhow!("agent_id {agent_id:?} is not a valid Ulid: {e}")
-    })?;
+    let host_ulid: ulid::Ulid = agent_id
+        .parse()
+        .map_err(|e| anyhow::anyhow!("agent_id {agent_id:?} is not a valid Ulid: {e}"))?;
     let storage_host_id = isengard_storage::host::HostId(host_ulid);
     let core_host_id: isengard_core::HostId = host_ulid;
 
@@ -150,7 +152,10 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             ));
             match supervisor.reconcile_orphans(storage_host_id).await {
                 Ok(0) => {}
-                Ok(n) => warn!(orphans = n, "marked orphan deployments as failed at startup"),
+                Ok(n) => warn!(
+                    orphans = n,
+                    "marked orphan deployments as failed at startup"
+                ),
                 Err(e) => {
                     tracing::error!(error = %e, "reconcile_orphans failed (continuing startup)")
                 }
