@@ -30,7 +30,24 @@ CREATE TABLE deployments_new (
     updated_at               TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO deployments_new SELECT * FROM deployments;
+-- Explicit column list (not SELECT *) so a future column reorder/add can't
+-- silently mis-map data into the wrong slot during this recreate.
+INSERT INTO deployments_new (
+    id, host_id, stack_id, service_name, strategy, state,
+    blue_container, green_container, blue_digest, green_digest,
+    public_hostname, health_path, container_port,
+    healthcheck_started_at, healthcheck_passed_at, switched_at,
+    drained_at, finished_at, error, metadata_json,
+    created_at, updated_at
+)
+SELECT
+    id, host_id, stack_id, service_name, strategy, state,
+    blue_container, green_container, blue_digest, green_digest,
+    public_hostname, health_path, container_port,
+    healthcheck_started_at, healthcheck_passed_at, switched_at,
+    drained_at, finished_at, error, metadata_json,
+    created_at, updated_at
+FROM deployments;
 DROP TABLE deployments;
 ALTER TABLE deployments_new RENAME TO deployments;
 
