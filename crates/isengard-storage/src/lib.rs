@@ -5,6 +5,7 @@
 
 pub mod acme_account;
 pub mod adapter_config;
+pub mod deployment;
 pub mod error;
 pub mod fleet;
 pub mod host;
