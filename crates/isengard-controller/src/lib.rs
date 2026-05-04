@@ -10,6 +10,7 @@ pub mod disconnect_monitor;
 pub mod enrollment;
 pub mod pending_actions;
 pub mod plugin_host;
+pub mod revocation;
 pub mod routing;
 pub mod sync_services;
 pub mod sync_stacks;
