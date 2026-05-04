@@ -45,6 +45,10 @@ pub enum DeploymentState {
     Switching,
     Draining,
     DestroyingBlue,
+    /// Post-switch collapse recovery: green went unhealthy after the swap,
+    /// driver is rolling back to the snapshotted blue upstream. Non-terminal
+    /// (transitions to `Failed` once the swap-back completes). Phase 10f.
+    Recovering,
     Done,
     Aborted,
     Failed,
@@ -58,6 +62,7 @@ impl DeploymentState {
             Self::Switching => "switching",
             Self::Draining => "draining",
             Self::DestroyingBlue => "destroying_blue",
+            Self::Recovering => "recovering",
             Self::Done => "done",
             Self::Aborted => "aborted",
             Self::Failed => "failed",
@@ -78,6 +83,7 @@ impl FromStr for DeploymentState {
             "switching" => Self::Switching,
             "draining" => Self::Draining,
             "destroying_blue" => Self::DestroyingBlue,
+            "recovering" => Self::Recovering,
             "done" => Self::Done,
             "aborted" => Self::Aborted,
             "failed" => Self::Failed,
@@ -653,6 +659,7 @@ mod tests {
         assert!(!DeploymentState::Switching.is_terminal());
         assert!(!DeploymentState::Draining.is_terminal());
         assert!(!DeploymentState::DestroyingBlue.is_terminal());
+        assert!(!DeploymentState::Recovering.is_terminal());
     }
 
     #[test]
@@ -663,6 +670,7 @@ mod tests {
             DeploymentState::Switching,
             DeploymentState::Draining,
             DeploymentState::DestroyingBlue,
+            DeploymentState::Recovering,
             DeploymentState::Done,
             DeploymentState::Aborted,
             DeploymentState::Failed,
