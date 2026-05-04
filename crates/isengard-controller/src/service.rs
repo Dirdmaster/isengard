@@ -15,6 +15,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::bus::EventBus;
 use crate::ca::Authority;
 use crate::enrollment::{EnrollmentService, HostInfo};
+use crate::revocation::RevocationSet;
 use crate::routing::RoutingPusher;
 
 #[derive(Clone)]
@@ -25,6 +26,10 @@ pub struct ControllerService {
     pub routing: Arc<RoutingPusher>,
     pub ca: Arc<Authority>,
     pub enrollment: Arc<EnrollmentService>,
+    /// Phase 14: in-memory revocation set the auth interceptor reads on every
+    /// RPC. Carried on the service so future handlers (e.g. an admin RPC for
+    /// `revoke_agent`) can mutate it without re-fetching from inventory.
+    pub revocation: RevocationSet,
 }
 
 impl ControllerService {
@@ -35,6 +40,7 @@ impl ControllerService {
         routing: Arc<RoutingPusher>,
         ca: Arc<Authority>,
         enrollment: Arc<EnrollmentService>,
+        revocation: RevocationSet,
     ) -> Self {
         Self {
             inventory,
@@ -43,6 +49,7 @@ impl ControllerService {
             routing,
             ca,
             enrollment,
+            revocation,
         }
     }
 
@@ -54,6 +61,7 @@ impl ControllerService {
         inventory: Arc<Inventory>,
         ca: Arc<Authority>,
         enrollment: Arc<EnrollmentService>,
+        revocation: RevocationSet,
     ) -> Self {
         let journal = Arc::new(
             Journal::open_in_memory()
@@ -69,6 +77,7 @@ impl ControllerService {
             routing,
             ca,
             enrollment,
+            revocation,
         }
     }
 }

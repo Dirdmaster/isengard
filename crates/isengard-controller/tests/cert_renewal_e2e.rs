@@ -10,6 +10,7 @@ use chrono::Duration;
 use isengard_controller::ControllerService;
 use isengard_controller::ca::Authority;
 use isengard_controller::enrollment::EnrollmentService;
+use isengard_controller::revocation::RevocationSet;
 use isengard_proto::pb::controller_server::Controller;
 use isengard_proto::pb::{EnrollRequest, RenewCertRequest};
 use isengard_storage::Inventory;
@@ -20,12 +21,15 @@ async fn renew_cert_returns_fresh_valid_leaf_for_existing_host() {
     let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
     let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
     let enrollment = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
+    let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
     let token = enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
 
-    let svc = ControllerService::new_for_test(inv.clone(), ca.clone(), enrollment.clone()).await;
+    let svc =
+        ControllerService::new_for_test(inv.clone(), ca.clone(), enrollment.clone(), revocation)
+            .await;
 
     // Enroll first to get the original cert + host_id.
     let enroll_resp = svc
