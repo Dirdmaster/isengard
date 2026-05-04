@@ -94,6 +94,9 @@ async fn record_attempt_increments_count_and_clears_error_on_success() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(m.attempt_count, 2);
+    assert_eq!(
+        m.attempt_count, 0,
+        "success resets attempt_count (it tracks consecutive failures, not total attempts)"
+    );
     assert_eq!(m.last_error, None, "success clears error");
 }

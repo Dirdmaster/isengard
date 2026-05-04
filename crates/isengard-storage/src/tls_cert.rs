@@ -117,6 +117,12 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(decode_tls_cert_row).collect()
     }
 
+    /// Record a renewal attempt outcome. On success, `attempt_count` resets
+    /// to 0 — the field tracks CONSECUTIVE FAILURES (analogous to Plan A's
+    /// healthcheck eviction counter), not "total attempts ever". Without
+    /// this reset, the backoff window in `tls/renewal.rs::should_retry`
+    /// continues to grow even after a successful renewal, which means a
+    /// long-lived agent eventually hits the 24h cap and won't renew on time.
     pub async fn record_tls_attempt(
         &self,
         public_hostname: &str,
@@ -127,7 +133,7 @@ impl crate::inventory::Inventory {
         if success {
             sqlx::query(
                 "UPDATE tls_certs SET last_attempt_at = ?, last_error = NULL, \
-                 attempt_count = attempt_count + 1 WHERE public_hostname = ?",
+                 attempt_count = 0 WHERE public_hostname = ?",
             )
             .bind(&now)
             .bind(public_hostname)
