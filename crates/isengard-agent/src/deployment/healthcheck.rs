@@ -189,7 +189,7 @@ mod tests {
             .with_success_threshold(99)
             .with_deadline(Duration::from_millis(800));
         let res = hc.wait_for_healthy(addr).await;
-        let to = res.err().expect("should time out");
+        let to = res.expect_err("should time out");
         assert!(
             to.last_attempts.len() <= MAX_TRACKED_ATTEMPTS,
             "expected ≤5 attempts retained, got {}",
