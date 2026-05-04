@@ -369,12 +369,7 @@ impl crate::inventory::Inventory {
 fn row_to_deployment(r: &sqlx::sqlite::SqliteRow) -> Result<Deployment> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = r.try_get("host_id")?;
-    if host_bytes.len() != 16 {
-        return Err(Error::InvalidHostId(host_bytes.len()));
-    }
-    let mut arr = [0u8; 16];
-    arr.copy_from_slice(&host_bytes);
-    let host_id = HostId::from_bytes(arr);
+    let host_id = HostId::from_db_bytes(host_bytes)?;
 
     let strategy_s: String = r.try_get("strategy")?;
     let state_s: String = r.try_get("state")?;
