@@ -4,6 +4,8 @@ import { useHostsStore } from '~/stores/hosts'
 import { useServicesStore } from '~/stores/services'
 import { useEventsStore } from '~/stores/events'
 import ServiceExposeModal from '~/components/ServiceExposeModal.vue'
+import DeploymentInProgressPanel from '~/components/DeploymentInProgressPanel.vue'
+import { useDeployments } from '~/composables/useDeployments'
 
 const route = useRoute()
 const stackId = computed(() => route.params.id as string)
@@ -39,6 +41,16 @@ const recentEvents = computed(() => {
     .slice(0, 20)
 })
 
+// Live deployments for this stack. Most recently created `active` deployment
+// is shown above the services section (Plan B Phase 10 Task 6).
+const { active: activeDeployments } = useDeployments(stackId)
+const visibleDeployment = computed(() => {
+  if (!activeDeployments.value.length) return null
+  return [...activeDeployments.value].sort((a, b) => {
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  })[0]
+})
+
 async function forceUpdate() {
   try {
     const api = useApi()
@@ -72,7 +84,11 @@ function openExposeFor(hostId: string, serviceName: string, port: number) {
         @force-update="forceUpdate"
       />
 
-      <div class="grid grid-cols-2 gap-6 p-6">
+      <div class="px-6 pt-6" v-if="visibleDeployment">
+        <DeploymentInProgressPanel :deployment="visibleDeployment" />
+      </div>
+
+      <div class="grid grid-cols-2 gap-6 p-6" :class="{ 'pt-0': visibleDeployment }">
         <section>
           <h2 class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">Services</h2>
           <div class="flex flex-wrap gap-2 items-center">
