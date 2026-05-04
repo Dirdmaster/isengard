@@ -70,7 +70,7 @@ impl RoutingPusher {
     pub async fn build_for_host(&self, host_id: HostId) -> Result<ProxyConfig> {
         let rules = self.inv.list_routing_rules_for_host(host_id).await?;
 
-        let hash = hash_rules(&rules);
+        let hash = hash_rules(&self.inv, &rules).await?;
         let mut guard = self.by_host.lock().await;
         let entry = guard.entry(host_id).or_default();
         if entry.last_hash != hash {
@@ -166,7 +166,8 @@ impl RoutingPusher {
                 }
             }
 
-            let new_rule = self
+            let hostname_for_log = rule.hostname.clone();
+            let insert_result = self
                 .inv
                 .insert_routing_rule(InsertRoutingRule {
                     fleet: "default".into(),
@@ -186,7 +187,27 @@ impl RoutingPusher {
                     source_container_id: Some(report.container_id.clone()),
                     source_imported_from: None,
                 })
-                .await?;
+                .await;
+            let new_rule = match insert_result {
+                Ok(r) => r,
+                Err(e) => {
+                    // Most likely cause: another label rule already owns this
+                    // hostname on this host (UNIQUE(public_hostname, host_id)).
+                    // First-writer-wins; we log and skip rather than tearing
+                    // down the existing rule. Use `ingest_labels_removed` from
+                    // the other container's exit, or have the user resolve
+                    // the duplicate label, to free the hostname.
+                    tracing::warn!(
+                        host_id = %host_id,
+                        container_id = %report.container_id,
+                        hostname = %hostname_for_log,
+                        error = %e,
+                        "ingest_labels: skipping label rule (likely hostname collision \
+                         with another label rule on this host)"
+                    );
+                    continue;
+                }
+            };
 
             for (field, value) in preserved_overrides {
                 self.inv
@@ -242,7 +263,7 @@ fn to_proto(r: StorageRule) -> ProtoRule {
     }
 }
 
-fn hash_rules(rules: &[StorageRule]) -> u64 {
+async fn hash_rules(inv: &Inventory, rules: &[StorageRule]) -> Result<u64> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
@@ -253,6 +274,15 @@ fn hash_rules(rules: &[StorageRule]) -> u64 {
         r.adapter.hash(&mut h);
         r.healthcheck_path.hash(&mut h);
         r.healthcheck_interval_secs.hash(&mut h);
+        // Include per-rule overrides so a UI override change bumps the
+        // generation and the agent receives the new ProxyConfig.
+        // Without this, hash-only-on-rule-fields would silently stall on
+        // override-only edits.
+        let overrides = inv.list_routing_rule_overrides(r.id).await?;
+        for o in &overrides {
+            o.field.hash(&mut h);
+            o.value_json.to_string().hash(&mut h);
+        }
     }
-    h.finish()
+    Ok(h.finish())
 }
