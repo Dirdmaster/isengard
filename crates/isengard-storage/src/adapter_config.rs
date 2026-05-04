@@ -4,6 +4,7 @@
 
 use crate::error::{Error, Result};
 use crate::host::HostId;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +13,8 @@ pub struct AdapterConfig {
     pub adapter: String,
     pub config_json: serde_json::Value,
     pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +35,8 @@ impl crate::inventory::Inventory {
             VALUES (?, ?, ?, ?)
             ON CONFLICT (host_id, adapter) DO UPDATE SET
               config_json = excluded.config_json,
-              enabled = excluded.enabled
+              enabled = excluded.enabled,
+              updated_at = CURRENT_TIMESTAMP
             "#,
         )
         .bind(&host_bytes)
@@ -52,7 +56,7 @@ impl crate::inventory::Inventory {
         use sqlx::Row;
         let host_bytes = host_id.to_bytes().to_vec();
         let row = sqlx::query(
-            "SELECT host_id, adapter, config_json, enabled \
+            "SELECT host_id, adapter, config_json, enabled, created_at, updated_at \
              FROM adapter_config \
              WHERE host_id = ? AND adapter = ?",
         )
@@ -77,11 +81,28 @@ impl crate::inventory::Inventory {
         let enabled: i64 = r.try_get("enabled")?;
         let enabled = enabled != 0;
 
+        let parse_dt = |key: &str| -> Result<DateTime<Utc>> {
+            let s: String = r.try_get(key)?;
+            DateTime::parse_from_rfc3339(&s)
+                .or_else(|_| {
+                    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                        .map(|n| n.and_utc().fixed_offset())
+                })
+                .map(|d| d.with_timezone(&Utc))
+                .map_err(|e| Error::Decode {
+                    reason: format!("bad timestamp '{s}' for {key}: {e}"),
+                })
+        };
+        let created_at = parse_dt("created_at")?;
+        let updated_at = parse_dt("updated_at")?;
+
         Ok(Some(AdapterConfig {
             host_id,
             adapter,
             config_json,
             enabled,
+            created_at,
+            updated_at,
         }))
     }
 }

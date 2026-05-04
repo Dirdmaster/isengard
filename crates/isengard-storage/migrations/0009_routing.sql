@@ -43,6 +43,8 @@ CREATE TABLE adapter_config (
     adapter     TEXT NOT NULL,
     config_json TEXT NOT NULL,
     enabled     BOOLEAN NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (host_id, adapter)
 );
 
