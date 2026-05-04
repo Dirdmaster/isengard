@@ -53,3 +53,20 @@ fn fifth_failure_uses_24h_backoff() {
         "25h in is past the 24h backoff"
     );
 }
+
+/// Regression test for the slice-4 review fix: `record_tls_attempt(success=true)`
+/// resets `attempt_count` to 0, which means `should_retry` no longer waits
+/// for a failure backoff window after a success.
+///
+/// Before the fix, a cert that had failed once then succeeded would carry
+/// `attempt_count == 2` and the backoff curve treated the next attempt as a
+/// 2nd-failure (2h wait), even though the success was just minutes ago.
+#[test]
+fn success_clears_backoff_so_next_attempt_is_immediately_allowed() {
+    // Just-succeeded cert: attempt_count reset to 0, last_attempt_at very recent.
+    let m = meta(0, 1, None);
+    assert!(
+        should_retry(&m, Utc::now()),
+        "after success (attempt_count == 0), retry should be immediately allowed"
+    );
+}
