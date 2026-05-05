@@ -247,13 +247,18 @@ pub async fn run_sync_loop(
 ///
 /// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
 /// (proves the connection was healthy).
+///
+/// Imp-2: takes an `Arc<RwLock<Endpoint>>` so the cert renewal task can swap
+/// in a freshly-built Endpoint after rotating the on-disk cert. Each
+/// reconnect attempt clones the *current* endpoint, so the new cert
+/// propagates the next time the stream cycles (no agent restart needed).
 #[instrument(
     skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_sync_with_reconnect(
-    endpoint: Endpoint,
+    endpoint: Arc<tokio::sync::RwLock<Endpoint>>,
     agent_id: String,
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
@@ -282,9 +287,13 @@ pub async fn run_sync_with_reconnect(
             }
         }
 
+        // Snapshot the current endpoint. Holding the read lock for the
+        // length of the connect+sync would block renewals; cloning is cheap
+        // (Endpoint is a config bundle, not a live connection).
+        let endpoint_snapshot = endpoint.read().await.clone();
         let attempt_started = Instant::now();
         let result = run_sync_loop(
-            endpoint.clone(),
+            endpoint_snapshot,
             agent_id.clone(),
             interval_secs,
             cancel.clone(),

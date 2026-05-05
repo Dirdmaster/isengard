@@ -149,9 +149,17 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     // -- build the mTLS endpoint reused by the sync stream + any future
     //    direct RPC the agent issues (RenewCert, etc). One Endpoint, many
     //    `connect()` calls — sync's reconnect loop dials per attempt.
+    //
+    //    Imp-2: wrap the Endpoint in `Arc<RwLock<_>>` so the cert renewal
+    //    task can swap in a freshly-built Endpoint after rotating the
+    //    on-disk cert. Sync's reconnect loop reads this on every attempt
+    //    and adopts the new identity at the next stream cycle — without a
+    //    restart.
     let bundle = cert_store::load(&opts.state_dir)
         .map_err(|e| anyhow::anyhow!("loading cert bundle: {e}"))?;
-    let endpoint = build_mtls_endpoint(&opts.controller_url, &bundle)?;
+    let initial_endpoint = build_mtls_endpoint(&opts.controller_url, &bundle)?;
+    let endpoint: Arc<tokio::sync::RwLock<tonic::transport::Endpoint>> =
+        Arc::new(tokio::sync::RwLock::new(initial_endpoint));
 
     // -- build the outbound EventEmitter (mpsc-backed). Receiver lives in
     //    this scope and is passed by &mut into the sync loop so events stay
@@ -202,25 +210,24 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let core_host_id: isengard_core::HostId = host_ulid;
 
     // -- Phase 14 Task 12: cert renewal task. Polls the on-disk cert TTL and
-    //    swaps in a fresh bundle once past 50%. Uses its own dedicated channel
-    //    (the sync loop builds a fresh one from `endpoint` on every reconnect,
-    //    so the freshly-written cert is automatically picked up next cycle).
+    //    swaps in a fresh bundle once past 50%. Imp-2: the task and the sync
+    //    loop share an `Arc<RwLock<Endpoint>>`; on renewal the task rebuilds
+    //    the Endpoint from the new bundle and replaces the inner. Sync's
+    //    reconnect loop reads the current Endpoint on every attempt, so the
+    //    new cert propagates without restarting the agent.
     {
         let renewal_endpoint = endpoint.clone();
         let renewal_state_dir = opts.state_dir.clone();
+        let renewal_url = opts.controller_url.clone();
+        let endpoint_builder: cert_renewal::EndpointBuilder =
+            std::sync::Arc::new(|url, bundle| build_mtls_endpoint(url, bundle));
         tokio::spawn(async move {
-            let channel = match renewal_endpoint.connect().await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(error = %e, "cert_renewal: initial channel connect failed; task exiting");
-                    return;
-                }
-            };
-            let channel_holder = std::sync::Arc::new(tokio::sync::RwLock::new(channel));
             if let Err(e) = cert_renewal::run_renewal_loop(
                 renewal_state_dir,
                 storage_host_id,
-                channel_holder,
+                renewal_endpoint,
+                renewal_url,
+                endpoint_builder,
                 std::time::Duration::from_secs(60),
             )
             .await
