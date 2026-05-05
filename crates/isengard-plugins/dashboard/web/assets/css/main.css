@@ -1,37 +1,44 @@
+/* Import canonical design tokens — every iso-* CSS var lives here. */
+@import "../../../../../../design/tokens.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    /* Map shadcn tokens onto our iso-* palette. Values are HSL triplets. */
-    --background:           220 11% 5%;     /* iso-bg-base #0b0d0f */
-    --foreground:           215 12% 91%;    /* iso-text-primary #e6e8eb */
+    /*
+     * Map shadcn tokens onto our iso-* palette. Values are HSL triplets,
+     * derived from the hex values in design/tokens.css. Update both if
+     * the hex changes.
+     */
+    --background:           228 20% 5%;     /* iso-bg-base #0A0B0F */
+    --foreground:           220 24% 93%;    /* iso-text-primary #E8EBF1 */
 
-    --card:                 215 16% 7%;     /* iso-bg-elevated */
-    --card-foreground:      215 12% 91%;
+    --card:                 223 15% 9%;     /* iso-bg-elevated #14161B */
+    --card-foreground:      220 24% 93%;    /* iso-text-primary */
 
-    --popover:              215 16% 9%;     /* iso-bg-overlay */
-    --popover-foreground:   215 12% 91%;
+    --popover:              222 16% 12%;    /* iso-bg-overlay #1A1D24 */
+    --popover-foreground:   220 24% 93%;    /* iso-text-primary */
 
-    --primary:              215 12% 91%;
-    --primary-foreground:   220 11% 5%;
+    --primary:              220 24% 93%;    /* iso-text-primary */
+    --primary-foreground:   228 20% 5%;     /* iso-bg-base */
 
-    --secondary:            215 16% 7%;
-    --secondary-foreground: 215 12% 91%;
+    --secondary:            223 15% 9%;     /* iso-bg-elevated */
+    --secondary-foreground: 220 24% 93%;    /* iso-text-primary */
 
-    --muted:                215 16% 7%;
-    --muted-foreground:     215 9% 56%;     /* iso-text-muted */
+    --muted:                223 15% 9%;     /* iso-bg-elevated */
+    --muted-foreground:     224 11% 53%;    /* iso-text-muted #7A8194 */
 
-    --accent:               215 16% 9%;
-    --accent-foreground:    215 12% 91%;
+    --accent:               222 16% 12%;    /* iso-bg-overlay */
+    --accent-foreground:    220 24% 93%;    /* iso-text-primary */
 
-    --destructive:          0 91% 71%;      /* iso-error */
-    --destructive-foreground: 215 12% 91%;
+    --destructive:          0 91% 71%;      /* iso-accent-error #F87171 */
+    --destructive-foreground: 220 24% 93%;  /* iso-text-primary */
 
-    --border:               215 12% 13%;    /* iso-border-subtle */
-    --input:                215 12% 13%;
-    --ring:                 142 71% 58%;    /* iso-success: focus ring */
+    --border:               224 15% 14%;    /* iso-border-subtle #1F222A */
+    --input:                224 15% 14%;    /* iso-border-subtle */
+    --ring:                 142 69% 58%;    /* iso-accent-success #4ADE80 — focus ring */
 
     --radius: 0.5rem;
   }

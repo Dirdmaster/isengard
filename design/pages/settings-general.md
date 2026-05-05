@@ -30,7 +30,9 @@ Catch-all for instance-level settings that don't fit a specialized tab.
 
 - `<TopBar />`
 - `<PageHeader title="Settings" sub="General" />`
-- `<SettingsTabs active="general" />` — General · Networking · Policies · Backup · Webhooks · Notifier · Authentication
+- `<SettingsTabs active="general" />` — General¹ · Enrollment¹ · Networking¹ · Deployments¹ · Notifier¹ · Policies² · Backup² · Webhooks² · Authentication²
+
+  ¹ Shipped. ² Designed-not-built — the page-spec exists in `design/pages/` as a placeholder for an unshipped phase, and the tab is not rendered by the live `SettingsTabs` component yet. Compare this list against `crates/isengard-plugins/dashboard/web/pages/settings/index.vue` for the source of truth on what the dashboard actually renders.
 - `<SettingsSection />` per group with rows of label / control / helper text
 - `<DangerZone />` red-bordered section at bottom
 - `<BottomBar />`

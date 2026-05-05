@@ -5,6 +5,7 @@
  *   - design/tw-config.js (concept HTML uses these via Tailwind CDN)
  *   - design/concepts/*.html (via <link rel="stylesheet">)
  *   - the production Tailwind config (crates/isengard-plugins/dashboard/web/tailwind.config.ts)
+ *     via crates/isengard-plugins/dashboard/web/assets/css/main.css
  *
  * Change a value here, every surface updates atomically.
  *
@@ -16,6 +17,11 @@
   --iso-bg-base: #0A0B0F;
   --iso-bg-elevated: #14161B;
   --iso-bg-overlay: #1A1D24;
+  --iso-bg-row-hover: #11151a;
+  --iso-bg-selected: #0f1a12;
+
+  /* === Terminal === */
+  --iso-terminal-bg: #050505;
 
   /* === Text === */
   --iso-text-primary: #E8EBF1;
@@ -32,6 +38,7 @@
   --iso-accent-error-soft: #2E1818;
   --iso-accent-info: #60A5FA;
   --iso-accent-info-soft: #16242E;
+  --iso-accent-neutral: #94a3b8;
 
   /* === Borders === */
   --iso-border-subtle: #1F222A;
@@ -62,4 +69,16 @@
   /* === Typography === */
   --iso-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --iso-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+
+  /* === Font size scale (size / line-height) === */
+  --iso-font-size-xs: 11px;
+  --iso-line-height-xs: 14px;
+  --iso-font-size-sm: 12px;
+  --iso-line-height-sm: 16px;
+  --iso-font-size-base: 13px;
+  --iso-line-height-base: 18px;
+  --iso-font-size-md: 14px;
+  --iso-line-height-md: 20px;
+  --iso-font-size-lg: 16px;
+  --iso-line-height-lg: 22px;
 }
