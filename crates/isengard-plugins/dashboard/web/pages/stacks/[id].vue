@@ -6,6 +6,12 @@ import { useEventsStore } from '~/stores/events'
 import ServiceExposeModal from '~/components/ServiceExposeModal.vue'
 import DeploymentInProgressPanel from '~/components/DeploymentInProgressPanel.vue'
 import DeploymentAbortedPanel from '~/components/DeploymentAbortedPanel.vue'
+import StackTabs from '~/components/stacks/StackTabs.vue'
+import StackOverviewTab from '~/components/stacks/StackOverviewTab.vue'
+import StackHistoryTab from '~/components/stacks/StackHistoryTab.vue'
+import StackComposeTab from '~/components/stacks/StackComposeTab.vue'
+import StackRoutingTab from '~/components/stacks/StackRoutingTab.vue'
+import StackSettingsTab from '~/components/stacks/StackSettingsTab.vue'
 import { useDeployments } from '~/composables/useDeployments'
 
 const route = useRoute()
@@ -93,6 +99,24 @@ async function forceUpdate() {
   }
 }
 
+async function abortDeploy(id: string) {
+  const { confirm } = useConfirm()
+  const ok = await confirm({
+    title: 'Abort deployment?',
+    description: 'The current deploy will be stopped. Containers may be left in a partial state until the next update.',
+    confirmText: 'Abort',
+    danger: true,
+  })
+  if (!ok) return
+  try {
+    const api = useApi()
+    await api.post(`/deployments/${id}/abort`, {})
+    useToast().success('Abort requested')
+  } catch (e) {
+    useToast().error(`Abort failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
 const exposeModalOpen = ref(false)
 const exposeModalHostId = ref('')
 const exposeModalServiceName = ref('')
@@ -103,6 +127,14 @@ function openExposeFor(hostId: string, serviceName: string, port: number) {
   exposeModalPort.value = port
   exposeModalOpen.value = true
 }
+
+const stackTabs = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'compose', label: 'Compose' },
+  { key: 'history', label: 'History' },
+  { key: 'routing', label: 'Routing' },
+  { key: 'settings', label: 'Settings' },
+]
 </script>
 
 <template>
@@ -113,7 +145,9 @@ function openExposeFor(hostId: string, serviceName: string, port: number) {
         :stack="stack"
         :host-hostname="host.hostname"
         :fleet="host.fleet"
+        :active-deployment="visibleDeployment"
         @force-update="forceUpdate"
+        @abort-deploy="abortDeploy"
       />
 
       <div class="px-6 pt-6" v-if="visibleDeployment">
@@ -126,42 +160,19 @@ function openExposeFor(hostId: string, serviceName: string, port: number) {
         />
       </div>
 
-      <div class="grid grid-cols-2 gap-6 p-6" :class="{ 'pt-0': visibleDeployment || visibleAborted }">
-        <section>
-          <h2 class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">Services</h2>
-          <div class="flex flex-wrap gap-2 items-center">
-            <template v-for="svc in services" :key="svc.name">
-              <div class="flex items-center gap-1">
-                <ServiceChip :name="svc.name" :state="svc.state" />
-                <button
-                  class="text-[10px] text-iso-text-muted hover:text-iso-info underline px-1"
-                  @click="openExposeFor(svc.host_id, svc.name, 0)"
-                >
-                  Expose
-                </button>
-              </div>
-            </template>
-            <span v-if="services.length === 0" class="text-sm text-iso-text-faint">
-              No services reported (waiting for next heartbeat).
-            </span>
-          </div>
-        </section>
-
-        <section>
-          <h2 class="text-xs uppercase tracking-wider text-iso-text-faint mb-3">Recent events</h2>
-          <div class="space-y-1">
-            <EventRow
-              v-for="e in recentEvents"
-              :key="e.id"
-              :event="e"
-              :selected="false"
-            />
-            <span v-if="recentEvents.length === 0" class="text-sm text-iso-text-faint">
-              No recent events for this stack's host.
-            </span>
-          </div>
-        </section>
-      </div>
+      <StackTabs :tabs="stackTabs" default-tab="overview" v-slot="{ activeTab }">
+        <StackOverviewTab
+          v-if="activeTab === 'overview'"
+          :stack="stack"
+          :services="services"
+          :recent-events="recentEvents"
+          @expose="openExposeFor"
+        />
+        <StackComposeTab v-else-if="activeTab === 'compose'" />
+        <StackHistoryTab v-else-if="activeTab === 'history'" :stack-id="stackId" />
+        <StackRoutingTab v-else-if="activeTab === 'routing'" />
+        <StackSettingsTab v-else-if="activeTab === 'settings'" />
+      </StackTabs>
     </div>
 
     <div v-else class="p-6 text-iso-text-muted">
