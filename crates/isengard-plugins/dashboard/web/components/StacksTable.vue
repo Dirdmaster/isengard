@@ -96,7 +96,7 @@ function sourceBadge(source: string) {
           <span class="w-2 h-2 rounded-full shrink-0" :class="dotColor(row.health)"></span>
           <span class="font-mono font-medium text-iso-text-primary truncate">{{ row.stack.name }}</span>
           <span
-            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated border border-iso-border-subtle text-[10px] text-iso-text-muted shrink-0"
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-elevated text-[10px] text-iso-text-muted shrink-0"
             :title="`source: ${row.stack.source}`"
           >
             <Icon :name="sourceBadge(row.stack.source).icon" class="w-2.5 h-2.5" />
@@ -117,7 +117,7 @@ function sourceBadge(source: string) {
           <span class="truncate">{{ row.primaryImage ?? '—' }}</span>
           <span
             v-if="row.extraImageCount > 0"
-            class="px-1 py-px rounded-iso-sm bg-iso-bg-elevated border border-iso-border-subtle text-[10px] text-iso-text-muted shrink-0"
+            class="px-1 py-px rounded-iso-sm bg-iso-bg-elevated text-[10px] text-iso-text-muted shrink-0"
           >
             +{{ row.extraImageCount }}
           </span>
