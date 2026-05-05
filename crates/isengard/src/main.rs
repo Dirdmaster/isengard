@@ -81,6 +81,15 @@ enum Command {
         /// ignored once the agent has a persisted cert bundle.
         #[arg(long, env = "ISENGARD_ENROLL_TOKEN")]
         enroll_token: Option<String>,
+        /// Path to a PEM file holding the controller's CA root cert. Pinned
+        /// as the bootstrap channel's trust anchor for the Enroll RPC.
+        /// REQUIRED when the controller serves a self-signed cert (the
+        /// default for an Isengard-managed CA). For a publicly-signed
+        /// controller cert, leave unset to fall back to the platform's
+        /// native root store. Get the PEM via
+        /// `isengard controller ca export` on the controller host.
+        #[arg(long, env = "ISENGARD_CONTROLLER_CA_PEM_PATH")]
+        controller_ca_pem_path: Option<std::path::PathBuf>,
     },
 }
 
@@ -96,6 +105,11 @@ enum ControllerAction {
         #[command(subcommand)]
         op: AgentOp,
     },
+    /// Internal CA management (export the root cert PEM).
+    Ca {
+        #[command(subcommand)]
+        op: CaOp,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -110,6 +124,14 @@ enum TokenOp {
         #[arg(long, default_value = "15m")]
         ttl: humantime::Duration,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CaOp {
+    /// Print the controller's CA root certificate PEM to stdout. Operators
+    /// pipe this into a file the agent can mount + pin via
+    /// `ISENGARD_CONTROLLER_CA_PEM_PATH`.
+    Export,
 }
 
 #[derive(Debug, Subcommand)]
@@ -153,12 +175,14 @@ async fn main() -> Result<()> {
                 op: AgentOp::Revoke { host_id, reason },
             }) => run_agent_revoke(state_dir, host_id, reason).await,
             Some(ControllerAction::Agent { op: AgentOp::List }) => run_agent_list(state_dir).await,
+            Some(ControllerAction::Ca { op: CaOp::Export }) => run_ca_export(state_dir).await,
         },
         Command::Agent {
             controller,
             state_dir,
             enroll_token,
-        } => run_agent_mode(controller, state_dir, enroll_token).await,
+            controller_ca_pem_path,
+        } => run_agent_mode(controller, state_dir, enroll_token, controller_ca_pem_path).await,
     }
 }
 
@@ -271,6 +295,7 @@ async fn run_agent_mode(
     controller: String,
     state_dir: std::path::PathBuf,
     enroll_token: Option<String>,
+    controller_ca_pem_path: Option<std::path::PathBuf>,
 ) -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
@@ -290,6 +315,22 @@ async fn run_agent_mode(
                 .unwrap_or_else(|_| isengard_agent::tls::LE_STAGING_URL.to_string()),
         }),
         enroll_token,
+        bootstrap_trust: isengard_agent::enroll::BootstrapTrust {
+            ca_pem_path: controller_ca_pem_path,
+            ca_pem: None,
+        },
     })
     .await
+}
+
+/// Print the controller's CA root cert PEM to stdout. The controller's first
+/// boot persists the CA in SQLite; this subcommand reuses [`Authority::load_or_init`]
+/// (which is a no-op when the CA already exists) and writes the persisted PEM.
+async fn run_ca_export(state_dir: std::path::PathBuf) -> Result<()> {
+    let inv = open_inventory(&state_dir).await?;
+    let ca = Authority::load_or_init(&inv)
+        .await
+        .context("loading or initializing CA")?;
+    print!("{}", ca.root_cert_pem());
+    Ok(())
 }

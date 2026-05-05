@@ -105,6 +105,7 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
         proxy_https_port: None,
         tls: None,
         enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
@@ -153,6 +154,7 @@ async fn second_run_is_idempotent_no_re_enroll() {
         proxy_https_port: None,
         tls: None,
         enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
 
     // First run: spawn, wait for enroll, abort.

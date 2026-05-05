@@ -51,6 +51,12 @@ pub struct AgentOptions {
     /// `ISENGARD_ENROLL_TOKEN` env var. Once an agent has a persisted cert
     /// bundle, this is ignored.
     pub enroll_token: Option<String>,
+    /// Optional trust pin for the bootstrap Enroll RPC (Phase 14 task 15).
+    /// Required when the controller serves a self-signed (internal-CA) cert,
+    /// which is the default. Resolution order in [`enroll::enroll`]:
+    /// `ISENGARD_CONTROLLER_CA_PEM_PATH` env > `ISENGARD_CONTROLLER_CA_PEM`
+    /// env > this struct's path > this struct's inline PEM > native roots.
+    pub bootstrap_trust: enroll::BootstrapTrust,
 }
 
 #[derive(Debug, Clone)]
@@ -113,7 +119,13 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                     )
                 })?;
             let host_info = enroll::HostInfo::detect();
-            let outcome = enroll::enroll(&opts.controller_url, &enroll_token, host_info).await?;
+            let outcome = enroll::enroll(
+                &opts.controller_url,
+                &enroll_token,
+                host_info,
+                opts.bootstrap_trust.clone(),
+            )
+            .await?;
             // Drop the plaintext token from memory once the bundle is in hand.
             drop(enroll_token);
 

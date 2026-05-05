@@ -93,6 +93,7 @@ async fn agent_heartbeats_advance_last_seen_at() {
         proxy_https_port: None,
         tls: None,
         enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
