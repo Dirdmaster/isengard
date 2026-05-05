@@ -50,6 +50,16 @@ const canAbort = computed(() => {
   if (!dep) return false
   return ['pending', 'running', 'switching', 'draining'].includes(dep.state)
 })
+
+const statusDotColor = computed(() => {
+  switch (status.value.state) {
+    case 'success': return 'bg-iso-success'
+    case 'warn': return 'bg-iso-warn'
+    case 'error': return 'bg-iso-error'
+    case 'info': return 'bg-iso-info'
+    default: return 'bg-iso-text-muted'
+  }
+})
 </script>
 
 <template>
@@ -60,8 +70,7 @@ const canAbort = computed(() => {
         <span class="text-iso-text-faint">/</span>
         <span class="font-mono text-iso-text-primary truncate">{{ stack.name }}</span>
       </nav>
-      <h1 class="font-mono text-xl mt-1 flex items-center gap-2">
-        <Icon name="lucide:layers" class="w-5 h-5 text-iso-text-muted" />
+      <h1 class="font-mono text-2xl mt-1 flex items-center gap-3">
         {{ stack.name }}
         <StatusPill
           :state="status.state"
@@ -70,10 +79,19 @@ const canAbort = computed(() => {
           size="sm"
         />
       </h1>
-      <div class="text-sm text-iso-text-muted mt-1">
-        on <NuxtLink :to="`/stacks?host_id=${stack.host_id}`" class="hover:text-iso-text-primary">{{ hostHostname }}</NuxtLink>
-        · fleet {{ fleet }}
-        · source {{ stack.source }}
+      <div class="text-xs text-iso-text-muted mt-1.5 flex items-center gap-2 flex-wrap">
+        <span class="flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full" :class="statusDotColor"></span>
+          {{ status.label }}
+        </span>
+        <span class="text-iso-text-faint">·</span>
+        <span>
+          on <NuxtLink :to="`/stacks?host_id=${stack.host_id}`" class="hover:text-iso-text-primary">{{ hostHostname }}</NuxtLink>
+        </span>
+        <span class="text-iso-text-faint">·</span>
+        <span>fleet {{ fleet }}</span>
+        <span class="text-iso-text-faint">·</span>
+        <span>source {{ stack.source }}</span>
       </div>
     </div>
     <div class="flex items-center gap-2 shrink-0">
