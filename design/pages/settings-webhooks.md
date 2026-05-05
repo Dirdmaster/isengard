@@ -65,3 +65,7 @@ Sub-page or expandable section showing:
 
 - Concepts: `concepts/2026-05-03-settings-webhooks-v1.html` (TODO)
 - Source: [[Hooks & Webhooks]]
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

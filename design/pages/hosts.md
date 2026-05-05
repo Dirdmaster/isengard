@@ -61,3 +61,7 @@ In all three cases, they want to scan quickly and either feel reassured or jump 
 - ADRs: `decisions/2026-05-02-bottom-bar-cmdk.md` (the BottomBar shown here)
 - Implementation: `crates/isengard-plugins/dashboard/web/pages/hosts.vue` (planned)
 - User flow: `flows/onboarding.md` (Hosts page is post-wizard landing)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

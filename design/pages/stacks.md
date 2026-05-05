@@ -53,3 +53,7 @@ Operators looking for a specific stack to deploy/restart/inspect. Also the entry
 - Concepts: `concepts/2026-05-02-stacks-v1.html`
 - Stack detail: `pages/stack-detail.md`
 - Source design: [[Stack Deployment]]
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.
