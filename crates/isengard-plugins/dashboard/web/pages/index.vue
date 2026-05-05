@@ -1,48 +1,31 @@
 <template>
   <AppShell>
-    <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden min-h-0">
-      <div class="flex flex-col overflow-hidden">
-        <PageHeader title="Home" :subtitle="activitySubtitle" />
-
-        <StatRow />
-
-        <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
-          <StateStrip
-            v-for="f in fleetsToShow"
-            :key="f.name"
-            :fleet="f"
-          />
-
-          <EmptyState
-            v-if="eventsStore.events.length === 0 && eventsStore.loaded"
-            icon="activity"
-            title="All quiet"
-            description="Events appear as Isengard checks for image updates and applies them. Quiet is the default state. Nothing here means nothing has changed."
-          >
-            <template v-if="hostsStore.hosts.length === 0" #cta>
-              <Button
-                variant="outline"
-                size="sm"
-                class="border-iso-border-subtle hover:border-iso-success hover:text-iso-success"
-                @click="addHostOpen = true"
-              >
-                <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
-                Add a host
-              </Button>
-            </template>
-          </EmptyState>
-          <EventTimeline v-else />
+    <main class="flex-1 flex flex-col p-6 gap-5 overflow-auto min-h-0">
+      <!-- Page header: title + "fleet at a glance" subtitle -->
+      <div class="flex items-center justify-between shrink-0">
+        <div class="flex flex-col gap-1">
+          <h1 class="text-[22px] font-semibold text-iso-text-primary">Home</h1>
+          <span class="text-iso-xs text-iso-text-muted">{{ subtitle }}</span>
         </div>
       </div>
-      <Inspector />
-    </main>
 
-    <AddHostModal v-if="addHostOpen" @close="addHostOpen = false" />
+      <!-- 4-cell stat row -->
+      <StatRow />
+
+      <!-- Two-column body: activity feed + (deploys + health) -->
+      <div class="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 flex-1 min-h-0">
+        <ActivityCard />
+        <div class="flex flex-col gap-4 min-h-0">
+          <ActiveDeploysCard />
+          <HealthSnapshotCard />
+        </div>
+      </div>
+    </main>
   </AppShell>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { shouldShowWizard } from '~/stores/wizard'
 
@@ -50,10 +33,7 @@ const eventsStore = useEventsStore()
 const hostsStore = useHostsStore()
 const fleetsStore = useFleetsStore()
 const stacksStore = useStacksStore()
-const ui = useUiStore()
 const router = useRouter()
-
-const addHostOpen = ref(false)
 
 onMounted(async () => {
   await Promise.all([
@@ -67,18 +47,20 @@ onMounted(async () => {
   }
 })
 
-const fleetsToShow = computed(() => {
-  const list = ui.activeFleet === 'all'
-    ? fleetsStore.fleets
-    : fleetsStore.fleets.filter(f => f.name === ui.activeFleet)
-  return list.filter(f => f.host_count > 0)
-})
-
-const activitySubtitle = computed(() => {
-  const events = eventsStore.events.length
-  const hosts = hostsStore.hosts.length
-  const eventLabel = `${events} ${events === 1 ? 'event' : 'events'}`
-  if (hosts === 0) return eventLabel
-  return `${eventLabel} · ${hosts} ${hosts === 1 ? 'host' : 'hosts'}`
+// Subtitle: relative time since the most-recent event, mirroring the concept's
+// "Your fleet at a glance · last updated just now" pattern.
+const subtitle = computed(() => {
+  const e = eventsStore.events[0]
+  const base = 'Your fleet at a glance'
+  if (!e) return `${base} · no activity yet`
+  const ms = Date.now() - new Date(e.occurred_at).getTime()
+  const s = Math.floor(ms / 1000)
+  let rel: string
+  if (s < 30) rel = 'just now'
+  else if (s < 60) rel = `${s}s ago`
+  else if (s < 3600) rel = `${Math.floor(s / 60)}m ago`
+  else if (s < 86400) rel = `${Math.floor(s / 3600)}h ago`
+  else rel = `${Math.floor(s / 86400)}d ago`
+  return `${base} · last updated ${rel}`
 })
 </script>

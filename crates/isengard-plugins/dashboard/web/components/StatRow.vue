@@ -4,10 +4,14 @@ import { useRouter } from 'vue-router'
 import type { DeploymentDto } from '~/composables/useDeployments'
 
 /**
- * Home page header strip: hosts up · stacks healthy · pending approvals · deploys in progress.
+ * Home page stat row: 4 cells — HOSTS / STACKS / APPROVALS / DEPLOYS.
  *
- * Per `design/pages/home.md` — the 10-second answer to "is anything broken?".
- * Each cell is clickable and routes to the relevant page (where it has somewhere to go).
+ * Per `design/concepts/home/v1.html` — the 10-second answer to "is anything
+ * happening?". Each cell has a status dot, uppercase label, big mono number,
+ * secondary count, status footer. Warn/info cells have soft backgrounds and
+ * tinted borders.
+ *
+ * Approvals stays disabled until Phase 9 ships (see `design/pages/approvals.md`).
  */
 
 const hostsStore = useHostsStore()
@@ -28,7 +32,6 @@ onMounted(async () => {
 })
 
 // Hosts up: hosts with last_seen_at within the last 5 minutes.
-// Anything older drifts toward "stale", anything null is unenrolled / never-reported.
 const hostsUp = computed(() => {
   const cutoff = Date.now() - 5 * 60 * 1000
   return hostsStore.hosts.filter((h) => {
@@ -38,22 +41,38 @@ const hostsUp = computed(() => {
 })
 
 const hostsTotal = computed(() => hostsStore.hosts.length)
+const hostsAllHealthy = computed(() => hostsTotal.value > 0 && hostsUp.value === hostsTotal.value)
 
-// Stacks healthy: anything that doesn't have a recent `update.failed` event
-// for one of its services. Heuristic — proper health needs Phase 9-ish data.
-const stacksHealthy = computed(() => {
+// Stacks: count + degraded heuristic from recent failure events.
+const stacksTotal = computed(() => stacksStore.items.length)
+
+const stacksDegraded = computed(() => {
   const failedHostIds = new Set(
     eventsStore.events
       .filter((e) => e.kind === 'update.failed' && e.host_id)
       .slice(0, 50)
       .map((e) => e.host_id as string),
   )
-  return stacksStore.items.filter((s) => !failedHostIds.has(s.host_id)).length
+  return stacksStore.items.filter((s) => failedHostIds.has(s.host_id)).length
 })
 
-const stacksTotal = computed(() => stacksStore.items.length)
+const stacksHealthy = computed(() => stacksTotal.value - stacksDegraded.value)
 
 const deploysInProgress = computed(() => activeDeploys.value.length)
+
+// Concept shows "web-app · 60%" — pick the first active deploy and its
+// switching progress. Heuristic: switched_at && !drained_at => switching.
+const primaryDeploy = computed(() => activeDeploys.value[0] ?? null)
+
+const primaryDeployProgress = computed(() => {
+  const d = primaryDeploy.value
+  if (!d) return null
+  // Cheap proxy for progress — we don't have a true % from the backend.
+  if (d.drained_at) return 100
+  if (d.switched_at) return 60
+  if (d.healthcheck_passed_at) return 40
+  return 20
+})
 
 function go(path: string) {
   router.push(path)
@@ -61,53 +80,107 @@ function go(path: string) {
 </script>
 
 <template>
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-px bg-iso-border-subtle border-y border-iso-border-subtle shrink-0">
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3.5 shrink-0">
+    <!-- HOSTS -->
     <button
       type="button"
-      class="bg-iso-bg-base hover:bg-iso-bg-elevated transition-colors px-4 py-3 text-left flex flex-col gap-0.5"
+      class="p-4 rounded-iso-lg bg-iso-bg-elevated border border-iso-border-subtle flex flex-col gap-1.5 text-left hover:border-iso-border-strong transition-colors"
       @click="go('/hosts')"
     >
-      <div class="flex items-baseline gap-1.5">
-        <span class="font-mono text-xl text-iso-text-primary tabular-nums">{{ hostsUp }}</span>
-        <span class="text-xs text-iso-text-faint tabular-nums">/ {{ hostsTotal }}</span>
+      <div class="flex items-center gap-2">
+        <div
+          class="w-2 h-2 rounded-full"
+          :class="hostsAllHealthy ? 'bg-iso-success' : hostsTotal === 0 ? 'bg-iso-text-faint' : 'bg-iso-warn'"
+        ></div>
+        <span class="text-[11px] font-medium text-iso-text-muted tracking-wide">HOSTS</span>
       </div>
-      <span class="text-[11px] uppercase tracking-wider text-iso-text-muted">hosts up</span>
+      <div class="flex items-baseline gap-2">
+        <span class="text-2xl font-semibold font-mono text-iso-text-primary">{{ hostsUp }}</span>
+        <span class="text-iso-xs text-iso-text-muted">/ {{ hostsTotal }} up</span>
+      </div>
+      <span
+        class="text-[11px]"
+        :class="hostsAllHealthy ? 'text-iso-success' : 'text-iso-text-muted'"
+      >
+        {{ hostsTotal === 0 ? 'no hosts enrolled' : hostsAllHealthy ? 'all healthy' : `${hostsTotal - hostsUp} stale` }}
+      </span>
     </button>
 
+    <!-- STACKS -->
     <button
       type="button"
-      class="bg-iso-bg-base hover:bg-iso-bg-elevated transition-colors px-4 py-3 text-left flex flex-col gap-0.5"
+      class="p-4 rounded-iso-lg bg-iso-bg-elevated border border-iso-border-subtle flex flex-col gap-1.5 text-left hover:border-iso-border-strong transition-colors"
       @click="go('/stacks')"
     >
-      <div class="flex items-baseline gap-1.5">
-        <span class="font-mono text-xl text-iso-text-primary tabular-nums">{{ stacksHealthy }}</span>
-        <span class="text-xs text-iso-text-faint tabular-nums">/ {{ stacksTotal }}</span>
+      <div class="flex items-center gap-2">
+        <div
+          class="w-2 h-2 rounded-full"
+          :class="stacksDegraded > 0 ? 'bg-iso-warn' : 'bg-iso-success'"
+        ></div>
+        <span class="text-[11px] font-medium text-iso-text-muted tracking-wide">STACKS</span>
       </div>
-      <span class="text-[11px] uppercase tracking-wider text-iso-text-muted">stacks healthy</span>
+      <div class="flex items-baseline gap-2">
+        <span class="text-2xl font-semibold font-mono text-iso-text-primary">{{ stacksTotal }}</span>
+        <span class="text-iso-xs text-iso-text-muted">tracked</span>
+      </div>
+      <span class="text-[11px] text-iso-text-muted">
+        <template v-if="stacksTotal === 0">none yet</template>
+        <template v-else-if="stacksDegraded === 0">{{ stacksHealthy }} healthy</template>
+        <template v-else>{{ stacksHealthy }} healthy · {{ stacksDegraded }} degraded</template>
+      </span>
     </button>
 
+    <!-- APPROVALS — Phase 9 deferred -->
     <div
-      class="bg-iso-bg-base px-4 py-3 text-left flex flex-col gap-0.5 cursor-not-allowed"
-      title="Approvals coming with Phase 9"
+      class="p-4 rounded-iso-lg bg-iso-bg-elevated border border-iso-border-subtle flex flex-col gap-1.5 text-left opacity-60"
+      title="Approvals coming with Phase 9 (update policies)"
     >
-      <div class="flex items-baseline gap-1.5">
-        <span class="font-mono text-xl text-iso-text-faint">—</span>
+      <div class="flex items-center gap-2">
+        <div class="w-2 h-2 rounded-full bg-iso-text-faint"></div>
+        <span class="text-[11px] font-medium text-iso-text-muted tracking-wide">APPROVALS</span>
       </div>
-      <span class="text-[11px] uppercase tracking-wider text-iso-text-muted">pending approvals</span>
+      <div class="flex items-baseline gap-2">
+        <span class="text-2xl font-semibold font-mono text-iso-text-faint">—</span>
+        <span class="text-iso-xs text-iso-text-muted">pending</span>
+      </div>
+      <span class="text-[11px] text-iso-text-faint">phase 9</span>
     </div>
 
+    <!-- DEPLOYS -->
     <button
       type="button"
-      class="bg-iso-bg-base hover:bg-iso-bg-elevated transition-colors px-4 py-3 text-left flex flex-col gap-0.5"
+      class="p-4 rounded-iso-lg flex flex-col gap-1.5 text-left transition-colors"
+      :class="deploysInProgress > 0
+        ? 'bg-iso-info-soft border border-iso-info hover:opacity-90'
+        : 'bg-iso-bg-elevated border border-iso-border-subtle hover:border-iso-border-strong'"
       @click="go('/stacks')"
     >
-      <div class="flex items-baseline gap-1.5">
+      <div class="flex items-center gap-2">
+        <div
+          class="w-2 h-2 rounded-full"
+          :class="deploysInProgress > 0 ? 'bg-iso-info' : 'bg-iso-success'"
+        ></div>
         <span
-          class="font-mono text-xl tabular-nums"
+          class="text-[11px] font-medium tracking-wide"
+          :class="deploysInProgress > 0 ? 'text-iso-info' : 'text-iso-text-muted'"
+        >DEPLOYS</span>
+      </div>
+      <div class="flex items-baseline gap-2">
+        <span
+          class="text-2xl font-semibold font-mono"
           :class="deploysInProgress > 0 ? 'text-iso-info' : 'text-iso-text-primary'"
         >{{ deploysInProgress }}</span>
+        <span class="text-iso-xs text-iso-text-muted">{{ deploysInProgress === 0 ? 'idle' : 'in progress' }}</span>
       </div>
-      <span class="text-[11px] uppercase tracking-wider text-iso-text-muted">deploys in progress</span>
+      <span
+        class="text-[11px]"
+        :class="deploysInProgress > 0 ? 'text-iso-info' : 'text-iso-text-muted'"
+      >
+        <template v-if="primaryDeploy && primaryDeployProgress !== null">
+          {{ primaryDeploy.service_name }} · {{ primaryDeployProgress }}%
+        </template>
+        <template v-else>no active deploys</template>
+      </span>
     </button>
   </div>
 </template>
