@@ -1,18 +1,50 @@
 <script setup lang="ts">
+/**
+ * "Coming soon" modal for the stack-creation wizard. The real flow
+ * (paste compose / form builder / git sync) ships in a later phase;
+ * for now we surface a per-mode preview so the empty-state cards on
+ * /stacks have somewhere to land.
+ */
+
+export type StackMode = 'paste' | 'form' | 'git'
+
+const props = withDefaults(defineProps<{ mode?: StackMode | null }>(), {
+  mode: null,
+})
+
 defineEmits<{ close: [] }>()
 
-function handleOpenChange(v: boolean, emit: (e: 'close') => void) {
-  if (!v) emit('close')
+interface ModeCopy {
+  title: string
+  blurb: string
 }
+
+const modeCopy: Record<StackMode, ModeCopy> = {
+  paste: {
+    title: 'Paste compose · coming soon',
+    blurb: 'Drop in a compose.yml, pick which hosts run it, deploy. The fastest path: it lands first.',
+  },
+  form: {
+    title: 'Form builder · coming soon',
+    blurb: 'Click through services, ports, volumes, env. Isengard generates the YAML and ships it.',
+  },
+  git: {
+    title: 'Git sync · coming soon',
+    blurb: 'Point at a repo + path. Every commit triggers a redeploy. GitOps without the YAML pipeline.',
+  },
+}
+
+const heading = computed(() => (props.mode ? modeCopy[props.mode].title : 'Add stack'))
+const blurb = computed(() => (props.mode ? modeCopy[props.mode].blurb : "Stack creation isn't wired up yet."))
 </script>
 
 <template>
   <Dialog :open="true" @update:open="(v) => !v && $emit('close')">
     <DialogContent class="bg-iso-bg-base border-iso-border-subtle sm:max-w-[560px]">
       <DialogHeader>
-        <DialogTitle class="font-mono text-iso-text-primary">Add stack</DialogTitle>
+        <DialogTitle class="font-mono text-iso-text-primary">{{ heading }}</DialogTitle>
         <DialogDescription class="text-iso-text-muted">
-          Stack creation isn't wired up yet.
+          {{ blurb }}
         </DialogDescription>
       </DialogHeader>
 
@@ -35,10 +67,10 @@ function handleOpenChange(v: boolean, emit: (e: 'close') => void) {
           A first-class
           <span class="text-iso-text-primary">+ Add stack</span>
           wizard
-          (<span class="text-iso-text-primary">paste compose</span>,
-          <span class="text-iso-text-primary">git sync</span>,
-          <span class="text-iso-text-primary">form builder</span>) is on the roadmap.
-          For now, deploy via your usual compose flow on the host and Isengard will pick it up.
+          (<span :class="mode === 'paste' ? 'text-iso-info font-semibold' : 'text-iso-text-primary'">paste compose</span>,
+          <span :class="mode === 'form'  ? 'text-iso-info font-semibold' : 'text-iso-text-primary'">form builder</span>,
+          <span :class="mode === 'git'   ? 'text-iso-info font-semibold' : 'text-iso-text-primary'">git sync</span>)
+          is on the roadmap. For now, deploy via your usual compose flow on the host and Isengard will pick it up.
         </p>
       </div>
 

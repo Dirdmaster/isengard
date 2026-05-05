@@ -6,7 +6,8 @@ import { useEventsStore } from '~/stores/events'
 import { useUiStore } from '~/stores/ui'
 import type { DeploymentDto } from '~/composables/useDeployments'
 import type { StackRowData } from '~/components/StacksTable.vue'
-import AddStackComingSoonModal from '~/components/AddStackComingSoonModal.vue'
+import AddStackComingSoonModal, { type StackMode } from '~/components/AddStackComingSoonModal.vue'
+import StacksEmptyState from '~/components/StacksEmptyState.vue'
 
 const stacksStore   = useStacksStore()
 const hostsStore    = useHostsStore()
@@ -139,15 +140,35 @@ const rows = computed<StackRowData[]>(() => {
 const subtitle = computed(() => {
   const stackCount = rows.value.length
   const serviceCount = rows.value.reduce((sum, r) => sum + r.serviceCount, 0)
+  const stacksLabel = `${stackCount} ${stackCount === 1 ? 'stack' : 'stacks'}`
+
+  // Empty-state subtitle leans forward: "0 stacks · N hosts ready to deploy on"
+  // matches the concept and primes the user that there's a fleet waiting.
+  if (stackCount === 0) {
+    const hostsReady = hostsStore.hosts.length
+    const hostsLabel = `${hostsReady} ${hostsReady === 1 ? 'host' : 'hosts'}`
+    return `${stacksLabel} · ${hostsLabel} ready to deploy on`
+  }
+
   const hostSet = new Set(rows.value.map((r) => r.stack.host_id))
   const hostCount = hostSet.size
-  const stacksLabel = `${stackCount} ${stackCount === 1 ? 'stack' : 'stacks'}`
   const servicesLabel = `${serviceCount} ${serviceCount === 1 ? 'service' : 'services'}`
   if (hostCount === 0) return `${stacksLabel} · ${servicesLabel}`
   return `${stacksLabel} · ${servicesLabel} across ${hostCount} ${hostCount === 1 ? 'host' : 'hosts'}`
 })
 
 const addStackOpen = ref(false)
+const addStackMode = ref<StackMode | null>(null)
+
+function openAddStack(mode: StackMode | null = null) {
+  addStackMode.value = mode
+  addStackOpen.value = true
+}
+
+function closeAddStack() {
+  addStackOpen.value = false
+  addStackMode.value = null
+}
 </script>
 
 <template>
@@ -156,7 +177,7 @@ const addStackOpen = ref(false)
       <template #actions>
         <button
           class="px-3 py-1.5 rounded-iso-md bg-iso-success text-iso-bg-base text-xs font-medium hover:opacity-90"
-          @click="addStackOpen = true"
+          @click="openAddStack(null)"
         >
           + Add stack
         </button>
@@ -165,9 +186,17 @@ const addStackOpen = ref(false)
 
     <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
       <TableSkeleton v-if="!stacksStore.loaded" :rows="6" :columns="[240, 110, 90, 240, 140, 110]" />
+      <StacksEmptyState
+        v-else-if="rows.length === 0"
+        @pick="openAddStack"
+      />
       <StacksTable v-else :rows="rows" class="flex-1 flex flex-col min-h-0" />
     </div>
 
-    <AddStackComingSoonModal v-if="addStackOpen" @close="addStackOpen = false" />
+    <AddStackComingSoonModal
+      v-if="addStackOpen"
+      :mode="addStackMode"
+      @close="closeAddStack"
+    />
   </AppShell>
 </template>
