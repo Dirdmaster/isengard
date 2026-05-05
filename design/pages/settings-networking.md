@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "Sub-tabs (Adapter/Proxy) shipped; per-adapter model + listener config + ACME log + import deferred"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
@@ -12,6 +13,13 @@ tags:
 ---
 
 # Settings · Networking
+
+## Implementation status (2026-05-05)
+
+- Shipped: Adapter cards (None / Tailscale / CfTunnel), `RoutingRulesTable`, `RoutingRuleEditModal`
+- Deferred: Headscale / raw-wireguard / custom adapter cards, true `<NetworkingSubTabs />` separation (Adapter and Proxy currently render stacked on one tab), Listener config (ports, default TLS strategy), ACME contact email + issuance log, `<ImportRulesModal />` (NPM / Traefik), label-vs-UI conflict banner
+- Drift: cards are scoped per-host (assume `hostsStore.hosts[0]`) instead of per-adapter; multi-adapter selection per routing rule is not represented
+
 
 The control plane for Pingora + NetworkingAdapter configuration. Two sub-tabs:
 1. **Adapter** — which transport(s) the fleet uses

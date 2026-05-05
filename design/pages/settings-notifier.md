@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "Currently 5% MVP (two on/off switches); per-channel cards + test button + rate limits + filters not shipped"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
@@ -12,6 +13,13 @@ tags:
 ---
 
 # Settings · Notifier
+
+## Implementation status (2026-05-05)
+
+- Shipped: on/off toggles for Telegram + Discord (env-var-gated)
+- Deferred: per-channel cards (status, last message sent, test button, rate limits, kind filters), HTTP channel UI, callback URL config + reachability check, `+ Add channel` modal
+- Reason: Phase 4 (notifier) shipped the backend; the spec'd UI is a Phase 4.5 polish pass that hasn't been planned
+
 
 Configure outbound notification channels (Telegram, Discord, generic HTTP) and inbound callback endpoints (for approval flow).
 
