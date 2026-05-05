@@ -142,21 +142,17 @@ impl Controller for ControllerService {
         }))
     }
 
-    /// Sign a fresh leaf cert for the calling agent. The new cert + key go back
-    /// in the response; the old cert row stays in storage (append-only audit).
-    ///
-    /// TODO(task-8): once the mTLS interceptor lands, cross-check that the
-    /// `host_id` in the request matches the `host_id` extracted from the
-    /// caller's client cert. Until then we trust the request body, which is
-    /// fine because nothing reaches this handler without already passing
-    /// transport-level authentication once the interceptor is wired in.
+    /// Sign a fresh leaf cert for the calling agent. The host_id is read
+    /// authoritatively from the client cert's CN (set by `ca::sign_agent_leaf`
+    /// to `host_id.to_string()`); the request body carries no fields. This
+    /// closes the Bl-1 horizontal-escalation hole where agent A could request
+    /// a cert minted for agent B by passing B's host_id in the request body.
     async fn renew_cert(
         &self,
         request: Request<RenewCertRequest>,
     ) -> Result<Response<RenewCertResponse>, Status> {
-        let req = request.into_inner();
-        let host_id = isengard_storage::HostId::from_db_bytes(req.host_id)
-            .map_err(|_| Status::invalid_argument("invalid host_id"))?;
+        let host_id = host_id_from_peer_cert(&request)?;
+        let _ = request.into_inner(); // body has no fields after Bl-1 fix
 
         let renewed = self.enrollment.renew(host_id).await.map_err(|e| {
             tracing::warn!(error = %e, host_id = %host_id, "renew_cert: failed");
@@ -174,26 +170,36 @@ impl Controller for ControllerService {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::SyncStream>, Status> {
+        // Bl-2 fix: derive the authoritative host_id from the caller's client
+        // cert CN (set by `ca::sign_agent_leaf` to `host_id.to_string()`).
+        // Any value in SyncHello.agent_id is logged for debugging but
+        // explicitly NOT trusted — previously, an agent with cert A could
+        // attribute heartbeats / container reports / label reports to agent
+        // B by sending B's id in the Hello payload.
+        let host_id = host_id_from_peer_cert(&request)?;
         let mut inbound = request.into_inner();
 
-        // Read first frame: must be SyncHello with a valid agent_id.
+        // Read first frame: must be SyncHello (the agent_id field is logged
+        // but ignored — see above).
         let hello = inbound
             .message()
             .await
             .map_err(|e| Status::aborted(format!("reading hello: {e}")))?
             .ok_or_else(|| Status::invalid_argument("stream closed before SyncHello"))?;
 
-        let agent_id_str = match hello.payload {
+        let claimed_agent_id = match hello.payload {
             Some(isengard_proto::pb::agent_message::Payload::Hello(h)) => h.agent_id,
             _ => {
                 return Err(Status::invalid_argument("first frame must be SyncHello"));
             }
         };
-
-        // Parse the ULID and look up the host.
-        let agent_ulid = ulid::Ulid::from_string(&agent_id_str)
-            .map_err(|e| Status::unauthenticated(format!("invalid agent_id: {e}")))?;
-        let host_id = isengard_storage::HostId(agent_ulid);
+        if claimed_agent_id != host_id.to_string() {
+            tracing::warn!(
+                cert_host_id = %host_id,
+                claimed_agent_id = %claimed_agent_id,
+                "Sync: SyncHello.agent_id does not match cert CN; using cert (Bl-2 defense)",
+            );
+        }
 
         let host = self
             .inventory
@@ -367,4 +373,47 @@ impl Controller for ControllerService {
 
         Ok(Response::new(outbound))
     }
+}
+
+/// Extract the authoritative `HostId` from the caller's mTLS client cert.
+/// The CN of every agent leaf is set to `host_id.to_string()` by
+/// [`crate::ca::Authority::sign_agent_leaf`], so the CN is the source of
+/// truth for which agent is calling.
+///
+/// Used by `renew_cert` (Bl-1 fix) and `sync` (Bl-2 fix) to prevent
+/// horizontal-escalation attacks where one agent's cert is used to mint
+/// or impersonate another agent.
+///
+/// Returns `Status::unauthenticated` on missing peer cert (the auth layer
+/// rejects this on non-public methods, so this is a defense-in-depth
+/// double-check) or a CN that doesn't parse as a ULID.
+fn host_id_from_peer_cert<T>(request: &Request<T>) -> Result<isengard_storage::HostId, Status> {
+    use tonic::transport::server::TlsConnectInfo;
+    use x509_parser::prelude::*;
+
+    let peer_certs = request
+        .extensions()
+        .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()
+        .and_then(|info| info.peer_certs())
+        .ok_or_else(|| Status::unauthenticated("client cert required"))?;
+
+    let cert_der = peer_certs
+        .first()
+        .ok_or_else(|| Status::unauthenticated("no client cert presented"))?;
+
+    let (_, cert) = parse_x509_certificate(cert_der.as_ref())
+        .map_err(|e| Status::unauthenticated(format!("malformed client cert: {e}")))?;
+
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .ok_or_else(|| Status::unauthenticated("client cert has no CN"))?
+        .as_str()
+        .map_err(|e| Status::unauthenticated(format!("client cert CN not utf8: {e}")))?;
+
+    let ulid = ulid::Ulid::from_string(cn)
+        .map_err(|e| Status::unauthenticated(format!("client cert CN not a valid ULID: {e}")))?;
+
+    Ok(isengard_storage::HostId(ulid))
 }

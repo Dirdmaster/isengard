@@ -44,7 +44,11 @@ message EnrollResponse {
 }
 
 message RenewCertRequest {
-  bytes host_id = 1;
+  // Phase 14 Bl-1 fix: host_id is intentionally omitted. The controller's
+  // CertAuthInterceptor authenticates the caller via mTLS and the renew_cert
+  // handler reads the host_id from the client cert's CN. Trusting a
+  // request-body host_id allowed a horizontal-escalation attack where agent
+  // A could request a fresh cert minted for agent B.
 }
 
 message RenewCertResponse {

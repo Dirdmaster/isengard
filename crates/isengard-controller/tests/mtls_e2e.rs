@@ -159,9 +159,7 @@ async fn enroll_then_mtls_heartbeat_succeeds() {
     let mut client = ControllerClient::new(channel);
 
     let renew_resp = client
-        .renew_cert(RenewCertRequest {
-            host_id: resp.host_id.clone(),
-        })
+        .renew_cert(RenewCertRequest {})
         .await
         .expect("RenewCert should succeed with a valid client cert")
         .into_inner();
@@ -221,10 +219,105 @@ async fn revoked_cert_rejected() {
     let mut client = ControllerClient::new(channel);
 
     let err = client
-        .renew_cert(RenewCertRequest {
-            host_id: resp.host_id,
-        })
+        .renew_cert(RenewCertRequest {})
         .await
         .expect_err("RenewCert with a revoked cert must fail");
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "got {err:?}");
+}
+
+/// Bl-1 regression test: agent A connects with its own cert, calls
+/// RenewCert. With the fix, RenewCertRequest carries no host_id and the
+/// controller authoritatively reads the host_id from agent A's cert CN —
+/// regardless of any client claims — so the renewed cert is minted for A.
+/// We verify by comparing the resulting cert's CN against agent A's host_id.
+///
+/// Pre-fix the attacker would have stuffed B's host_id in the request body
+/// to make the controller mint a cert for B; verifying the renewed cert's
+/// CN equals the caller's cert CN proves the controller now sources the
+/// host_id from transport authentication only.
+#[tokio::test]
+async fn renew_cert_uses_caller_cert_cn_not_request_body() {
+    let boot = boot_controller().await;
+
+    let token = boot
+        .enrollment
+        .mint(TokenRole::Agent, Duration::minutes(5))
+        .await
+        .unwrap();
+
+    // Bootstrap → enroll agent A.
+    let channel = Channel::from_shared(boot.url.clone())
+        .unwrap()
+        .tls_config(bootstrap_tls(boot.ca.root_cert_pem()))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = ControllerClient::new(channel);
+    let resp_a = client
+        .enroll(EnrollRequest {
+            token,
+            hostname: "agent-a".into(),
+            os: "linux".into(),
+            version: "0.1".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let host_id_a = HostId::from_db_bytes(resp_a.host_id.clone()).unwrap();
+
+    // Mint a fake "B" host_id the attacker would have liked to hand the
+    // controller. It's never enrolled and the cert never sees it; the test
+    // just proves the controller ignores client-supplied host_id entirely.
+    let host_id_b = HostId::new();
+    assert_ne!(host_id_a, host_id_b);
+
+    // Agent A dials with A's cert and calls RenewCert. The request body has
+    // no host_id at all post-fix; the controller is forced to use the cert.
+    let channel_a = Channel::from_shared(boot.url.clone())
+        .unwrap()
+        .tls_config(mtls(
+            &resp_a.ca_root_pem,
+            &resp_a.agent_cert_pem,
+            &resp_a.agent_key_pem,
+        ))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = ControllerClient::new(channel_a);
+    let renewed = client
+        .renew_cert(RenewCertRequest {})
+        .await
+        .expect("RenewCert with A's cert should succeed")
+        .into_inner();
+
+    // The renewed cert's CN must equal A's host_id (proving the controller
+    // sourced the identity from the cert, not from the body).
+    let (_, pem) = x509_parser::pem::parse_x509_pem(renewed.agent_cert_pem.as_bytes()).unwrap();
+    let cert = pem.parse_x509().unwrap();
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .expect("renewed leaf has CN")
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        cn,
+        host_id_a.to_string(),
+        "renewed cert was minted for the caller's cert CN identity"
+    );
+    assert_ne!(cn, host_id_b.to_string());
+
+    // Sanity: the new cert is also persisted under host A.
+    let active = boot
+        .inv
+        .active_cert_for_host(host_id_a)
+        .await
+        .unwrap()
+        .expect("A has an active cert after renewal");
+    assert!(active.cert_pem.contains("BEGIN CERTIFICATE"));
 }

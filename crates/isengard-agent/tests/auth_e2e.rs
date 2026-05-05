@@ -175,10 +175,10 @@ async fn full_auth_lifecycle_in_process() {
     // --- 4. Agent builds mTLS endpoint + RenewCert succeeds ----------
     {
         let mut client = mtls_client(&harness, &outcome.bundle).await;
+        // Bl-1 fix: RenewCertRequest no longer carries a host_id; the
+        // controller reads it from the caller's client cert CN.
         let renew = client
-            .renew_cert(RenewCertRequest {
-                host_id: outcome.host_id.to_bytes().to_vec(),
-            })
+            .renew_cert(RenewCertRequest {})
             .await
             .expect("RenewCert should succeed with a valid client cert")
             .into_inner();
@@ -226,9 +226,7 @@ async fn full_auth_lifecycle_in_process() {
     //   the channel on every reconnect).
     let mut client = mtls_client(&harness, &outcome.bundle).await;
     let err = client
-        .renew_cert(RenewCertRequest {
-            host_id: outcome.host_id.to_bytes().to_vec(),
-        })
+        .renew_cert(RenewCertRequest {})
         .await
         .expect_err("revoked cert must be rejected");
     assert_eq!(

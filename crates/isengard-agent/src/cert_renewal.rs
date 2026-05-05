@@ -64,10 +64,10 @@ async fn maybe_renew(
     );
     let channel = channel_holder.read().await.clone();
     let mut client = ControllerClient::new(channel);
+    // Bl-1 fix: RenewCertRequest no longer carries host_id; the controller
+    // reads it authoritatively from the client cert CN.
     let resp = client
-        .renew_cert(RenewCertRequest {
-            host_id: host_id.to_bytes().to_vec(),
-        })
+        .renew_cert(RenewCertRequest {})
         .await
         .context("renew_cert RPC")?
         .into_inner();
