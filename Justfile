@@ -116,10 +116,11 @@ _smoke-up ctrl_img agent_img:
     echo "→ starting agent ({{agent_img}})"
     docker run -d --name {{agent}} --restart=always \
       --platform linux/amd64 \
+      --add-host controller.local:host-gateway \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -v {{agent}}-data:/var/lib/isengard \
       -v {{ca_pem}}:/etc/isengard/ca.pem:ro \
-      -e ISENGARD_CONTROLLER=https://host.docker.internal:9417 \
+      -e ISENGARD_CONTROLLER=https://controller.local:9417 \
       -e ISENGARD_ENROLL_TOKEN="$TOKEN" \
       -e ISENGARD_CONTROLLER_CA_PEM_PATH=/etc/isengard/ca.pem \
       --group-add $(stat -f %g /var/run/docker.sock) \
