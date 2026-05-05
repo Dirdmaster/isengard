@@ -1,7 +1,7 @@
 <template>
-  <div class="border border-iso-border rounded-lg p-4 bg-iso-bg-elevated">
+  <div class="rounded-iso-lg border border-iso-border-subtle bg-iso-bg-elevated p-5">
     <div class="flex items-center justify-between mb-3">
-      <h3 class="text-sm font-semibold">cf-tunnel</h3>
+      <h3 class="text-sm font-semibold text-iso-text-primary">cf-tunnel</h3>
       <StatusPill v-if="config?.enabled" state="success" label="enabled" size="xs" />
       <StatusPill v-else state="neutral" label="disabled" size="xs" />
     </div>
