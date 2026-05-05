@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Host } from '~/stores/hosts'
+import { useEnrollment } from '~/composables/useEnrollment'
 
 interface Props {
   host: Host
@@ -12,6 +13,7 @@ const fleets = useFleetsStore()
 if (fleets.fleets.length === 0) await fleets.load()
 
 const actions = useHostActions()
+const enrollment = useEnrollment()
 const toast = useToast()
 const editingFleet = ref(false)
 const newFleet = ref(props.host.fleet)
@@ -57,6 +59,26 @@ async function decommission() {
     emit('changed')
   } catch (e) {
     toast.error(`Decommission failed: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+async function revokeCert() {
+  const { confirm } = useConfirm()
+  const ok = await confirm({
+    title: `Revoke cert for ${props.host.hostname}?`,
+    description:
+      'The active leaf cert is invalidated immediately: the next gRPC call from this agent will be rejected. The host stays in inventory and can be re-enrolled with a fresh token.',
+    confirmText: 'Revoke cert',
+    danger: true,
+  })
+  if (!ok) return
+
+  try {
+    await enrollment.revokeHostCert(props.host.id)
+    toast.success(`Certificate for ${props.host.hostname} revoked`)
+    emit('changed')
+  } catch (e) {
+    toast.error(`Revoke cert failed: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
 
@@ -129,6 +151,14 @@ function formatTs(ts: string | null | undefined): string {
             <Icon name="lucide:layers" class="w-3.5 h-3.5 mr-2" />
             View stacks on this host
           </NuxtLink>
+        </Button>
+        <Button
+          variant="outline"
+          class="w-full justify-start border-iso-error/40 text-iso-error hover:bg-iso-error/10 hover:border-iso-error"
+          @click="revokeCert"
+        >
+          <Icon name="lucide:shield-off" class="w-3.5 h-3.5 mr-2" />
+          Revoke cert
         </Button>
         <Button
           variant="outline"
