@@ -108,6 +108,18 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             (state.agent_id, hb)
         }
         None => {
+            // Imp-5 fix: symmetric to the agent.json-without-certs branch
+            // above. If the cert bundle is on disk but agent.json isn't,
+            // the previous boot crashed mid-enroll or someone partially
+            // restored state; either way we'd silently re-enroll and end
+            // up with a second cert pointing at a different HostId. Bail
+            // and ask the operator to clean up.
+            if cert_store::exists(&opts.state_dir) {
+                anyhow::bail!(
+                    "cert bundle present in {}/certs but no agent.json — wipe certs/ and re-enroll",
+                    opts.state_dir.display(),
+                );
+            }
             info!("no agent.json found, enrolling with controller");
             let enroll_token = std::env::var("ISENGARD_ENROLL_TOKEN")
                 .ok()

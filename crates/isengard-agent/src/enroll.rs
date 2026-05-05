@@ -150,6 +150,16 @@ fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
             return Ok(pin_ca(pem));
         }
     }
+    // Imp-6: make the bootstrap-trust fallback noisy. With no pin, the
+    // agent will only succeed against a controller serving a publicly
+    // signed cert (e.g. Let's Encrypt). The default Phase 14 deployment
+    // is self-signed (internal CA), so this almost always means the
+    // operator forgot to wire the CA.
+    tracing::warn!(
+        "no controller CA pinned (ISENGARD_CONTROLLER_CA_PEM_PATH or _PEM); \
+         falling back to system trust store. This will fail with self-signed \
+         CAs — see `isengard controller ca export`."
+    );
     Ok(ClientTlsConfig::new().with_native_roots())
 }
 
