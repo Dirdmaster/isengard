@@ -43,6 +43,13 @@ pub struct ControllerHandles {
     pub journal: Arc<Journal>,
     pub bus: Arc<EventBus>,
     pub routing: Arc<routing::RoutingPusher>,
+    /// Phase 14: enrollment-token mint/redeem service. Surfaced so the
+    /// dashboard plugin can expose REST endpoints for token management.
+    pub enrollment: Arc<EnrollmentService>,
+    /// Phase 14: in-memory revocation set the auth interceptor reads on every
+    /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
+    /// `revoke_agent` (which both writes the DB row and updates this set).
+    pub revocation: RevocationSet,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -146,6 +153,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         journal: journal.clone(),
         bus: bus.clone(),
         routing: routing.clone(),
+        enrollment: enrollment.clone(),
+        revocation: revocation.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;

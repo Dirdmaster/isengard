@@ -63,17 +63,25 @@ pub async fn stop_controller_plugins(loaded: &mut [LoadedPlugin]) {
 mod tests {
     use super::*;
     use crate::bus::EventBus;
+    use crate::ca::Authority;
+    use crate::enrollment::EnrollmentService;
+    use crate::revocation::RevocationSet;
     use isengard_storage::{Inventory, Journal};
 
     #[tokio::test]
     async fn load_controller_plugins_runs_without_panic() {
         let inventory = Arc::new(Inventory::open_in_memory().await.unwrap());
         let routing = Arc::new(crate::routing::RoutingPusher::new(inventory.clone()));
+        let ca = Arc::new(Authority::load_or_init(&inventory).await.unwrap());
+        let enrollment = Arc::new(EnrollmentService::new(inventory.clone(), ca.clone()));
+        let revocation = RevocationSet::load_from_inventory(&inventory).await.unwrap();
         let handles = Arc::new(ControllerHandles {
             inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),
             bus: Arc::new(EventBus::new()),
             routing,
+            enrollment,
+            revocation,
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into

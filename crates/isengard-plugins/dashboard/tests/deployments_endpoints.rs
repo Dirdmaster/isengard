@@ -10,6 +10,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use isengard_controller::ControllerHandles;
 use isengard_controller::bus::EventBus;
+use isengard_controller::ca::Authority;
+use isengard_controller::enrollment::EnrollmentService;
+use isengard_controller::revocation::RevocationSet;
 use isengard_controller::routing::RoutingPusher;
 use isengard_plugin_dashboard::deployments::{self, AbortResponse, DeploymentDto};
 use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeployment};
@@ -26,6 +29,9 @@ async fn setup_app() -> (axum::Router, Arc<Inventory>, HostId, StackId) {
     let journal = Arc::new(Journal::open_in_memory().await.unwrap());
     let bus = Arc::new(EventBus::new());
     let routing = Arc::new(RoutingPusher::new(inv.clone()));
+    let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
+    let enrollment = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
+    let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
 
     let host_id = inv
         .enroll_host(EnrollHost {
@@ -54,6 +60,8 @@ async fn setup_app() -> (axum::Router, Arc<Inventory>, HostId, StackId) {
         journal,
         bus,
         routing,
+        enrollment,
+        revocation,
     });
 
     let app = deployments::router(handles);
