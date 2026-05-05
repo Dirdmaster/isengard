@@ -1,6 +1,8 @@
 //! `Controller` gRPC service. `enroll` (Phase 2c, refactored Phase 14 Task 6)
 //! and `sync` (Phase 2e) are real.
 
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use isengard_proto::pb::controller_server::Controller;

@@ -95,7 +95,10 @@ async fn sign_agent_leaf_omits_server_auth_eku() {
         .unwrap()
         .expect("EKU extension present");
     assert!(eku.value.client_auth, "agent leaf has ClientAuth");
-    assert!(!eku.value.server_auth, "agent leaf must NOT have ServerAuth");
+    assert!(
+        !eku.value.server_auth,
+        "agent leaf must NOT have ServerAuth"
+    );
 }
 
 #[tokio::test]

@@ -124,7 +124,9 @@ async fn renewal_swaps_endpoint_in_holder() {
         os: "linux".into(),
         version: env!("CARGO_PKG_VERSION").into(),
     };
-    let outcome = enroll::enroll(&url, &token, host_info, trust).await.unwrap();
+    let outcome = enroll::enroll(&url, &token, host_info, trust)
+        .await
+        .unwrap();
     let state_dir = TempDir::new().unwrap();
     cert_store::save(state_dir.path(), &outcome.bundle).unwrap();
 
@@ -157,8 +159,7 @@ async fn renewal_swaps_endpoint_in_holder() {
     // Wait past 50% of the 2-second TTL.
     tokio::time::sleep(StdDuration::from_millis(1200)).await;
 
-    let endpoint_builder: cert_renewal::EndpointBuilder =
-        Arc::new(|url, bundle| build_mtls_endpoint(url, bundle));
+    let endpoint_builder: cert_renewal::EndpointBuilder = Arc::new(build_mtls_endpoint);
     let renewal_holder = endpoint_holder.clone();
     let renewal_state_dir = state_dir.path().to_path_buf();
     let renewal_url = url.clone();

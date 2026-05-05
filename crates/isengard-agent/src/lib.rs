@@ -232,7 +232,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         let renewal_state_dir = opts.state_dir.clone();
         let renewal_url = opts.controller_url.clone();
         let endpoint_builder: cert_renewal::EndpointBuilder =
-            std::sync::Arc::new(|url, bundle| build_mtls_endpoint(url, bundle));
+            std::sync::Arc::new(build_mtls_endpoint);
         tokio::spawn(async move {
             if let Err(e) = cert_renewal::run_renewal_loop(
                 renewal_state_dir,

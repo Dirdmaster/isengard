@@ -157,10 +157,7 @@ async fn revoke_all_active_for_host_skips_already_revoked() {
     .unwrap();
     inv.revoke_cert(&[1], "earlier").await.unwrap();
 
-    let revoked = inv
-        .revoke_all_active_for_host(host, "later")
-        .await
-        .unwrap();
+    let revoked = inv.revoke_all_active_for_host(host, "later").await.unwrap();
     assert_eq!(revoked, vec![vec![2u8]]);
 }
 

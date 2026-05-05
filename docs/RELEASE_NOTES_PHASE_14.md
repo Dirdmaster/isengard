@@ -29,8 +29,6 @@ There is no in-place migration. To upgrade:
 - CA private key not encrypted at rest (file permissions only).
 - No CA rotation story; rotating the CA requires re-enrolling everyone.
 - Dashboard HTTP still unauthenticated (Cloudflare Access integration is the planned answer).
-- Bootstrap-trust during the Enroll RPC: agent trusts whatever cert the controller presents during initial enrollment if `ISENGARD_CONTROLLER_CA_PEM` is provided (which is correct), or relies on native roots if not (only works for LE-signed controllers).
-- `revoke_agent` only revokes the most recent cert; after a renewal, the old cert stays active until separately revoked. Operators currently need to call revoke per active cert.
-- Sync loop's mTLS endpoint has the cert baked in at startup; cert renewals are written to disk but only take effect on agent process restart.
+- Bootstrap-trust during the Enroll RPC: agent trusts whatever cert the controller presents during initial enrollment if `ISENGARD_CONTROLLER_CA_PEM` is provided (which is correct), or relies on native roots if not (only works for LE-signed controllers — the agent now logs a warning when falling back).
 
 See `docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md` for the full design.
