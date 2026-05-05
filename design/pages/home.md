@@ -1,15 +1,23 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "StatRow shipped, but DeploysPanel/HealthAlert/+New dropdown deferred"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
 ---
 
 # Home
+
+## Implementation status (2026-05-05)
+
+- Shipped: `<StatRow />` (hosts/stacks/approvals/deploys), TopBar with Home tab, post-wizard router redirect to `/welcome` when 0 hosts
+- Deferred: `<DeploysPanel />` right column, `<HealthAlert />` degraded banner, `+ New ▾` dropdown (Add host / stack / routing rule)
+- Drift: page header label says "Activity" while the TopBar tab says "Home" — left column is `StateStrip` + `EventTimeline` instead of the spec'd `<ActivityFeed limit="12" />` + 60/40 split
+
 
 The dashboard root. Operational pulse: how is the fleet RIGHT NOW, what changed in the last hour, what needs attention.
 

@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: phase-11-pending
+status_note: "Backup & Restore is Phase 11"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page

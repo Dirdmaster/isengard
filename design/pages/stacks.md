@@ -1,15 +1,23 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "+ Add stack CTA missing (needs Add Stack wizard); IMAGE/STATE/LAST DEPLOY columns + StatusDot dropped"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
 ---
 
 # Stacks
+
+## Implementation status (2026-05-05)
+
+- Shipped: stacks list with Stack/Host/Fleet/Services/Latest event/Source columns, fleet filter via TopBar
+- Deferred: `+ Add stack` CTA (depends on Add Stack wizard), per-row `<StatusDot />`, `IMAGE` / `STATE` / `LAST DEPLOY` columns, source-icon badges (📦 paste · 🌱 git · 🎨 form · 🔍 discovered), failed-deploy red border state
+- Drift: subtitle reads `"N stacks"` instead of `"N stacks · M services"` and drops the `"in <fleet>"` filter scope
+
 
 The list of every stack across the fleet. A stack is a docker-compose project (logical group of services that ship together).
 

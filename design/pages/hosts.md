@@ -2,8 +2,9 @@
 type: design
 kind: page-spec
 status: stable
+status_note: "Wizard step-2 entry + OS column shipped; close to spec"
 created: 2026-05-02
-updated: 2026-05-02
+updated: 2026-05-05
 tags:
   - design
   - page

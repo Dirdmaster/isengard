@@ -1,15 +1,23 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "Tab structure shipped (Overview/History real, others stubs); compose/policies/promote actions deferred"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
 ---
 
 # Stack detail
+
+## Implementation status (2026-05-05)
+
+- Shipped: stack page with services as `<ServiceChip>` row, `Force update stack` action, `DeploymentInProgressPanel` / `DeploymentAbortedPanel` (Phase 10), Recent events panel
+- Deferred: tab structure (Overview / Compose / History / Routing / Settings), Redeploy / Abort / Promote / Pause action cluster, `<ComposePane />`, `<HistoryTimeline />` (deploy attempts, not raw events), per-stack `<RoutingRulesTable />`, `<EffectivePolicyCard />`, header status chip
+- Drift: header uses a `← Stacks` link instead of a breadcrumb; services are inline chips, not a clickable `<ServicesTable />` (because service-detail isn't built)
+
 
 Per-stack page. The drill-down from /stacks. Surfaces everything about one compose project: services, deploy state, routing, history.
 

@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "Controller identity card shipped; telemetry/updates/defaults/danger zone deferred"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
@@ -11,6 +12,13 @@ tags:
 ---
 
 # Settings · General
+
+## Implementation status (2026-05-05)
+
+- Shipped: General tab renders `<FleetsSettings />` (fleet management)
+- Deferred: Controller identity (public URL, instance name, timezone), Telemetry opt-ins, Updates channel/check, Defaults (default fleet for new hosts, default update gate), Danger zone (Reset wizard / Wipe inventory)
+- Drift: implemented tabs are `general / enrollment / networking / deployments / notifier`; `policies / backup / webhooks / authentication` are designed-not-built (their page-specs exist as placeholders)
+
 
 Catch-all for instance-level settings that don't fit a specialized tab.
 

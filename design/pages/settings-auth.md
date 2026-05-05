@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: phase-?-pending
+status_note: "Dashboard auth (None/shared-token/cf-access) hasn't shipped — no phase number yet; Cloudflare Access integration is the v1.x roadmap answer"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page

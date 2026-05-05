@@ -2,8 +2,9 @@
 type: design
 kind: page-spec
 status: stable
+status_note: "Implementation broadly honors spec"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
