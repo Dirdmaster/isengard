@@ -1,16 +1,18 @@
 <template>
   <button
-    class="w-full grid grid-cols-[60px_90px_1fr_auto] gap-3.5 px-5 py-2 items-center text-left transition-colors border-l-2"
-    :class="selected ? 'bg-iso-bg-selected border-iso-success' : 'border-transparent hover:bg-iso-bg-row-hover'"
+    class="w-full grid grid-cols-[80px_180px_1fr_140px] gap-3 px-4 py-2.5 text-xs items-center text-left border-b border-iso-border-subtle transition-colors"
+    :class="selected ? 'bg-iso-bg-selected' : 'hover:bg-iso-bg-row-hover'"
     @click="$emit('select')"
   >
-    <span class="font-mono text-iso-xs text-iso-text-faint">{{ formatTime(event.occurred_at) }}</span>
-    <span class="font-mono text-iso-xs font-medium" :class="kindClass">{{ kindLabel }}</span>
-    <span class="text-iso-base text-iso-text-secondary truncate">
-      <span v-if="event.container_name" class="font-medium text-iso-text-primary">{{ event.container_name }}</span>
-      <span v-if="event.summary" class="ml-1">{{ event.summary }}</span>
+    <span class="font-mono text-iso-text-faint">{{ formatTime(event.occurred_at) }}</span>
+    <span>
+      <span
+        class="px-1.5 py-px rounded-iso-sm font-mono text-[10px] truncate inline-block max-w-full"
+        :class="chipClass"
+      >{{ event.kind }}</span>
     </span>
-    <span class="text-iso-xs text-iso-text-faint font-mono">{{ shortHostId }}</span>
+    <span class="text-iso-text-secondary truncate">{{ message }}</span>
+    <span class="font-mono text-iso-info text-[11px] truncate">{{ target }}</span>
   </button>
 </template>
 
@@ -24,21 +26,65 @@ const props = defineProps<{
 }>()
 defineEmits<{ select: [] }>()
 
-const kindLabel = computed(() => props.event.kind.split('.')[1]?.toUpperCase() ?? props.event.kind.toUpperCase())
+// Map event.kind → tone family. Mirrors the concept's chip palette.
+// Same logic as ActivityCard so /events and the home feed agree.
+function toneFor(kind: string): 'success' | 'warn' | 'error' | 'info' | 'neutral' {
+  if (
+    kind.startsWith('update.success') ||
+    kind.startsWith('routing.healthy') ||
+    kind.startsWith('backup.success') ||
+    kind.startsWith('policy.evaluated') ||
+    kind.startsWith('webhook.delivered')
+  ) return 'success'
+  if (
+    kind.startsWith('update.failed') ||
+    kind.startsWith('routing.degraded') ||
+    kind.startsWith('healthcheck.failed') ||
+    kind.startsWith('approval.rejected')
+  ) return 'error'
+  if (
+    kind.startsWith('update.pending_approval') ||
+    kind.startsWith('update.pulling') ||
+    kind.startsWith('approval.pending')
+  ) return 'warn'
+  if (
+    kind.startsWith('deploy.') ||
+    kind.startsWith('agent.') ||
+    kind.startsWith('webhook.') ||
+    kind.startsWith('hooks.') ||
+    kind.startsWith('stack.')
+  ) return 'info'
+  return 'neutral'
+}
 
-const kindClass = computed(() => {
-  const k = props.event.kind
-  if (k.startsWith('update.success')) return 'text-iso-success'
-  if (k.startsWith('update.failed')) return 'text-iso-error'
-  if (k.startsWith('update.pulling')) return 'text-iso-warn'
-  if (k.startsWith('update.checked')) return 'text-iso-neutral'
-  if (k.startsWith('agent.disconnect')) return 'text-iso-info'
-  return 'text-iso-neutral'
+const chipClass = computed(() => {
+  switch (toneFor(props.event.kind)) {
+    case 'success': return 'bg-iso-success-soft text-iso-success'
+    case 'warn':    return 'bg-iso-warn-soft text-iso-warn'
+    case 'error':   return 'bg-iso-error-soft text-iso-error'
+    case 'info':    return 'bg-iso-info-soft text-iso-info'
+    default:        return 'bg-iso-bg-overlay text-iso-text-muted'
+  }
 })
 
-const shortHostId = computed(() => {
-  if (!props.event.host_id) return ''
-  return props.event.host_id.slice(0, 6)
+// Concept "MESSAGE" column: just the human-readable summary, lightly enriched
+// with container if the summary doesn't already mention it. Falls back gracefully.
+const message = computed(() => {
+  const e = props.event
+  const summary = e.summary?.trim()
+  const container = e.container_name?.trim()
+  if (summary && container && !summary.toLowerCase().includes(container.toLowerCase())) {
+    return `${container} ${summary}`
+  }
+  return summary || container || e.kind
+})
+
+// Concept "TARGET" column: `host / service` (or em-dash placeholder).
+const target = computed(() => {
+  const e = props.event
+  const host = e.host_id ? e.host_id.slice(0, 8) : '—'
+  const svc  = e.container_name ?? '—'
+  return `${host} / ${svc}`
 })
 
 function formatTime(iso: string) {
