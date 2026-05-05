@@ -1,6 +1,6 @@
 ---
 type: decision
-status: accepted
+status: decided · revised 2026-05-05
 date: 2026-05-02
 tags:
   - design
@@ -61,3 +61,25 @@ We chose **Option B — always-on ⌘K** because:
 - Concepts: `concepts/2026-05-02-hosts-v1.html` (shows the bar in typing state)
 - Future ADRs: `2026-05-XX-cmd-grammar.md` (what verbs and parameters mean)
 - Implementation: `crates/isengard-plugins/dashboard/web/components/BottomBar.vue` (planned)
+
+## 2026-05-05 update — implementation chose Option C-ish
+
+What shipped is **not** Option B. The bottom of every page is `BottomStatusBar.vue` (h-9, status zones only — no input), and the cmd surface lives in a teleported `<CmdPane />` overlay opened on `⌘K` (mounted once in `app.vue`). Effectively this is a slimmer Option C: persistent status chrome + a modal action surface that fills the screen when invoked.
+
+### Why we deviated
+
+- **Single overlay > duplicate chrome.** A 56px input on every page would either be the same input mounted everywhere (and so duplicated chrome on top of the modal that ⌘K opens by reflex anyway) or different per-page wiring. The teleported overlay collapses both into one mount, invokable from any route via the global `useShortcuts()` binding.
+- **Screen real estate.** h-9 status bar leaves ~47px more vertical room for content than the planned 56px input bar. Operator views (event timeline, host table) lean dense; that 47px is real.
+- **No keyboard regression.** ⌘K still focuses an input within ~50ms — the overlay opens animation-free and steals focus. The `keyboard-first operator` guarantee from the original decision still holds; the input is just deferred until invoked rather than always-present.
+
+### What stays from Option B
+
+- The verb-first cmd grammar (still TBD in a separate ADR).
+- The principle that the bar (now `BottomStatusBar`) preserves the live signal: connection state + event count compact on the right, no input chrome stealing from it.
+- Status chips remain "context for the cmd, not a competing surface" — they live in the BottomStatusBar's right zone, not in the overlay.
+
+### What's parked
+
+- The "always-on input" mental model is not coming back. Anything that depended on the input being permanently visible (e.g. a passive `cwd`-style breadcrumb in the input chrome) needs to find a different home — likely as a status segment on the bar or as a hint inside `CmdPane`.
+
+Option B is recorded above as **considered but not shipped** so the rationale isn't lost. Future revisions to the bottom chrome should treat *this* update as the load-bearing decision.
