@@ -242,8 +242,10 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // workflows don't require extra env wiring.
     let controller_dns =
         std::env::var("ISENGARD_CONTROLLER_DNS").unwrap_or_else(|_| "controller.local".into());
+    // Imp-1: controller's own server cert needs both ClientAuth and
+    // ServerAuth. Agents only get ClientAuth via sign_agent_leaf.
     let server_leaf = ca
-        .sign_agent_leaf(HostId::new(), &controller_dns, chrono::Duration::days(30))
+        .sign_server_leaf(HostId::new(), &controller_dns, chrono::Duration::days(30))
         .context("sign controller server leaf")?;
     let identity = Identity::from_pem(
         server_leaf.cert_pem.as_bytes(),

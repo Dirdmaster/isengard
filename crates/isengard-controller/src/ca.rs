@@ -6,8 +6,9 @@
 //! controller's SQLite (`ca` table, single row). On controller boot,
 //! [`Authority::load_or_init`] either loads the persisted root or generates
 //! and persists a new one. Per-agent leaf certs are minted by
-//! [`Authority::sign_agent_leaf`] (called by the enrollment service and by
-//! the controller's own server-cert generator).
+//! [`Authority::sign_agent_leaf`] (ClientAuth-only, used by the enrollment
+//! service for agent leaves) and the controller's own server cert is
+//! minted by [`Authority::sign_server_leaf`] (ClientAuth + ServerAuth).
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -106,19 +107,70 @@ impl Authority {
         &self.key_pem
     }
 
-    /// Mint a per-agent leaf cert. CN = host UUID, single SAN (DNS) =
-    /// hostname, EKU includes both ClientAuth (for mTLS dial back to the
-    /// controller) and ServerAuth (so the same cert can be reused if the
-    /// agent ever exposes a server endpoint). Random 16-byte serial.
+    /// Maximum length of an agent-supplied hostname. DNS labels are bounded
+    /// to 253 characters total; we apply the same cap as a basic sanity
+    /// guard against absurd inputs (Imp-1 bonus). Anything longer is
+    /// rejected up-front so we never feed a 4-MB SAN to rcgen.
+    const MAX_HOSTNAME_LEN: usize = 253;
+
+    /// Mint a per-agent leaf cert (Imp-1: ClientAuth EKU only).
     ///
-    /// Stable signature — called by `EnrollmentService` (Task 3) and by the
-    /// controller's own bootstrap server-cert generator (Task 8).
+    /// CN = host UUID, single SAN (DNS) = hostname, EKU = ClientAuth.
+    /// Random 16-byte serial. Pre-Imp-1 the EKU also included ServerAuth,
+    /// which combined with agent-controlled hostnames let an agent get a
+    /// cert other peers would trust as the controller (e.g. by enrolling
+    /// with `hostname: "controller.local"`). Restricting agent leaves to
+    /// ClientAuth closes that path. Controller-side server certs are
+    /// minted via [`sign_server_leaf`] instead.
     pub fn sign_agent_leaf(
         &self,
         host_id: HostId,
         hostname: &str,
         ttl: Duration,
     ) -> Result<IssuedLeaf> {
+        self.sign_leaf_inner(
+            host_id,
+            hostname,
+            ttl,
+            &[ExtendedKeyUsagePurpose::ClientAuth],
+        )
+    }
+
+    /// Mint the controller's own server cert. Same shape as
+    /// [`sign_agent_leaf`] but with both ClientAuth (so the controller can
+    /// also dial out via mTLS in future) and ServerAuth (required for the
+    /// gRPC server's TLS handshake).
+    pub fn sign_server_leaf(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        ttl: Duration,
+    ) -> Result<IssuedLeaf> {
+        self.sign_leaf_inner(
+            host_id,
+            hostname,
+            ttl,
+            &[
+                ExtendedKeyUsagePurpose::ClientAuth,
+                ExtendedKeyUsagePurpose::ServerAuth,
+            ],
+        )
+    }
+
+    fn sign_leaf_inner(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        ttl: Duration,
+        ekus: &[ExtendedKeyUsagePurpose],
+    ) -> Result<IssuedLeaf> {
+        if hostname.len() > Self::MAX_HOSTNAME_LEN {
+            return Err(anyhow::anyhow!(
+                "hostname too long ({} > {})",
+                hostname.len(),
+                Self::MAX_HOSTNAME_LEN,
+            ));
+        }
         let leaf_key =
             KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generate leaf key")?;
         let mut params = CertificateParams::new(vec![]).context("leaf params")?;
@@ -132,10 +184,7 @@ impl Authority {
             KeyUsagePurpose::DigitalSignature,
             KeyUsagePurpose::KeyEncipherment,
         ];
-        params.extended_key_usages = vec![
-            ExtendedKeyUsagePurpose::ClientAuth,
-            ExtendedKeyUsagePurpose::ServerAuth,
-        ];
+        params.extended_key_usages = ekus.to_vec();
         let now = Utc::now();
         let expires_at = now + ttl;
         params.not_before = chrono_to_offset(now);

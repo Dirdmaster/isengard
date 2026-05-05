@@ -47,8 +47,10 @@ async fn boot_controller() -> Boot {
 
     // Server identity: a leaf signed by our CA, with `controller.local` in
     // the SAN so the rustls-based client can verify the hostname.
+    // Imp-1: server certs go through sign_server_leaf (ServerAuth EKU);
+    // sign_agent_leaf is ClientAuth-only post-Imp-1.
     let server_leaf = ca
-        .sign_agent_leaf(HostId::new(), CONTROLLER_DNS, Duration::days(30))
+        .sign_server_leaf(HostId::new(), CONTROLLER_DNS, Duration::days(30))
         .unwrap();
     let identity = Identity::from_pem(
         server_leaf.cert_pem.as_bytes(),

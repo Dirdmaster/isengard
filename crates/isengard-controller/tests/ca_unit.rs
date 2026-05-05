@@ -75,3 +75,60 @@ async fn sign_agent_leaf_includes_hostname_san() {
         "got {dns_names:?}"
     );
 }
+
+/// Imp-1 regression: agent leaves must NOT carry ServerAuth EKU. An agent
+/// could otherwise enroll with a hostname like "controller.local" and
+/// receive a cert other peers would trust as the controller. Server certs
+/// are minted via [`Authority::sign_server_leaf`] instead.
+#[tokio::test]
+async fn sign_agent_leaf_omits_server_auth_eku() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let auth = Authority::load_or_init(&inv).await.unwrap();
+
+    let leaf = auth
+        .sign_agent_leaf(HostId::new(), "agent-host", Duration::days(30))
+        .unwrap();
+    let (_, pem) = x509_parser::pem::parse_x509_pem(leaf.cert_pem.as_bytes()).unwrap();
+    let cert = pem.parse_x509().unwrap();
+    let eku = cert
+        .extended_key_usage()
+        .unwrap()
+        .expect("EKU extension present");
+    assert!(eku.value.client_auth, "agent leaf has ClientAuth");
+    assert!(!eku.value.server_auth, "agent leaf must NOT have ServerAuth");
+}
+
+#[tokio::test]
+async fn sign_server_leaf_has_both_ekus() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let auth = Authority::load_or_init(&inv).await.unwrap();
+
+    let leaf = auth
+        .sign_server_leaf(HostId::new(), "controller.local", Duration::days(30))
+        .unwrap();
+    let (_, pem) = x509_parser::pem::parse_x509_pem(leaf.cert_pem.as_bytes()).unwrap();
+    let cert = pem.parse_x509().unwrap();
+    let eku = cert
+        .extended_key_usage()
+        .unwrap()
+        .expect("EKU extension present");
+    assert!(eku.value.client_auth, "server leaf has ClientAuth");
+    assert!(eku.value.server_auth, "server leaf has ServerAuth");
+}
+
+#[tokio::test]
+async fn sign_agent_leaf_rejects_overly_long_hostname() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let auth = Authority::load_or_init(&inv).await.unwrap();
+
+    let too_long = "a".repeat(254);
+    let result = auth.sign_agent_leaf(HostId::new(), &too_long, Duration::days(30));
+    let err = match result {
+        Ok(_) => panic!("hostname > 253 chars should be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        format!("{err:#}").contains("hostname too long"),
+        "got {err:#}"
+    );
+}

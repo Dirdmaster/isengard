@@ -69,8 +69,9 @@ async fn boot_controller() -> ControllerHarness {
     let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
 
     // Server identity: leaf signed by our CA, SAN = "localhost".
+    // Imp-1: server certs require ServerAuth EKU via sign_server_leaf.
     let server_leaf = ca
-        .sign_agent_leaf(HostId::new(), CONTROLLER_DNS, Duration::days(30))
+        .sign_server_leaf(HostId::new(), CONTROLLER_DNS, Duration::days(30))
         .unwrap();
     let identity = Identity::from_pem(
         server_leaf.cert_pem.as_bytes(),
