@@ -43,18 +43,15 @@ const PUBLIC_METHODS: &[&str] = &["/isengard.v1.Controller/Enroll"];
 #[derive(Clone)]
 pub struct CertAuthInterceptor {
     revocation: RevocationSet,
-    // Kept for future use: the renew_cert handler will cross-check that the
-    // host_id in the request body matches the host_id encoded in the caller's
-    // client cert (see TODO in service.rs::renew_cert).
-    _ca: Arc<Authority>,
 }
 
 impl CertAuthInterceptor {
-    pub fn new(revocation: RevocationSet, ca: Arc<Authority>) -> Self {
-        Self {
-            revocation,
-            _ca: ca,
-        }
+    /// `_ca` is unused now — the per-handler cert CN extraction lives in
+    /// `service.rs` (Bl-1/Bl-2 fix), not at the layer level. Kept in the
+    /// signature so existing call sites in `lib.rs` and the test harnesses
+    /// don't churn; the parameter is intentionally discarded.
+    pub fn new(revocation: RevocationSet, _ca: Arc<Authority>) -> Self {
+        Self { revocation }
     }
 }
 
