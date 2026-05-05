@@ -35,8 +35,6 @@
       <Inspector />
     </main>
 
-    <CmdPane />
-    <HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />
     <AddHostModal v-if="addHostOpen" @close="addHostOpen = false" />
   </AppShell>
 </template>

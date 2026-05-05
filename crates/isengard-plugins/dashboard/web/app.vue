@@ -22,11 +22,14 @@
       :duration="4000"
     />
     <ConfirmDialogShell />
+    <CmdPane />
+    <HelpOverlay :open="ui.helpOpen" @close="ui.helpOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
 const eventsStore = useEventsStore()
+const ui = useUiStore()
 const { connectionState } = useEventStream()
 
 useShortcuts()
