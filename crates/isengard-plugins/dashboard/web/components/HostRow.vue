@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { Host } from '~/stores/hosts'
 
 interface Props {
   host: Host
-  sparkline: number[]
   stackCount: number
   serviceCount: number
   latestEvent: { kind: string; summary: string } | null
@@ -33,13 +33,23 @@ const kindColor = (kind: string) => ({
   PULLING:    'text-iso-warn',
   DISCONNECT: 'text-iso-info',
 }[kind] ?? 'text-iso-text-muted')
+
+// Compose `os · docker X.Y` (or fall back to whichever side we have).
+// Spec: `design/pages/hosts.md` calls for an OS+Docker column rather than
+// the activity sparkline; keep both bits of info in one cell to stay lean.
+const osDocker = computed(() => {
+  const parts: string[] = []
+  if (props.host.os) parts.push(props.host.os)
+  if (props.host.docker_version) parts.push(`docker ${props.host.docker_version}`)
+  return parts.join(' · ')
+})
 </script>
 
 <template>
   <div
     class="group grid items-center gap-3 px-3 py-2 hover:bg-iso-bg-elevated cursor-pointer border-l-2"
     :class="selected ? 'border-iso-success bg-iso-success/5' : 'border-transparent'"
-    style="grid-template-columns: 170px 70px 130px 80px 1fr 90px 60px auto"
+    style="grid-template-columns: 170px 70px 80px 130px 1fr 90px 60px auto"
     @click="emit('click', host)"
   >
     <div class="flex items-center gap-2 min-w-0">
@@ -47,10 +57,15 @@ const kindColor = (kind: string) => ({
       <span class="font-mono text-sm truncate">{{ host.hostname }}</span>
     </div>
     <span class="text-xs text-iso-text-muted">{{ host.fleet }}</span>
-    <Sparkline :data="sparkline" color="success" :width="120" :height="20" />
     <span class="text-xs text-iso-text-muted font-mono">
       {{ stackCount }} · {{ serviceCount }} svcs
     </span>
+    <span
+      v-if="osDocker"
+      class="text-xs text-iso-text-muted font-mono truncate"
+      :title="osDocker"
+    >{{ osDocker }}</span>
+    <span v-else class="text-xs text-iso-text-faint">—</span>
     <span v-if="latestEvent" class="text-xs font-mono truncate">
       <span :class="kindColor(latestEvent.kind)">{{ latestEvent.kind }}</span>
       <span class="text-iso-text-muted ml-1">{{ latestEvent.summary }}</span>

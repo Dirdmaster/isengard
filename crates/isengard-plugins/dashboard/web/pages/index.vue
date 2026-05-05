@@ -2,7 +2,9 @@
   <AppShell>
     <main class="flex-1 grid grid-cols-[1fr_340px] overflow-hidden min-h-0">
       <div class="flex flex-col overflow-hidden">
-        <PageHeader title="Activity" :subtitle="activitySubtitle" />
+        <PageHeader title="Home" :subtitle="activitySubtitle" />
+
+        <StatRow />
 
         <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
           <StateStrip
@@ -47,6 +49,7 @@ import { shouldShowWizard } from '~/stores/wizard'
 const eventsStore = useEventsStore()
 const hostsStore = useHostsStore()
 const fleetsStore = useFleetsStore()
+const stacksStore = useStacksStore()
 const ui = useUiStore()
 const router = useRouter()
 
@@ -57,6 +60,7 @@ onMounted(async () => {
     eventsStore.load(100),
     hostsStore.load(),
     fleetsStore.load(),
+    stacksStore.fetchAll(),
   ])
   if (hostsStore.hosts.length === 0 && shouldShowWizard()) {
     router.replace('/welcome')

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { useHostsStore, type Host } from '~/stores/hosts'
 import { useStacksStore } from '~/stores/stacks'
 import { useEventsStore } from '~/stores/events'
@@ -9,7 +10,6 @@ const stacksStore = useStacksStore()
 const eventsStore = useEventsStore()
 const uiStore = useUiStore()
 
-const sparklines = ref<Record<string, number[]>>({})
 const inspectingHost = ref<Host | null>(null)
 
 await Promise.all([
@@ -18,21 +18,28 @@ await Promise.all([
   eventsStore.load(200),
 ])
 
-for (const host of hostsStore.hosts) {
-  try {
-    const { data, fetch } = useSparkline(host.id)
-    await fetch('24h')
-    if (data.value) sparklines.value[host.id] = data.value.buckets
-  } catch {
-    sparklines.value[host.id] = []
-  }
-}
-
 const filteredHosts = computed(() => {
   const fleet = uiStore.activeFleet
   return fleet === 'all'
     ? hostsStore.hosts
     : hostsStore.hosts.filter((h) => h.fleet === fleet)
+})
+
+const fleetCount = computed(() => {
+  const set = new Set(hostsStore.hosts.map((h) => h.fleet))
+  return set.size
+})
+
+// Spec: `5 hosts across 3 fleets` when unfiltered, `5 hosts in prod` when scoped.
+// `design/pages/hosts.md` § States.
+const subtitle = computed(() => {
+  const n = filteredHosts.value.length
+  const noun = n === 1 ? 'host' : 'hosts'
+  const fleet = uiStore.activeFleet
+  if (fleet !== 'all') return `${n} ${noun} in ${fleet}`
+  const fleets = fleetCount.value
+  if (fleets === 0) return `${n} ${noun}`
+  return `${n} ${noun} across ${fleets} ${fleets === 1 ? 'fleet' : 'fleets'}`
 })
 
 const stackCounts = computed(() => {
@@ -75,7 +82,7 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
 
 <template>
   <AppShell>
-    <PageHeader title="Hosts" :subtitle="`${filteredHosts.length} ${filteredHosts.length === 1 ? 'host' : 'hosts'}`">
+    <PageHeader title="Hosts" :subtitle="subtitle">
       <template #actions>
         <AddHostButton />
       </template>
@@ -85,7 +92,6 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
       <HostsTable
         v-else
         :hosts="filteredHosts"
-        :sparklines="sparklines"
         :stack-counts="stackCounts"
         :latest-events="latestEvents"
         :selected-id="null"

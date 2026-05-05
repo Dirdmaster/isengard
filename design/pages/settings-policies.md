@@ -69,3 +69,7 @@ Each field is one of: `strategy`, `gate`, `window`, `paused_until`, `on_failure`
 - Concepts: `concepts/2026-05-03-settings-policies-v1.html`
 - Source: [[Update Policies & Approval Flow]]
 - Cross: Stack detail Settings tab embeds `<EffectivePolicyPreview />` scoped to that stack
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

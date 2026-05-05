@@ -55,3 +55,7 @@ Configure outbound notification channels (Telegram, Discord, generic HTTP) and i
 
 - Source: cross-cuts [[Update Policies & Approval Flow]] (callback flow is the approval gate)
 - Concepts: (none yet)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

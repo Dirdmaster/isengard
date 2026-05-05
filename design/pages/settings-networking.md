@@ -75,3 +75,7 @@ Multi-adapter is allowed — routing rules pick which adapter to use per rule.
 
 - Concepts: `concepts/2026-05-02-settings-networking-v1.html`
 - Source: [[Networking & Proxy]], [[Cloudflare Integration]]
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

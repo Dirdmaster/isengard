@@ -18,7 +18,7 @@ If a component is listed here, it ships in the Vue tree. Aspirational components
 ## Layout chrome
 
 - **AppShell** (`AppShell.vue`) — top-level wrapper that renders `<TopBar />` plus a default slot. No props. Used by `pages/*` route shells.
-- **TopBar** (`TopBar.vue`) — h-14 global nav: brand cluster + `<FleetPicker />`, route-aware tabs (`Home / Hosts / Stacks / Events / Settings`), search button (opens cmd pane), settings icon. No props; reads `useUiStore` and `$route`.
+- **TopBar** (`TopBar.vue`) — h-14 global nav: brand cluster + `<FleetPicker />`, route-aware tabs (`Home / Hosts / Stacks / Events / Settings`), search button (opens cmd pane), settings icon. No props; reads `useUiStore` and `$route`. Note: an `Approvals` tab will land alongside the Phase 9 (Update Policies + Approval Flow) work — the page-specs already document the surface but the tab itself is intentionally absent until the flow ships.
 - **BottomStatusBar** (`BottomStatusBar.vue`) — h-9 status strip. Props: `{ connectionState: 'connecting' | 'live' | 'reconnecting' | 'offline'; eventCount: number }`. Renders dot + label + key hints.
 - **PageHeader** (`PageHeader.vue`) — title + optional subtitle row with `meta` and `actions` named slots. Props: `{ title: string; subtitle?: string }`.
 - **WizardShell** (`WizardShell.vue`) — fixed-position chrome for `/welcome`. Props: `{ step: 1 | 2 | 3 | 4 }`. Renders brand mark, step counter, default slot.
@@ -26,8 +26,8 @@ If a component is listed here, it ships in the Vue tree. Aspirational components
 
 ## Tables and lists
 
-- **HostsTable** (`HostsTable.vue`) — props: `{ hosts: Host[]; sparklines: Record<string, number[]>; stackCounts: Record<string, { stacks: number; services: number }>; latestEvents: Record<string, { kind: string; summary: string } | null>; selectedId: string | null }`. Emits `select(host)`, `action('force-update'|'shell'|'menu', host)`. Falls back to `<EmptyState>` when empty.
-- **HostRow** (`HostRow.vue`) — single row inside HostsTable. Props: `{ host; sparkline: number[]; stackCount: number; serviceCount: number; latestEvent; lastSeenRelative: string; agentVersionWarn: boolean; selected? }`. Emits `click(host)`, `action(action, host)`.
+- **HostsTable** (`HostsTable.vue`) — props: `{ hosts: Host[]; stackCounts: Record<string, { stacks: number; services: number }>; latestEvents: Record<string, { kind: string; summary: string } | null>; selectedId: string | null }`. Emits `select(host)`, `action('force-update'|'shell'|'menu', host)`. Falls back to `<EmptyState>` when empty.
+- **HostRow** (`HostRow.vue`) — single row inside HostsTable. Props: `{ host; stackCount: number; serviceCount: number; latestEvent; lastSeenRelative: string; agentVersionWarn: boolean; selected? }`. Emits `click(host)`, `action(action, host)`.
 - **StacksTable** (`StacksTable.vue`) — props: `{ rows: Array<{ stack, hostHostname, fleet, serviceCount, latestEvent }> }`. Routes on row click. Empty-state fallback explains compose label discovery.
 - **StackRow** (`StackRow.vue`) — compact row used outside StacksTable (e.g. host-detail context). Props: `{ stack: Stack; services: { name: string; state? }[] }`. Emits `click(stack)`.
 - **EventTimeline** (`EventTimeline.vue`) — full feed grouped by day. No props; reads `useEventsStore` + `useUiStore`. Renders `<DayLabel>` + `<EventRow>` groups.
@@ -95,7 +95,7 @@ These all wrap `<SettingsSection>` and live as direct children of `pages/setting
 
 ## Entry-point atoms
 
-- **AddHostButton** (`AddHostButton.vue`) — outline `<Button>` that opens AddHostModal. No props. Used in HostsTable empty state.
+- **AddHostButton** (`AddHostButton.vue`) — outline `<Button>` that routes to `/welcome?step=2&fresh=1` (wizard step 2). No props. Used in HostsTable empty state and the Hosts page header. The in-place `<AddHostModal>` flow is still available from Settings → Enrollment.
 - **FleetPicker** (`FleetPicker.vue`) — dropdown for active fleet (lives inside TopBar). No props; mutates `useUiStore.activeFleet`.
 - **KvRow** (`KvRow.vue`) — label/value row used in Inspector. Props: `{ label: string; value: string; mono?: boolean; valueClass?: string }`.
 

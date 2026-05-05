@@ -58,3 +58,7 @@ Source design: [[Cloudflare Integration]] (cf-access section).
 
 - Source: [[Cloudflare Integration]]
 - Concepts: (none yet)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

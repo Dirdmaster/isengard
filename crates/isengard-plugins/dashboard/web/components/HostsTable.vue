@@ -3,7 +3,6 @@ import type { Host } from '~/stores/hosts'
 
 interface Props {
   hosts: Host[]
-  sparklines: Record<string, number[]>
   stackCounts: Record<string, { stacks: number; services: number }>
   latestEvents: Record<string, { kind: string; summary: string } | null>
   selectedId: string | null
@@ -33,12 +32,12 @@ function lastSeenRelative(host: Host): string {
     <div
       v-show="hosts.length > 0"
       class="grid items-center gap-3 px-3 py-2 text-[10px] uppercase tracking-wider text-iso-text-faint border-b border-iso-border-subtle shrink-0"
-      style="grid-template-columns: 170px 70px 130px 80px 1fr 90px 60px auto"
+      style="grid-template-columns: 170px 70px 80px 130px 1fr 90px 60px auto"
     >
       <span>Host</span>
       <span>Fleet</span>
-      <span>Activity</span>
       <span>Stacks</span>
+      <span>OS / Docker</span>
       <span>Latest</span>
       <span>Last seen</span>
       <span>Agent</span>
@@ -60,7 +59,6 @@ function lastSeenRelative(host: Host): string {
         v-for="h in hosts"
         :key="h.id"
         :host="h"
-        :sparkline="sparklines[h.id] ?? []"
         :stack-count="stackCounts[h.id]?.stacks ?? 0"
         :service-count="stackCounts[h.id]?.services ?? 0"
         :latest-event="latestEvents[h.id] ?? null"

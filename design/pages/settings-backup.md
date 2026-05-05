@@ -61,3 +61,7 @@ Source design: [[Backup & Restore]].
 
 - Concepts: `concepts/2026-05-03-settings-backup-v1.html` (TODO)
 - Source: [[Backup & Restore]]
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.
