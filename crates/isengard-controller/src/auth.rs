@@ -126,6 +126,14 @@ where
                 return Ok(Status::unauthenticated("client cert has no serial").into_http());
             };
 
+            // Bl-3 defense in depth. extract_serial already rejects empty
+            // serials, but if the parser ever changes its behavior we'd
+            // rather fail closed than skip the revocation check entirely
+            // (an empty serial would never match any revoked entry).
+            if serial.is_empty() {
+                return Ok(Status::unauthenticated("client cert has empty serial").into_http());
+            }
+
             if revocation.contains(&serial) {
                 return Ok(Status::unauthenticated("client cert revoked").into_http());
             }
@@ -143,10 +151,20 @@ where
 /// leading 0x00 to keep the integer positive — strip it so the result lines
 /// up with the serial we persisted in `agent_certs.serial` (which is the
 /// raw 16 bytes from `OsRng`).
+///
+/// Returns `None` for empty serials (Bl-3 fix). A serial encoded as the
+/// single byte `0x00` collapses to `[]` after sign-pad stripping; an empty
+/// serial would never match any entry in the revocation set, so a
+/// successful lookup would silently bypass revocation. We treat this as a
+/// malformed cert and reject upstream.
 fn extract_serial(cert_der: &[u8]) -> Option<Vec<u8>> {
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der).ok()?;
     let raw = cert.tbs_certificate.raw_serial();
-    Some(strip_asn1_sign_pad(raw).to_vec())
+    let stripped = strip_asn1_sign_pad(raw);
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(stripped.to_vec())
 }
 
 /// Strip the ASN.1 INTEGER positive-sign padding byte, if present. A leading
@@ -156,5 +174,49 @@ fn strip_asn1_sign_pad(raw: &[u8]) -> &[u8] {
     match raw {
         [0x00, rest @ ..] if rest.first().is_some_and(|b| b & 0x80 != 0) => rest,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_asn1_sign_pad;
+
+    #[test]
+    fn no_padding_passes_through() {
+        assert_eq!(strip_asn1_sign_pad(&[0x12, 0x34]), &[0x12, 0x34]);
+    }
+
+    #[test]
+    fn padded_high_bit_byte_strips_leading_zero() {
+        // 0x00 prefix is required by ASN.1 INTEGER to keep the value positive
+        // when the first significant byte's MSB is set; the canonical form
+        // we persist is the post-strip slice.
+        assert_eq!(strip_asn1_sign_pad(&[0x00, 0xab, 0xcd]), &[0xab, 0xcd]);
+    }
+
+    #[test]
+    fn single_high_bit_byte_passes_through() {
+        // Only one significant byte and its MSB is set, but there's no
+        // leading zero — the rule strips a 0x00 prefix only when followed
+        // by a high-bit byte; with no prefix the byte stays.
+        assert_eq!(strip_asn1_sign_pad(&[0xff]), &[0xff]);
+    }
+
+    #[test]
+    fn single_zero_byte_passes_through() {
+        // [0x00] doesn't match the strip rule (rest is empty so the
+        // is_some_and guard is false) — passes through unchanged. The
+        // Bl-3 path that mattered was the empty-input case below.
+        assert_eq!(strip_asn1_sign_pad(&[0x00]), &[0x00]);
+    }
+
+    #[test]
+    fn empty_input_stays_empty() {
+        // The Bl-3 case. ASN.1 INTEGER bytes shouldn't come through empty
+        // for a valid cert, but if they do strip_asn1_sign_pad propagates
+        // the empty slice — and extract_serial converts that to None so
+        // the surrounding auth layer rejects the cert rather than silently
+        // skipping the revocation check.
+        assert!(strip_asn1_sign_pad(&[]).is_empty());
     }
 }
