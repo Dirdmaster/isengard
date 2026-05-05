@@ -14,10 +14,10 @@ defineEmits<{ pick: [mode: StackMode] }>()
 </script>
 
 <template>
-  <div class="flex-1 rounded-iso-xl border border-dashed border-iso-border bg-iso-bg-elevated/40 flex items-center justify-center min-h-0 m-4">
+  <div class="flex-1 rounded-iso-xl border border-dashed border-iso-border-subtle bg-iso-bg-elevated/40 flex items-center justify-center min-h-0 m-4">
     <div class="w-[820px] flex flex-col items-center gap-8 p-10 text-center">
 
-      <div class="w-14 h-14 rounded-iso-lg border border-iso-border-strong bg-iso-bg-base flex items-center justify-center font-mono text-iso-text-secondary text-xl font-semibold">
+      <div class="w-14 h-14 rounded-iso-lg border border-iso-border-subtle bg-iso-bg-base flex items-center justify-center font-mono text-iso-text-secondary text-xl font-semibold">
         { }
       </div>
 
@@ -31,11 +31,11 @@ defineEmits<{ pick: [mode: StackMode] }>()
       <div class="grid grid-cols-3 gap-3 w-full">
         <button
           type="button"
-          class="text-left p-4 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-info flex flex-col gap-2 transition-colors"
+          class="text-left p-4 rounded-iso-lg border border-iso-border-subtle bg-iso-bg-base hover:border-iso-info flex flex-col gap-2 transition-colors"
           @click="$emit('pick', 'paste')"
         >
           <div class="flex items-center gap-2">
-            <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated border border-iso-border flex items-center justify-center font-mono text-xs text-iso-text-secondary">
+            <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated flex items-center justify-center font-mono text-xs text-iso-text-secondary">
               { }
             </div>
             <span class="text-xs font-semibold text-iso-text-primary">Paste compose</span>
@@ -48,11 +48,11 @@ defineEmits<{ pick: [mode: StackMode] }>()
 
         <button
           type="button"
-          class="text-left p-4 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-info flex flex-col gap-2 transition-colors"
+          class="text-left p-4 rounded-iso-lg border border-iso-border-subtle bg-iso-bg-base hover:border-iso-info flex flex-col gap-2 transition-colors"
           @click="$emit('pick', 'form')"
         >
           <div class="flex items-center gap-2">
-            <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated border border-iso-border flex items-center justify-center">
+            <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated flex items-center justify-center">
               <Icon name="lucide:sliders-horizontal" class="w-4 h-4 text-iso-text-secondary" />
             </div>
             <span class="text-xs font-semibold text-iso-text-primary">Form builder</span>
@@ -65,11 +65,11 @@ defineEmits<{ pick: [mode: StackMode] }>()
 
         <button
           type="button"
-          class="text-left p-4 rounded-iso-lg border border-iso-border bg-iso-bg-base hover:border-iso-info flex flex-col gap-2 transition-colors"
+          class="text-left p-4 rounded-iso-lg border border-iso-border-subtle bg-iso-bg-base hover:border-iso-info flex flex-col gap-2 transition-colors"
           @click="$emit('pick', 'git')"
         >
           <div class="flex items-center gap-2">
-            <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated border border-iso-border flex items-center justify-center">
+            <div class="w-7 h-7 rounded-iso-sm bg-iso-bg-elevated flex items-center justify-center">
               <Icon name="lucide:git-branch" class="w-4 h-4 text-iso-text-secondary" />
             </div>
             <span class="text-xs font-semibold text-iso-text-primary">Git sync</span>

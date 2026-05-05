@@ -17,7 +17,7 @@ const dotColor = computed(() => ({
 </script>
 
 <template>
-  <span class="inline-flex items-center gap-1.5 rounded px-2 py-1 bg-iso-bg-elevated border border-iso-border-subtle text-xs font-mono">
+  <span class="inline-flex items-center gap-1.5 rounded px-2 py-1 bg-iso-bg-elevated text-xs font-mono text-iso-text-secondary">
     <span class="w-1.5 h-1.5 rounded-full" :class="dotColor"></span>
     {{ name }}
   </span>
