@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: draft
+status_note: "Live tail + search shipped; time range / Export JSONL / kind chip overhaul pending backend"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
@@ -11,6 +12,13 @@ tags:
 ---
 
 # Events
+
+## Implementation status (2026-05-05)
+
+- Shipped: live WS event feed, host dropdown filter, basic kind chips (UPDATED / FAILED / CHECKED / PULLING / DISCONNECT)
+- Deferred: free-text search, time range picker, Export JSONL CTA, full `update.* / deploy.* / approval.* / agent.* / routing.*` chip set, virtualised list, live-tail pause banner, `⌘K events of <thing>` filter syntax
+- Drift: row click routes to `/events/[id]` (a built-not-designed detail page) instead of jumping to the relevant entity (host/service/approval)
+
 
 The fleet-wide event journal. Every state change, deploy, alert, approval, hook fire — chronological, filterable, jumpable.
 

@@ -1,9 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: stable
+status: phase-12-pending
+status_note: "Hooks & Webhooks is Phase 12"
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-05-05
 tags:
   - design
   - page
