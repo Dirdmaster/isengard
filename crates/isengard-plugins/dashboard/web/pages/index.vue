@@ -1,25 +1,32 @@
 <template>
   <AppShell>
-    <main class="flex-1 flex flex-col p-6 gap-5 overflow-auto min-h-0">
-      <!-- Page header: title + "fleet at a glance" subtitle -->
-      <div class="flex items-center justify-between shrink-0">
-        <div class="flex flex-col gap-1">
-          <h1 class="text-[22px] font-semibold text-iso-text-primary">Home</h1>
-          <span class="text-iso-xs text-iso-text-muted">{{ subtitle }}</span>
+    <main class="flex-1 grid grid-cols-[1fr_340px] min-h-0 overflow-hidden">
+      <!-- Left column: fleet group cards + activity timeline -->
+      <div class="flex flex-col min-h-0 overflow-y-auto">
+        <!-- Fleet group cards (one per fleet that has at least one host) -->
+        <div class="flex flex-col gap-2 px-3 pt-3 pb-1 shrink-0">
+          <FleetGroupCard
+            v-for="fleet in visibleFleets"
+            :key="fleet.name"
+            :fleet="fleet"
+          />
+          <!-- Empty: no fleets / hosts at all -->
+          <div
+            v-if="visibleFleets.length === 0"
+            class="rounded-iso-md bg-iso-bg-elevated border border-iso-border-subtle px-4 py-6 text-center text-iso-text-faint text-iso-sm"
+          >
+            No fleets yet — enroll a host to start tracking.
+          </div>
+        </div>
+
+        <!-- Activity timeline (day-grouped, reverse-chron) -->
+        <div class="flex-1 min-h-0">
+          <EventTimeline />
         </div>
       </div>
 
-      <!-- 4-cell stat row -->
-      <StatRow />
-
-      <!-- Two-column body: activity feed + (deploys + health) -->
-      <div class="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 flex-1 min-h-0">
-        <ActivityCard />
-        <div class="flex flex-col gap-4 min-h-0">
-          <ActiveDeploysCard />
-          <HealthSnapshotCard />
-        </div>
-      </div>
+      <!-- Right column: Inspector rail -->
+      <Inspector class="overflow-y-auto" />
     </main>
   </AppShell>
 </template>
@@ -47,20 +54,11 @@ onMounted(async () => {
   }
 })
 
-// Subtitle: relative time since the most-recent event, mirroring the concept's
-// "Your fleet at a glance · last updated just now" pattern.
-const subtitle = computed(() => {
-  const e = eventsStore.events[0]
-  const base = 'Your fleet at a glance'
-  if (!e) return `${base} · no activity yet`
-  const ms = Date.now() - new Date(e.occurred_at).getTime()
-  const s = Math.floor(ms / 1000)
-  let rel: string
-  if (s < 30) rel = 'just now'
-  else if (s < 60) rel = `${s}s ago`
-  else if (s < 3600) rel = `${Math.floor(s / 60)}m ago`
-  else if (s < 86400) rel = `${Math.floor(s / 3600)}h ago`
-  else rel = `${Math.floor(s / 86400)}d ago`
-  return `${base} · last updated ${rel}`
+// Show fleets the user actually has hosts in. Falls back to the raw fleet list
+// when host data hasn't loaded yet, so the cards don't briefly disappear.
+const visibleFleets = computed(() => {
+  const enrolledFleetNames = new Set(hostsStore.hosts.map(h => h.fleet))
+  if (enrolledFleetNames.size === 0) return fleetsStore.fleets
+  return fleetsStore.fleets.filter(f => enrolledFleetNames.has(f.name))
 })
 </script>

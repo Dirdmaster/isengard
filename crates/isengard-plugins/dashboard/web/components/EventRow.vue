@@ -27,7 +27,7 @@ const props = defineProps<{
 defineEmits<{ select: [] }>()
 
 // Map event.kind → tone family. Mirrors the concept's chip palette.
-// Same logic as ActivityCard so /events and the home feed agree.
+// Same chip palette across /events, the home timeline, and any other feed.
 function toneFor(kind: string): 'success' | 'warn' | 'error' | 'info' | 'neutral' {
   if (
     kind.startsWith('update.success') ||
