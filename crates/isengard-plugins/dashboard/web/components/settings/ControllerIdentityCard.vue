@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import pkg from '~/package.json'
-import SettingsSection from '~/components/SettingsSection.vue'
+
+/**
+ * Controller identity card — aligned to `design/concepts/settings-general/v1.html`.
+ *
+ * Concept renders an elevated card with a small-caps section heading and a
+ * 2-column [180px_1fr] grid of label/value rows. Telemetry / Updates /
+ * Defaults / Danger zone from the concept are intentionally NOT rebuilt here:
+ * each one needs backend support (settings store, update flow, destructive-
+ * action guards) that lands in later phases. Building hollow shells would be
+ * design dishonesty.
+ */
 
 const version = (pkg as { version?: string }).version ?? 'dev'
 
@@ -16,51 +26,43 @@ onMounted(() => {
 })
 
 const fields = computed(() => [
+  { label: 'Public hostname', value: hostname.value, mono: true },
   { label: 'Version', value: version, mono: true },
-  { label: 'Hostname', value: hostname.value, mono: true },
-  {
-    label: 'Started at',
-    value: 'TBD',
-    mono: false,
-    note: 'Coming with controller info endpoint (Phase 14b/15).',
-  },
   {
     label: 'State directory',
     value: '/var/lib/isengard',
     mono: true,
     note: 'Default path. Read from controller once info endpoint lands.',
   },
+  {
+    label: 'Started at',
+    value: '— pending controller info endpoint',
+    mono: false,
+  },
 ])
 </script>
 
 <template>
-  <SettingsSection
-    title="Controller identity"
-    description="This controller's build and runtime info. Read-only today; some fields are placeholders until the controller info endpoint ships."
-  >
-    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-      <div
-        v-for="f in fields"
-        :key="f.label"
-        class="rounded-md border border-iso-border-subtle bg-iso-bg-elevated px-4 py-3"
-      >
-        <dt class="text-[10px] uppercase tracking-wider text-iso-text-faint">{{ f.label }}</dt>
-        <dd
-          :class="[
-            'mt-1 text-sm text-iso-text-primary',
-            f.mono ? 'font-mono' : '',
-          ]"
+  <section class="rounded-iso-lg border border-iso-border-subtle bg-iso-bg-elevated p-5 flex flex-col gap-4 mb-6">
+    <span class="text-[10px] font-semibold text-iso-text-muted tracking-widest">CONTROLLER IDENTITY</span>
+
+    <div class="grid grid-cols-[180px_1fr] items-center gap-y-3 gap-x-6">
+      <template v-for="f in fields" :key="f.label">
+        <label class="text-xs text-iso-text-muted">{{ f.label }}</label>
+        <div
+          class="px-3 py-2 rounded-iso-md bg-iso-bg-base border border-iso-border-subtle text-xs text-iso-text-primary"
+          :class="f.mono ? 'font-mono' : ''"
         >
           {{ f.value }}
-        </dd>
-        <p v-if="f.note" class="text-[11px] text-iso-text-muted mt-1">{{ f.note }}</p>
-      </div>
-    </dl>
+          <span v-if="f.note" class="text-iso-text-faint ml-2">({{ f.note }})</span>
+        </div>
+      </template>
+    </div>
 
-    <p class="text-xs text-iso-text-muted mt-4 leading-relaxed">
-      Telemetry, updates, defaults, and danger zone are intentionally not shown here yet — each
+    <p class="text-[11px] text-iso-text-muted leading-relaxed">
+      Telemetry, updates, defaults, and danger zone are intentionally not shown yet — each
       needs backend support (settings store, update flow, destructive-action guards) that lands
       in later phases.
     </p>
-  </SettingsSection>
+  </section>
 </template>

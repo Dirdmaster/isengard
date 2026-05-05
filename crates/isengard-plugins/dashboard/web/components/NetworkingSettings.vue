@@ -1,12 +1,14 @@
 <template>
   <NetworkingSubTabs :tabs="subTabs" default-tab="adapter" v-slot="{ activeSubTab }">
-    <section v-if="activeSubTab === 'adapter'">
-      <h2 class="text-sm font-semibold text-iso-text-primary mb-4">Adapters</h2>
-      <p class="text-xs text-iso-text-muted mb-4">
-        Choose how this controller is reachable. Adapter config is per-host today; multi-adapter
-        per controller arrives with the global adapter model.
-      </p>
-      <div v-if="!firstHost" class="text-iso-text-muted text-xs mb-3">
+    <section v-if="activeSubTab === 'adapter'" class="flex flex-col gap-4">
+      <div class="flex flex-col gap-0.5">
+        <h2 class="text-sm font-semibold text-iso-text-primary">Adapters</h2>
+        <p class="text-xs text-iso-text-muted">
+          Choose how this controller is reachable. Adapter config is per-host today; multi-adapter
+          per controller arrives with the global adapter model.
+        </p>
+      </div>
+      <div v-if="!firstHost" class="rounded-iso-lg border border-dashed border-iso-border-subtle bg-iso-bg-elevated/40 px-5 py-8 text-center text-xs text-iso-text-muted">
         No hosts enrolled yet. Add a host first, then configure adapters per-host.
       </div>
       <div v-else class="grid gap-4">
@@ -16,7 +18,7 @@
       </div>
     </section>
 
-    <section v-else-if="activeSubTab === 'proxy'">
+    <section v-else-if="activeSubTab === 'proxy'" class="flex flex-col gap-4">
       <RoutingRulesTable @add="onAdd" @edit="onEdit" />
       <RoutingRuleEditModal v-model:open="modalOpen" :rule="editingRule" />
     </section>
