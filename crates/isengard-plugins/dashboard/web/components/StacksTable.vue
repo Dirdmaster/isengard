@@ -72,42 +72,16 @@ function sourceBadge(source: string) {
 <template>
   <div class="flex flex-col min-h-0">
     <div
-      v-if="rows.length === 0"
-      class="flex-1 rounded-iso-lg border border-dashed border-iso-border-subtle bg-iso-bg-elevated/40 flex items-center justify-center p-6 m-4"
+      class="grid items-center gap-3 px-4 py-2.5 text-[10px] uppercase tracking-wider text-iso-text-muted border-b border-iso-border-subtle shrink-0"
+      style="grid-template-columns: 240px 110px 90px minmax(220px,1fr) 140px 110px"
     >
-      <div class="w-[680px] flex flex-col items-center gap-6 p-8 text-center">
-        <div class="w-14 h-14 rounded-iso-lg border border-iso-border-strong bg-iso-bg-base flex items-center justify-center font-mono text-iso-text-secondary text-xl font-semibold">
-          { }
-        </div>
-        <div class="flex flex-col gap-2">
-          <h2 class="text-2xl font-semibold tracking-tight text-iso-text-primary">Deploy your first stack</h2>
-          <p class="text-sm text-iso-text-muted leading-relaxed max-w-md">
-            A <span class="text-iso-text-primary">stack</span> is a docker-compose project running on one or more of your hosts.
-            They appear here automatically when an agent reports containers labelled
-            <code class="font-mono text-xs text-iso-text-secondary">com.docker.compose.project</code>
-            or
-            <code class="font-mono text-xs text-iso-text-secondary">isengard.stack</code>.
-          </p>
-        </div>
-        <div class="text-[11px] text-iso-text-muted">
-          Stacks already running on your hosts? They appear automatically as
-          <span class="text-iso-info">discovered</span> once the agent reports them.
-        </div>
-      </div>
+      <span>Stack</span>
+      <span>Fleet</span>
+      <span>Services</span>
+      <span>Image</span>
+      <span>Last deploy</span>
+      <span>Health</span>
     </div>
-
-    <template v-else>
-      <div
-        class="grid items-center gap-3 px-4 py-2.5 text-[10px] uppercase tracking-wider text-iso-text-muted border-b border-iso-border-subtle shrink-0"
-        style="grid-template-columns: 240px 110px 90px minmax(220px,1fr) 140px 110px"
-      >
-        <span>Stack</span>
-        <span>Fleet</span>
-        <span>Services</span>
-        <span>Image</span>
-        <span>Last deploy</span>
-        <span>Health</span>
-      </div>
 
       <div
         v-for="row in rows"
@@ -157,6 +131,5 @@ function sourceBadge(source: string) {
           {{ row.health }}
         </span>
       </div>
-    </template>
   </div>
 </template>
