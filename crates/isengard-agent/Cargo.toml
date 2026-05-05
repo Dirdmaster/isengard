@@ -33,6 +33,7 @@ tokio-util = { workspace = true }
 tonic.workspace = true
 tracing.workspace = true
 ulid = { workspace = true }
+x509-parser.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

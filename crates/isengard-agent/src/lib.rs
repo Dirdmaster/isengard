@@ -3,6 +3,7 @@
 
 pub mod agent_state;
 pub mod backoff;
+pub mod cert_renewal;
 pub mod cert_store;
 pub mod container_snapshot;
 pub mod deployment;
@@ -187,6 +188,35 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("agent_id {agent_id:?} is not a valid Ulid: {e}"))?;
     let storage_host_id = isengard_storage::host::HostId(host_ulid);
     let core_host_id: isengard_core::HostId = host_ulid;
+
+    // -- Phase 14 Task 12: cert renewal task. Polls the on-disk cert TTL and
+    //    swaps in a fresh bundle once past 50%. Uses its own dedicated channel
+    //    (the sync loop builds a fresh one from `endpoint` on every reconnect,
+    //    so the freshly-written cert is automatically picked up next cycle).
+    {
+        let renewal_endpoint = endpoint.clone();
+        let renewal_state_dir = opts.state_dir.clone();
+        tokio::spawn(async move {
+            let channel = match renewal_endpoint.connect().await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "cert_renewal: initial channel connect failed; task exiting");
+                    return;
+                }
+            };
+            let channel_holder = std::sync::Arc::new(tokio::sync::RwLock::new(channel));
+            if let Err(e) = cert_renewal::run_renewal_loop(
+                renewal_state_dir,
+                storage_host_id,
+                channel_holder,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            {
+                warn!(error = %e, "cert_renewal: loop exited");
+            }
+        });
+    }
 
     // Hold onto the supervisor `Arc` so the sync loop can dispatch
     // `AbortDeployment` payloads into [`DeploymentSupervisor::handle_abort`].

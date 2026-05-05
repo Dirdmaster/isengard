@@ -1974,6 +1974,7 @@ dependencies = [
  "tonic",
  "tracing",
  "ulid",
+ "x509-parser",
 ]
 
 [[package]]
