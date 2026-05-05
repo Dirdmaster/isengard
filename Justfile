@@ -61,6 +61,90 @@ www:
 www-build:
     cd www && bun run build
 
+# === Smoke / demo (full controller + agent end-to-end on Docker) ===
+
+ctrl := "isengard-controller"
+agent := "isengard-agent"
+ca_pem := "/tmp/isengard-ca.pem"
+http_port := "9418"
+grpc_port := "9417"
+
+# Wipe any previous smoke run (containers + named volumes + extracted CA)
+smoke-clean:
+    @echo "→ stopping + removing containers"
+    -docker rm -f {{ctrl}} {{agent}} 2>/dev/null
+    @echo "→ removing volumes"
+    -docker volume rm {{ctrl}}-data {{agent}}-data 2>/dev/null
+    @echo "→ removing extracted CA"
+    -rm -f {{ca_pem}}
+    @echo "✓ clean"
+
+# Pull both :next images from GHCR (use this for the published flow)
+smoke-pull:
+    docker pull --platform linux/amd64 ghcr.io/dirdmaster/isengard-controller:next
+    docker pull --platform linux/amd64 ghcr.io/dirdmaster/isengard-agent:next
+
+# Build both images locally from the working-tree Dockerfile (use when iterating
+# on uncommitted changes — no GHA round-trip)
+smoke-build:
+    @echo "→ building isengard-controller:local"
+    docker build --platform linux/amd64 --target controller -t isengard-controller:local .
+    @echo "→ building isengard-agent:local"
+    docker build --platform linux/amd64 --target agent -t isengard-agent:local .
+
+# Internal: bring up controller + agent given image refs
+[private]
+_smoke-up ctrl_img agent_img:
+    #!/usr/bin/env bash
+    set -e
+    echo "→ starting controller ({{ctrl_img}})"
+    docker run -d --name {{ctrl}} --restart=always \
+      --platform linux/amd64 \
+      -p {{grpc_port}}:9417 -p {{http_port}}:9418 \
+      -v {{ctrl}}-data:/var/lib/isengard \
+      "{{ctrl_img}}" >/dev/null
+    echo "→ waiting for controller HTTP"
+    for i in $(seq 1 30); do
+      curl -fsS -o /dev/null "http://localhost:{{http_port}}/" && break
+      sleep 1
+      [ "$i" = "30" ] && { echo "controller didn't start; logs:"; docker logs {{ctrl}}; exit 1; }
+    done
+    echo "→ extracting CA"
+    docker exec {{ctrl}} isengard controller ca export > {{ca_pem}}
+    echo "→ minting enrollment token (15m)"
+    TOKEN=$(docker exec {{ctrl}} isengard controller token mint --ttl 15m | tr -d '[:space:]')
+    echo "→ starting agent ({{agent_img}})"
+    docker run -d --name {{agent}} --restart=always \
+      --platform linux/amd64 \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v {{agent}}-data:/var/lib/isengard \
+      -v {{ca_pem}}:/etc/isengard/ca.pem:ro \
+      -e ISENGARD_CONTROLLER=https://host.docker.internal:9417 \
+      -e ISENGARD_ENROLL_TOKEN="$TOKEN" \
+      -e ISENGARD_CONTROLLER_CA_PEM_PATH=/etc/isengard/ca.pem \
+      --group-add $(stat -f %g /var/run/docker.sock) \
+      "{{agent_img}}" >/dev/null
+    echo "→ waiting for agent enrollment"
+    for i in $(seq 1 30); do
+      docker exec {{ctrl}} isengard controller agent list 2>/dev/null | grep -q . && { echo "✓ agent enrolled"; break; }
+      sleep 1
+      [ "$i" = "30" ] && { echo "agent didn't enroll; logs:"; docker logs {{agent}}; exit 1; }
+    done
+    echo ""
+    echo "✓ smoke ready"
+    echo "  dashboard:    http://localhost:{{http_port}}/"
+    echo "  controller:   docker logs -f {{ctrl}}"
+    echo "  agent:        docker logs -f {{agent}}"
+    echo "  list agents:  docker exec {{ctrl}} isengard controller agent list"
+    echo "  revoke agent: docker exec {{ctrl}} isengard controller agent revoke <host-id>"
+    echo "  teardown:     just smoke-clean"
+
+# Smoke test using published :next images from GHCR (most common path)
+smoke: smoke-clean smoke-pull (_smoke-up "ghcr.io/dirdmaster/isengard-controller:next" "ghcr.io/dirdmaster/isengard-agent:next")
+
+# Smoke test using locally-built images (use when iterating on uncommitted code)
+smoke-local: smoke-clean smoke-build (_smoke-up "isengard-controller:local" "isengard-agent:local")
+
 # === Maintenance ===
 
 clean:
