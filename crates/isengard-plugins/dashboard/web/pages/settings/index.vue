@@ -5,6 +5,7 @@
       <div class="max-w-3xl mx-auto w-full p-6">
         <SettingsTabs :tabs="tabs" default-tab="general" v-slot="{ activeTab }">
           <div v-if="activeTab === 'general'">
+            <SettingsControllerIdentityCard />
             <FleetsSettings />
           </div>
           <div v-else-if="activeTab === 'enrollment'">
