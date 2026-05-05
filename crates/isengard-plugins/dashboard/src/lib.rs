@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 const PLUGIN_NAME: &str = "dashboard";
-const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9418";
+const DEFAULT_BIND_ADDR: &str = "0.0.0.0:9418";
 
 #[derive(RustEmbed)]
 #[folder = "web/.output/public/"]
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn dashboard_new_has_default_bind_addr() {
         let d = Dashboard::new();
-        assert_eq!(d.bind_addr.to_string(), "127.0.0.1:9418");
+        assert_eq!(d.bind_addr.to_string(), "0.0.0.0:9418");
     }
 
     #[test]
