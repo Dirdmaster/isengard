@@ -1,5 +1,6 @@
 {
   "name": "isengard-dashboard",
+  "version": "0.1.0-alpha",
   "private": true,
   "type": "module",
   "scripts": {
