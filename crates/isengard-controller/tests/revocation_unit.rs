@@ -70,3 +70,60 @@ async fn revoke_agent_persists_and_updates_set() {
     assert!(set.contains(&[7, 7, 7]));
     assert!(inv.active_cert_for_host(host).await.unwrap().is_none());
 }
+
+/// Imp-3 regression: revoke_agent must revoke EVERY active cert for the
+/// host. Pre-fix it only revoked the most-recent (`active_cert_for_host`
+/// LIMIT 1), so an older still-active cert (the one the agent was
+/// presenting before a renewal) survived a single revoke call.
+#[tokio::test]
+async fn revoke_agent_revokes_all_active_certs_for_host() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let host = host_with_cert(&inv, vec![1, 1, 1]).await;
+    // Add a second (renewed) active cert for the same host.
+    inv.insert_agent_cert(isengard_storage::agent_cert::AgentCert {
+        serial: vec![2, 2, 2],
+        host_id: host,
+        cert_pem: "p".into(),
+        issued_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::days(30),
+        revoked_at: None,
+        revoke_reason: None,
+    })
+    .await
+    .unwrap();
+
+    let set = RevocationSet::load_from_inventory(&inv).await.unwrap();
+    revoke_agent(&inv, &set, host, "decommission")
+        .await
+        .unwrap();
+
+    // Both serials must end up in the set AND both rows revoked in storage.
+    assert!(set.contains(&[1, 1, 1]), "older cert serial revoked");
+    assert!(set.contains(&[2, 2, 2]), "newer cert serial revoked");
+    assert!(inv.active_cert_for_host(host).await.unwrap().is_none());
+}
+
+/// Imp-3 hardening: revoke_agent on a host with no active certs surfaces
+/// an error so the dashboard handler can map it to a clean 404 (instead
+/// of silently succeeding).
+#[tokio::test]
+async fn revoke_agent_errors_when_no_active_certs() {
+    let inv = Inventory::open_in_memory().await.unwrap();
+    let id = inv
+        .enroll_host(EnrollHost {
+            fingerprint: "fp-no-cert".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            agent_version: "0.1".into(),
+            docker_version: "27".into(),
+            fleet: "default".into(),
+        })
+        .await
+        .unwrap();
+    let set = RevocationSet::load_from_inventory(&inv).await.unwrap();
+    let err = revoke_agent(&inv, &set, id, "decommission")
+        .await
+        .expect_err("no active cert → error");
+    assert!(format!("{err:#}").contains("no active cert"));
+}

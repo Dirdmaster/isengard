@@ -84,6 +84,54 @@ impl Inventory {
         Ok(())
     }
 
+    /// Imp-3 fix: atomically revoke EVERY currently-active cert for `host_id`,
+    /// returning the serials that were just revoked. Pre-fix the controller's
+    /// `revoke_agent` only revoked the most-recently-issued active cert;
+    /// after a renewal the older active cert kept working until separately
+    /// revoked. The fix moves the "kick this host off" semantics from
+    /// "newest cert" to "every active cert".
+    ///
+    /// Returns an empty Vec if the host has no active certs (already
+    /// revoked / never had one) — this is NOT an error so callers can use
+    /// the same code path for "revoke whatever's there" without bothering
+    /// to look first.
+    pub async fn revoke_all_active_for_host(
+        &self,
+        host_id: HostId,
+        reason: &str,
+    ) -> Result<Vec<Vec<u8>>> {
+        let host_bytes = host_id.to_bytes().to_vec();
+        // Read first so we can return the affected serials. UPDATE then RETURNING
+        // would be ideal, but sqlx + sqlite migrations don't expose RETURNING
+        // through the macros we use here, so a tiny SELECT-then-UPDATE inside
+        // a single connection pass is fine.
+        let serials: Vec<Vec<u8>> =
+            sqlx::query("SELECT serial FROM agent_certs WHERE host_id = ? AND revoked_at IS NULL")
+                .bind(&host_bytes)
+                .fetch_all(self.pool())
+                .await?
+                .into_iter()
+                .map(|r| r.get::<Vec<u8>, _>(0))
+                .collect();
+
+        if serials.is_empty() {
+            return Ok(serials);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE agent_certs SET revoked_at = ?, revoke_reason = ?
+             WHERE host_id = ? AND revoked_at IS NULL",
+        )
+        .bind(&now)
+        .bind(reason)
+        .bind(&host_bytes)
+        .execute(self.pool())
+        .await?;
+
+        Ok(serials)
+    }
+
     /// Return the serials of every revoked cert. The interceptor uses this
     /// to populate its in-memory revocation set on startup; mutations after
     /// startup are pushed via [`Inventory::revoke_cert`] + an in-process

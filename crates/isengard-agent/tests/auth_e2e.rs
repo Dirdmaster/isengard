@@ -192,32 +192,29 @@ async fn full_auth_lifecycle_in_process() {
     }
 
     // --- 5. Operator revokes EVERY active cert for the agent -------
-    //   Note: `revoke_agent` only revokes the *most recent* active cert
-    //   (`active_cert_for_host` LIMIT 1). The successful RenewCert above
-    //   minted a second active cert — calling `revoke_agent` once would
-    //   only revoke the renewed one, leaving the original (which the
-    //   agent is still presenting from `outcome.bundle`) valid. For the
-    //   real-world "kick this host off" semantics we revoke every active
-    //   cert in a loop until none remain. The CLI wrapper is `isengard
-    //   controller agent revoke` and operators expecting full lockout
-    //   should call it once per active cert, OR (TODO follow-up) the CLI
-    //   should iterate internally.
-    while harness
-        .inv
-        .active_cert_for_host(outcome.host_id)
-        .await
-        .unwrap()
-        .is_some()
-    {
-        revoke_agent(
-            &harness.inv,
-            &harness.revocation,
-            outcome.host_id,
-            "phase-14-task-15-e2e",
-        )
-        .await
-        .expect("revoke_agent");
-    }
+    //   Imp-3 fix: a single revoke_agent call now revokes every active
+    //   cert for the host (storage uses a single `UPDATE ... WHERE
+    //   host_id = ? AND revoked_at IS NULL`). The successful RenewCert
+    //   above minted a second active cert; before the fix the test
+    //   needed a while loop to drain them. After the fix one call is
+    //   enough.
+    revoke_agent(
+        &harness.inv,
+        &harness.revocation,
+        outcome.host_id,
+        "phase-14-task-15-e2e",
+    )
+    .await
+    .expect("revoke_agent");
+    assert!(
+        harness
+            .inv
+            .active_cert_for_host(outcome.host_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "all active certs should be revoked after single revoke_agent",
+    );
 
     // --- 6. Next mTLS call fails with Unauthenticated ----------------
     //   The revocation set is mutated in-place; on the next RPC the

@@ -57,22 +57,31 @@ impl RevocationSet {
     }
 }
 
-/// Look up the active cert for `host_id`, persistently revoke it via
-/// [`Inventory::revoke_cert`], and add the serial to the in-memory set so
-/// the very next RPC from that agent is rejected.
+/// Imp-3 fix: revoke EVERY currently-active cert for `host_id` (not just
+/// the most-recent). Pre-fix the controller called
+/// [`Inventory::active_cert_for_host`] which is `LIMIT 1 ORDER BY issued_at
+/// DESC`, so an older still-active cert (e.g. the one the agent was
+/// presenting before a renewal) survived a single revoke call. The fix
+/// moves to a single SQL `UPDATE ... WHERE host_id = ? AND revoked_at IS
+/// NULL` via [`Inventory::revoke_all_active_for_host`].
 ///
-/// Errors if the host has no active (non-revoked) cert.
+/// Returns an error only on storage failure. A host with zero active
+/// certs is treated as a no-op success — callers should use this when
+/// they want "kick this host off, however many certs it has".
 pub async fn revoke_agent(
     inventory: &Inventory,
     revocation: &RevocationSet,
     host_id: HostId,
     reason: &str,
 ) -> Result<()> {
-    let cert = inventory
-        .active_cert_for_host(host_id)
-        .await?
-        .ok_or_else(|| anyhow!("no active cert for host {host_id}"))?;
-    inventory.revoke_cert(&cert.serial, reason).await?;
-    revocation.revoke(cert.serial);
+    let serials = inventory
+        .revoke_all_active_for_host(host_id, reason)
+        .await?;
+    if serials.is_empty() {
+        return Err(anyhow!("no active cert for host {host_id}"));
+    }
+    for serial in serials {
+        revocation.revoke(serial);
+    }
     Ok(())
 }
