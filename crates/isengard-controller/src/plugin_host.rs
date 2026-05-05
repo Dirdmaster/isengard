@@ -74,7 +74,9 @@ mod tests {
         let routing = Arc::new(crate::routing::RoutingPusher::new(inventory.clone()));
         let ca = Arc::new(Authority::load_or_init(&inventory).await.unwrap());
         let enrollment = Arc::new(EnrollmentService::new(inventory.clone(), ca.clone()));
-        let revocation = RevocationSet::load_from_inventory(&inventory).await.unwrap();
+        let revocation = RevocationSet::load_from_inventory(&inventory)
+            .await
+            .unwrap();
         let handles = Arc::new(ControllerHandles {
             inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),
