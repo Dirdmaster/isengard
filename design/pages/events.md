@@ -57,3 +57,7 @@ Operator post-incident: "what happened in the last hour and in what order?" Also
 
 - Concepts: `concepts/2026-05-02-events-v1.html`
 - Implementation: builds on existing event journal + WS broadcast (Phase 4)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

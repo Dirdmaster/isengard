@@ -18,7 +18,7 @@ If a component is listed here, it ships in the Vue tree. Aspirational components
 ## Layout chrome
 
 - **AppShell** (`AppShell.vue`) — top-level wrapper that renders `<TopBar />` plus a default slot. No props. Used by `pages/*` route shells.
-- **TopBar** (`TopBar.vue`) — h-14 global nav: brand cluster + `<FleetPicker />`, route-aware tabs (`Home / Hosts / Stacks / Events / Settings`), search button (opens cmd pane), settings icon. No props; reads `useUiStore` and `$route`.
+- **TopBar** (`TopBar.vue`) — h-14 global nav: brand cluster + `<FleetPicker />`, route-aware tabs (`Home / Hosts / Stacks / Events / Settings`), search button (opens cmd pane), settings icon. No props; reads `useUiStore` and `$route`. Note: an `Approvals` tab will land alongside the Phase 9 (Update Policies + Approval Flow) work — the page-specs already document the surface but the tab itself is intentionally absent until the flow ships.
 - **BottomStatusBar** (`BottomStatusBar.vue`) — h-9 status strip. Props: `{ connectionState: 'connecting' | 'live' | 'reconnecting' | 'offline'; eventCount: number }`. Renders dot + label + key hints.
 - **PageHeader** (`PageHeader.vue`) — title + optional subtitle row with `meta` and `actions` named slots. Props: `{ title: string; subtitle?: string }`.
 - **WizardShell** (`WizardShell.vue`) — fixed-position chrome for `/welcome`. Props: `{ step: 1 | 2 | 3 | 4 }`. Renders brand mark, step counter, default slot.

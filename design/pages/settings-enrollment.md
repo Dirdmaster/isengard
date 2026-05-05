@@ -72,3 +72,7 @@ Source design: [[2026-05-05 Auth and Identity Swarm Style]] (decision) · `docs/
 - Backend endpoints: `crates/isengard-plugins/dashboard/src/enrollment.rs` — `POST /enrollment/tokens`, `GET /enrollment/tokens`, `DELETE /enrollment/tokens/:hash_prefix`, `DELETE /hosts/:host_id/cert`
 - Cross-reference: `pages/hosts.md` (HostInspector hosts the per-host cert revoke action)
 - Welcome wizard: `pages/welcome.md` (the `+ Add host with wizard` entry point)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

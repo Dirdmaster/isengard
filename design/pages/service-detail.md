@@ -69,3 +69,7 @@ Operator drilling from Stack detail or arriving via alert. They want logs stream
 - Concepts: `concepts/2026-05-02-service-detail-v1.html`
 - Source: [[Service Detail & Logs Streaming]]
 - Cross: [[Networking & Proxy]] (routing card), [[Update Policies & Approval Flow]] (policy banner), [[Blue-Green Deployment]] (deploy progress), [[Hooks & Webhooks]] (lifecycle hooks panel)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

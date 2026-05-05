@@ -46,3 +46,7 @@ Catch-all for instance-level settings that don't fit a specialized tab.
 
 - Concepts: (none yet — straightforward form layout)
 - Settings tabs: see other `pages/settings-*.md`
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

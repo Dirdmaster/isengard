@@ -59,3 +59,7 @@ Operator who picked a stack to inspect or act on. They want service status at a 
 - Concepts: `concepts/2026-05-02-stack-detail-deploying-v1.html`, `concepts/2026-05-02-stack-detail-aborted-v1.html`
 - Service drill: `pages/service-detail.md`
 - Source: [[Blue-Green Deployment]], [[Stack Deployment]]
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.

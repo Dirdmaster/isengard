@@ -56,3 +56,7 @@ Returning operators opening Isengard for the daily check. They want a 10-second 
 - Concepts: `concepts/2026-05-02-home-v1.html`
 - Implementation: `crates/isengard-plugins/dashboard/web/pages/index.vue`
 - Cross: surfaces output from [[Update Policies & Approval Flow]] (approvals count) and [[Blue-Green Deployment]] (active deploys)
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar. The pending-approvals stat in `<StatRow>` renders as `—` until the surface ships.

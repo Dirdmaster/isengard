@@ -58,3 +58,7 @@ Operator with `prod` fleet under approval gate. Telegram message arrived; they'r
 - Concepts: `concepts/2026-05-02-approvals-v1.html`
 - Source: [[Update Policies & Approval Flow]]
 - Notifier: callbacks fire same code path as Approve/Reject buttons
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar. The whole Approvals surface (this page included) ships with Phase 9; tracked under [[Update Policies & Approval Flow]].

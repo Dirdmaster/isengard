@@ -67,3 +67,7 @@ Source design: `docs/superpowers/specs/2026-05-04-phase-10e-10g-blue-green-ui-de
 - Backend endpoints: `crates/isengard-plugins/dashboard/src/deployments.rs` — `GET /services/deploy-strategy`, `PUT /services/:id/deploy-strategy`
 - Active deployment surfaces (out of scope here): `pages/stack-detail.md` for the in-progress / aborted panels
 - Container label override (always wins): `isengard.deploy.strategy=blue-green|in-place` documented in Phase 10a–d driver spec
+
+---
+
+> Approvals tab is pending Phase 9 — not currently in TopBar.
