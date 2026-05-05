@@ -39,6 +39,10 @@ pub struct EnrollmentTokenRecord {
     pub expires_at: DateTime<Utc>,
     pub consumed_at: Option<DateTime<Utc>>,
     pub consumed_by: Option<HostId>,
+    /// Imp-4 fix: distinct from consumed_at — cancellation marks the token
+    /// unusable without falsely claiming a host redeemed it. Filled by
+    /// [`Inventory::cancel_enrollment_token`].
+    pub cancelled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -63,13 +67,13 @@ impl Inventory {
     }
 
     /// Look up a token by hash. Returns `None` if the token doesn't exist,
-    /// has been consumed, or has expired.
+    /// has been consumed, has been cancelled (Imp-4), or has expired.
     pub async fn find_active_token(&self, hash: &[u8]) -> Result<Option<EnrollmentTokenRecord>> {
         let now = Utc::now().to_rfc3339();
         let row = sqlx::query(
-            "SELECT token_hash, role, expires_at, consumed_at, consumed_by, created_at
+            "SELECT token_hash, role, expires_at, consumed_at, consumed_by, cancelled_at, created_at
              FROM enrollment_tokens
-             WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?",
+             WHERE token_hash = ? AND consumed_at IS NULL AND cancelled_at IS NULL AND expires_at > ?",
         )
         .bind(hash)
         .bind(&now)
@@ -83,14 +87,16 @@ impl Inventory {
     }
 
     /// Atomically consume a token by binding it to `host_id`. Errors if the
-    /// token is missing or already consumed (rows-affected == 0).
+    /// token is missing or already consumed (rows-affected == 0). Cancelled
+    /// tokens are also rejected — once an operator pulls the rug on an
+    /// invitation, no enrollment can revive it.
     pub async fn consume_enrollment_token(&self, hash: &[u8], host_id: HostId) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let host_bytes = host_id.to_bytes().to_vec();
         let res = sqlx::query(
             "UPDATE enrollment_tokens
              SET consumed_at = ?, consumed_by = ?
-             WHERE token_hash = ? AND consumed_at IS NULL",
+             WHERE token_hash = ? AND consumed_at IS NULL AND cancelled_at IS NULL",
         )
         .bind(&now)
         .bind(&host_bytes)
@@ -100,21 +106,45 @@ impl Inventory {
 
         if res.rows_affected() == 0 {
             return Err(Error::Conflict(
-                "enrollment token not found or already consumed".into(),
+                "enrollment token not found, already consumed, or cancelled".into(),
             ));
         }
         Ok(())
     }
 
-    /// List all currently-active (unexpired, unconsumed) enrollment tokens,
-    /// most recently created first. Used by the dashboard to show pending
-    /// invitations.
+    /// Imp-4 fix: mark an unused token as cancelled. Distinct from
+    /// [`Self::consume_enrollment_token`] so the audit trail doesn't
+    /// pretend a sentinel HostId enrolled. Returns an error if the token
+    /// is missing, already consumed, or already cancelled.
+    pub async fn cancel_enrollment_token(&self, hash: &[u8]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let res = sqlx::query(
+            "UPDATE enrollment_tokens
+             SET cancelled_at = ?
+             WHERE token_hash = ? AND consumed_at IS NULL AND cancelled_at IS NULL",
+        )
+        .bind(&now)
+        .bind(hash)
+        .execute(self.pool())
+        .await?;
+
+        if res.rows_affected() == 0 {
+            return Err(Error::Conflict(
+                "enrollment token not found, already consumed, or already cancelled".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// List all currently-active (unexpired, unconsumed, uncancelled)
+    /// enrollment tokens, most recently created first. Used by the dashboard
+    /// to show pending invitations.
     pub async fn list_active_tokens(&self) -> Result<Vec<EnrollmentTokenRecord>> {
         let now = Utc::now().to_rfc3339();
         let rows = sqlx::query(
-            "SELECT token_hash, role, expires_at, consumed_at, consumed_by, created_at
+            "SELECT token_hash, role, expires_at, consumed_at, consumed_by, cancelled_at, created_at
              FROM enrollment_tokens
-             WHERE consumed_at IS NULL AND expires_at > ?
+             WHERE consumed_at IS NULL AND cancelled_at IS NULL AND expires_at > ?
              ORDER BY created_at DESC",
         )
         .bind(&now)
@@ -132,11 +162,16 @@ fn decode_token_row(r: sqlx::sqlite::SqliteRow) -> Result<EnrollmentTokenRecord>
     let expires_at_str: String = r.get(2);
     let consumed_at_str: Option<String> = r.get(3);
     let consumed_by_bytes: Option<Vec<u8>> = r.get(4);
-    let created_at_str: String = r.get(5);
+    let cancelled_at_str: Option<String> = r.get(5);
+    let created_at_str: String = r.get(6);
 
     let expires_at = parse_db_timestamp(&expires_at_str, "expires_at")?;
     let consumed_at = match consumed_at_str {
         Some(s) => Some(parse_db_timestamp(&s, "consumed_at")?),
+        None => None,
+    };
+    let cancelled_at = match cancelled_at_str {
+        Some(s) => Some(parse_db_timestamp(&s, "cancelled_at")?),
         None => None,
     };
     let created_at = parse_db_timestamp(&created_at_str, "created_at")?;
@@ -151,6 +186,7 @@ fn decode_token_row(r: sqlx::sqlite::SqliteRow) -> Result<EnrollmentTokenRecord>
         expires_at,
         consumed_at,
         consumed_by,
+        cancelled_at,
         created_at,
     })
 }

@@ -136,12 +136,12 @@ async fn list_tokens(
     Ok(Json(entries))
 }
 
-/// `DELETE /enrollment/tokens/:hash_prefix`. Marks the matching active token
-/// consumed so it can never be redeemed. Inventory has no first-class
-/// "revoke unconsumed token" call; we fake it by consuming the token with a
-/// throwaway `HostId` (`HostId::new()` mints a fresh ULID that will never
-/// match a real enrolled host). The token row is preserved for audit; the
-/// `consumed_by` column points at a sentinel.
+/// `DELETE /enrollment/tokens/:hash_prefix`. Imp-4 fix: marks the matching
+/// active token as cancelled (NEW dedicated `cancelled_at` column from
+/// migration 0015) so it can never be redeemed. Pre-fix the handler faked
+/// a consumption with a sentinel `HostId::new()` to lock the token out,
+/// which polluted the audit trail by making it look like a fresh-ULID
+/// host had enrolled.
 async fn revoke_token(
     State(handles): State<Arc<ControllerHandles>>,
     Path(hash_prefix): Path<String>,
@@ -186,15 +186,11 @@ async fn revoke_token(
         ));
     };
 
-    // Sentinel host_id: HostId::new() mints a fresh ULID that no real host
-    // will ever own. consume_enrollment_token treats this as "consumed", so
-    // future redeem attempts will see the token as already-used.
-    let sentinel = HostId::new();
     handles
         .inventory
-        .consume_enrollment_token(&token.token_hash, sentinel)
+        .cancel_enrollment_token(&token.token_hash)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("consume: {e}")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cancel: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
