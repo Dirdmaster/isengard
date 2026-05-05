@@ -4,6 +4,10 @@
 //! for a bit, abort controller A, spawn controller B on the SAME port (with
 //! the SAME state dir, so it has the agent's host row), wait for agent to
 //! reconnect, verify last_seen_at advances after the gap.
+//!
+//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). Reconnect
+//! semantics are still valid; what's stale is the bootstrap (`http://`,
+//! bearer token, `seed_token` writing settings rows). Marked `#[ignore]`.
 
 #![allow(clippy::result_large_err)]
 
@@ -75,6 +79,7 @@ async fn seed_token(state_dir: &std::path::Path, token: &str, fleet: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "phase-14 task-11: superseded by auth_e2e.rs (Task 15)"]
 async fn agent_survives_controller_restart() {
     let controller_state = TempDir::new().unwrap();
     let agent_state = TempDir::new().unwrap();
@@ -92,6 +97,8 @@ async fn agent_survives_controller_restart() {
         proxy_http_port: None,
         proxy_https_port: None,
         tls: None,
+        enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

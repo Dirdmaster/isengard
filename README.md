@@ -1,10 +1,56 @@
 # Isengard
 
-> **Note (2026-04-29):** Isengard is being rewritten from the ground up as a container management platform — single binary with controller and agent modes, plugin model, multi-host support, web dashboard. The Rust rewrite is in progress on the `feat/platform-rewrite` branch. The Go implementation below remains the current stable release; it stays in [`legacy-go/`](./legacy-go/) on the rewrite branch as a reference. See [`docs/superpowers/specs/2026-04-29-platform-pivot-design.md`](./docs/superpowers/specs/2026-04-29-platform-pivot-design.md) for the design.
+> **Note (2026-04-29):** Isengard is being rewritten from the ground up as a container management platform: single binary with controller and agent modes, plugin model, multi-host support, web dashboard. The Rust rewrite is in progress on the `feat/platform-rewrite` branch. The Go implementation below remains the current stable release; it stays in [`legacy-go/`](./legacy-go/) on the rewrite branch as a reference. See [`docs/superpowers/specs/2026-04-29-platform-pivot-design.md`](./docs/superpowers/specs/2026-04-29-platform-pivot-design.md) for the design.
+>
+> **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
+
+## Rust rewrite quick start (controller + agent)
+
+The rewrite splits Isengard into a **controller** (one per fleet, exposes a dashboard + gRPC) and **agents** (one per Docker host, talks to the controller over mTLS). All auth is bootstrapped from short-lived enrollment tokens minted by the controller; there is no long-lived shared secret.
+
+```bash
+# 1. Start the controller. State (CA, sqlite, certs) lives in /var/lib/isengard.
+docker run -d --name isengard-controller \
+  -p 7777:7777 \
+  -p 8080:8080 \
+  -v isengard-controller-state:/var/lib/isengard \
+  ghcr.io/dirdmaster/isengard:next controller
+
+# 2. Export the controller's CA cert so agents can verify the controller during enrollment.
+docker exec isengard-controller isengard controller ca export > ca.pem
+
+# 3. Mint a short-lived enrollment token (default TTL 15m, single-use).
+docker exec isengard-controller isengard controller token mint --ttl 15m
+# => prints a token like: ITK_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# 4. On each agent host, start the agent with the token + CA cert.
+docker run -d --name isengard-agent \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v isengard-agent-state:/var/lib/isengard \
+  -v $(pwd)/ca.pem:/etc/isengard/ca.pem:ro \
+  -e ISENGARD_CONTROLLER_ADDR=https://controller.example.com:7777 \
+  -e ISENGARD_CONTROLLER_CA_PEM_PATH=/etc/isengard/ca.pem \
+  -e ISENGARD_ENROLL_TOKEN=ITK_xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  ghcr.io/dirdmaster/isengard:next agent
+```
+
+The agent enrolls on first boot (exchanges the token for an mTLS cert bundle, persists it to `state-dir/certs/`), then uses mTLS for every subsequent RPC. Certs auto-renew at 50% TTL (default 30-day TTL = renews every ~15 days). The token is consumed immediately and cannot be reused.
+
+To remove an agent:
+
+```bash
+# Revoke its cert (immediately rejects further RPCs from that host).
+docker exec isengard-controller isengard controller agent revoke <host_id>
+
+# List agents to find the host_id.
+docker exec isengard-controller isengard controller agent list
+```
+
+You can also mint tokens and revoke hosts from the dashboard at `http://controller:8080` (Settings → Enrollment, and per-host Revoke buttons on the inspector).
 
 ---
 
-# Isengard
+# Isengard (legacy Go)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/dirdmaster/isengard/ci.yml?branch=main&label=CI&style=flat)](https://github.com/dirdmaster/isengard/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/github/actions/workflow/status/dirdmaster/isengard/docker.yml?label=Docker&style=flat)](https://github.com/dirdmaster/isengard/actions/workflows/docker.yml)

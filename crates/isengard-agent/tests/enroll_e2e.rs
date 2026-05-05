@@ -5,6 +5,13 @@
 //! Phase 2e made `run_agent` long-lived (blocks on ctrl_c). These tests now
 //! `tokio::spawn(run_agent(...))` and assert via polling, then abort the
 //! handle when the assertions are satisfied.
+//!
+//! NOTE(phase-14, task-11): the underlying enrollment flow now requires mTLS
+//! plus a controller-minted token. The Phase 2 helpers (`seed_token` writing
+//! to `enrollment.token.<X>` settings, `http://` URLs, bearer auth) no longer
+//! match the wire surface. These tests stay in the tree as documentation of
+//! the old invariants; they're `#[ignore]`d and superseded by the Phase 14
+//! Task 15 e2e (`auth_e2e.rs`).
 
 #![allow(clippy::result_large_err)]
 
@@ -82,6 +89,7 @@ async fn wait_for_state_file(path: &std::path::Path, timeout_ms: u64) -> bool {
 }
 
 #[tokio::test]
+#[ignore = "phase-14 task-11: superseded by auth_e2e.rs (Task 15)"]
 async fn agent_enrolls_writes_state_and_appears_in_inventory() {
     let controller_state = TempDir::new().unwrap();
     let agent_state = TempDir::new().unwrap();
@@ -96,6 +104,8 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
         proxy_http_port: None,
         proxy_https_port: None,
         tls: None,
+        enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
@@ -129,6 +139,7 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
 }
 
 #[tokio::test]
+#[ignore = "phase-14 task-11: superseded by auth_e2e.rs (Task 15)"]
 async fn second_run_is_idempotent_no_re_enroll() {
     let controller_state = TempDir::new().unwrap();
     let agent_state = TempDir::new().unwrap();
@@ -142,6 +153,8 @@ async fn second_run_is_idempotent_no_re_enroll() {
         proxy_http_port: None,
         proxy_https_port: None,
         tls: None,
+        enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
 
     // First run: spawn, wait for enroll, abort.

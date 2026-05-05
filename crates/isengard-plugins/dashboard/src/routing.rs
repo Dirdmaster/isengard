@@ -394,6 +394,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use isengard_controller::bus::EventBus;
+    use isengard_controller::ca::Authority;
+    use isengard_controller::enrollment::EnrollmentService;
+    use isengard_controller::revocation::RevocationSet;
     use isengard_storage::{EnrollHost, HostId, Inventory, Journal, RoutingRule};
     use tower::ServiceExt;
 
@@ -404,11 +407,16 @@ mod tests {
         let routing = Arc::new(isengard_controller::routing::RoutingPusher::new(
             inv.clone(),
         ));
+        let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
+        let enrollment = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
+        let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
         Arc::new(ControllerHandles {
             inventory: inv,
             journal: jrnl,
             bus,
             routing,
+            enrollment,
+            revocation,
         })
     }
 

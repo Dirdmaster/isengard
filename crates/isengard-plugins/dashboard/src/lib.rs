@@ -8,6 +8,7 @@
 mod api;
 pub mod deployments;
 mod dto;
+pub mod enrollment;
 pub mod routing;
 mod ws;
 
@@ -94,7 +95,8 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
         router = router
             .nest("/api/v1", api::router(h.clone()))
             .nest("/api/v1", routing::router(h.clone()))
-            .nest("/api/v1", deployments::router(h))
+            .nest("/api/v1", deployments::router(h.clone()))
+            .nest("/api/v1", enrollment::router(h))
             .merge(ws_router)
             .merge(install_router);
     }

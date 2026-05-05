@@ -6,6 +6,8 @@
         <SettingsTabs :tabs="tabs" default-tab="general" v-slot="{ activeTab }">
           <div v-if="activeTab === 'general'">
             <FleetsSettings />
+          </div>
+          <div v-else-if="activeTab === 'enrollment'">
             <EnrollmentSettings />
           </div>
           <div v-else-if="activeTab === 'networking'">
@@ -26,6 +28,7 @@
 <script setup lang="ts">
 const tabs = [
   { key: 'general', label: 'General' },
+  { key: 'enrollment', label: 'Enrollment' },
   { key: 'networking', label: 'Networking' },
   { key: 'deployments', label: 'Deployments' },
   { key: 'notifier', label: 'Notifier' },

@@ -1,22 +1,37 @@
-//! `Controller` gRPC service. `enroll` (Phase 2c) and `sync` (Phase 2e) are real.
+//! `Controller` gRPC service. `enroll` (Phase 2c, refactored Phase 14 Task 6)
+//! and `sync` (Phase 2e) are real.
+
+#![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
 
 use isengard_proto::pb::controller_server::Controller;
-use isengard_proto::pb::{AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse};
+use isengard_proto::pb::{
+    AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, RenewCertRequest,
+    RenewCertResponse,
+};
 use isengard_storage::{Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::bus::EventBus;
+use crate::ca::Authority;
+use crate::enrollment::{EnrollmentService, HostInfo};
+use crate::revocation::RevocationSet;
 use crate::routing::RoutingPusher;
 
 #[derive(Clone)]
 pub struct ControllerService {
-    inventory: Arc<Inventory>,
-    journal: Arc<Journal>,
-    bus: Arc<EventBus>,
-    routing: Arc<RoutingPusher>,
+    pub inventory: Arc<Inventory>,
+    pub journal: Arc<Journal>,
+    pub bus: Arc<EventBus>,
+    pub routing: Arc<RoutingPusher>,
+    pub ca: Arc<Authority>,
+    pub enrollment: Arc<EnrollmentService>,
+    /// Phase 14: in-memory revocation set the auth interceptor reads on every
+    /// RPC. Carried on the service so future handlers (e.g. an admin RPC for
+    /// `revoke_agent`) can mutate it without re-fetching from inventory.
+    pub revocation: RevocationSet,
 }
 
 impl ControllerService {
@@ -25,12 +40,46 @@ impl ControllerService {
         journal: Arc<Journal>,
         bus: Arc<EventBus>,
         routing: Arc<RoutingPusher>,
+        ca: Arc<Authority>,
+        enrollment: Arc<EnrollmentService>,
+        revocation: RevocationSet,
     ) -> Self {
         Self {
             inventory,
             journal,
             bus,
             routing,
+            ca,
+            enrollment,
+            revocation,
+        }
+    }
+
+    /// Test constructor: stubs the bus, journal, and routing pusher with
+    /// fresh in-memory instances. Caller supplies the inventory + CA +
+    /// enrollment service it wants to exercise. Used by Phase 14 task tests
+    /// that only care about the enrollment / cert flows.
+    pub async fn new_for_test(
+        inventory: Arc<Inventory>,
+        ca: Arc<Authority>,
+        enrollment: Arc<EnrollmentService>,
+        revocation: RevocationSet,
+    ) -> Self {
+        let journal = Arc::new(
+            Journal::open_in_memory()
+                .await
+                .expect("journal open_in_memory in test"),
+        );
+        let bus = Arc::new(EventBus::new());
+        let routing = Arc::new(RoutingPusher::new(inventory.clone()));
+        Self {
+            inventory,
+            journal,
+            bus,
+            routing,
+            ca,
+            enrollment,
+            revocation,
         }
     }
 }
@@ -45,79 +94,26 @@ impl Controller for ControllerService {
     ) -> Result<Response<EnrollResponse>, Status> {
         let req = request.into_inner();
 
-        // Resolve fleet from the optional enrollment_token. If the agent
-        // enrolled via the wizard, the token's payload (created by the
-        // dashboard's POST /hosts handler) carries the fleet name. Without a
-        // valid token, enrollment is rejected — every host belongs to a fleet
-        // the user explicitly named.
-        let token = req.enrollment_token.as_deref().unwrap_or_default();
-        if token.is_empty() {
-            return Err(Status::invalid_argument(
-                "enrollment_token required (issue one via the dashboard)",
-            ));
-        }
-        let key = format!("enrollment.token.{token}");
-        let fleet = match self.inventory.get_setting(&key).await {
-            Ok(Some(payload)) => payload
-                .get("fleet")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .ok_or_else(|| {
-                    Status::invalid_argument("enrollment token payload missing fleet")
-                })?,
-            Ok(None) => {
-                return Err(Status::unauthenticated(
-                    "enrollment token unknown or expired",
-                ));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "enroll: settings lookup failed");
-                return Err(Status::internal("settings lookup failed"));
-            }
-        };
-
-        // Convert proto request → storage request, applying the resolved fleet.
-        let enroll_req = isengard_storage::EnrollHost {
-            fingerprint: req.fingerprint.clone(),
+        let host_info = HostInfo {
             hostname: req.hostname.clone(),
             os: req.os,
-            arch: req.arch,
-            agent_version: req.agent_version,
-            docker_version: req.docker_version,
-            fleet: fleet.clone(),
+            version: req.version,
         };
 
-        let id = match self.inventory.enroll_host(enroll_req).await {
-            Ok(id) => id,
-            Err(isengard_storage::Error::Db(sqlx_err)) => {
-                // UNIQUE violation on fingerprint maps to AlreadyExists.
-                let is_unique_violation = sqlx_err
-                    .as_database_error()
-                    .map(|db_err| {
-                        db_err.message().contains("UNIQUE")
-                            || db_err.code().as_deref() == Some("2067")
-                            || db_err.code().as_deref() == Some("19")
-                    })
-                    .unwrap_or(false);
-                if is_unique_violation {
-                    return Err(Status::already_exists(format!(
-                        "host with fingerprint {:?} is already enrolled",
-                        req.fingerprint,
-                    )));
-                }
-                tracing::error!(error = %sqlx_err, "Enroll: db error");
-                return Err(Status::internal("database error"));
-            }
-            Err(other) => {
-                tracing::error!(error = %other, "Enroll: unexpected error");
-                return Err(Status::internal("storage error"));
-            }
-        };
-
-        let server_time_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        // EnrollmentService.redeem owns: token validation (lookup by hash,
+        // expiry/consumed checks), HostId allocation, leaf cert signing,
+        // cert persistence, and token consumption. Any failure surfaces as
+        // an `Unauthenticated` gRPC status — the most common cause is an
+        // unknown / expired / already-consumed token, and we deliberately
+        // don't leak which.
+        let resp = self
+            .enrollment
+            .redeem(&req.token, host_info)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, hostname = %req.hostname, "enroll: redeem failed");
+                Status::unauthenticated(format!("{e}"))
+            })?;
 
         // Emit agent.enroll event so dashboard subscribers (e.g. the
         // onboarding wizard's listening step) can react in real time.
@@ -129,14 +125,10 @@ impl Controller for ControllerService {
         let event = isengard_core::Event {
             kind: "agent.enroll".to_string(),
             occurred_at: chrono::Utc::now(),
-            host_id: Some(id.0),
-            summary: format!(
-                "{} enrolled (fingerprint {})",
-                display_name,
-                req.fingerprint.chars().take(12).collect::<String>(),
-            ),
+            host_id: Some(resp.host_id.0),
+            summary: format!("{} enrolled", display_name),
             metadata: serde_json::json!({
-                "fingerprint": req.fingerprint,
+                "host_id": resp.host_id.to_string(),
                 "hostname": req.hostname,
             }),
             ..Default::default()
@@ -144,9 +136,35 @@ impl Controller for ControllerService {
         crate::persist_and_broadcast(&self.journal, &self.bus, event).await;
 
         Ok(Response::new(EnrollResponse {
-            agent_id: id.to_string(),
-            heartbeat_interval_secs: 10,
-            server_time_ms,
+            host_id: resp.host_id.to_bytes().to_vec(),
+            agent_cert_pem: resp.agent_cert_pem,
+            agent_key_pem: resp.agent_key_pem,
+            ca_root_pem: resp.ca_root_pem,
+            heartbeat_interval_secs: resp.heartbeat_interval_secs,
+        }))
+    }
+
+    /// Sign a fresh leaf cert for the calling agent. The host_id is read
+    /// authoritatively from the client cert's CN (set by `ca::sign_agent_leaf`
+    /// to `host_id.to_string()`); the request body carries no fields. This
+    /// closes the Bl-1 horizontal-escalation hole where agent A could request
+    /// a cert minted for agent B by passing B's host_id in the request body.
+    async fn renew_cert(
+        &self,
+        request: Request<RenewCertRequest>,
+    ) -> Result<Response<RenewCertResponse>, Status> {
+        let host_id = host_id_from_peer_cert(&request)?;
+        let _ = request.into_inner(); // body has no fields after Bl-1 fix
+
+        let renewed = self.enrollment.renew(host_id).await.map_err(|e| {
+            tracing::warn!(error = %e, host_id = %host_id, "renew_cert: failed");
+            Status::internal(format!("{e}"))
+        })?;
+
+        Ok(Response::new(RenewCertResponse {
+            agent_cert_pem: renewed.agent_cert_pem,
+            agent_key_pem: renewed.agent_key_pem,
+            expires_at: renewed.expires_at.to_rfc3339(),
         }))
     }
 
@@ -154,26 +172,36 @@ impl Controller for ControllerService {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::SyncStream>, Status> {
+        // Bl-2 fix: derive the authoritative host_id from the caller's client
+        // cert CN (set by `ca::sign_agent_leaf` to `host_id.to_string()`).
+        // Any value in SyncHello.agent_id is logged for debugging but
+        // explicitly NOT trusted — previously, an agent with cert A could
+        // attribute heartbeats / container reports / label reports to agent
+        // B by sending B's id in the Hello payload.
+        let host_id = host_id_from_peer_cert(&request)?;
         let mut inbound = request.into_inner();
 
-        // Read first frame: must be SyncHello with a valid agent_id.
+        // Read first frame: must be SyncHello (the agent_id field is logged
+        // but ignored — see above).
         let hello = inbound
             .message()
             .await
             .map_err(|e| Status::aborted(format!("reading hello: {e}")))?
             .ok_or_else(|| Status::invalid_argument("stream closed before SyncHello"))?;
 
-        let agent_id_str = match hello.payload {
+        let claimed_agent_id = match hello.payload {
             Some(isengard_proto::pb::agent_message::Payload::Hello(h)) => h.agent_id,
             _ => {
                 return Err(Status::invalid_argument("first frame must be SyncHello"));
             }
         };
-
-        // Parse the ULID and look up the host.
-        let agent_ulid = ulid::Ulid::from_string(&agent_id_str)
-            .map_err(|e| Status::unauthenticated(format!("invalid agent_id: {e}")))?;
-        let host_id = isengard_storage::HostId(agent_ulid);
+        if claimed_agent_id != host_id.to_string() {
+            tracing::warn!(
+                cert_host_id = %host_id,
+                claimed_agent_id = %claimed_agent_id,
+                "Sync: SyncHello.agent_id does not match cert CN; using cert (Bl-2 defense)",
+            );
+        }
 
         let host = self
             .inventory
@@ -347,4 +375,47 @@ impl Controller for ControllerService {
 
         Ok(Response::new(outbound))
     }
+}
+
+/// Extract the authoritative `HostId` from the caller's mTLS client cert.
+/// The CN of every agent leaf is set to `host_id.to_string()` by
+/// [`crate::ca::Authority::sign_agent_leaf`], so the CN is the source of
+/// truth for which agent is calling.
+///
+/// Used by `renew_cert` (Bl-1 fix) and `sync` (Bl-2 fix) to prevent
+/// horizontal-escalation attacks where one agent's cert is used to mint
+/// or impersonate another agent.
+///
+/// Returns `Status::unauthenticated` on missing peer cert (the auth layer
+/// rejects this on non-public methods, so this is a defense-in-depth
+/// double-check) or a CN that doesn't parse as a ULID.
+fn host_id_from_peer_cert<T>(request: &Request<T>) -> Result<isengard_storage::HostId, Status> {
+    use tonic::transport::server::TlsConnectInfo;
+    use x509_parser::prelude::*;
+
+    let peer_certs = request
+        .extensions()
+        .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()
+        .and_then(|info| info.peer_certs())
+        .ok_or_else(|| Status::unauthenticated("client cert required"))?;
+
+    let cert_der = peer_certs
+        .first()
+        .ok_or_else(|| Status::unauthenticated("no client cert presented"))?;
+
+    let (_, cert) = parse_x509_certificate(cert_der.as_ref())
+        .map_err(|e| Status::unauthenticated(format!("malformed client cert: {e}")))?;
+
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .ok_or_else(|| Status::unauthenticated("client cert has no CN"))?
+        .as_str()
+        .map_err(|e| Status::unauthenticated(format!("client cert CN not utf8: {e}")))?;
+
+    let ulid = ulid::Ulid::from_string(cn)
+        .map_err(|e| Status::unauthenticated(format!("client cert CN not a valid ULID: {e}")))?;
+
+    Ok(isengard_storage::HostId(ulid))
 }

@@ -1,13 +1,16 @@
 //! Controller-mode runtime: load plugins, bind the gRPC server, await
 //! shutdown, drain, stop plugins, exit.
 
-mod auth;
 mod service;
 
+pub mod auth;
 pub mod bus;
+pub mod ca;
 pub mod disconnect_monitor;
+pub mod enrollment;
 pub mod pending_actions;
 pub mod plugin_host;
+pub mod revocation;
 pub mod routing;
 pub mod sync_services;
 pub mod sync_stacks;
@@ -19,15 +22,18 @@ use anyhow::{Context, Result};
 use isengard_core::{Event, HostMode, Plugin, registrations_for};
 use isengard_proto::FILE_DESCRIPTOR_SET;
 use isengard_proto::pb::controller_server::ControllerServer;
-use isengard_storage::{InsertEvent, Inventory, Journal};
+use isengard_storage::{InsertEvent, Inventory, Journal, host::HostId};
 use tokio::signal;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{info, instrument};
 
-pub use auth::TokenAuthLayer;
 pub use service::ControllerService;
 
+use crate::auth::CertAuthInterceptor;
 use crate::bus::EventBus;
+use crate::ca::Authority;
+use crate::enrollment::EnrollmentService;
+use crate::revocation::RevocationSet;
 
 /// Bundle of references controller-side plugins need to access controller state.
 /// Passed via `PluginContext.bus` (downcast from `Arc<dyn Any>`).
@@ -37,6 +43,13 @@ pub struct ControllerHandles {
     pub journal: Arc<Journal>,
     pub bus: Arc<EventBus>,
     pub routing: Arc<routing::RoutingPusher>,
+    /// Phase 14: enrollment-token mint/redeem service. Surfaced so the
+    /// dashboard plugin can expose REST endpoints for token management.
+    pub enrollment: Arc<EnrollmentService>,
+    /// Phase 14: in-memory revocation set the auth interceptor reads on every
+    /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
+    /// `revoke_agent` (which both writes the DB row and updates this set).
+    pub revocation: RevocationSet,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -117,6 +130,22 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
 
+    // Phase 14: internal CA + enrollment service. CA is loaded-or-initialized
+    // from the `ca` row (single-row table); the EnrollmentService owns the
+    // mint/redeem flow and signs leaf certs via the CA.
+    let ca = Arc::new(
+        Authority::load_or_init(&inventory)
+            .await
+            .context("loading or initializing CA")?,
+    );
+    let enrollment = Arc::new(EnrollmentService::new(inventory.clone(), ca.clone()));
+
+    // Phase 14: hydrate the in-memory revocation set from the `agent_certs`
+    // table so the very first RPC after boot already sees revoked certs.
+    let revocation = RevocationSet::load_from_inventory(&inventory)
+        .await
+        .context("hydrating revocation set")?;
+
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
     let handles = Arc::new(ControllerHandles {
@@ -124,6 +153,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         journal: journal.clone(),
         bus: bus.clone(),
         routing: routing.clone(),
+        enrollment: enrollment.clone(),
+        revocation: revocation.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -201,21 +232,49 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         .build_v1()
         .context("building reflection service")?;
 
-    // Build the auth layer from the env var. Binary's main() already verified
-    // it's set; if it's somehow missing here, fail loud rather than silently allow.
-    let token =
-        std::env::var("ISENGARD_TOKEN").with_context(|| "ISENGARD_TOKEN env var must be set")?;
-    let auth_layer = crate::auth::TokenAuthLayer::new(token);
+    // Phase 14: per-RPC client cert validation + revocation check (replaces
+    // the Phase 2c bearer-token middleware).
+    let auth_layer = CertAuthInterceptor::new(revocation.clone(), ca.clone());
+
+    // Sign the controller's own server cert with our CA. The DNS name agents
+    // verify against is configurable so a single binary can be deployed under
+    // different hostnames; the default matches the test fixture so dev
+    // workflows don't require extra env wiring.
+    let controller_dns =
+        std::env::var("ISENGARD_CONTROLLER_DNS").unwrap_or_else(|_| "controller.local".into());
+    // Imp-1: controller's own server cert needs both ClientAuth and
+    // ServerAuth. Agents only get ClientAuth via sign_agent_leaf.
+    let server_leaf = ca
+        .sign_server_leaf(HostId::new(), &controller_dns, chrono::Duration::days(30))
+        .context("sign controller server leaf")?;
+    let identity = Identity::from_pem(
+        server_leaf.cert_pem.as_bytes(),
+        server_leaf.key_pem.as_bytes(),
+    );
+    let ca_root = Certificate::from_pem(ca.root_cert_pem().as_bytes());
+
+    // `client_auth_optional(true)` lets the bootstrap Enroll RPC succeed
+    // without a client cert. The auth layer enforces cert presence + the
+    // revocation check on every other method.
+    let tls_config = ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(ca_root)
+        .client_auth_optional(true);
 
     let svc = ControllerServer::new(ControllerService::new(
         inventory,
         journal,
         bus,
         routing.clone(),
+        ca,
+        enrollment,
+        revocation,
     ));
 
     info!("gRPC server listening");
     let serve_fut = Server::builder()
+        .tls_config(tls_config)
+        .context("install server TLS config")?
         .layer(auth_layer)
         .add_service(svc)
         .add_service(reflection)

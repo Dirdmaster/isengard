@@ -11,14 +11,18 @@ description = "Controller-mode runtime"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base32.workspace = true
 chrono.workspace = true
 http.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
 isengard-storage.workspace = true
+rand.workspace = true
+rcgen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-subtle.workspace = true
+sha2.workspace = true
+time.workspace = true
 tokio = { workspace = true }
 tokio-stream.workspace = true
 tonic.workspace = true
@@ -26,6 +30,7 @@ tonic-reflection.workspace = true
 tower.workspace = true
 tracing.workspace = true
 ulid.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
 tempfile = "3.14.0"

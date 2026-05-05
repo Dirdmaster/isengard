@@ -28,7 +28,10 @@ cf-tunnel = ["dep:isengard-plugin-networking-cf-tunnel"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 clap.workspace = true
+hex = "0.4"
+humantime = "2.1"
 inventory.workspace = true
 isengard-agent.workspace = true
 isengard-controller.workspace = true
@@ -39,10 +42,12 @@ isengard-plugin-networking-tailscale = { workspace = true, optional = true }
 isengard-plugin-networking-cf-tunnel = { workspace = true, optional = true }
 isengard-plugin-notifier.workspace = true
 isengard-plugin-updater.workspace = true
+isengard-storage.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ulid = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.0.16"

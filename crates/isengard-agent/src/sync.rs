@@ -21,8 +21,7 @@ use isengard_proto::pb::{AgentMessage, Event as ProtoEvent, Heartbeat, SyncHello
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
-use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 use tracing::{debug, info, instrument, warn};
 
 use crate::Result;
@@ -37,13 +36,12 @@ use crate::proxy::ProxyState;
 /// emitted while the stream is down stay queued in the channel until the next
 /// stream comes up.
 #[instrument(
-    skip(token, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
+    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_sync_loop(
-    controller_url: String,
-    token: String,
+    endpoint: Endpoint,
     agent_id: String,
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
@@ -52,20 +50,14 @@ pub async fn run_sync_loop(
     proxy_state: ProxyState,
     supervisor: Option<Arc<DeploymentSupervisor>>,
 ) -> Result<()> {
-    let channel = Channel::from_shared(controller_url.clone())
-        .with_context(|| format!("invalid controller url {controller_url:?}"))?
+    // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
+    // already carries the client identity + CA root.
+    let channel = endpoint
         .connect()
         .await
-        .with_context(|| format!("connecting to controller at {controller_url}"))?;
+        .with_context(|| "connecting to controller (mTLS)".to_string())?;
 
-    let bearer: MetadataValue<_> = format!("Bearer {token}")
-        .parse()
-        .context("token contains characters not legal in a Bearer header")?;
-
-    let mut client = ControllerClient::with_interceptor(channel, move |mut req: Request<()>| {
-        req.metadata_mut().insert("authorization", bearer.clone());
-        Ok(req)
-    });
+    let mut client = ControllerClient::new(channel);
 
     // Outbound: Hello, then Heartbeat every interval.
     let (tx, rx) = mpsc::channel::<AgentMessage>(16);
@@ -255,14 +247,18 @@ pub async fn run_sync_loop(
 ///
 /// Backoff resets to base if the previous attempt's stream stayed open ≥ 60s
 /// (proves the connection was healthy).
+///
+/// Imp-2: takes an `Arc<RwLock<Endpoint>>` so the cert renewal task can swap
+/// in a freshly-built Endpoint after rotating the on-disk cert. Each
+/// reconnect attempt clones the *current* endpoint, so the new cert
+/// propagates the next time the stream cycles (no agent restart needed).
 #[instrument(
-    skip(token, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
+    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_sync_with_reconnect(
-    controller_url: String,
-    token: String,
+    endpoint: Arc<tokio::sync::RwLock<Endpoint>>,
     agent_id: String,
     interval_secs: u32,
     cancel: Arc<tokio::sync::Notify>,
@@ -291,10 +287,13 @@ pub async fn run_sync_with_reconnect(
             }
         }
 
+        // Snapshot the current endpoint. Holding the read lock for the
+        // length of the connect+sync would block renewals; cloning is cheap
+        // (Endpoint is a config bundle, not a live connection).
+        let endpoint_snapshot = endpoint.read().await.clone();
         let attempt_started = Instant::now();
         let result = run_sync_loop(
-            controller_url.clone(),
-            token.clone(),
+            endpoint_snapshot,
             agent_id.clone(),
             interval_secs,
             cancel.clone(),

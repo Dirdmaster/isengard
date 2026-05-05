@@ -33,8 +33,9 @@ tokio-util = { workspace = true }
 tonic.workspace = true
 tracing.workspace = true
 ulid = { workspace = true }
+x509-parser.workspace = true
 
 [dev-dependencies]
-tempfile = "3.14.0"
+tempfile = { workspace = true }
 isengard-controller = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

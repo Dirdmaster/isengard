@@ -14,6 +14,11 @@
 //! exactly the path real plugin events take (Event payload variant → Sync
 //! handler → Journal → EventBus). The agent's internal emitter is unit-tested
 //! in `events::tests` separately.
+//!
+//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). The Phase 4
+//! bootstrap (`http://`, bearer token, `seed_token` writing settings rows)
+//! does not match the mTLS surface; left in tree as documentation and marked
+//! `#[ignore]`.
 
 #![allow(clippy::result_large_err)]
 
@@ -95,6 +100,7 @@ async fn seed_token(state_dir: &std::path::Path, token: &str, fleet: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "phase-14 task-11: superseded by auth_e2e.rs (Task 15)"]
 async fn agent_emitted_event_lands_in_controller_journal() {
     tokio::time::timeout(Duration::from_secs(30), run_test())
         .await
@@ -117,6 +123,8 @@ async fn run_test() {
         proxy_http_port: None,
         proxy_https_port: None,
         tls: None,
+        enroll_token: None,
+        bootstrap_trust: Default::default(),
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
