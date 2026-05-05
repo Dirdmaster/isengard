@@ -60,10 +60,10 @@ const latestEvents = computed(() => {
   return out
 })
 
-const router = useRouter()
-
+// Per `design/concepts/hosts/inspector-v1.html` and `design/pages/hosts.md`,
+// clicking a hostname opens the HostInspector slide-over, not a route push.
 function selectHost(host: Host) {
-  router.push(`/stacks?host_id=${host.id}`)
+  inspectingHost.value = host
 }
 
 async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Host) {
@@ -87,14 +87,14 @@ async function handleAction(action: 'force-update' | 'shell' | 'menu', host: Hos
         <AddHostButton />
       </template>
     </PageHeader>
-    <div class="flex-1 flex flex-col min-h-0 overflow-y-auto">
+    <div class="flex-1 flex flex-col min-h-0 p-4 overflow-y-auto">
       <TableSkeleton v-if="!hostsStore.loaded" :rows="6" />
       <HostsTable
         v-else
         :hosts="filteredHosts"
         :stack-counts="stackCounts"
         :latest-events="latestEvents"
-        :selected-id="null"
+        :selected-id="inspectingHost?.id ?? null"
         class="flex-1 flex flex-col min-h-0"
         @select="selectHost"
         @action="handleAction"
