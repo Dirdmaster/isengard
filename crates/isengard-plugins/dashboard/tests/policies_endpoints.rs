@@ -395,3 +395,57 @@ async fn put_with_malformed_window_cron_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn post_with_external_gate_round_trips() {
+    let (app, _handles) = setup_app().await;
+    let body = serde_json::json!({
+        "scopeType": "global",
+        "scopeKey": "",
+        "body": {
+            "external_gate": {
+                "url": "https://gate.example.com/decide",
+                "secret": "shh",
+                "timeout_secs": 15
+            }
+        }
+    });
+    let resp = app.clone().oneshot(post_json("/policies", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v = body_json(resp).await;
+    assert_eq!(
+        v["body"]["external_gate"]["url"],
+        "https://gate.example.com/decide"
+    );
+    assert_eq!(v["body"]["external_gate"]["timeout_secs"], 15);
+}
+
+#[tokio::test]
+async fn put_with_empty_external_gate_url_rejects_400() {
+    let (app, _handles) = setup_app().await;
+    let body = serde_json::json!({
+        "body": {
+            "external_gate": { "url": "", "timeout_secs": 10 }
+        }
+    });
+    let resp = app
+        .oneshot(put_json("/policies/global/_", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn put_with_external_gate_timeout_zero_rejects_400() {
+    let (app, _handles) = setup_app().await;
+    let body = serde_json::json!({
+        "body": {
+            "external_gate": { "url": "https://gate.example.com", "timeout_secs": 0 }
+        }
+    });
+    let resp = app
+        .oneshot(put_json("/policies/global/_", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
