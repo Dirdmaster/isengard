@@ -14,10 +14,11 @@
         v-for="tab in tabs"
         :key="tab.path"
         :to="tab.path"
-        class="px-3 py-1.5 text-iso-xs transition-colors border-b-2"
+        class="px-3 py-1.5 text-iso-xs transition-colors border-b-2 inline-flex items-center"
         :class="$route.path === tab.path ? 'text-iso-text-primary border-iso-text-primary font-medium' : 'text-iso-text-faint border-transparent hover:text-iso-text-secondary'"
       >
         {{ tab.label }}
+        <ApprovalsBadge v-if="tab.path === '/approvals'" />
       </NuxtLink>
     </nav>
 
@@ -83,14 +84,15 @@ const ui = useUiStore()
 const router = useRouter()
 const newOpen = ref(false)
 
-// Approvals tab is intentionally absent — Phase 9 (update policies & approvals)
-// hasn't shipped yet. The concept HTML at design/concepts/home/v1.html shows
-// it for the eventual layout. Re-enable when ApprovalsPage lands.
+// Approvals tab landed with Phase 9b (T5). The badge polls
+// `usePendingApprovalsCount` every 30s and renders inline next to the label
+// when count > 0.
 const tabs = [
   { path: '/', label: 'Home' },
   { path: '/hosts', label: 'Hosts' },
   { path: '/stacks', label: 'Stacks' },
   { path: '/events', label: 'Events' },
+  { path: '/approvals', label: 'Approvals' },
   { path: '/settings', label: 'Settings' },
 ]
 
