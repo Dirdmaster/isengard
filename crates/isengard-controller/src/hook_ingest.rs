@@ -87,11 +87,7 @@ impl HookLabelIngest {
     /// container_name from the in-memory map; if absent, the row is
     /// deleted-by-id which still works because the table indexes
     /// `(host_id, container_id)`.
-    pub async fn ingest_removed(
-        &self,
-        host_id: HostId,
-        ev: &ContainerLabelsRemoved,
-    ) -> Result<()> {
+    pub async fn ingest_removed(&self, host_id: HostId, ev: &ContainerLabelsRemoved) -> Result<()> {
         let name_opt = {
             let mut guard = self.by_container.lock().await;
             guard.remove(&(host_id, ev.container_id.clone()))
@@ -301,11 +297,7 @@ mod tests {
         );
         ingest.ingest(host, &r2).await.unwrap();
 
-        let row = inv
-            .get_container_hooks(host, "web")
-            .await
-            .unwrap()
-            .unwrap();
+        let row = inv.get_container_hooks(host, "web").await.unwrap().unwrap();
         assert_eq!(row.pre_deploy_url.as_deref(), Some("https://new"));
     }
 }

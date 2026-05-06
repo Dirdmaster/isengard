@@ -87,8 +87,12 @@ pub enum GateResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     Approve,
-    Reject { reason: Option<String> },
-    Defer { until: DateTime<Utc> },
+    Reject {
+        reason: Option<String>,
+    },
+    Defer {
+        until: DateTime<Utc>,
+    },
     Manual,
     /// Connection refused / DNS / network unreachable. The cycle emits
     /// `update.gated_unreachable` and applies a 1h `paused_until` rather
@@ -178,12 +182,12 @@ mod tests {
 
     #[test]
     fn gate_response_defer_with_until_parses() {
-        let r: GateResponse = serde_json::from_str(
-            r#"{"decision":"defer","until":"2026-06-01T00:00:00Z"}"#,
-        )
-        .unwrap();
+        let r: GateResponse =
+            serde_json::from_str(r#"{"decision":"defer","until":"2026-06-01T00:00:00Z"}"#).unwrap();
         match r {
-            GateResponse::Defer { until } => assert_eq!(until.to_rfc3339(), "2026-06-01T00:00:00+00:00"),
+            GateResponse::Defer { until } => {
+                assert_eq!(until.to_rfc3339(), "2026-06-01T00:00:00+00:00")
+            }
             other => panic!("expected Defer, got {other:?}"),
         }
     }
@@ -197,17 +201,8 @@ mod tests {
     #[test]
     fn gate_decision_as_str_stable() {
         assert_eq!(GateDecision::Approve.as_str(), "approve");
-        assert_eq!(
-            GateDecision::Reject { reason: None }.as_str(),
-            "reject"
-        );
-        assert_eq!(
-            GateDecision::Defer {
-                until: Utc::now()
-            }
-            .as_str(),
-            "defer"
-        );
+        assert_eq!(GateDecision::Reject { reason: None }.as_str(), "reject");
+        assert_eq!(GateDecision::Defer { until: Utc::now() }.as_str(), "defer");
         assert_eq!(GateDecision::Manual.as_str(), "manual");
         assert_eq!(GateDecision::Unreachable.as_str(), "unreachable");
     }

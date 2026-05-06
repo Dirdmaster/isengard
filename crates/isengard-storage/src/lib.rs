@@ -31,6 +31,7 @@ pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
 pub use agent_cert::AgentCert;
 pub use approval_store::InventoryApprovalStore;
 pub use ca::CaRow;
+pub use container_hooks::{ContainerHooks, UpsertContainerHooks};
 pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};
 pub use error::{Error, Result};
 pub use fleet::Fleet;
@@ -51,7 +52,6 @@ pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
-pub use container_hooks::{ContainerHooks, UpsertContainerHooks};
 pub use webhook::{
     DeliverySource, DeliveryStatus, InsertDelivery, InsertGateDelivery, InsertLifecycleDelivery,
     InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook, WebhookDelivery, kind_matches,

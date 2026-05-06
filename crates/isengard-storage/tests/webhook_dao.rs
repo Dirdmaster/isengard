@@ -265,9 +265,7 @@ async fn list_deliveries_filters_by_status_and_limit() {
 
 // Phase 12b/c additions: lifecycle + gate delivery sources.
 
-use isengard_storage::webhook::{
-    DeliverySource, InsertGateDelivery, InsertLifecycleDelivery,
-};
+use isengard_storage::webhook::{DeliverySource, InsertGateDelivery, InsertLifecycleDelivery};
 
 #[tokio::test]
 async fn lifecycle_delivery_inserts_with_inline_url_and_secret() {

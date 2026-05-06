@@ -11,9 +11,7 @@ use isengard_core::HostId;
 use isengard_core::approval_store::PendingApprovalBody;
 use isengard_core::policy::{ExternalGate, GatePayload};
 use isengard_plugin_updater::gate::evaluate_gate;
-use isengard_plugin_updater::policy::{
-    PolicyDecision, SkipReason, policy_decision_from_gate,
-};
+use isengard_plugin_updater::policy::{PolicyDecision, SkipReason, policy_decision_from_gate};
 use reqwest::Client;
 use std::time::Duration;
 use wiremock::matchers::method;
@@ -73,9 +71,10 @@ async fn approve_response_drives_proceed() {
 async fn reject_response_drives_skip_with_reason() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"{"decision":"reject","reason":"change-window-only"}"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"decision":"reject","reason":"change-window-only"}"#),
+        )
         .mount(&server)
         .await;
     let gate = ExternalGate {
@@ -97,9 +96,10 @@ async fn reject_response_drives_skip_with_reason() {
 async fn defer_response_drives_deferred_with_until() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"{"decision":"defer","until":"2026-06-01T00:00:00Z"}"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"decision":"defer","until":"2026-06-01T00:00:00Z"}"#),
+        )
         .mount(&server)
         .await;
     let gate = ExternalGate {

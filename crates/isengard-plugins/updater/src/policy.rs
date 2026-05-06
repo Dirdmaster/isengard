@@ -60,9 +60,13 @@ pub enum PolicyDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     Pinned,
-    Paused { until: DateTime<Utc> },
+    Paused {
+        until: DateTime<Utc>,
+    },
     /// Phase 12c: the configured `external_gate` returned `reject`.
-    GateRejected { reason: Option<String> },
+    GateRejected {
+        reason: Option<String>,
+    },
 }
 
 impl SkipReason {
@@ -325,7 +329,9 @@ pub fn policy_decision_from_gate(
 ) -> PolicyDecision {
     match gate {
         GateDecision::Approve => PolicyDecision::Proceed,
-        GateDecision::Reject { reason } => PolicyDecision::Skip(SkipReason::GateRejected { reason }),
+        GateDecision::Reject { reason } => {
+            PolicyDecision::Skip(SkipReason::GateRejected { reason })
+        }
         GateDecision::Defer { until } => PolicyDecision::Deferred {
             next_window: Some(until),
         },
@@ -735,7 +741,12 @@ mod tests {
         };
         let until = Utc::now() + Duration::hours(2);
         let dec = policy_decision_from_gate(GateDecision::Defer { until }, body);
-        assert_eq!(dec, PolicyDecision::Deferred { next_window: Some(until) });
+        assert_eq!(
+            dec,
+            PolicyDecision::Deferred {
+                next_window: Some(until)
+            }
+        );
     }
 
     #[test]
@@ -770,7 +781,9 @@ mod tests {
         };
         let dec = policy_decision_from_gate(GateDecision::Unreachable, body);
         match dec {
-            PolicyDecision::Deferred { next_window: Some(t) } => {
+            PolicyDecision::Deferred {
+                next_window: Some(t),
+            } => {
                 let now = Utc::now();
                 let lower = now + Duration::minutes(55);
                 let upper = now + Duration::minutes(65);

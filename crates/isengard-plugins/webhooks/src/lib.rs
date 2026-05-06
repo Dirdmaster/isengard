@@ -119,7 +119,10 @@ impl Plugin for Webhooks {
         // Phase 12b: lifecycle subscriber. Distinct broadcast subscription
         // so a lag on one tap doesn't drop the other's events.
         let lifecycle_rx = handles.bus.subscribe();
-        self.lifecycle_task = Some(tokio::spawn(lifecycle::run(inventory.clone(), lifecycle_rx)));
+        self.lifecycle_task = Some(tokio::spawn(lifecycle::run(
+            inventory.clone(),
+            lifecycle_rx,
+        )));
 
         // Worker: drain pending deliveries with retry + signing.
         let http = Client::builder()

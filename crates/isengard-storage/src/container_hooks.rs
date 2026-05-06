@@ -148,13 +148,12 @@ impl crate::inventory::Inventory {
         container_name: &str,
     ) -> Result<bool> {
         let host_bytes = host_id.0.to_bytes().to_vec();
-        let r = sqlx::query(
-            r#"DELETE FROM container_hooks WHERE host_id = ? AND container_name = ?"#,
-        )
-        .bind(&host_bytes)
-        .bind(container_name)
-        .execute(self.pool())
-        .await?;
+        let r =
+            sqlx::query(r#"DELETE FROM container_hooks WHERE host_id = ? AND container_name = ?"#)
+                .bind(&host_bytes)
+                .bind(container_name)
+                .execute(self.pool())
+                .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -164,13 +163,12 @@ impl crate::inventory::Inventory {
         container_id: &str,
     ) -> Result<bool> {
         let host_bytes = host_id.0.to_bytes().to_vec();
-        let r = sqlx::query(
-            r#"DELETE FROM container_hooks WHERE host_id = ? AND container_id = ?"#,
-        )
-        .bind(&host_bytes)
-        .bind(container_id)
-        .execute(self.pool())
-        .await?;
+        let r =
+            sqlx::query(r#"DELETE FROM container_hooks WHERE host_id = ? AND container_id = ?"#)
+                .bind(&host_bytes)
+                .bind(container_id)
+                .execute(self.pool())
+                .await?;
         Ok(r.rows_affected() > 0)
     }
 }
@@ -178,16 +176,15 @@ impl crate::inventory::Inventory {
 fn row_to_hooks(r: sqlx::sqlite::SqliteRow) -> Result<ContainerHooks> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = r.try_get("host_id")?;
-    let host_arr: [u8; 16] =
-        host_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Decode {
-                reason: format!(
-                    "container_hooks.host_id: expected 16 bytes, got {}",
-                    host_bytes.len()
-                ),
-            })?;
+    let host_arr: [u8; 16] = host_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Decode {
+            reason: format!(
+                "container_hooks.host_id: expected 16 bytes, got {}",
+                host_bytes.len()
+            ),
+        })?;
     let host_id = HostId(ulid::Ulid::from_bytes(host_arr));
     Ok(ContainerHooks {
         id: r.try_get("id")?,

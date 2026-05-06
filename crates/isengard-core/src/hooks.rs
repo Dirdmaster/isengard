@@ -68,7 +68,9 @@ pub fn has_any_hook_label(labels: &HashMap<String, String>) -> bool {
 }
 
 fn nonempty(v: Option<&String>) -> Option<String> {
-    v.map(|s| s.trim()).filter(|s| !s.is_empty()).map(String::from)
+    v.map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 #[cfg(test)]

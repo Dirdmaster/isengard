@@ -675,10 +675,8 @@ fn build_policy_skipped_event(
     if let crate::policy::SkipReason::Paused { until } = reason {
         payload["until"] = serde_json::Value::String(until.to_rfc3339());
     }
-    if let crate::policy::SkipReason::GateRejected { reason: r } = reason {
-        if let Some(s) = r {
-            payload["gate_reason"] = serde_json::Value::String(s.clone());
-        }
+    if let crate::policy::SkipReason::GateRejected { reason: Some(s) } = reason {
+        payload["gate_reason"] = serde_json::Value::String(s.clone());
     }
     let summary = match reason {
         crate::policy::SkipReason::Pinned => format!("skipped {service} (pinned)"),

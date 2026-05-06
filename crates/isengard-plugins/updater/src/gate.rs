@@ -152,9 +152,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/gate"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(r#"{"decision":"approve"}"#),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"decision":"approve"}"#))
             .mount(&server)
             .await;
         let gate = ExternalGate {
@@ -170,9 +168,10 @@ mod tests {
     async fn reject_response_yields_reject_with_reason() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"decision":"reject","reason":"too risky"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"decision":"reject","reason":"too risky"}"#),
+            )
             .mount(&server)
             .await;
         let gate = ExternalGate {
@@ -193,9 +192,10 @@ mod tests {
     async fn defer_response_yields_defer_with_until() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"decision":"defer","until":"2026-06-01T00:00:00Z"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"decision":"defer","until":"2026-06-01T00:00:00Z"}"#),
+            )
             .mount(&server)
             .await;
         let gate = ExternalGate {
@@ -206,10 +206,7 @@ mod tests {
         let dec = evaluate_gate(&http(), &gate, &payload()).await;
         match dec {
             GateDecision::Defer { until } => {
-                assert_eq!(
-                    until,
-                    Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()
-                );
+                assert_eq!(until, Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
             }
             other => panic!("expected Defer, got {other:?}"),
         }

@@ -83,7 +83,10 @@ pub async fn run(inventory: Arc<Inventory>, mut rx: Receiver<Event>) {
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "lifecycle subscriber broadcast lag, events dropped");
+                warn!(
+                    skipped = n,
+                    "lifecycle subscriber broadcast lag, events dropped"
+                );
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 debug!("lifecycle subscriber: broadcast closed; ending task");
@@ -132,10 +135,7 @@ pub async fn on_lifecycle(
 
     let host_storage_id = StorageHostId(dep.host_id.0);
     for name in names {
-        let Some(hooks) = inventory
-            .get_container_hooks(host_storage_id, name)
-            .await?
-        else {
+        let Some(hooks) = inventory.get_container_hooks(host_storage_id, name).await? else {
             continue;
         };
         let url_opt = match kind {
@@ -259,9 +259,13 @@ mod tests {
         .await
         .unwrap();
 
-        on_lifecycle(&inv, &ev("deployment.spinning_up", &dep), HookKind::PreDeploy)
-            .await
-            .unwrap();
+        on_lifecycle(
+            &inv,
+            &ev("deployment.spinning_up", &dep),
+            HookKind::PreDeploy,
+        )
+        .await
+        .unwrap();
 
         let rows = inv
             .list_deliveries_by_source(DeliverySource::Lifecycle, 50)
@@ -277,9 +281,13 @@ mod tests {
     async fn missing_hook_row_silent_no_op() {
         let (inv, _host, dep) = setup().await;
         // No upsert_container_hooks call.
-        on_lifecycle(&inv, &ev("deployment.spinning_up", &dep), HookKind::PreDeploy)
-            .await
-            .unwrap();
+        on_lifecycle(
+            &inv,
+            &ev("deployment.spinning_up", &dep),
+            HookKind::PreDeploy,
+        )
+        .await
+        .unwrap();
         let rows = inv
             .list_deliveries_by_source(DeliverySource::Lifecycle, 50)
             .await
@@ -371,9 +379,13 @@ mod tests {
         .await
         .unwrap();
         // Pre-deploy event arrives -> no enqueue.
-        on_lifecycle(&inv, &ev("deployment.spinning_up", &dep), HookKind::PreDeploy)
-            .await
-            .unwrap();
+        on_lifecycle(
+            &inv,
+            &ev("deployment.spinning_up", &dep),
+            HookKind::PreDeploy,
+        )
+        .await
+        .unwrap();
         let rows = inv
             .list_deliveries_by_source(DeliverySource::Lifecycle, 50)
             .await

@@ -1,8 +1,6 @@
 //! Phase 12b T2 acceptance tests for the container_hooks DAO.
 
-use isengard_storage::{
-    ContainerHooks, EnrollHost, HostId, Inventory, UpsertContainerHooks,
-};
+use isengard_storage::{ContainerHooks, EnrollHost, HostId, Inventory, UpsertContainerHooks};
 
 async fn fresh() -> (Inventory, HostId) {
     let inv = Inventory::open_in_memory().await.expect("open");
@@ -47,7 +45,10 @@ async fn insert_then_get_round_trips_fields() {
         .expect("upsert");
     assert_eq!(row.container_name, "web");
     assert_eq!(row.pre_deploy_url.as_deref(), Some("https://h.example/pre"));
-    assert_eq!(row.post_deploy_url.as_deref(), Some("https://h.example/post"));
+    assert_eq!(
+        row.post_deploy_url.as_deref(),
+        Some("https://h.example/post")
+    );
     assert!(row.on_failure_url.is_none());
 
     let got = inv

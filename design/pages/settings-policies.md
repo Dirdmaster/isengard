@@ -37,6 +37,7 @@ Source design: [[Update Policies & Approval Flow]] (full schema, layering, edge 
     reaper that drops container-scope rows whose `updated_at` is older
     than 24h.
   - **Phase 9d**: maintenance windows. `MaintenanceWindow { cron_expr, timezone }` field on Policy + ResolvedPolicy. Updater emits `update.deferred(next_window)` outside the window. PolicyEditor gains a window picker (cron + tz dropdown + custom tz + live "Next 3 firings" preview). PolicyRow renders the window summary line. EffectivePolicyPreview includes the window row with provenance. REST validates the cron expression at write time.
+  - **Phase 12c (#55)**: external-action gates. New `ExternalGate { url, secret?, timeout_secs }` field on Policy + ResolvedPolicy. Updater consults the gate before any update via `evaluate_gate(http, gate, payload)`; response decision (`approve` / `reject` / `defer` / `manual`) maps to existing flow. Connection refused yields `update.gated_unreachable` + 1h paused_until; timeout / 5xx / parse-fail collapse to manual (escalates via existing approval queue). PolicyEditor gains an "External gate" section with URL, optional secret, and timeout (1..=300 s). Each evaluation is logged in `webhook_deliveries` with `source='gate'`; visible in the Settings -> Webhooks "Gates" sub-tab.
 - Deferred:
   - `Minor` strategy semver-aware bumping (Phase 9i)
   - Rollback failure handler (Phase 9j; couples with Phase 10 deploy story)

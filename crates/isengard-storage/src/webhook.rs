@@ -328,10 +328,7 @@ impl crate::inventory::Inventory {
     /// Phase 12c: insert a delivery row representing one external-gate
     /// evaluation. The row is the audit trail; the synchronous evaluator
     /// stamps the outcome via `mark_delivery_*` paths just like webhook rows.
-    pub async fn insert_gate_delivery(
-        &self,
-        ins: InsertGateDelivery,
-    ) -> Result<WebhookDelivery> {
+    pub async fn insert_gate_delivery(&self, ins: InsertGateDelivery) -> Result<WebhookDelivery> {
         let res = sqlx::query(
             r#"
             INSERT INTO webhook_deliveries

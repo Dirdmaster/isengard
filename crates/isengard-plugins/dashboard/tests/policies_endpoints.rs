@@ -410,7 +410,11 @@ async fn post_with_external_gate_round_trips() {
             }
         }
     });
-    let resp = app.clone().oneshot(post_json("/policies", body)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/policies", body))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let v = body_json(resp).await;
     assert_eq!(
