@@ -31,7 +31,11 @@ pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};
 pub use error::{Error, Result};
 pub use fleet::Fleet;
 pub use host::{EnrollHost, Host, HostId};
-pub use host_action::{HostAction, HostActionId, HostActionKind};
+pub use host_action::{
+    APPROVAL_KIND, ApprovalDecision, ApprovalFilter, ApprovalState, ApprovalStateFilter,
+    DecidedApproval, HostAction, HostActionId, HostActionKind, InsertPendingApproval,
+    PendingApprovalRow, UpdateApprovalBody,
+};
 pub use inventory::Inventory;
 pub use journal::{EventRow, InsertEvent, Journal};
 pub use policy::{InsertPolicy, InventoryPolicyLoader, PolicyRow, PolicyScopeType};
