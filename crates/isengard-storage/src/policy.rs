@@ -3,66 +3,17 @@
 //! See spec §"DAO (in `isengard-storage::policy`)" of
 //! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
 //!
-//! `Policy` itself lives in `isengard-core::policy`; this module owns the row
-//! shape, the scope-type enum, and the DAO methods on `Inventory`.
+//! `Policy` and `PolicyScopeType` live in `isengard-core::policy`; this
+//! module owns the row shape and the DAO methods on `Inventory`. The
+//! scope-type enum is re-exported below so existing call sites
+//! (`isengard_storage::policy::PolicyScopeType`) keep compiling.
 
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use isengard_core::policy::Policy;
+// Re-export so external crates can keep their existing import path.
+pub use isengard_core::policy::PolicyScopeType;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-
-/// Discriminator for the polymorphic `scope_key` column. Mirrors the SQL
-/// CHECK constraint in `0016_policies.sql`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PolicyScopeType {
-    Global,
-    Fleet,
-    Stack,
-    Service,
-    Container,
-}
-
-impl PolicyScopeType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Global => "global",
-            Self::Fleet => "fleet",
-            Self::Stack => "stack",
-            Self::Service => "service",
-            Self::Container => "container",
-        }
-    }
-
-    /// Specificity rank: smaller wins, so `Global` (rank 0) is overridden by
-    /// every other scope. Used to order layered resolution.
-    pub fn rank(&self) -> u8 {
-        match self {
-            Self::Global => 0,
-            Self::Fleet => 1,
-            Self::Stack => 2,
-            Self::Service => 3,
-            Self::Container => 4,
-        }
-    }
-}
-
-impl FromStr for PolicyScopeType {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "global" => Ok(Self::Global),
-            "fleet" => Ok(Self::Fleet),
-            "stack" => Ok(Self::Stack),
-            "service" => Ok(Self::Service),
-            "container" => Ok(Self::Container),
-            other => Err(Error::Decode {
-                reason: format!("unknown policy scope_type: {other}"),
-            }),
-        }
-    }
-}
 
 /// A row from the `policies` table. `body` is the parsed `Policy`; the raw
 /// JSON column is dropped on read (the resolver only ever needs the typed
@@ -213,7 +164,14 @@ impl crate::inventory::Inventory {
 fn row_to_policy(r: sqlx::sqlite::SqliteRow) -> Result<PolicyRow> {
     use sqlx::Row;
     let scope_type_s: String = r.try_get("scope_type")?;
-    let scope_type: PolicyScopeType = scope_type_s.parse()?;
+    let scope_type: PolicyScopeType =
+        scope_type_s
+            .parse()
+            .map_err(
+                |e: isengard_core::policy::UnknownPolicyScopeType| Error::Decode {
+                    reason: e.to_string(),
+                },
+            )?;
     let body_json: String = r.try_get("body_json")?;
     let body: Policy = serde_json::from_str(&body_json).map_err(|e| Error::Decode {
         reason: format!("deserializing Policy body: {e}"),

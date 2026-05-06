@@ -8,8 +8,81 @@
 //! scope". The implicit root resolved value (when no rows exist) is exposed as
 //! the [`defaults`] module's constants.
 
+pub mod resolve;
+
+pub use resolve::{
+    PolicyContext, PolicyOrigin, ResolvedPolicy, ResolvedProvenance, resolve_policy,
+};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+
+/// Discriminator for the polymorphic `scope_key` column. Mirrors the SQL
+/// CHECK constraint in `0016_policies.sql`.
+///
+/// Lives in `isengard-core` so the pure resolver can sort and compare scopes
+/// without taking a dependency on `isengard-storage`. Storage re-exports it
+/// for backwards compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyScopeType {
+    Global,
+    Fleet,
+    Stack,
+    Service,
+    Container,
+}
+
+impl PolicyScopeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Fleet => "fleet",
+            Self::Stack => "stack",
+            Self::Service => "service",
+            Self::Container => "container",
+        }
+    }
+
+    /// Specificity rank: smaller wins, so `Global` (rank 0) is overridden by
+    /// every other scope. Used to order layered resolution.
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::Global => 0,
+            Self::Fleet => 1,
+            Self::Stack => 2,
+            Self::Service => 3,
+            Self::Container => 4,
+        }
+    }
+}
+
+/// Error returned when parsing an unknown scope-type string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownPolicyScopeType(pub String);
+
+impl std::fmt::Display for UnknownPolicyScopeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown policy scope_type: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownPolicyScopeType {}
+
+impl FromStr for PolicyScopeType {
+    type Err = UnknownPolicyScopeType;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "global" => Ok(Self::Global),
+            "fleet" => Ok(Self::Fleet),
+            "stack" => Ok(Self::Stack),
+            "service" => Ok(Self::Service),
+            "container" => Ok(Self::Container),
+            other => Err(UnknownPolicyScopeType(other.to_string())),
+        }
+    }
+}
 
 /// How aggressively the updater should bump a service's image.
 ///
@@ -132,5 +205,34 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         let back: Policy = serde_json::from_str(&s).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn scope_type_round_trips_through_str() {
+        for s in [
+            PolicyScopeType::Global,
+            PolicyScopeType::Fleet,
+            PolicyScopeType::Stack,
+            PolicyScopeType::Service,
+            PolicyScopeType::Container,
+        ] {
+            let parsed: PolicyScopeType = s.as_str().parse().expect("parse roundtrip");
+            assert_eq!(parsed, s);
+        }
+    }
+
+    #[test]
+    fn scope_type_rank_orders_by_specificity() {
+        assert!(PolicyScopeType::Global.rank() < PolicyScopeType::Fleet.rank());
+        assert!(PolicyScopeType::Fleet.rank() < PolicyScopeType::Stack.rank());
+        assert!(PolicyScopeType::Stack.rank() < PolicyScopeType::Service.rank());
+        assert!(PolicyScopeType::Service.rank() < PolicyScopeType::Container.rank());
+    }
+
+    #[test]
+    fn unknown_scope_type_string_errors() {
+        let err = "frobozz".parse::<PolicyScopeType>().unwrap_err();
+        assert_eq!(err.0, "frobozz");
+        assert!(format!("{err}").contains("unknown policy scope_type"));
     }
 }
