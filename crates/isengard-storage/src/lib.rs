@@ -23,6 +23,7 @@ pub mod service;
 pub mod setting;
 pub mod stack;
 pub mod tls_cert;
+pub mod webhook;
 
 pub use acme_account::{AcmeAccount, UpsertAcmeAccount};
 pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
@@ -49,3 +50,7 @@ pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
+pub use webhook::{
+    DeliveryStatus, InsertDelivery, InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook,
+    WebhookDelivery, kind_matches,
+};

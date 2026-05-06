@@ -1,37 +1,31 @@
 [package]
-name = "isengard-plugin-dashboard"
+name = "isengard-plugin-webhooks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Dashboard plugin for Isengard: Nuxt 3 SPA + axum"
+description = "Isengard webhooks plugin: subscribe events to user-defined HTTP endpoints with HMAC signing and retry"
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-axum.workspace = true
 chrono.workspace = true
-hex.workspace = true
+hex = "0.4"
+hmac = "0.12"
 inventory.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
-isengard-plugin-notifier.workspace = true
-isengard-proto.workspace = true
 isengard-storage.workspace = true
-mime_guess.workspace = true
 reqwest.workspace = true
-rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 subtle.workspace = true
-rand.workspace = true
 tokio = { workspace = true }
-tower.workspace = true
 tracing.workspace = true
-ulid.workspace = true
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true, features = ["rand_core"] }
-rand.workspace = true
+tokio = { workspace = true }
+wiremock.workspace = true
