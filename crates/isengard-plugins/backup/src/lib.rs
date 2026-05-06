@@ -14,6 +14,7 @@ use isengard_core::{
 };
 use tracing::info;
 
+pub mod encrypt;
 pub mod snapshot;
 
 const PLUGIN_NAME: &str = "backup";
