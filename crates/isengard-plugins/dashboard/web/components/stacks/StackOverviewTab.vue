@@ -70,7 +70,10 @@ function stateClasses(state: Service['state']) {
           :key="`${svc.host_id}-${svc.name}`"
           class="rounded-iso-lg border border-iso-border-subtle bg-iso-bg-elevated overflow-hidden"
         >
-          <div class="px-4 py-3 flex items-center justify-between gap-3">
+          <NuxtLink
+            :to="`/stacks/${stack.id}/services/${encodeURIComponent(svc.name)}`"
+            class="px-4 py-3 flex items-center justify-between gap-3 hover:bg-iso-bg-row-hover transition-colors"
+          >
             <div class="flex items-center gap-3 min-w-0">
               <span class="w-2 h-2 rounded-full shrink-0" :class="dotColor(svc.state)"></span>
               <span class="font-mono text-sm font-semibold text-iso-text-primary truncate">{{ svc.name }}</span>
@@ -80,12 +83,12 @@ function stateClasses(state: Service['state']) {
               <span class="text-[10px]" :class="stateClasses(svc.state)">{{ stateLabel(svc.state) }}</span>
               <button
                 class="text-[10px] text-iso-text-muted hover:text-iso-info underline"
-                @click="$emit('expose', svc.host_id, svc.name, 0)"
+                @click.stop.prevent="$emit('expose', svc.host_id, svc.name, 0)"
               >
                 Expose
               </button>
             </div>
-          </div>
+          </NuxtLink>
           <EffectivePolicyPreview
             v-if="svc.name"
             :fleet="fleet"
