@@ -10,6 +10,7 @@ pub mod disconnect_monitor;
 pub mod enrollment;
 pub mod pending_actions;
 pub mod plugin_host;
+pub mod policy_ingest;
 pub mod revocation;
 pub mod routing;
 pub mod sync_services;
@@ -133,6 +134,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     let bus = Arc::new(crate::bus::EventBus::new());
 
     let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
+    let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
 
     // Phase 14: internal CA + enrollment service. CA is loaded-or-initialized
     // from the `ca` row (single-row table); the EnrollmentService owns the
@@ -267,14 +269,42 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         .client_auth_optional(true);
 
     let svc = ControllerServer::new(ControllerService::new(
-        inventory,
+        inventory.clone(),
         journal,
         bus,
         routing.clone(),
+        policy_ingest.clone(),
         ca,
         enrollment,
         revocation,
     ));
+
+    // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.
+    // Runs every hour with a 24h max-age. Belt-and-braces against missed
+    // `ContainerLabelsRemoved` events (e.g. agent crashed during destroy).
+    let reaper_inv = inventory.clone();
+    let reaper_handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+        // Skip the first immediate tick: nothing useful to do at boot.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now = chrono::Utc::now();
+            match policy_ingest::reap_orphaned_container_policies(
+                &reaper_inv,
+                now,
+                chrono::Duration::hours(24),
+            )
+            .await
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(reaped = n, "policy labels: reaper swept stale rows"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "policy labels: reaper failed");
+                }
+            }
+        }
+    });
 
     info!("gRPC server listening");
     let serve_fut = Server::builder()
@@ -295,6 +325,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // -- shutdown -------------------------------------------------------------
     disconnect_handle.abort();
     deployment_handle.abort();
+    reaper_handle.abort();
 
     // -- plugin stop ----------------------------------------------------------
     plugin_host::stop_controller_plugins(&mut controller_plugins).await;

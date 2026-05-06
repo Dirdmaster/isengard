@@ -82,6 +82,13 @@ const isPaused = computed<boolean>(() => {
   return t > Date.now()
 })
 
+/** Phase 9b.1: container-scope rows are discovered from compose labels.
+ *  They carry a "from labels" pill and have Edit / Remove suppressed since
+ *  the source of truth is the compose file, not this UI. */
+const isContainerScope = computed<boolean>(
+  () => props.policy.scopeType === 'container',
+)
+
 interface SummaryLine {
   key: string
   text: string
@@ -148,6 +155,14 @@ const summary = computed<SummaryLine[]>(() => {
     out.push({
       key: 'approver',
       text: `Approver: ${b.approver_channel}`,
+      override: true,
+    })
+  }
+  if (b.window) {
+    const tz = b.window.timezone ?? 'UTC'
+    out.push({
+      key: 'window',
+      text: `Window: ${b.window.cron_expr} (${tz})`,
       override: true,
     })
   }
@@ -227,6 +242,14 @@ function gateBadgeClass(g: UpdateGate): string {
           {{ scopeLabel }}
         </span>
         <span
+          v-if="isContainerScope"
+          class="px-1.5 py-0.5 rounded-iso-sm border border-iso-border-subtle bg-iso-bg-base text-[10px] text-iso-text-muted font-mono inline-flex items-center gap-1"
+          title="Discovered from compose labels (isengard.policy.*). Edit the compose file to change."
+        >
+          <span aria-hidden="true">[label]</span>
+          <span>from labels</span>
+        </span>
+        <span
           v-if="effectiveStrategy"
           :class="[
             'px-2 py-0.5 rounded-iso-sm border font-mono text-[11px]',
@@ -254,17 +277,23 @@ function gateBadgeClass(g: UpdateGate): string {
       </div>
 
       <div class="flex items-center gap-1 shrink-0">
+        <span
+          v-if="isContainerScope"
+          class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-faint italic"
+          title="Edit the compose file's isengard.policy.* labels and redeploy to change."
+        >read-only</span>
         <button
+          v-else
           class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-secondary hover:bg-iso-bg-base hover:text-iso-text-primary"
           @click="$emit('edit', policy)"
         >Edit</button>
         <button
-          v-if="isPaused"
+          v-if="isPaused && !isContainerScope"
           class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-info hover:bg-iso-info/10"
           @click="$emit('resume', policy)"
         >Resume now</button>
         <button
-          v-if="!implicitDefault"
+          v-if="!implicitDefault && !isContainerScope"
           class="px-2 py-1 rounded-iso-sm text-[11px] text-iso-text-faint hover:bg-iso-error/10 hover:text-iso-error"
           @click="$emit('remove', policy)"
         >Remove</button>

@@ -33,6 +33,16 @@ export interface ResolvedProvenance {
   paused_until: PolicyOrigin
   on_failure: PolicyOrigin
   approver_channel: PolicyOrigin
+  window: PolicyOrigin
+}
+
+/**
+ * Mirror of `crates/isengard-core/src/policy/mod.rs::MaintenanceWindow`.
+ * Phase 9d.
+ */
+export interface MaintenanceWindow {
+  cron_expr: string
+  timezone?: string | null
 }
 
 /**
@@ -45,6 +55,7 @@ export interface ResolvedPolicy {
   paused_until: string | null
   on_failure: FailureHandling
   approver_channel: string | null
+  window: MaintenanceWindow | null
   provenance: ResolvedProvenance
 }
 

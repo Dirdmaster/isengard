@@ -43,6 +43,7 @@ isengard-plugin-networking-tailscale = { workspace = true, optional = true }
 isengard-plugin-networking-cf-tunnel = { workspace = true, optional = true }
 isengard-plugin-notifier.workspace = true
 isengard-plugin-updater.workspace = true
+isengard-plugin-webhooks.workspace = true
 isengard-storage.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }

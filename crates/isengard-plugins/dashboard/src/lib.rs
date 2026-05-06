@@ -5,14 +5,15 @@
 
 #![allow(clippy::result_large_err)]
 
-mod api;
+pub mod api;
 pub mod approvals;
 pub mod backup;
 pub mod deployments;
-mod dto;
+pub mod dto;
 pub mod enrollment;
 pub mod policies;
 pub mod routing;
+pub mod webhooks;
 mod ws;
 
 use std::net::SocketAddr;
@@ -101,6 +102,7 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
             .nest("/api/v1", deployments::router(h.clone()))
             .nest("/api/v1", policies::router(h.clone()))
             .nest("/api/v1", approvals::router(h.clone()))
+            .nest("/api/v1", webhooks::router(h.clone()))
             .nest("/api/v1", backup::router(h.clone()))
             .nest("/api/v1", enrollment::router(h))
             .merge(ws_router)

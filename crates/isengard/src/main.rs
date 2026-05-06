@@ -35,6 +35,8 @@ use isengard_plugin_networking_none as _;
 use isengard_plugin_networking_tailscale as _;
 #[allow(unused_imports)]
 use isengard_plugin_notifier as _;
+#[allow(unused_imports)]
+use isengard_plugin_webhooks as _;
 
 #[derive(Debug, Parser)]
 #[command(

@@ -28,6 +28,9 @@
           <div v-else-if="activeTab === 'notifier'">
             <NotifierSettings />
           </div>
+          <div v-else-if="activeTab === 'webhooks'">
+            <WebhooksSettings />
+          </div>
           <div v-else-if="activeTab === 'backup'">
             <BackupSettings />
           </div>
@@ -45,6 +48,7 @@ const tabs = [
   { key: 'networking', label: 'Networking' },
   { key: 'deployments', label: 'Deployments' },
   { key: 'notifier', label: 'Notifier' },
+  { key: 'webhooks', label: 'Webhooks' },
   { key: 'backup', label: 'Backup' },
 ]
 </script>

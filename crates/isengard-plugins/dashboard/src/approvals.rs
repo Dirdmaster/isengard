@@ -11,6 +11,7 @@
 //! | GET    | `/approvals/:id`                | Single row by ULID action_id             |
 //! | POST   | `/approvals/:id`                | Decide (approve/reject/snooze)           |
 //! | POST   | `/notifier/callback/telegram`   | Telegram webhook callback for inline btn |
+//! | POST   | `/notifier/callback/discord`    | Discord interactions endpoint (Phase 9c) |
 //!
 //! Decision flow:
 //! 1. `decide_pending_approval` atomically transitions `pending_open` to one
@@ -32,11 +33,21 @@
 //!    text and drop the inline keyboard.
 //! 5. Return Telegram's expected `answerCallbackQuery` shape so the user's
 //!    button stops spinning.
+//!
+//! Discord callback flow (Phase 9c):
+//! 1. Verify the ed25519 signature over `timestamp || raw_body` using
+//!    `ISENGARD_DISCORD_PUBLIC_KEY`. 401 on any failure.
+//! 2. Parse the interaction body. PING (type=1) returns PONG; MESSAGE_COMPONENT
+//!    (type=3) parses `data.custom_id` and dispatches to `decide_pending_approval`.
+//! 3. Respond with UPDATE_MESSAGE (type=7) so Discord clears the buttons in
+//!    place. The optional out-of-band PATCH covers the rare case where the
+//!    interaction omitted a message reference.
 
 use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -46,10 +57,12 @@ use isengard_controller::ControllerHandles;
 use isengard_core::Event;
 use isengard_core::event::kinds::{UPDATE_APPROVED, UPDATE_REJECTED, UPDATE_SNOOZED};
 use isengard_core::policy::{Policy, PolicyScopeType};
+use isengard_plugin_notifier::discord::{edit_discord_message_text, verify_discord_signature};
 use isengard_plugin_notifier::telegram::edit_telegram_message_text;
 use isengard_storage::HostActionKind;
 use isengard_storage::host_action::{
-    ApprovalDecision, ApprovalFilter, ApprovalState, ApprovalStateFilter, PendingApprovalRow,
+    ApprovalDecision, ApprovalFilter, ApprovalState, ApprovalStateFilter, DecidedApproval,
+    PendingApprovalRow,
 };
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -60,11 +73,18 @@ const TELEGRAM_BOT_TOKEN_ENV: &str = "ISENGARD_TELEGRAM_BOT_TOKEN";
 const TELEGRAM_API_BASE_ENV: &str = "ISENGARD_TELEGRAM_API_BASE";
 const TELEGRAM_SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
 
+const DISCORD_PUBLIC_KEY_ENV: &str = "ISENGARD_DISCORD_PUBLIC_KEY";
+const DISCORD_BOT_TOKEN_ENV: &str = "ISENGARD_DISCORD_BOT_TOKEN";
+const DISCORD_API_BASE_ENV: &str = "ISENGARD_DISCORD_API_BASE";
+const DISCORD_SIGNATURE_HEADER: &str = "x-signature-ed25519";
+const DISCORD_TIMESTAMP_HEADER: &str = "x-signature-timestamp";
+
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/approvals", get(list_approvals))
         .route("/approvals/{id}", get(get_approval).post(decide_approval))
         .route("/notifier/callback/telegram", post(telegram_callback))
+        .route("/notifier/callback/discord", post(discord_callback))
         .with_state(handles)
 }
 
@@ -858,6 +878,425 @@ fn render_decided_message_text(
             format!("Snoozed by {decided_by} at {stamp} for {hours}h")
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Discord callback
+// ---------------------------------------------------------------------------
+
+/// Discord interaction body. Discord uses snake_case AND camelCase across
+/// fields in its API; this struct deserializes the subset we care about.
+#[derive(Debug, Deserialize)]
+struct DiscordInteraction {
+    /// 1=PING, 2=APPLICATION_COMMAND, 3=MESSAGE_COMPONENT, 4=APPLICATION_COMMAND_AUTOCOMPLETE,
+    /// 5=MODAL_SUBMIT. We handle 1 and 3.
+    #[serde(rename = "type")]
+    kind: u8,
+    #[serde(default)]
+    data: Option<DiscordInteractionData>,
+    #[serde(default)]
+    member: Option<DiscordMember>,
+    #[serde(default)]
+    user: Option<DiscordUser>,
+    #[serde(default)]
+    message: Option<DiscordMessageRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordInteractionData {
+    #[serde(default)]
+    custom_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMember {
+    #[serde(default)]
+    user: Option<DiscordUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordUser {
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    global_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMessageRef {
+    /// Snowflake string. Parsed to i64 at use site.
+    id: String,
+    #[serde(default)]
+    channel_id: Option<String>,
+}
+
+/// Discord interaction response shapes. Type 1 = PONG (response to PING),
+/// type 7 = UPDATE_MESSAGE (edit the source component message). Other
+/// response types are not used by this handler.
+#[derive(Debug, Serialize)]
+struct DiscordPong {
+    #[serde(rename = "type")]
+    kind: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscordUpdateMessage<'a> {
+    #[serde(rename = "type")]
+    kind: u8,
+    data: DiscordUpdateMessageData<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct DiscordUpdateMessageData<'a> {
+    content: &'a str,
+    components: &'a [serde_json::Value],
+}
+
+async fn discord_callback(
+    State(handles): State<Arc<ControllerHandles>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // 1. Verify signature (public key + headers required).
+    let public_key = match std::env::var(DISCORD_PUBLIC_KEY_ENV) {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            warn!(
+                env = DISCORD_PUBLIC_KEY_ENV,
+                "discord callback rejected: public key env not set"
+            );
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "discord public key not configured",
+            );
+        }
+    };
+    let signature = match headers
+        .get(DISCORD_SIGNATURE_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "missing X-Signature-Ed25519 header",
+            );
+        }
+    };
+    let timestamp = match headers
+        .get(DISCORD_TIMESTAMP_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "missing X-Signature-Timestamp header",
+            );
+        }
+    };
+    if let Err(e) = verify_discord_signature(&public_key, timestamp.as_bytes(), &body, &signature) {
+        debug!(error = %e, "discord signature verify failed");
+        return err(StatusCode::UNAUTHORIZED, "invalid discord signature");
+    }
+
+    // 2. Parse interaction body.
+    let interaction: DiscordInteraction = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!("malformed discord interaction body: {e}"),
+            );
+        }
+    };
+
+    match interaction.kind {
+        1 => {
+            // PING: echo PONG. Discord uses this at endpoint registration time
+            // to verify the URL implements the protocol.
+            Json(DiscordPong { kind: 1 }).into_response()
+        }
+        3 => discord_message_component(&handles, interaction).await,
+        other => err(
+            StatusCode::BAD_REQUEST,
+            format!("unsupported discord interaction type {other}"),
+        ),
+    }
+}
+
+async fn discord_message_component(
+    handles: &Arc<ControllerHandles>,
+    interaction: DiscordInteraction,
+) -> Response {
+    // Extract custom_id.
+    let custom_id = match interaction
+        .data
+        .as_ref()
+        .and_then(|d| d.custom_id.as_deref())
+    {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "discord component interaction missing custom_id",
+            );
+        }
+    };
+
+    let parsed = match parse_callback_data(custom_id) {
+        Ok(p) => p,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+
+    // Resolve decided_by from member.user.username (guild context) or
+    // user.username (DM). Fall back to global_name then "discord".
+    let decided_by = resolve_discord_decided_by(&interaction);
+
+    // Apply the decision.
+    let storage_decision = parsed.parsed.to_storage();
+    let decide_res = handles
+        .inventory
+        .decide_pending_approval(&parsed.action_id, storage_decision, &decided_by)
+        .await;
+    let decided = match decide_res {
+        Ok(d) => d,
+        Err(isengard_storage::Error::Conflict(msg)) => {
+            // Already decided. Return UPDATE_MESSAGE so Discord swaps the
+            // buttons for an explanation rather than leaving them clickable.
+            let text = format!("Already decided: {msg}");
+            return discord_update_message_response(&text);
+        }
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("decide approval: {e}"),
+            );
+        }
+    };
+
+    // Run the same side-effects as the dashboard / Telegram paths.
+    let outcome =
+        apply_callback_side_effects(handles, &parsed, &decided, &decided_by, "discord_callback")
+            .await;
+
+    // Best-effort message edit. Discord's UPDATE_MESSAGE response handles the
+    // common case (the user clicked the button on the very message we want to
+    // edit), so this PATCH is only needed if the interaction omitted a
+    // `message` reference (rare). Keep the helper around for completeness.
+    let edited_text =
+        render_decided_message_text(parsed.parsed, &decided_by, outcome.dispatched_apply_update);
+    let interaction_message_id: Option<i64> =
+        interaction.message.as_ref().and_then(|m| m.id.parse().ok());
+    let interaction_channel_id: Option<i64> = interaction
+        .message
+        .as_ref()
+        .and_then(|m| m.channel_id.as_ref())
+        .and_then(|s| s.parse::<i64>().ok());
+
+    if interaction_message_id.is_none() {
+        // Fall back to persisted Discord metadata on the row.
+        let stored = decided.row.metadata_json.as_ref().and_then(|meta| {
+            let cid = meta
+                .get("notifier_discord_channel_id")
+                .and_then(|v| v.as_i64());
+            let mid = meta
+                .get("notifier_discord_message_id")
+                .and_then(|v| v.as_i64());
+            match (cid, mid) {
+                (Some(c), Some(m)) => Some((c, m)),
+                _ => None,
+            }
+        });
+        if let Some((channel_id, message_id)) = stored {
+            if let Ok(token) = std::env::var(DISCORD_BOT_TOKEN_ENV) {
+                if !token.is_empty() {
+                    let api_base = std::env::var(DISCORD_API_BASE_ENV).ok();
+                    if let Err(e) = edit_discord_message_text(
+                        api_base.as_deref(),
+                        &token,
+                        channel_id,
+                        message_id,
+                        &edited_text,
+                    )
+                    .await
+                    {
+                        warn!(
+                            action_id = %parsed.action_id,
+                            error = %e,
+                            "discord callback: edit_discord_message_text failed; decision applied"
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        // We have a message ref in the interaction itself; rely on the
+        // UPDATE_MESSAGE response to do the edit. Logging the ids here keeps
+        // troubleshooting straightforward when something goes sideways.
+        debug!(
+            action_id = %parsed.action_id,
+            channel_id = ?interaction_channel_id,
+            message_id = ?interaction_message_id,
+            "discord callback: returning UPDATE_MESSAGE for interaction"
+        );
+    }
+
+    discord_update_message_response(&edited_text)
+}
+
+/// Carrier for the post-decide side-effects so all callback paths share one
+/// implementation. Currently only Discord uses this struct; the Telegram path
+/// keeps its inline copy because it predates the helper. The data shape is
+/// stable enough that a future refactor could collapse them.
+struct CallbackOutcome {
+    dispatched_apply_update: bool,
+}
+
+/// Run the post-decide side-effects: queue the apply_update HostAction on
+/// approve, write paused_until on snooze, and emit the lifecycle event on the
+/// bus. Returns whether the apply_update was queued so callers can render a
+/// "queued" suffix in the edited message.
+async fn apply_callback_side_effects(
+    handles: &Arc<ControllerHandles>,
+    parsed: &ParsedCallbackData,
+    decided: &DecidedApproval,
+    decided_by: &str,
+    source: &str,
+) -> CallbackOutcome {
+    let mut dispatched = false;
+    let mut paused_until_set: Option<DateTime<Utc>> = None;
+
+    if decided.should_dispatch_apply_update {
+        let host_id = decided.row.body.host_id;
+        let stack_name = decided.row.body.stack.clone();
+        if let Err(e) = handles
+            .inventory
+            .queue_action(
+                host_id,
+                HostActionKind::ForceUpdate {
+                    stack_name: Some(stack_name),
+                },
+            )
+            .await
+        {
+            warn!(
+                source = %source,
+                action_id = %parsed.action_id,
+                error = %e,
+                "callback: failed to queue apply_update HostAction"
+            );
+        } else {
+            dispatched = true;
+        }
+    }
+
+    if let ParsedDecision::Snooze(hours) = parsed.parsed {
+        let until = Utc::now() + Duration::hours(hours as i64);
+        let scope_key = decided.row.body.service.clone();
+        let merged = match handles
+            .inventory
+            .get_policy(PolicyScopeType::Service, &scope_key)
+            .await
+        {
+            Ok(Some(existing)) => Policy {
+                paused_until: Some(until),
+                ..existing.body
+            },
+            _ => Policy {
+                paused_until: Some(until),
+                ..Default::default()
+            },
+        };
+        if handles
+            .inventory
+            .upsert_policy(PolicyScopeType::Service, &scope_key, &merged)
+            .await
+            .is_ok()
+        {
+            paused_until_set = Some(until);
+        }
+    }
+
+    let row = &decided.row;
+    let mut event = Event {
+        kind: parsed.parsed.event_kind().to_string(),
+        occurred_at: Utc::now(),
+        host_id: Some(row.body.host_id.into()),
+        summary: format!(
+            "{} for {}/{}: {}",
+            parsed.parsed.event_kind(),
+            row.body.stack,
+            row.body.service,
+            decided_by
+        ),
+        container_name: Some(row.body.container_name.clone()),
+        image: Some(row.body.image.clone()),
+        old_digest: Some(row.body.current_digest.clone()),
+        new_digest: Some(row.body.proposed_digest.clone()),
+        ..Default::default()
+    };
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "action_id".to_string(),
+        serde_json::Value::String(row.action_id.clone()),
+    );
+    metadata.insert(
+        "decided_by".to_string(),
+        serde_json::Value::String(decided_by.to_string()),
+    );
+    metadata.insert(
+        "source".to_string(),
+        serde_json::Value::String(source.to_string()),
+    );
+    if let ParsedDecision::Snooze(hours) = parsed.parsed {
+        metadata.insert("snooze_hours".to_string(), serde_json::Value::from(hours));
+        if let Some(pu) = paused_until_set {
+            metadata.insert(
+                "paused_until".to_string(),
+                serde_json::Value::String(pu.to_rfc3339()),
+            );
+        }
+    }
+    event.metadata = serde_json::Value::Object(metadata);
+    handles.bus.publish(event);
+
+    CallbackOutcome {
+        dispatched_apply_update: dispatched,
+    }
+}
+
+fn resolve_discord_decided_by(i: &DiscordInteraction) -> String {
+    if let Some(member) = i.member.as_ref() {
+        if let Some(u) = member.user.as_ref() {
+            if let Some(name) = u.username.as_deref() {
+                return format!("discord:@{name}");
+            }
+            if let Some(name) = u.global_name.as_deref() {
+                return format!("discord:{name}");
+            }
+        }
+    }
+    if let Some(u) = i.user.as_ref() {
+        if let Some(name) = u.username.as_deref() {
+            return format!("discord:@{name}");
+        }
+        if let Some(name) = u.global_name.as_deref() {
+            return format!("discord:{name}");
+        }
+    }
+    "discord".to_string()
+}
+
+fn discord_update_message_response(text: &str) -> Response {
+    let body = DiscordUpdateMessage {
+        kind: 7,
+        data: DiscordUpdateMessageData {
+            content: text,
+            components: &[],
+        },
+    };
+    Json(body).into_response()
 }
 
 #[cfg(test)]
