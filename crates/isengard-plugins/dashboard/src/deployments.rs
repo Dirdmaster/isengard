@@ -52,6 +52,16 @@ pub struct DeploymentDto {
     /// rolling group. `None` for single-host (orchestrator-bypass) deploys.
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Phase 9F (#48): blue digest snapshot taken at deployment start when
+    /// the resolved policy's `on_failure == Rollback`. The supervisor
+    /// uses this to re-pull the prior image if green fails.
+    #[serde(default)]
+    pub previous_digest: Option<String>,
+    /// Phase 9F (#48): timestamp the supervisor entered the rollback
+    /// branch. The dashboard uses it to render "Rolled back at HH:MM"
+    /// without parsing the error string.
+    #[serde(default)]
+    pub rollback_attempted_at: Option<String>,
 }
 
 impl From<Deployment> for DeploymentDto {
@@ -76,6 +86,8 @@ impl From<Deployment> for DeploymentDto {
             created_at: d.created_at.to_rfc3339(),
             updated_at: d.updated_at.to_rfc3339(),
             group_id: d.group_id,
+            previous_digest: d.previous_digest,
+            rollback_attempted_at: d.rollback_attempted_at.map(|t| t.to_rfc3339()),
         }
     }
 }

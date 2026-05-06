@@ -29,6 +29,17 @@ export interface DeploymentDto {
    * checks for it defensively, so this is `optional` here.
    */
   group_id?: string | null
+  /**
+   * Phase 9F (#48): blue digest captured at deployment start when the
+   * resolved policy says `on_failure = Rollback`. NULL means the row
+   * is not eligible for automatic rollback.
+   */
+  previous_digest?: string | null
+  /**
+   * Phase 9F (#48): timestamp the supervisor entered the rollback
+   * branch. Set regardless of whether rollback eventually succeeded.
+   */
+  rollback_attempted_at?: string | null
 }
 
 /**
