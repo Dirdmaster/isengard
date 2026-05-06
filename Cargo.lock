@@ -2097,6 +2097,7 @@ dependencies = [
  "inventory",
  "isengard-controller",
  "isengard-core",
+ "isengard-storage",
  "reqwest",
  "serde",
  "serde_json",

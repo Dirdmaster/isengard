@@ -17,7 +17,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::channel::{NotifyChannel, format_event};
+use crate::channel::{InlineButton, NotifyChannel, format_event};
 
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 
@@ -53,6 +53,78 @@ struct SendMessageBody<'a> {
     text: &'a str,
 }
 
+/// Result of a successful interactive send. Carries the Telegram-assigned
+/// `message_id` so callers can later edit the message (after a decision) or
+/// stash it alongside the originating record (e.g. a pending_approval row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramSentMessage {
+    pub chat_id: String,
+    pub message_id: i64,
+}
+
+/// Telegram inline keyboard wire format.
+/// `inline_keyboard` is a 2-D array of buttons (rows of buttons).
+#[derive(Debug, Serialize)]
+struct InlineKeyboardMarkup<'a> {
+    inline_keyboard: Vec<Vec<TgInlineButton<'a>>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TgInlineButton<'a> {
+    text: &'a str,
+    callback_data: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct SendInteractiveBody<'a> {
+    chat_id: &'a str,
+    text: &'a str,
+    parse_mode: &'static str,
+    reply_markup: InlineKeyboardMarkup<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct EditMessageBody<'a> {
+    chat_id: &'a str,
+    message_id: i64,
+    text: &'a str,
+    parse_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_markup: Option<InlineKeyboardMarkup<'a>>,
+}
+
+/// Shape of Telegram's `sendMessage` success body. We only care about
+/// `result.message_id`; Telegram returns more (chat, date, etc.).
+#[derive(Debug, Deserialize)]
+struct TelegramSendResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    description: Option<String>,
+    result: Option<TelegramMessageResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramMessageResult {
+    message_id: i64,
+}
+
+fn to_keyboard<'a>(buttons: &'a [Vec<InlineButton>]) -> InlineKeyboardMarkup<'a> {
+    InlineKeyboardMarkup {
+        inline_keyboard: buttons
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|b| TgInlineButton {
+                        text: &b.text,
+                        callback_data: &b.callback_data,
+                    })
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
 impl TelegramChannel {
     /// Build a channel from config. Env var beats config. Returns Err if no
     /// token resolvable OR chat_ids is empty.
@@ -80,6 +152,101 @@ impl TelegramChannel {
                 .build()
                 .map_err(|e| anyhow::anyhow!("building http client: {e}"))?,
         })
+    }
+
+    /// Configured chat ids. Used by the interactive subscriber to pick a
+    /// destination for `update.pending_approval` events.
+    pub fn chat_ids(&self) -> &[String] {
+        &self.chat_ids
+    }
+
+    /// Send a message with an inline keyboard. Returns the Telegram-assigned
+    /// `message_id` so callers can later edit the message after a decision.
+    ///
+    /// `buttons` is a 2-D array (rows of buttons). Telegram caps each
+    /// `callback_data` at 64 bytes; this method does not enforce that, so
+    /// keep payloads short at the call site.
+    pub async fn send_inline_keyboard(
+        &self,
+        chat_id: &str,
+        text: &str,
+        buttons: Vec<Vec<InlineButton>>,
+    ) -> anyhow::Result<TelegramSentMessage> {
+        let url = format!("{}/bot{}/sendMessage", self.api_base, self.bot_token);
+        let body = SendInteractiveBody {
+            chat_id,
+            text,
+            parse_mode: "HTML",
+            reply_markup: to_keyboard(&buttons),
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("telegram sendMessage transport: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "telegram sendMessage non-success: status={status} body={body}"
+            ));
+        }
+        let parsed: TelegramSendResponse = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("telegram sendMessage decode: {e}"))?;
+        if !parsed.ok {
+            return Err(anyhow::anyhow!(
+                "telegram sendMessage ok=false: {}",
+                parsed.description.unwrap_or_default()
+            ));
+        }
+        let message_id = parsed
+            .result
+            .ok_or_else(|| anyhow::anyhow!("telegram sendMessage missing result"))?
+            .message_id;
+        Ok(TelegramSentMessage {
+            chat_id: chat_id.to_string(),
+            message_id,
+        })
+    }
+
+    /// Edit the text (and optionally the keyboard) of a previously-sent
+    /// interactive message. Pass `reply_markup = None` to drop the keyboard
+    /// (used after an approval is decided so the buttons disappear).
+    pub async fn edit_message_text(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        text: &str,
+        reply_markup: Option<Vec<Vec<InlineButton>>>,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/bot{}/editMessageText", self.api_base, self.bot_token);
+        let keyboard = reply_markup.as_ref().map(|kb| to_keyboard(kb));
+        let body = EditMessageBody {
+            chat_id,
+            message_id,
+            text,
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("telegram editMessageText transport: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "telegram editMessageText non-success: status={status} body={body}"
+            ));
+        }
+        Ok(())
     }
 }
 
