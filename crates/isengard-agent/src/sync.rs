@@ -27,7 +27,13 @@ use tracing::{debug, info, instrument, warn};
 use crate::Result;
 use crate::backoff::Backoff;
 use crate::deployment::DeploymentSupervisor;
+use crate::logs::LogSource;
 use crate::proxy::ProxyState;
+
+/// Phase 13B: in-process registry of active log subscriptions on this agent.
+/// Each entry holds a `watch::Sender<bool>` whose receiver the corresponding
+/// `run_tail` task selects on; flipping it to `true` cancels the tail.
+type LogSubs = Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>>;
 
 /// Open a Sync stream and run the heartbeat loop until the stream errors or
 /// `cancel` fires. Returns Ok on graceful cancel; Err on stream error.
@@ -36,11 +42,11 @@ use crate::proxy::ProxyState;
 /// emitted while the stream is down stay queued in the channel until the next
 /// stream comes up.
 #[instrument(
-    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
+    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor, log_source),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn run_sync_loop(
+pub async fn run_sync_loop<S: LogSource>(
     endpoint: Endpoint,
     agent_id: String,
     interval_secs: u32,
@@ -49,6 +55,7 @@ pub async fn run_sync_loop(
     agent_msg_rx: &mut mpsc::Receiver<AgentMessage>,
     proxy_state: ProxyState,
     supervisor: Option<Arc<DeploymentSupervisor>>,
+    log_source: Option<Arc<S>>,
 ) -> Result<()> {
     // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
@@ -124,6 +131,10 @@ pub async fn run_sync_loop(
     // future Command/ConfigUpdate).
     let read_proxy_state = proxy_state.clone();
     let read_supervisor = supervisor.clone();
+    let read_log_source = log_source.clone();
+    let read_log_tx = tx.clone();
+    let log_subs: LogSubs = Arc::new(tokio::sync::Mutex::new(Default::default()));
+    let read_log_subs = log_subs.clone();
     let mut read_task = tokio::spawn(async move {
         while let Ok(Some(msg)) = inbound.message().await {
             match msg.payload {
@@ -160,10 +171,68 @@ pub async fn run_sync_loop(
                         warn!("AbortDeployment received but supervisor not wired");
                     }
                 }
+                Some(isengard_proto::pb::controller_message::Payload::StartLogStream(start)) => {
+                    let Some(source) = read_log_source.clone() else {
+                        warn!(
+                            sub = %start.subscription_id,
+                            "StartLogStream received but no LogSource is wired (no docker)"
+                        );
+                        // Best-effort surfacing back to the controller.
+                        let chunk = isengard_proto::pb::LogChunk {
+                            subscription_id: start.subscription_id.clone(),
+                            kind: isengard_proto::pb::log_chunk::Kind::Unavailable as i32,
+                            occurred_at: String::new(),
+                            stream: String::new(),
+                            line: String::new(),
+                            dropped: 0,
+                            reason: "agent_no_docker".into(),
+                        };
+                        let _ = read_log_tx
+                            .send(AgentMessage {
+                                payload: Some(agent_message::Payload::LogChunk(chunk)),
+                            })
+                            .await;
+                        continue;
+                    };
+                    let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+                    {
+                        let mut subs = read_log_subs.lock().await;
+                        subs.insert(start.subscription_id.clone(), abort_tx);
+                    }
+                    let out = read_log_tx.clone();
+                    let sub_id = start.subscription_id.clone();
+                    let container = start.container_name.clone();
+                    let tail = start.tail;
+                    let follow = start.follow;
+                    let subs_for_cleanup = read_log_subs.clone();
+                    tokio::spawn(async move {
+                        crate::logs::run_tail(
+                            source, sub_id.clone(), container, tail, follow, abort_rx, out,
+                        )
+                        .await;
+                        // Drop the entry on natural completion so a fresh
+                        // StartLogStream with the same id can take over.
+                        subs_for_cleanup.lock().await.remove(&sub_id);
+                    });
+                }
+                Some(isengard_proto::pb::controller_message::Payload::StopLogStream(stop)) => {
+                    let mut subs = read_log_subs.lock().await;
+                    if let Some(tx) = subs.remove(&stop.subscription_id) {
+                        let _ = tx.send(true);
+                    }
+                }
                 _ => {
                     warn!(?msg.payload, "unexpected ControllerMessage payload");
                 }
             }
+        }
+        // Stream closed: abort every still-running subscription so the
+        // tasks unwind promptly. (Not strictly required since `out` will
+        // close on drop, but explicit cancellation avoids race with Sender
+        // refcounts.)
+        let mut subs = read_log_subs.lock().await;
+        for (_, tx) in subs.drain() {
+            let _ = tx.send(true);
         }
         info!("inbound stream closed");
     });
@@ -253,11 +322,11 @@ pub async fn run_sync_loop(
 /// reconnect attempt clones the *current* endpoint, so the new cert
 /// propagates the next time the stream cycles (no agent restart needed).
 #[instrument(
-    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor),
+    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor, log_source),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
-pub async fn run_sync_with_reconnect(
+pub async fn run_sync_with_reconnect<S: LogSource>(
     endpoint: Arc<tokio::sync::RwLock<Endpoint>>,
     agent_id: String,
     interval_secs: u32,
@@ -266,6 +335,7 @@ pub async fn run_sync_with_reconnect(
     agent_msg_rx: &mut mpsc::Receiver<AgentMessage>,
     proxy_state: ProxyState,
     supervisor: Option<Arc<DeploymentSupervisor>>,
+    log_source: Option<Arc<S>>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -301,6 +371,7 @@ pub async fn run_sync_with_reconnect(
             agent_msg_rx,
             proxy_state.clone(),
             supervisor.clone(),
+            log_source.clone(),
         )
         .await;
 
