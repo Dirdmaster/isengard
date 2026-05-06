@@ -2,9 +2,9 @@
 type: design
 kind: page-spec
 status: shipped
-status_note: "Phase 9a-9d shipped: storage, resolver, updater, REST, settings UI, preview. Phase 9e-9f: gate=approval enforcement + interactive callbacks"
+status_note: "Phase 9a-9d shipped: storage, resolver, updater, REST, settings UI, preview. Phase 9e-9f: gate=approval enforcement + interactive callbacks. Phase 9e (Minor strategy): registry tag listing + semver-aware bumping shipped"
 created: 2026-05-03
-updated: 2026-05-06
+updated: 2026-05-07
 tags:
   - design
   - page
@@ -28,10 +28,9 @@ Source design: [[Update Policies & Approval Flow]] (full schema, layering, edge 
   - Settings → Policies page with `<PolicyRow>` list + `<PolicyEditor>` modal (field-level inheritance with override checkboxes)
   - `<EffectivePolicyPreview>` on Stack detail (per-service resolved policy with provenance labels)
   - **Phase 9e-9f**: `gate=Approval` enforcement (updater persists pending rows, surfaces them via [[approvals]] queue + Telegram interactive messages); see `design/pages/approvals.md` for the queue surface
+  - **Phase 9e (Minor strategy)**: `strategy=Minor` is now enforced. The updater lists the repository's tags (per-image 1h TTL cache), picks the highest patch+minor of the current major (skips prereleases + malformed tags), HEADs the bumped tag for its digest, and threads the bumped image / digest into the existing approval and recreate paths. Major-version bumps still require `Any`.
 - Deferred:
   - Maintenance windows (`window` field semantics) (Phase 9h)
-  - `Minor` strategy semver-aware bumping (Phase 9i)
-  - Rollback failure handler (Phase 9j; couples with Phase 10 deploy story)
   - Container-label policy discovery (Phase 9b.1)
   - Discord interactive messages (Phase 9g; same pattern as Telegram)
 
