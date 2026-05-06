@@ -100,7 +100,9 @@ fn decode_bollard_frame(out: bollard::container::LogOutput) -> DecodedLine {
     // With timestamps=true, the daemon prefixes each line with an RFC3339Nano
     // timestamp followed by a space. Strip + capture it.
     let (ts, rest) = match body.split_once(' ') {
-        Some((ts, rest)) if ts.len() >= 20 && ts.contains('T') => (ts.to_string(), rest.to_string()),
+        Some((ts, rest)) if ts.len() >= 20 && ts.contains('T') => {
+            (ts.to_string(), rest.to_string())
+        }
         _ => (String::new(), body),
     };
     DecodedLine {
@@ -301,11 +303,8 @@ mod tests {
         run_tail(source, "sub-1".into(), "c".into(), 1, true, abort_rx, tx).await;
 
         let mut got = Vec::new();
-        while let Ok(Some(m)) = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx.recv(),
-        )
-        .await
+        while let Ok(Some(m)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
         {
             got.push(m);
         }

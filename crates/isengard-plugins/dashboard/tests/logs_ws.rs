@@ -218,8 +218,14 @@ async fn backfill_then_live_lines_reach_client() {
     let sub = read_subscription_id(&mut agent_rx).await;
 
     // Push a backfill chunk + a live line through the fanout.
-    handles.log_fanout.route(backfill_chunk(&sub, "starting")).await;
-    handles.log_fanout.route(line_chunk(&sub, "hello world")).await;
+    handles
+        .log_fanout
+        .route(backfill_chunk(&sub, "starting"))
+        .await;
+    handles
+        .log_fanout
+        .route(line_chunk(&sub, "hello world"))
+        .await;
 
     let f1 = next_text_frame(&mut ws).await.expect("first frame");
     let f2 = next_text_frame(&mut ws).await.expect("second frame");
@@ -299,8 +305,12 @@ async fn multi_host_aggregation_interleaves() {
 
     let f1 = next_text_frame(&mut ws).await.expect("frame");
     let f2 = next_text_frame(&mut ws).await.expect("frame");
-    let texts: Vec<String> = [f1["msg"].as_str().unwrap_or("").to_string(),
-                              f2["msg"].as_str().unwrap_or("").to_string()].into_iter().collect();
+    let texts: Vec<String> = [
+        f1["msg"].as_str().unwrap_or("").to_string(),
+        f2["msg"].as_str().unwrap_or("").to_string(),
+    ]
+    .into_iter()
+    .collect();
     assert!(texts.iter().any(|t| t == "from-h1"));
     assert!(texts.iter().any(|t| t == "from-h2"));
 }

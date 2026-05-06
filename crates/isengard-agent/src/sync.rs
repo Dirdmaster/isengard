@@ -33,7 +33,8 @@ use crate::proxy::ProxyState;
 /// Phase 13B: in-process registry of active log subscriptions on this agent.
 /// Each entry holds a `watch::Sender<bool>` whose receiver the corresponding
 /// `run_tail` task selects on; flipping it to `true` cancels the tail.
-type LogSubs = Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>>;
+type LogSubs =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>>;
 
 /// Open a Sync stream and run the heartbeat loop until the stream errors or
 /// `cancel` fires. Returns Ok on graceful cancel; Err on stream error.
@@ -207,7 +208,13 @@ pub async fn run_sync_loop<S: LogSource>(
                     let subs_for_cleanup = read_log_subs.clone();
                     tokio::spawn(async move {
                         crate::logs::run_tail(
-                            source, sub_id.clone(), container, tail, follow, abort_rx, out,
+                            source,
+                            sub_id.clone(),
+                            container,
+                            tail,
+                            follow,
+                            abort_rx,
+                            out,
                         )
                         .await;
                         // Drop the entry on natural completion so a fresh
