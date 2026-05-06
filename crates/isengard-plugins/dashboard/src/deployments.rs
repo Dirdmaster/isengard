@@ -48,6 +48,10 @@ pub struct DeploymentDto {
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Phase 10c (refs #50): set when this deployment is part of a multi-host
+    /// rolling group. `None` for single-host (orchestrator-bypass) deploys.
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 impl From<Deployment> for DeploymentDto {
@@ -71,6 +75,7 @@ impl From<Deployment> for DeploymentDto {
             error: d.error,
             created_at: d.created_at.to_rfc3339(),
             updated_at: d.updated_at.to_rfc3339(),
+            group_id: d.group_id,
         }
     }
 }

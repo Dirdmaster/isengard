@@ -120,6 +120,10 @@ pub struct Deployment {
     pub metadata_json: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Phase 10c (refs #50): set when this deployment is part of a multi-host
+    /// rolling group. `None` for single-host deploys (orchestrator-bypass).
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,7 +188,7 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   created_at, updated_at
+                   group_id, created_at, updated_at
             FROM deployments WHERE id = ?
             "#,
         )
@@ -205,7 +209,7 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   created_at, updated_at
+                   group_id, created_at, updated_at
             FROM deployments
             WHERE host_id = ? AND state NOT IN ('done', 'failed', 'aborted')
             ORDER BY created_at ASC
@@ -230,7 +234,7 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   created_at, updated_at
+                   group_id, created_at, updated_at
             FROM deployments
             WHERE host_id = ? AND service_name = ?
               AND state NOT IN ('done', 'failed', 'aborted')
@@ -256,7 +260,7 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   created_at, updated_at
+                   group_id, created_at, updated_at
             FROM deployments
             WHERE stack_id = ?
             ORDER BY created_at DESC
@@ -365,8 +369,8 @@ impl crate::inventory::Inventory {
                 public_hostname, health_path, container_port,
                 healthcheck_started_at, healthcheck_passed_at, switched_at,
                 drained_at, finished_at, error, metadata_json,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                group_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&d.id)
@@ -389,6 +393,7 @@ impl crate::inventory::Inventory {
         .bind(to_rfc(d.finished_at))
         .bind(&d.error)
         .bind(&d.metadata_json)
+        .bind(&d.group_id)
         .bind(d.created_at.to_rfc3339())
         .bind(d.updated_at.to_rfc3339())
         .execute(self.pool())
@@ -421,7 +426,7 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   created_at, updated_at
+                   group_id, created_at, updated_at
             FROM deployments
             WHERE group_id = ?
             ORDER BY created_at ASC
@@ -509,6 +514,7 @@ fn row_to_deployment(r: &sqlx::sqlite::SqliteRow) -> Result<Deployment> {
         updated_at: parse_dt(Some(r.try_get("updated_at")?))?.ok_or_else(|| Error::Decode {
             reason: "updated_at NULL".into(),
         })?,
+        group_id: r.try_get("group_id")?,
     })
 }
 
@@ -670,6 +676,7 @@ mod tests {
             metadata_json: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            group_id: None,
         };
 
         // First upsert: insert.
