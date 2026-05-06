@@ -118,7 +118,7 @@ Two surgical changes to `crates/isengard-plugins/dashboard/web/components/polici
 
 - `PolicyEditor.vue`: keep the Container radio disabled in edit/create, but
   swap the tooltip text from `"Phase 9b.1"` to
-  `"Discovered automatically from compose labels — read-only here."` and
+  `"Discovered automatically from compose labels: read-only here."` and
   the `scopeKeyHelper` text from `"Discovered from compose labels in Phase
   9b.1."` to a sentence describing the label naming.
 - `PolicyRow.vue`: when `policy.scopeType === 'container'`, render a small

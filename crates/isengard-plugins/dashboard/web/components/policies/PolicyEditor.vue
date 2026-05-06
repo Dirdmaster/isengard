@@ -77,8 +77,11 @@ const scopeKey = ref<string>(props.existing?.scopeKey ?? '')
 // In edit mode the scope is locked (we PUT the same scope key, not a rename).
 const scopeLocked = computed(() => props.mode === 'edit')
 
-// Container scope is reserved for compose-label discovery in Phase 9b.1; we
-// render the radio but disable selection so users see the future shape.
+// Container scope rows are discovered automatically from compose labels
+// (Phase 9b.1: `isengard.policy.*` keys on a running container). The UI
+// stays read-only for them: the radio is disabled here, and any existing
+// container row is rendered with a "discovered from labels" pill in the
+// list view rather than an Edit button.
 function isScopeRadioDisabled(t: PolicyScopeType): boolean {
   return t === 'container'
 }
@@ -99,7 +102,7 @@ const scopeKeyHelper = computed<string>(() => {
     case 'fleet': return 'Fleet name (matches the fleet rendered in inventory).'
     case 'stack': return 'Format: fleet/stack'
     case 'service': return 'Format: fleet/stack/service'
-    case 'container': return 'Discovered from compose labels in Phase 9b.1.'
+    case 'container': return 'Discovered automatically from compose labels (read-only here).'
   }
 })
 
@@ -124,7 +127,7 @@ const scopeKeyValidationError = computed<string | null>(() => {
         ? null
         : 'Format must be fleet/stack/service.'
     case 'container':
-      return 'Container scope is not authored from the UI yet.'
+      return 'Container scope is discovered from compose labels and read-only here.'
   }
   return null
 })
@@ -425,7 +428,8 @@ const scopeLabel = computed<string>(() => {
           <span
             v-if="t === 'container'"
             class="text-[10px] text-iso-text-faint"
-          >(Phase 9b.1)</span>
+            title="Discovered automatically from compose labels: read-only here."
+          >(from labels)</span>
         </label>
       </div>
 
