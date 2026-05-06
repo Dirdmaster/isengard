@@ -26,6 +26,8 @@ async fn discord_send_posts_to_webhook_with_content_field() {
     let cfg = DiscordConfig {
         webhook_url: format!("{}{}", server.uri(), webhook_path),
         kinds: vec!["update.success".into()],
+        channel_id: None,
+        api_base: None,
         tokens_per_minute: None,
     };
     let ch = DiscordChannel::from_config(cfg).unwrap();

@@ -2,7 +2,7 @@
 type: design
 kind: page-spec
 status: shipped
-status_note: "Phase 9e-9f shipped: queue page, ApprovalCard, nav badge, polling"
+status_note: "Phase 9c shipped: Discord interactive callbacks alongside Telegram + dashboard"
 created: 2026-05-03
 updated: 2026-05-06
 tags:
@@ -27,6 +27,8 @@ Source design: [[Update Policies & Approval Flow]] (full architecture).
   - `useApprovals` composable: filter, refresh, optimistic decide, 60s page poll
   - `usePendingApprovalsCount` composable: shared 30s nav-badge poller via `useState`, visibility-aware refresh
   - Empty state with in-container CTA to `/settings/policies`
+  - Telegram interactive messages + callback endpoint (Phase 9f)
+  - Discord interactive messages + callback endpoint (Phase 9c, ed25519-verified, MESSAGE_COMPONENT -> UPDATE_MESSAGE response)
 - Drift from concept v1:
   - Concept renders version diffs as semver labels (`v2.4.0 → v2.4.1`); implementation renders the digest pair (`sha256:0123abcd... → sha256:fedcba98...`) because the controller stores the proposed image digest, not a parsed semver. Tag-aware rendering lands with Phase 9i (Minor strategy).
 - Deferred:

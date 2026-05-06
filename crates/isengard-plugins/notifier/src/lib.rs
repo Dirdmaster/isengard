@@ -24,7 +24,7 @@ pub mod http;
 pub mod telegram;
 
 use crate::channel::{InlineButton, NotifyChannel, RateLimited};
-use crate::discord::{DiscordChannel, DiscordConfig};
+use crate::discord::{DiscordChannel, DiscordConfig, DiscordInteractive};
 use crate::http::{HttpChannel, HttpConfig};
 use crate::telegram::{TelegramChannel, TelegramConfig};
 
@@ -36,6 +36,8 @@ use crate::telegram::{TelegramChannel, TelegramConfig};
 const UPDATE_PENDING_APPROVAL_KIND: &str = "update.pending_approval";
 
 const TELEGRAM_WEBHOOK_SECRET_ENV: &str = "ISENGARD_TELEGRAM_WEBHOOK_SECRET";
+const DISCORD_BOT_TOKEN_ENV: &str = "ISENGARD_DISCORD_BOT_TOKEN";
+const DISCORD_PUBLIC_KEY_ENV: &str = "ISENGARD_DISCORD_PUBLIC_KEY";
 
 const PLUGIN_NAME: &str = "notifier";
 
@@ -59,6 +61,11 @@ pub struct Notifier {
     /// methods (`send_inline_keyboard`, `edit_message_text`) that the generic
     /// `NotifyChannel` trait does not expose.
     telegram: Option<Arc<TelegramChannel>>,
+    /// Direct handle to the Discord interactive client (if both the Discord
+    /// channel is configured and `ISENGARD_DISCORD_BOT_TOKEN` is set). Used by
+    /// the same `update.pending_approval` subscriber to fan the approval out
+    /// to Discord alongside Telegram.
+    discord_interactive: Option<Arc<DiscordInteractive>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -68,6 +75,7 @@ impl Notifier {
             channels: Vec::new(),
             kinds: Vec::new(),
             telegram: None,
+            discord_interactive: None,
             task: None,
         }
     }
@@ -127,9 +135,54 @@ impl Plugin for Notifier {
 
         if let Some(dc_cfg) = cfg.discord {
             let tpm = dc_cfg.tokens_per_minute.unwrap_or(10.0);
+            // Snapshot fields needed for the interactive client BEFORE the
+            // outbound webhook channel takes ownership of the config struct.
+            let interactive_channel_id = dc_cfg
+                .channel_id
+                .as_ref()
+                .and_then(|s| s.parse::<i64>().ok());
+            let interactive_api_base = dc_cfg.api_base.clone();
             let dc = DiscordChannel::from_config(dc_cfg)
                 .map_err(|e| init_err(format!("discord channel: {e}")))?;
             self.channels.push(Box::new(RateLimited::new(dc, tpm)));
+
+            // Interactive path: only opt in if a channel_id is configured AND
+            // a bot token is in env. Surface explicit warnings for partial
+            // configurations so operators aren't surprised when Discord stays
+            // one-way.
+            match interactive_channel_id {
+                Some(channel_id) => {
+                    match DiscordInteractive::from_env(channel_id, interactive_api_base) {
+                        Ok(Some(d)) => {
+                            self.discord_interactive = Some(Arc::new(d));
+                            if std::env::var(DISCORD_PUBLIC_KEY_ENV).is_err() {
+                                warn!(
+                                    env = DISCORD_PUBLIC_KEY_ENV,
+                                    "set ISENGARD_DISCORD_PUBLIC_KEY to enable Discord approval \
+                                     callbacks; outbound interactive messages will work but \
+                                     button clicks will be rejected as unauthenticated"
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            warn!(
+                                env = DISCORD_BOT_TOKEN_ENV,
+                                "set ISENGARD_DISCORD_BOT_TOKEN to enable Discord interactive \
+                                 messages; current Discord channel will be one-way only"
+                            );
+                        }
+                        Err(e) => {
+                            return Err(init_err(format!("discord interactive: {e}")));
+                        }
+                    }
+                }
+                None => {
+                    debug!(
+                        "discord channel configured without channel_id; \
+                         interactive approval messages disabled"
+                    );
+                }
+            }
         }
 
         if let Some(http_cfg) = cfg.http {
@@ -169,17 +222,24 @@ impl Plugin for Notifier {
         let channels = std::mem::take(&mut self.channels);
         let channels: Arc<[Box<dyn NotifyChannel>]> = channels.into();
         let telegram = self.telegram.clone();
+        let discord_interactive = self.discord_interactive.clone();
 
         let task = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
                         // Interactive path: pending_approval drives an inline
-                        // keyboard via Telegram and persists message metadata
-                        // so the callback handler can edit on decide.
+                        // keyboard via Telegram and/or Discord and persists
+                        // message metadata so the callback handler can edit
+                        // on decide. Both channels run independently; either,
+                        // both, or neither may be configured.
                         if event.kind == UPDATE_PENDING_APPROVAL_KIND {
                             if let Some(tg) = telegram.as_ref() {
                                 handle_pending_approval(tg, inventory.as_ref(), &event).await;
+                            }
+                            if let Some(dc) = discord_interactive.as_ref() {
+                                handle_pending_approval_discord(dc, inventory.as_ref(), &event)
+                                    .await;
                             }
                         }
                         // One-way fan-out path: every channel that opted in
@@ -328,6 +388,100 @@ async fn handle_pending_approval(tg: &Arc<TelegramChannel>, inventory: &Inventor
             "persisted approval message metadata"
         );
     }
+}
+
+/// Discord variant: send a plain-text message with an action row + buttons,
+/// then persist (channel_id, message_id) on the action's metadata so the
+/// dashboard callback can edit the same message after a decision.
+///
+/// Discord and Telegram coexist; each writes its own metadata key pair so a
+/// single approval row can carry both.
+async fn handle_pending_approval_discord(
+    dc: &Arc<DiscordInteractive>,
+    inventory: &Inventory,
+    event: &Event,
+) {
+    let payload: PendingApprovalPayload = match serde_json::from_value(event.metadata.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "pending_approval event has malformed metadata, dropping (discord)");
+            return;
+        }
+    };
+
+    let text = format_pending_approval_plain(&payload, event);
+    let buttons = vec![
+        InlineButton::new("Approve", format!("apv:{}:approve", payload.action_id)),
+        InlineButton::new("Reject", format!("apv:{}:reject", payload.action_id)),
+        InlineButton::new("Snooze 24h", format!("apv:{}:snooze:24", payload.action_id)),
+    ];
+
+    let sent = match dc.send_action_row(&text, &buttons).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                action_id = %payload.action_id,
+                error = %e,
+                "discord send_action_row failed; not retrying in v1"
+            );
+            return;
+        }
+    };
+
+    if let Err(e) = inventory
+        .set_discord_approval_message_metadata(&payload.action_id, sent.channel_id, sent.message_id)
+        .await
+    {
+        warn!(
+            action_id = %payload.action_id,
+            error = %e,
+            "failed to persist discord approval message metadata; callback edits will fall back \
+             to the in-interaction message reference"
+        );
+    } else {
+        debug!(
+            action_id = %payload.action_id,
+            channel_id = sent.channel_id,
+            message_id = sent.message_id,
+            "persisted discord approval message metadata"
+        );
+    }
+}
+
+/// Plain-text summary for a pending-approval Discord message. Discord renders
+/// a tiny subset of markdown but we keep this plain because the formatting
+/// budget is better spent on the action row buttons.
+fn format_pending_approval_plain(p: &PendingApprovalPayload, event: &Event) -> String {
+    let mut lines = vec!["[isengard] update awaiting approval".to_string()];
+
+    let location = match (&p.host_id, &p.stack, &p.service) {
+        (Some(h), Some(s), Some(svc)) => Some(format!("{h} . {s} . {svc}")),
+        (None, Some(s), Some(svc)) => Some(format!("{s} . {svc}")),
+        (Some(h), Some(s), None) => Some(format!("{h} . {s}")),
+        (Some(h), None, None) => Some(h.clone()),
+        _ => None,
+    };
+    if let Some(loc) = location {
+        lines.push(format!("where: {loc}"));
+    }
+
+    if let Some(img) = &p.image {
+        let digest_line = match (&p.current_digest, &p.proposed_digest) {
+            (Some(c), Some(n)) => {
+                format!("image: {} {} -> {}", img, short_digest(c), short_digest(n))
+            }
+            (None, Some(n)) => format!("image: {} {}", img, short_digest(n)),
+            _ => format!("image: {img}"),
+        };
+        lines.push(digest_line);
+    }
+
+    if !event.summary.is_empty() {
+        lines.push(event.summary.clone());
+    }
+
+    lines.push("Pick an action below.".to_string());
+    lines.join("\n")
 }
 
 /// HTML-formatted summary for a pending-approval Telegram message. Mirrors
