@@ -13,6 +13,7 @@ pub mod plugin_host;
 pub mod policy_ingest;
 pub mod revocation;
 pub mod routing;
+pub mod stack_deploy_orchestrator;
 pub mod sync_services;
 pub mod sync_stacks;
 
@@ -57,7 +58,7 @@ pub struct ControllerHandles {
 /// handler (for agent-originated events) and controller-internal producers
 /// like `disconnect_monitor`.
 ///
-/// On journal write failure, broadcasts NO event — better to drop than to
+/// On journal write failure, broadcasts NO event: better to drop than to
 /// notify on something we have no record of.
 pub async fn persist_and_broadcast(journal: &Journal, bus: &EventBus, event: Event) {
     let insert = InsertEvent {
@@ -175,6 +176,20 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         60.0,  // 60s poll
     ));
     let disconnect_handle = disconnect_monitor.start();
+
+    // Phase 10c (10i, refs #50): stack-level deployment orchestrator. Owns the
+    // multi-host wave plan when a stack-wide update fans out to 2+ hosts.
+    // Single-host deploys bypass this entirely; existing per-host deployment
+    // supervisors keep their behaviour.
+    let orchestrator =
+        std::sync::Arc::new(stack_deploy_orchestrator::StackDeployOrchestrator::new(
+            inventory.clone(),
+            bus.clone(),
+            std::sync::Arc::new(stack_deploy_orchestrator::ProductionDispatcher::new(
+                inventory.clone(),
+            )),
+        ));
+    let orchestrator_handle = orchestrator.clone().start_background();
 
     // Background task: subscribe to `deployment.*` events on the bus and mirror
     // the embedded Deployment row into the controller-local `deployments` table.
@@ -321,6 +336,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     disconnect_handle.abort();
     deployment_handle.abort();
     reaper_handle.abort();
+    orchestrator_handle.abort();
 
     // -- plugin stop ----------------------------------------------------------
     plugin_host::stop_controller_plugins(&mut controller_plugins).await;
