@@ -14,7 +14,7 @@ tags:
 
 ## Implementation status (2026-05-05)
 
-- Shipped: stack page with services as `<ServiceChip>` row, `Force update stack` action, `DeploymentInProgressPanel` / `DeploymentAbortedPanel` (Phase 10), Recent events panel
+- Shipped: stack page with services as `<ServiceChip>` row, `Force update stack` action, `DeploymentInProgressPanel` / `DeploymentAbortedPanel` (Phase 10), Recent events panel, `<EffectivePolicyPreview>` per service (Phase 9d)
 - Deferred: tab structure (Overview / Compose / History / Routing / Settings), Redeploy / Abort / Promote / Pause action cluster, `<ComposePane />`, `<HistoryTimeline />` (deploy attempts, not raw events), per-stack `<RoutingRulesTable />`, `<EffectivePolicyCard />`, header status chip
 - Drift: header uses a `← Stacks` link instead of a breadcrumb; services are inline chips, not a clickable `<ServicesTable />` (because service-detail isn't built)
 
