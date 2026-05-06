@@ -85,6 +85,7 @@ fn sample_dep(host_id: HostId, stack_id: StackId, state: DeploymentState) -> Ins
         health_path: Some("/".into()),
         container_port: Some(80),
         metadata_json: None,
+        previous_digest: None,
     }
 }
 

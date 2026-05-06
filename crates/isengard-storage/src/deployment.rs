@@ -49,9 +49,21 @@ pub enum DeploymentState {
     /// driver is rolling back to the snapshotted blue upstream. Non-terminal
     /// (transitions to `Failed` once the swap-back completes). Phase 10f.
     Recovering,
+    /// Phase 9F: the supervisor's `Rollback` failure-handler branch. The
+    /// driver is re-pulling `previous_digest` and recreating the container
+    /// at that image. Non-terminal: transitions to `RolledBack` on
+    /// success or `RollbackFailed` on error.
+    RollingBack,
     Done,
     Aborted,
     Failed,
+    /// Phase 9F: terminal success of the rollback handler. The previous
+    /// digest is now serving traffic.
+    RolledBack,
+    /// Phase 9F: terminal failure of the rollback handler. The original
+    /// failure was real and the rollback itself broke (image gone from
+    /// registry, resource exhaustion at recreate, etc).
+    RollbackFailed,
 }
 
 impl DeploymentState {
@@ -63,14 +75,22 @@ impl DeploymentState {
             Self::Draining => "draining",
             Self::DestroyingBlue => "destroying_blue",
             Self::Recovering => "recovering",
+            Self::RollingBack => "rolling_back",
             Self::Done => "done",
             Self::Aborted => "aborted",
             Self::Failed => "failed",
+            Self::RolledBack => "rolled_back",
+            Self::RollbackFailed => "rollback_failed",
         }
     }
 
+    /// Terminal states: a deployment in one of these doesn't transition
+    /// further on its own. Phase 9F adds `RolledBack` and `RollbackFailed`.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Aborted | Self::Failed)
+        matches!(
+            self,
+            Self::Done | Self::Aborted | Self::Failed | Self::RolledBack | Self::RollbackFailed
+        )
     }
 }
 
@@ -84,9 +104,12 @@ impl FromStr for DeploymentState {
             "draining" => Self::Draining,
             "destroying_blue" => Self::DestroyingBlue,
             "recovering" => Self::Recovering,
+            "rolling_back" => Self::RollingBack,
             "done" => Self::Done,
             "aborted" => Self::Aborted,
             "failed" => Self::Failed,
+            "rolled_back" => Self::RolledBack,
+            "rollback_failed" => Self::RollbackFailed,
             other => {
                 return Err(Error::Decode {
                     reason: format!("unknown deployment state: {other}"),
@@ -124,6 +147,17 @@ pub struct Deployment {
     /// rolling group. `None` for single-host deploys (orchestrator-bypass).
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Phase 9F: snapshot of the blue digest taken at deployment start.
+    /// Populated only when the resolved policy's `on_failure == Rollback`,
+    /// so the supervisor can re-pull this exact image if the deployment
+    /// fails healthcheck. NULL means "rollback not eligible".
+    #[serde(default)]
+    pub previous_digest: Option<String>,
+    /// Phase 9F: timestamp the supervisor entered the rollback branch.
+    /// Set regardless of rollback success so the dashboard can render
+    /// "Rolled back at HH:MM" without parsing the error string.
+    #[serde(default)]
+    pub rollback_attempted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +176,11 @@ pub struct InsertDeployment {
     pub health_path: Option<String>,
     pub container_port: Option<i64>,
     pub metadata_json: Option<String>,
+    /// Phase 9F: when the resolved policy's `on_failure == Rollback`, the
+    /// supervisor seeds this with `blue_digest` so the driver can re-pull
+    /// it if green fails. `None` keeps the row rollback-ineligible (the
+    /// existing default behaviour).
+    pub previous_digest: Option<String>,
 }
 
 impl crate::inventory::Inventory {
@@ -152,8 +191,9 @@ impl crate::inventory::Inventory {
             INSERT INTO deployments (
               id, host_id, stack_id, service_name, strategy, state,
               blue_container, green_container, blue_digest, green_digest,
-              public_hostname, health_path, container_port, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              public_hostname, health_path, container_port, metadata_json,
+              previous_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&ins.id)
@@ -170,6 +210,7 @@ impl crate::inventory::Inventory {
         .bind(&ins.health_path)
         .bind(ins.container_port)
         .bind(&ins.metadata_json)
+        .bind(&ins.previous_digest)
         .execute(self.pool())
         .await?;
 
@@ -188,7 +229,8 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   group_id, created_at, updated_at
+                   group_id, previous_digest, rollback_attempted_at,
+                   created_at, updated_at
             FROM deployments WHERE id = ?
             "#,
         )
@@ -209,9 +251,10 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   group_id, created_at, updated_at
+                   group_id, previous_digest, rollback_attempted_at,
+                   created_at, updated_at
             FROM deployments
-            WHERE host_id = ? AND state NOT IN ('done', 'failed', 'aborted')
+            WHERE host_id = ? AND state NOT IN ('done', 'failed', 'aborted', 'rolled_back', 'rollback_failed')
             ORDER BY created_at ASC
             "#,
         )
@@ -234,10 +277,11 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   group_id, created_at, updated_at
+                   group_id, previous_digest, rollback_attempted_at,
+                   created_at, updated_at
             FROM deployments
             WHERE host_id = ? AND service_name = ?
-              AND state NOT IN ('done', 'failed', 'aborted')
+              AND state NOT IN ('done', 'failed', 'aborted', 'rolled_back', 'rollback_failed')
             ORDER BY created_at ASC
             "#,
         )
@@ -260,7 +304,8 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   group_id, created_at, updated_at
+                   group_id, previous_digest, rollback_attempted_at,
+                   created_at, updated_at
             FROM deployments
             WHERE stack_id = ?
             ORDER BY created_at DESC
@@ -355,6 +400,40 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Phase 9F: stamp the moment the supervisor entered the rollback
+    /// branch. Set regardless of whether the rollback eventually
+    /// succeeded: the dashboard reads this to render "Rolled back at
+    /// HH:MM" without parsing the error string.
+    pub async fn set_deployment_rollback_attempted(
+        &self,
+        id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE deployments SET rollback_attempted_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(at.to_rfc3339())
+        .bind(id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Phase 9F: patch `previous_digest` after the row has been inserted.
+    /// Primary write happens at INSERT time when the resolved policy is
+    /// `on_failure == Rollback`; this setter exists for tests and for
+    /// any future "enable rollback mid-flight" flow.
+    pub async fn set_deployment_previous_digest(&self, id: &str, digest: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE deployments SET previous_digest = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(digest)
+        .bind(id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Upsert a Deployment row received from a remote source (controller-side use).
     /// Idempotent INSERT OR REPLACE keyed on `id`. Each upsert carries the full row,
     /// so latest-write-wins per field. Used by the controller's event subscriber.
@@ -369,8 +448,9 @@ impl crate::inventory::Inventory {
                 public_hostname, health_path, container_port,
                 healthcheck_started_at, healthcheck_passed_at, switched_at,
                 drained_at, finished_at, error, metadata_json,
-                group_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                group_id, previous_digest, rollback_attempted_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&d.id)
@@ -394,6 +474,8 @@ impl crate::inventory::Inventory {
         .bind(&d.error)
         .bind(&d.metadata_json)
         .bind(&d.group_id)
+        .bind(&d.previous_digest)
+        .bind(to_rfc(d.rollback_attempted_at))
         .bind(d.created_at.to_rfc3339())
         .bind(d.updated_at.to_rfc3339())
         .execute(self.pool())
@@ -426,7 +508,8 @@ impl crate::inventory::Inventory {
                    public_hostname, health_path, container_port,
                    healthcheck_started_at, healthcheck_passed_at, switched_at,
                    drained_at, finished_at, error, metadata_json,
-                   group_id, created_at, updated_at
+                   group_id, previous_digest, rollback_attempted_at,
+                   created_at, updated_at
             FROM deployments
             WHERE group_id = ?
             ORDER BY created_at ASC
@@ -448,7 +531,7 @@ impl crate::inventory::Inventory {
             r#"
             UPDATE deployments
             SET state = 'failed', error = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE host_id = ? AND state NOT IN ('done', 'failed', 'aborted')
+            WHERE host_id = ? AND state NOT IN ('done', 'failed', 'aborted', 'rolled_back', 'rollback_failed')
             "#,
         )
         .bind(reason)
@@ -515,6 +598,8 @@ fn row_to_deployment(r: &sqlx::sqlite::SqliteRow) -> Result<Deployment> {
             reason: "updated_at NULL".into(),
         })?,
         group_id: r.try_get("group_id")?,
+        previous_digest: r.try_get("previous_digest")?,
+        rollback_attempted_at: parse_dt(r.try_get("rollback_attempted_at")?)?,
     })
 }
 
@@ -567,6 +652,7 @@ mod tests {
             health_path: Some("/healthz".into()),
             container_port: Some(8080),
             metadata_json: None,
+            previous_digest: None,
         }
     }
 
@@ -677,6 +763,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             group_id: None,
+            previous_digest: None,
+            rollback_attempted_at: None,
         };
 
         // First upsert: insert.
@@ -722,5 +810,102 @@ mod tests {
             let parsed: DeploymentState = s.as_str().parse().expect("parse roundtrip");
             assert_eq!(parsed, s);
         }
+    }
+
+    // ----- Phase 9F: rollback handler storage coverage -----
+
+    /// Inserting a row with `previous_digest` set persists the value and
+    /// it round-trips back through `get_deployment`. The default-None
+    /// case is exercised by every other test in this module.
+    #[tokio::test]
+    async fn insert_with_previous_digest_round_trips() {
+        let (inv, host_id, stack_id) = setup().await;
+        let mut ins = sample_insert(host_id, stack_id);
+        ins.previous_digest = Some("sha256:old".into());
+        let d = inv.insert_deployment(ins).await.expect("insert");
+        assert_eq!(d.previous_digest.as_deref(), Some("sha256:old"));
+        let back = inv.get_deployment(&d.id).await.unwrap().unwrap();
+        assert_eq!(back.previous_digest.as_deref(), Some("sha256:old"));
+        // rollback_attempted_at stays None until the supervisor enters
+        // the rollback branch.
+        assert!(back.rollback_attempted_at.is_none());
+    }
+
+    /// Calling `set_deployment_rollback_attempted` persists an RFC3339
+    /// timestamp that survives a `get_deployment` round-trip.
+    #[tokio::test]
+    async fn set_rollback_attempted_persists_timestamp() {
+        let (inv, host_id, stack_id) = setup().await;
+        let d = inv
+            .insert_deployment(sample_insert(host_id, stack_id))
+            .await
+            .unwrap();
+        let when = chrono::Utc::now();
+        inv.set_deployment_rollback_attempted(&d.id, when)
+            .await
+            .unwrap();
+        let back = inv.get_deployment(&d.id).await.unwrap().unwrap();
+        let got = back.rollback_attempted_at.expect("attempted_at populated");
+        // RFC3339 round-trips at microsecond precision; allow a 1ms
+        // tolerance for SQLite's text serialization.
+        let delta = (got - when).num_milliseconds().abs();
+        assert!(delta < 1000, "expected close to {when}, got {got}");
+    }
+
+    /// All three new states (RollingBack, RolledBack, RollbackFailed)
+    /// round-trip through their string form.
+    #[test]
+    fn state_round_trips_for_new_states() {
+        for s in [
+            DeploymentState::RollingBack,
+            DeploymentState::RolledBack,
+            DeploymentState::RollbackFailed,
+        ] {
+            let parsed: DeploymentState = s.as_str().parse().expect("parse roundtrip");
+            assert_eq!(parsed, s);
+        }
+    }
+
+    /// `is_terminal` reports the two new terminal states; the in-flight
+    /// `RollingBack` is non-terminal.
+    #[test]
+    fn terminal_includes_rolled_back_and_rollback_failed() {
+        assert!(DeploymentState::RolledBack.is_terminal());
+        assert!(DeploymentState::RollbackFailed.is_terminal());
+        assert!(!DeploymentState::RollingBack.is_terminal());
+    }
+
+    /// `list_in_flight_deployments` excludes the new rollback terminal
+    /// states. Three rows: one in-flight, one RolledBack, one
+    /// RollbackFailed; only the first should come back.
+    #[tokio::test]
+    async fn list_in_flight_excludes_rollback_terminals() {
+        let (inv, host_id, stack_id) = setup().await;
+
+        let mut active = sample_insert(host_id, stack_id);
+        active.id = Ulid::new().to_string();
+        active.service_name = "web-active".into();
+        let active = inv.insert_deployment(active).await.unwrap();
+
+        let mut rolled = sample_insert(host_id, stack_id);
+        rolled.id = Ulid::new().to_string();
+        rolled.service_name = "web-rolled".into();
+        let rolled = inv.insert_deployment(rolled).await.unwrap();
+        inv.update_deployment_state(&rolled.id, DeploymentState::RolledBack)
+            .await
+            .unwrap();
+
+        let mut failed = sample_insert(host_id, stack_id);
+        failed.id = Ulid::new().to_string();
+        failed.service_name = "web-rollback-failed".into();
+        let failed = inv.insert_deployment(failed).await.unwrap();
+        inv.update_deployment_state(&failed.id, DeploymentState::RollbackFailed)
+            .await
+            .unwrap();
+
+        let in_flight = inv.list_in_flight_deployments(host_id).await.unwrap();
+        let names: Vec<_> = in_flight.iter().map(|d| d.service_name.clone()).collect();
+        assert_eq!(names, vec!["web-active".to_string()]);
+        let _ = (active, rolled, failed);
     }
 }

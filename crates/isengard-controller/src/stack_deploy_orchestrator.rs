@@ -761,6 +761,7 @@ mod tests {
             health_path: None,
             container_port: None,
             metadata_json: None,
+            previous_digest: None,
         }
     }
 
