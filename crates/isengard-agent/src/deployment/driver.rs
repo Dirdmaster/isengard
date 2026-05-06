@@ -996,10 +996,7 @@ impl DriverDeps for RealDriverDeps {
         //
         // Fallback path: if blue is gone, refuse and surface a clear
         // error. The supervisor will mark RollbackFailed.
-        let inspect = match self.docker.inspect_container(blue_id, None).await {
-            Ok(i) => Some(i),
-            Err(_) => None,
-        };
+        let inspect = self.docker.inspect_container(blue_id, None).await.ok();
         let image_repo = inspect
             .as_ref()
             .and_then(|i| i.config.as_ref())
@@ -1870,11 +1867,8 @@ mod tests {
     /// invoked exactly once with the recorded `previous_digest`.
     #[tokio::test]
     async fn rollback_on_healthcheck_timeout_succeeds() {
-        let (inv, d) = setup_with_previous_digest(
-            DeploymentState::Pending,
-            "sha256:previous_aaa",
-        )
-        .await;
+        let (inv, d) =
+            setup_with_previous_digest(DeploymentState::Pending, "sha256:previous_aaa").await;
         let id = d.id.clone();
         let dead = dead_addr();
 
@@ -1948,11 +1942,8 @@ mod tests {
     /// healthcheck_timeout AND the rollback failure.
     #[tokio::test]
     async fn rollback_on_healthcheck_timeout_fails_when_image_gone() {
-        let (inv, d) = setup_with_previous_digest(
-            DeploymentState::Pending,
-            "sha256:previous_bbb",
-        )
-        .await;
+        let (inv, d) =
+            setup_with_previous_digest(DeploymentState::Pending, "sha256:previous_bbb").await;
         let id = d.id.clone();
         let dead = dead_addr();
 
@@ -1994,9 +1985,14 @@ mod tests {
             }
         }
 
-        let driver = Driver::new(d, Arc::new(Deps { dead }), inv.clone(), Arc::new(NoopEmitter))
-            .with_healthcheck_overrides(Duration::from_millis(20), 3, Duration::from_millis(200))
-            .with_failure_policy(FailureHandling::Rollback);
+        let driver = Driver::new(
+            d,
+            Arc::new(Deps { dead }),
+            inv.clone(),
+            Arc::new(NoopEmitter),
+        )
+        .with_healthcheck_overrides(Duration::from_millis(20), 3, Duration::from_millis(200))
+        .with_failure_policy(FailureHandling::Rollback);
         driver.run().await;
 
         let after = inv.get_deployment(&id).await.unwrap().expect("row");
@@ -2060,8 +2056,17 @@ mod tests {
             }
         }
 
-        let driver = Driver::new(d, Arc::new(Deps { dead }), inv.clone(), Arc::new(NoopEmitter))
-            .with_healthcheck_overrides(Duration::from_millis(20), 3, Duration::from_millis(200));
+        let driver = Driver::new(
+            d,
+            Arc::new(Deps { dead }),
+            inv.clone(),
+            Arc::new(NoopEmitter),
+        )
+        .with_healthcheck_overrides(
+            Duration::from_millis(20),
+            3,
+            Duration::from_millis(200),
+        );
         // No with_failure_policy: the default is Notify.
         driver.run().await;
 
@@ -2113,9 +2118,14 @@ mod tests {
         }
 
         let before = chrono::Utc::now();
-        let driver = Driver::new(d, Arc::new(Deps { dead }), inv.clone(), Arc::new(NoopEmitter))
-            .with_healthcheck_overrides(Duration::from_millis(20), 3, Duration::from_millis(200))
-            .with_failure_policy(FailureHandling::Keep);
+        let driver = Driver::new(
+            d,
+            Arc::new(Deps { dead }),
+            inv.clone(),
+            Arc::new(NoopEmitter),
+        )
+        .with_healthcheck_overrides(Duration::from_millis(20), 3, Duration::from_millis(200))
+        .with_failure_policy(FailureHandling::Keep);
         driver.run().await;
 
         let after = inv.get_deployment(&id).await.unwrap().expect("row");
@@ -2140,11 +2150,8 @@ mod tests {
     /// is `RolledBack` and the deps' rollback hook fired.
     #[tokio::test]
     async fn rollback_on_post_switch_collapse() {
-        let (inv, d) = setup_with_previous_digest(
-            DeploymentState::Pending,
-            "sha256:previous_ccc",
-        )
-        .await;
+        let (inv, d) =
+            setup_with_previous_digest(DeploymentState::Pending, "sha256:previous_ccc").await;
         let id = d.id.clone();
         let (addr, _accept) = live_addr();
 
@@ -2221,11 +2228,8 @@ mod tests {
     /// AND the rollback failure.
     #[tokio::test]
     async fn rollback_failure_after_collapse_marks_rollback_failed() {
-        let (inv, d) = setup_with_previous_digest(
-            DeploymentState::Pending,
-            "sha256:previous_ddd",
-        )
-        .await;
+        let (inv, d) =
+            setup_with_previous_digest(DeploymentState::Pending, "sha256:previous_ddd").await;
         let id = d.id.clone();
         let (addr, _accept) = live_addr();
 
@@ -2269,11 +2273,16 @@ mod tests {
 
         let bus = crate::proxy::ProxyEventBus::new();
         let rx = bus.subscribe();
-        let driver = Driver::new(d, Arc::new(Deps { addr }), inv.clone(), Arc::new(NoopEmitter))
-            .with_healthcheck_overrides(Duration::from_millis(10), 1, Duration::from_millis(500))
-            .with_drain_overrides(Duration::from_secs(10), Duration::from_secs(1))
-            .with_proxy_events(rx)
-            .with_failure_policy(FailureHandling::Rollback);
+        let driver = Driver::new(
+            d,
+            Arc::new(Deps { addr }),
+            inv.clone(),
+            Arc::new(NoopEmitter),
+        )
+        .with_healthcheck_overrides(Duration::from_millis(10), 1, Duration::from_millis(500))
+        .with_drain_overrides(Duration::from_secs(10), Duration::from_secs(1))
+        .with_proxy_events(rx)
+        .with_failure_policy(FailureHandling::Rollback);
         let driver_task = tokio::spawn(driver.run());
         tokio::time::sleep(Duration::from_millis(150)).await;
         bus.publish(crate::proxy::ProxyEvent::UpstreamHealthChanged {

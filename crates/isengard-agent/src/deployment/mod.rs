@@ -10,9 +10,7 @@ use crate::deployment::eligibility::{ContainerSpec, Decision, classify};
 use crate::proxy::ProxyState;
 use anyhow::Result;
 use async_trait::async_trait;
-use isengard_core::policy::{
-    FailureHandling, PolicyContext, PolicyScopeType, resolve_policy,
-};
+use isengard_core::policy::{FailureHandling, PolicyContext, PolicyScopeType, resolve_policy};
 use isengard_core::{
     DispatchOutcome, EventEmitter, PolicyLoader, UpdateDispatcher, UpdateTriggerInfo,
 };
@@ -152,21 +150,14 @@ impl DeploymentSupervisor {
     /// Returns the resolved enum AND a boolean indicating whether a
     /// policy loader was actually consulted (so callers can distinguish
     /// "loader said Notify" from "no loader wired").
-    async fn resolve_failure_handling(
-        &self,
-        trigger: &UpdateTrigger,
-    ) -> (FailureHandling, bool) {
+    async fn resolve_failure_handling(&self, trigger: &UpdateTrigger) -> (FailureHandling, bool) {
         let Some(loader) = self.policy_loader.as_ref() else {
             return (FailureHandling::Notify, false);
         };
         // Fleet name lookup. `None` is fine: the resolver simply skips
         // fleet-scoped rows. `Err` is treated the same as None: we
         // never block on policy evaluation.
-        let fleet = loader
-            .fleet_for(trigger.host_id.0)
-            .await
-            .ok()
-            .flatten();
+        let fleet = loader.fleet_for(trigger.host_id.0).await.ok().flatten();
         let rows = match loader.list().await {
             Ok(r) => r,
             Err(e) => {
@@ -253,8 +244,7 @@ impl DeploymentSupervisor {
                 // before insert + spawn so we can both seed
                 // `previous_digest` and tell the driver what mode to
                 // operate in.
-                let (failure_handling, _resolved) =
-                    self.resolve_failure_handling(&trigger).await;
+                let (failure_handling, _resolved) = self.resolve_failure_handling(&trigger).await;
                 let previous_digest = match failure_handling {
                     FailureHandling::Rollback => Some(trigger.blue_digest.clone()),
                     FailureHandling::Keep | FailureHandling::Notify => None,
@@ -646,18 +636,17 @@ mod supervisor_tests {
     async fn rollback_policy_captures_previous_digest() {
         use isengard_core::policy::{FailureHandling as FH, Policy, PolicyScopeType};
         let (mut sup, host, stack, inv) = setup().await;
-        let loader: Arc<dyn isengard_core::PolicyLoader> =
-            Arc::new(FixedPolicyLoader {
-                rows: vec![isengard_core::LoadedPolicy {
-                    scope_type: PolicyScopeType::Service,
-                    scope_key: "web".into(),
-                    body: Policy {
-                        on_failure: Some(FH::Rollback),
-                        ..Default::default()
-                    },
-                }],
-                fleet: Some("default".into()),
-            });
+        let loader: Arc<dyn isengard_core::PolicyLoader> = Arc::new(FixedPolicyLoader {
+            rows: vec![isengard_core::LoadedPolicy {
+                scope_type: PolicyScopeType::Service,
+                scope_key: "web".into(),
+                body: Policy {
+                    on_failure: Some(FH::Rollback),
+                    ..Default::default()
+                },
+            }],
+            fleet: Some("default".into()),
+        });
         sup = sup.with_policy_loader(loader);
 
         let mut t = trigger(host, stack, true);
@@ -683,18 +672,17 @@ mod supervisor_tests {
     async fn notify_policy_leaves_previous_digest_null() {
         use isengard_core::policy::{FailureHandling as FH, Policy, PolicyScopeType};
         let (mut sup, host, stack, inv) = setup().await;
-        let loader: Arc<dyn isengard_core::PolicyLoader> =
-            Arc::new(FixedPolicyLoader {
-                rows: vec![isengard_core::LoadedPolicy {
-                    scope_type: PolicyScopeType::Service,
-                    scope_key: "web".into(),
-                    body: Policy {
-                        on_failure: Some(FH::Notify),
-                        ..Default::default()
-                    },
-                }],
-                fleet: Some("default".into()),
-            });
+        let loader: Arc<dyn isengard_core::PolicyLoader> = Arc::new(FixedPolicyLoader {
+            rows: vec![isengard_core::LoadedPolicy {
+                scope_type: PolicyScopeType::Service,
+                scope_key: "web".into(),
+                body: Policy {
+                    on_failure: Some(FH::Notify),
+                    ..Default::default()
+                },
+            }],
+            fleet: Some("default".into()),
+        });
         sup = sup.with_policy_loader(loader);
 
         let mut t = trigger(host, stack, true);

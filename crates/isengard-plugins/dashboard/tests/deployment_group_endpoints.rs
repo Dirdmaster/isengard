@@ -10,8 +10,8 @@ use isengard_controller::ControllerHandles;
 use isengard_controller::bus::EventBus;
 use isengard_controller::ca::Authority;
 use isengard_controller::enrollment::EnrollmentService;
-use isengard_controller::revocation::RevocationSet;
 use isengard_controller::log_fanout::LogFanout;
+use isengard_controller::revocation::RevocationSet;
 use isengard_controller::routing::RoutingPusher;
 use isengard_plugin_dashboard::deployment_groups::{
     DeploymentGroupDetailDto, DeploymentGroupDto, ParallelismDto,

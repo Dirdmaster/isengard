@@ -164,8 +164,13 @@ impl crate::inventory::Inventory {
     ) -> Result<PolicyRow> {
         // Try to read the existing row first so we preserve every
         // other field (Keep should not silently widen the policy).
-        let existing = self.get_policy(PolicyScopeType::Service, service_key).await?;
-        let mut body = existing.as_ref().map(|r| r.body.clone()).unwrap_or_default();
+        let existing = self
+            .get_policy(PolicyScopeType::Service, service_key)
+            .await?;
+        let mut body = existing
+            .as_ref()
+            .map(|r| r.body.clone())
+            .unwrap_or_default();
         body.paused_until = Some(until);
         self.upsert_policy(PolicyScopeType::Service, service_key, &body)
             .await
