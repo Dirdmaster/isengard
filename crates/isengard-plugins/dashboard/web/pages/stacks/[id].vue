@@ -6,6 +6,7 @@ import { useEventsStore } from '~/stores/events'
 import ServiceExposeModal from '~/components/ServiceExposeModal.vue'
 import DeploymentInProgressPanel from '~/components/DeploymentInProgressPanel.vue'
 import DeploymentAbortedPanel from '~/components/DeploymentAbortedPanel.vue'
+import DeploymentGroupPanel from '~/components/stacks/DeploymentGroupPanel.vue'
 import StackTabs from '~/components/stacks/StackTabs.vue'
 import StackOverviewTab from '~/components/stacks/StackOverviewTab.vue'
 import StackHistoryTab from '~/components/stacks/StackHistoryTab.vue'
@@ -150,6 +151,12 @@ const stackTabs = [
         @abort-deploy="abortDeploy"
       />
 
+      <!-- Phase 10c (T5 refs #50): multi-host group panel sits above the
+           single-deployment panel. Single-host deploys never produce a
+           group row, so this slot stays empty for the homelab default. -->
+      <div class="px-6 pt-6">
+        <DeploymentGroupPanel :stack-id="stackId" />
+      </div>
       <div class="px-6 pt-6" v-if="visibleDeployment">
         <DeploymentInProgressPanel :deployment="visibleDeployment" />
       </div>

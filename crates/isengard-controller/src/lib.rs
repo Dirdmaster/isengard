@@ -8,11 +8,13 @@ pub mod bus;
 pub mod ca;
 pub mod disconnect_monitor;
 pub mod enrollment;
+pub mod log_fanout;
 pub mod pending_actions;
 pub mod plugin_host;
 pub mod policy_ingest;
 pub mod revocation;
 pub mod routing;
+pub mod stack_deploy_orchestrator;
 pub mod sync_services;
 pub mod sync_stacks;
 
@@ -55,13 +57,19 @@ pub struct ControllerHandles {
     /// the backup plugin can open its own pool for WAL checkpoint + file
     /// copy without needing a public `Inventory::pool()` getter.
     pub db_path: std::path::PathBuf,
+    /// Phase 13B: subscription registry for log streaming. Dashboard's
+    /// WebSocket handler `register`s a fresh subscription, then sends
+    /// `StartLogStream` ControllerMessages via `routing.register_sender` to
+    /// each involved host. Inbound `AgentMessage::LogChunk` frames are
+    /// routed through this fanout to the matching WebSocket task.
+    pub log_fanout: Arc<log_fanout::LogFanout>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
 /// handler (for agent-originated events) and controller-internal producers
 /// like `disconnect_monitor`.
 ///
-/// On journal write failure, broadcasts NO event — better to drop than to
+/// On journal write failure, broadcasts NO event: better to drop than to
 /// notify on something we have no record of.
 pub async fn persist_and_broadcast(journal: &Journal, bus: &EventBus, event: Event) {
     let insert = InsertEvent {
@@ -154,6 +162,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
+    let log_fanout = log_fanout::LogFanout::new();
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
         journal: journal.clone(),
@@ -162,6 +171,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         enrollment: enrollment.clone(),
         revocation: revocation.clone(),
         db_path: db_path.clone(),
+        log_fanout: log_fanout.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -180,6 +190,20 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         60.0,  // 60s poll
     ));
     let disconnect_handle = disconnect_monitor.start();
+
+    // Phase 10c (10i, refs #50): stack-level deployment orchestrator. Owns the
+    // multi-host wave plan when a stack-wide update fans out to 2+ hosts.
+    // Single-host deploys bypass this entirely; existing per-host deployment
+    // supervisors keep their behaviour.
+    let orchestrator =
+        std::sync::Arc::new(stack_deploy_orchestrator::StackDeployOrchestrator::new(
+            inventory.clone(),
+            bus.clone(),
+            std::sync::Arc::new(stack_deploy_orchestrator::ProductionDispatcher::new(
+                inventory.clone(),
+            )),
+        ));
+    let orchestrator_handle = orchestrator.clone().start_background();
 
     // Background task: subscribe to `deployment.*` events on the bus and mirror
     // the embedded Deployment row into the controller-local `deployments` table.
@@ -277,6 +301,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         ca,
         enrollment,
         revocation,
+        log_fanout,
     ));
 
     // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.
@@ -326,6 +351,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     disconnect_handle.abort();
     deployment_handle.abort();
     reaper_handle.abort();
+    orchestrator_handle.abort();
 
     // -- plugin stop ----------------------------------------------------------
     plugin_host::stop_controller_plugins(&mut controller_plugins).await;

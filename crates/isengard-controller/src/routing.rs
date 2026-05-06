@@ -105,6 +105,21 @@ impl RoutingPusher {
         s.by_host.remove(&host);
     }
 
+    /// Phase 13B: send an arbitrary `ControllerMessage` (e.g. `StartLogStream`,
+    /// `StopLogStream`) to the host's current Sync sender. Returns `true` on a
+    /// successful enqueue, `false` if the host has no registered sender or the
+    /// sender's queue is full / closed.
+    ///
+    /// Best-effort: full queues drop the message. The caller chooses whether
+    /// to retry.
+    pub async fn send_to_host(&self, host: HostId, msg: ControllerMessage) -> bool {
+        let senders = self.senders.lock().await;
+        match senders.by_host.get(&host) {
+            Some(tx) => tx.try_send(Ok(msg)).is_ok(),
+            None => false,
+        }
+    }
+
     /// Push the latest `ProxyConfig` to the host's currently registered
     /// sender (if any). Best-effort: a full queue drops the message rather
     /// than blocking — the next `push_to_host` will carry the freshest

@@ -36,3 +36,8 @@ ulid.workspace = true
 [dev-dependencies]
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 rand.workspace = true
+# Phase 13B: WebSocket client for the logs WS integration tests + tonic for
+# the synthetic Sync sender shape (`mpsc::Receiver<Result<_, tonic::Status>>`).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+futures-util = { workspace = true }
+tonic = { workspace = true }

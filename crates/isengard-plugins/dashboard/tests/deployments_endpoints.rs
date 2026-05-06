@@ -63,6 +63,7 @@ async fn setup_app() -> (axum::Router, Arc<Inventory>, HostId, StackId) {
         enrollment,
         revocation,
         db_path: std::path::PathBuf::from(":memory:"),
+        log_fanout: isengard_controller::log_fanout::LogFanout::new(),
     });
 
     let app = deployments::router(handles);

@@ -188,7 +188,7 @@ fn default_url() -> String {
 }
 
 /// Builds the multi-line `docker run` command shown to the user during
-/// onboarding. Single source of truth — both the wizard and any docs that
+/// onboarding. Single source of truth: both the wizard and any docs that
 /// need to embed an example install command should call this.
 fn render_docker_run_command(controller_url: &str, token: &str) -> String {
     [
@@ -306,7 +306,15 @@ async fn list_events(
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    match handles.journal.list_recent(limit).await {
+    // When a `deployment_id` filter is set, widen the journal scan so we
+    // don't lose events behind newer unrelated rows. Cap at 5000 rows for
+    // safety. Phase 10c (T4 refs #50).
+    let scan_limit = if q.deployment_id.is_some() {
+        limit.clamp(500, 5000)
+    } else {
+        limit
+    };
+    match handles.journal.list_recent(scan_limit).await {
         Ok(rows) => {
             let mut dtos: Vec<EventDto> = rows.into_iter().map(EventDto::from).collect();
             if let Some(kind) = q.kind {
@@ -314,6 +322,18 @@ async fn list_events(
             }
             if let Some(host_id_s) = q.host_id {
                 dtos.retain(|e| e.host_id.as_deref() == Some(&host_id_s));
+            }
+            if let Some(dep_id) = q.deployment_id.as_deref() {
+                dtos.retain(|e| {
+                    e.metadata
+                        .get("deployment")
+                        .and_then(|d| d.get("id"))
+                        .and_then(|v| v.as_str())
+                        == Some(dep_id)
+                });
+                if dtos.len() as i64 > limit {
+                    dtos.truncate(limit as usize);
+                }
             }
             Json(dtos).into_response()
         }
@@ -877,6 +897,7 @@ mod tests {
             enrollment,
             revocation,
             db_path: std::path::PathBuf::from(":memory:"),
+            log_fanout: isengard_controller::log_fanout::LogFanout::new(),
         })
     }
 

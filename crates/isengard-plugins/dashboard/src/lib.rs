@@ -8,13 +8,14 @@
 pub mod api;
 pub mod approvals;
 pub mod backup;
+pub mod deployment_groups;
 pub mod deployments;
 pub mod dto;
 pub mod enrollment;
 pub mod policies;
 pub mod routing;
 pub mod webhooks;
-mod ws;
+pub mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -89,7 +90,10 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
     if let Some(h) = handles {
         let ws_router = Router::new()
             .route("/ws/events", get(ws::ws_handler))
-            .route("/api/v1/services/{id}/logs", get(ws::handle_logs))
+            .route(
+                "/api/v1/services/{stack_id}/{service_name}/logs/ws",
+                get(ws::handle_service_logs),
+            )
             .with_state(h.clone());
 
         let install_router = Router::new()
@@ -100,6 +104,7 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
             .nest("/api/v1", api::router(h.clone()))
             .nest("/api/v1", routing::router(h.clone()))
             .nest("/api/v1", deployments::router(h.clone()))
+            .nest("/api/v1", deployment_groups::router(h.clone()))
             .nest("/api/v1", policies::router(h.clone()))
             .nest("/api/v1", approvals::router(h.clone()))
             .nest("/api/v1", webhooks::router(h.clone()))
