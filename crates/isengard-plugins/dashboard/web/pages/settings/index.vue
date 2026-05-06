@@ -16,6 +16,9 @@
           <div v-else-if="activeTab === 'enrollment'">
             <EnrollmentSettings />
           </div>
+          <div v-else-if="activeTab === 'policies'">
+            <PoliciesSettings />
+          </div>
           <div v-else-if="activeTab === 'networking'">
             <NetworkingSettings />
           </div>
@@ -35,6 +38,7 @@
 const tabs = [
   { key: 'general', label: 'General' },
   { key: 'enrollment', label: 'Enrollment' },
+  { key: 'policies', label: 'Update policies' },
   { key: 'networking', label: 'Networking' },
   { key: 'deployments', label: 'Deployments' },
   { key: 'notifier', label: 'Notifier' },
