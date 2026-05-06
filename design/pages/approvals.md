@@ -1,10 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: phase-9-pending
-status_note: "Approval Flow is Phase 9"
+status: shipped
+status_note: "Phase 9e-9f shipped: queue page, ApprovalCard, nav badge, polling"
 created: 2026-05-03
-updated: 2026-05-05
+updated: 2026-05-06
 tags:
   - design
   - page
@@ -16,6 +16,24 @@ tags:
 The pending-decision queue. Surfaces every update.pending_approval action across the fleet so an operator can act in-app rather than via Telegram/Discord callbacks.
 
 Source design: [[Update Policies & Approval Flow]] (full architecture).
+
+## Implementation status (2026-05-06)
+
+- Shipped:
+  - `/approvals` queue page with filter chips (Open / Decided / All)
+  - `<ApprovalCard>` per row: scope path, image diff, requested-ago, expires-in countdown (warn/error tone as expiry approaches), Approve / Reject / Snooze actions, decided-state chip
+  - Snooze dropdown durations: 6h / 12h / 24h / 3d / 7d (writes service-scope `paused_until` via Plan A's policy upsert)
+  - `<ApprovalsBadge>` in `<TopBar>` (Approvals tab between Events and Settings)
+  - `useApprovals` composable: filter, refresh, optimistic decide, 60s page poll
+  - `usePendingApprovalsCount` composable: shared 30s nav-badge poller via `useState`, visibility-aware refresh
+  - Empty state with in-container CTA to `/settings/policies`
+- Drift from concept v1:
+  - Concept renders version diffs as semver labels (`v2.4.0 → v2.4.1`); implementation renders the digest pair (`sha256:0123abcd... → sha256:fedcba98...`) because the controller stores the proposed image digest, not a parsed semver. Tag-aware rendering lands with Phase 9i (Minor strategy).
+- Deferred:
+  - Bulk "Approve all from staging" action (v1.x)
+  - Per-card Reject reason capture (v1.x)
+  - Permission gate for approver role (lands with RBAC)
+  - "No notifier configured" banner: detection requires a server-side env exposure endpoint that doesn't exist yet (T5 note)
 
 ## Audience
 
@@ -62,4 +80,4 @@ Operator with `prod` fleet under approval gate. Telegram message arrived; they'r
 
 ---
 
-> Approvals tab is pending Phase 9 — not currently in TopBar. The whole Approvals surface (this page included) ships with Phase 9; tracked under [[Update Policies & Approval Flow]].
+> Shipped in Phase 9e-9f. Tracked under [[Update Policies & Approval Flow]].
