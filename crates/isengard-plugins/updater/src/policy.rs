@@ -19,8 +19,8 @@
 use chrono::{DateTime, Utc};
 use isengard_core::approval_store::PendingApprovalBody;
 use isengard_core::policy::{
-    PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateGate, UpdateStrategy, is_in_window,
-    next_window_after, resolve_policy,
+    GateDecision, PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateGate, UpdateStrategy,
+    is_in_window, next_window_after, resolve_policy,
 };
 use isengard_core::{HostId, LoadedPolicy};
 use std::collections::HashMap;
@@ -61,6 +61,8 @@ pub enum PolicyDecision {
 pub enum SkipReason {
     Pinned,
     Paused { until: DateTime<Utc> },
+    /// Phase 12c: the configured `external_gate` returned `reject`.
+    GateRejected { reason: Option<String> },
 }
 
 impl SkipReason {
@@ -70,6 +72,7 @@ impl SkipReason {
         match self {
             Self::Pinned => "pinned",
             Self::Paused { .. } => "paused",
+            Self::GateRejected { .. } => "gate_rejected",
         }
     }
 }
@@ -302,6 +305,40 @@ pub fn policy_decision(
     let resolved = resolve_policy(&projected, ctx);
     let decision = decision_from_resolved(&resolved, ctx, approval_ctx, now);
     (resolved, decision)
+}
+
+/// Phase 12c: map a [`GateDecision`] to the matching [`PolicyDecision`].
+///
+/// Pure function (no I/O). Caller does the side effects: emits
+/// `update.gated_<x>` events, persists the gate-evaluation `webhook_deliveries`
+/// audit row, upserts service-scope `paused_until` for `Defer` /
+/// `Unreachable`, and persists the approval row for `Manual`.
+///
+/// `pending_body` is built by the caller from `ctx + approval_ctx + resolved`
+/// (the same body the existing `gate=Approval` path uses). It is consumed
+/// only when the gate decision is `Manual`. For `Approve` the caller falls
+/// through to the existing post-policy logic (which is the original
+/// `policy_decision` output before gate evaluation).
+pub fn policy_decision_from_gate(
+    gate: GateDecision,
+    pending_body: PendingApprovalBody,
+) -> PolicyDecision {
+    match gate {
+        GateDecision::Approve => PolicyDecision::Proceed,
+        GateDecision::Reject { reason } => PolicyDecision::Skip(SkipReason::GateRejected { reason }),
+        GateDecision::Defer { until } => PolicyDecision::Deferred {
+            next_window: Some(until),
+        },
+        GateDecision::Manual => PolicyDecision::PendingApproval(pending_body),
+        GateDecision::Unreachable => {
+            // 1h backoff per spec. Caller persists this as paused_until on
+            // the service-scope policy row before returning Deferred.
+            let until = Utc::now() + chrono::Duration::hours(1);
+            PolicyDecision::Deferred {
+                next_window: Some(until),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -634,6 +671,112 @@ mod tests {
         fn with_service(mut self, s: String) -> Self {
             self.service = Some(s);
             self
+        }
+    }
+
+    /// Phase 12c: the four gate outcomes map to the four expected
+    /// `PolicyDecision` shapes.
+    #[test]
+    fn gate_approve_maps_to_proceed() {
+        let body = PendingApprovalBody {
+            host_id: HostId::nil(),
+            stack: "blog".into(),
+            service: "web".into(),
+            container_name: "blog-web-1".into(),
+            image: "i".into(),
+            current_digest: "sha256:1".into(),
+            proposed_digest: "sha256:2".into(),
+            diff_url: None,
+            approver_channel: None,
+        };
+        let dec = policy_decision_from_gate(GateDecision::Approve, body);
+        assert_eq!(dec, PolicyDecision::Proceed);
+    }
+
+    #[test]
+    fn gate_reject_maps_to_skip_gate_rejected_with_reason() {
+        let body = PendingApprovalBody {
+            host_id: HostId::nil(),
+            stack: "blog".into(),
+            service: "web".into(),
+            container_name: "x".into(),
+            image: "i".into(),
+            current_digest: "sha256:1".into(),
+            proposed_digest: "sha256:2".into(),
+            diff_url: None,
+            approver_channel: None,
+        };
+        let dec = policy_decision_from_gate(
+            GateDecision::Reject {
+                reason: Some("too risky".into()),
+            },
+            body,
+        );
+        assert_eq!(
+            dec,
+            PolicyDecision::Skip(SkipReason::GateRejected {
+                reason: Some("too risky".into())
+            })
+        );
+    }
+
+    #[test]
+    fn gate_defer_maps_to_deferred_next_window_until() {
+        let body = PendingApprovalBody {
+            host_id: HostId::nil(),
+            stack: "blog".into(),
+            service: "web".into(),
+            container_name: "x".into(),
+            image: "i".into(),
+            current_digest: "sha256:1".into(),
+            proposed_digest: "sha256:2".into(),
+            diff_url: None,
+            approver_channel: None,
+        };
+        let until = Utc::now() + Duration::hours(2);
+        let dec = policy_decision_from_gate(GateDecision::Defer { until }, body);
+        assert_eq!(dec, PolicyDecision::Deferred { next_window: Some(until) });
+    }
+
+    #[test]
+    fn gate_manual_maps_to_pending_approval_with_body() {
+        let body = PendingApprovalBody {
+            host_id: HostId::nil(),
+            stack: "blog".into(),
+            service: "web".into(),
+            container_name: "x".into(),
+            image: "i".into(),
+            current_digest: "sha256:1".into(),
+            proposed_digest: "sha256:2".into(),
+            diff_url: None,
+            approver_channel: Some("ops".into()),
+        };
+        let dec = policy_decision_from_gate(GateDecision::Manual, body.clone());
+        assert_eq!(dec, PolicyDecision::PendingApproval(body));
+    }
+
+    #[test]
+    fn gate_unreachable_maps_to_deferred_one_hour() {
+        let body = PendingApprovalBody {
+            host_id: HostId::nil(),
+            stack: "blog".into(),
+            service: "web".into(),
+            container_name: "x".into(),
+            image: "i".into(),
+            current_digest: "sha256:1".into(),
+            proposed_digest: "sha256:2".into(),
+            diff_url: None,
+            approver_channel: None,
+        };
+        let dec = policy_decision_from_gate(GateDecision::Unreachable, body);
+        match dec {
+            PolicyDecision::Deferred { next_window: Some(t) } => {
+                let now = Utc::now();
+                let lower = now + Duration::minutes(55);
+                let upper = now + Duration::minutes(65);
+                assert!(t >= lower && t <= upper, "expected ~1h ahead, got {t}");
+            }
+            other => panic!("expected Deferred, got {other:?}"),
         }
     }
 }
