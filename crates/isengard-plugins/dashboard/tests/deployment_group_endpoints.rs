@@ -11,6 +11,7 @@ use isengard_controller::bus::EventBus;
 use isengard_controller::ca::Authority;
 use isengard_controller::enrollment::EnrollmentService;
 use isengard_controller::revocation::RevocationSet;
+use isengard_controller::log_fanout::LogFanout;
 use isengard_controller::routing::RoutingPusher;
 use isengard_plugin_dashboard::deployment_groups::{
     DeploymentGroupDetailDto, DeploymentGroupDto, ParallelismDto,
@@ -62,6 +63,7 @@ async fn setup_app() -> (Router, Router, Arc<Inventory>, HostId, StackId) {
         routing,
         enrollment,
         revocation,
+        log_fanout: LogFanout::new(),
     });
 
     let groups_app = isengard_plugin_dashboard::deployment_groups::router(handles.clone());
