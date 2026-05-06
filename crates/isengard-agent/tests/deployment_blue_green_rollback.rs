@@ -242,7 +242,7 @@ async fn blue_green_rollback_on_healthcheck_failure() {
     };
     // The rollback may succeed (RolledBack) when the digest is locally
     // cached, or fail (RollbackFailed) when the registry refuses the
-    // pull. Both are acceptable terminal states for this e2e — the
+    // pull. Both are acceptable terminal states for this e2e: the
     // important assertions are the rollback metadata fields, which
     // are populated regardless.
     assert!(
