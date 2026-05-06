@@ -4,16 +4,21 @@ import { useWebhooks, type WebhookDto, type WebhookCreatedDto } from '~/composab
 import { useConfirm } from '~/composables/useConfirm'
 import AddWebhookModal from '~/components/AddWebhookModal.vue'
 import WebhookDeliveriesPanel from '~/components/WebhookDeliveriesPanel.vue'
+import SourceDeliveriesPanel from '~/components/SourceDeliveriesPanel.vue'
 
 /**
  * Body for the "Webhooks" settings tab. Mounted from
- * `pages/settings/index.vue`. Shipped in Phase 12a (#53).
+ * `pages/settings/index.vue`. Shipped in Phase 12a (#53), extended in
+ * Phase 12b/c with sub-tabs for lifecycle hooks (#54) and external-action
+ * gates (#55).
  *
  * Shows the list of configured outbound webhooks plus a per-row deliveries
- * panel. The Add modal returns the plaintext secret exactly once and the
- * SecretFlash mode of the modal renders the copy step before the user
- * dismisses it.
+ * panel for the default tab. The lifecycle / gate sub-tabs reuse the
+ * delivery row pattern but filter by source.
  */
+
+type SubTab = 'webhooks' | 'lifecycle' | 'gates'
+const subTab = ref<SubTab>('webhooks')
 
 const { webhooks, loading, error, refresh, removeWebhook, updateWebhook, sendTest } =
   useWebhooks()
@@ -74,6 +79,42 @@ defineExpose({ openAdd: () => { addOpen.value = true } })
 
 <template>
   <div class="flex flex-col gap-3">
+    <!-- Phase 12b/c: sub-tab strip -->
+    <div class="flex items-center gap-1 border-b border-iso-border-subtle pb-2">
+      <button
+        :class="[
+          'px-3 py-1 text-xs rounded-iso-sm',
+          subTab === 'webhooks'
+            ? 'bg-iso-bg-elevated text-iso-text-primary border border-iso-border-subtle'
+            : 'text-iso-text-muted hover:text-iso-text-primary',
+        ]"
+        @click="subTab = 'webhooks'"
+      >Webhooks</button>
+      <button
+        :class="[
+          'px-3 py-1 text-xs rounded-iso-sm',
+          subTab === 'lifecycle'
+            ? 'bg-iso-bg-elevated text-iso-text-primary border border-iso-border-subtle'
+            : 'text-iso-text-muted hover:text-iso-text-primary',
+        ]"
+        @click="subTab = 'lifecycle'"
+      >Lifecycle hooks</button>
+      <button
+        :class="[
+          'px-3 py-1 text-xs rounded-iso-sm',
+          subTab === 'gates'
+            ? 'bg-iso-bg-elevated text-iso-text-primary border border-iso-border-subtle'
+            : 'text-iso-text-muted hover:text-iso-text-primary',
+        ]"
+        @click="subTab = 'gates'"
+      >Gates</button>
+    </div>
+
+    <!-- Phase 12b/c: lifecycle / gate panels -->
+    <SourceDeliveriesPanel v-if="subTab === 'lifecycle'" source="lifecycle" />
+    <SourceDeliveriesPanel v-else-if="subTab === 'gates'" source="gate" />
+
+    <template v-else>
     <div class="flex items-center justify-between">
       <p class="text-xs text-iso-text-muted">
         Outbound webhooks. Subscribed events POST to your URL with an
@@ -171,5 +212,6 @@ defineExpose({ openAdd: () => { addOpen.value = true } })
     </template>
 
     <AddWebhookModal v-model:open="addOpen" @created="handleCreated" />
+    </template>
   </div>
 </template>

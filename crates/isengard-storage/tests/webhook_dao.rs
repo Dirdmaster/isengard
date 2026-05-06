@@ -262,3 +262,159 @@ async fn list_deliveries_filters_by_status_and_limit() {
     let limited = inv.list_deliveries(w.id, None, 2).await.expect("limit");
     assert_eq!(limited.len(), 2);
 }
+
+// Phase 12b/c additions: lifecycle + gate delivery sources.
+
+use isengard_storage::webhook::{DeliverySource, InsertGateDelivery, InsertLifecycleDelivery};
+
+#[tokio::test]
+async fn lifecycle_delivery_inserts_with_inline_url_and_secret() {
+    let inv = fresh_inv().await;
+    let d = inv
+        .insert_lifecycle_delivery(InsertLifecycleDelivery {
+            url: "https://hooks.example.com/pre".into(),
+            secret: Some("shh".into()),
+            event_kind: "deployment.spinning_up".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .expect("lifecycle insert");
+    assert_eq!(d.source, DeliverySource::Lifecycle);
+    assert!(d.webhook_id.is_none());
+    assert_eq!(d.url.as_deref(), Some("https://hooks.example.com/pre"));
+    assert_eq!(d.secret.as_deref(), Some("shh"));
+    assert_eq!(d.event_kind, "deployment.spinning_up");
+    assert_eq!(d.status, DeliveryStatus::Pending);
+}
+
+#[tokio::test]
+async fn gate_delivery_inserts_with_inline_url() {
+    let inv = fresh_inv().await;
+    let d = inv
+        .insert_gate_delivery(InsertGateDelivery {
+            url: "https://gate.example.com/decide".into(),
+            secret: None,
+            event_kind: "update.gate".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .expect("gate insert");
+    assert_eq!(d.source, DeliverySource::Gate);
+    assert!(d.webhook_id.is_none());
+    assert_eq!(d.url.as_deref(), Some("https://gate.example.com/decide"));
+    assert!(d.secret.is_none());
+}
+
+#[tokio::test]
+async fn list_deliveries_by_source_filters_by_kind() {
+    let inv = fresh_inv().await;
+
+    // One webhook delivery (12a flow).
+    let w = inv.insert_webhook(sample_insert()).await.expect("webhook");
+    let _wd = inv
+        .insert_delivery(InsertDelivery {
+            webhook_id: w.id,
+            event_kind: "update.success".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+
+    // One lifecycle, one gate.
+    let _l = inv
+        .insert_lifecycle_delivery(InsertLifecycleDelivery {
+            url: "https://hooks.example.com/post".into(),
+            secret: None,
+            event_kind: "deployment.completed".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+    let _g = inv
+        .insert_gate_delivery(InsertGateDelivery {
+            url: "https://gate.example.com/decide".into(),
+            secret: None,
+            event_kind: "update.gate".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+
+    let webhook_only = inv
+        .list_deliveries_by_source(DeliverySource::Webhook, 100)
+        .await
+        .unwrap();
+    assert_eq!(webhook_only.len(), 1);
+    let lifecycle_only = inv
+        .list_deliveries_by_source(DeliverySource::Lifecycle, 100)
+        .await
+        .unwrap();
+    assert_eq!(lifecycle_only.len(), 1);
+    let gate_only = inv
+        .list_deliveries_by_source(DeliverySource::Gate, 100)
+        .await
+        .unwrap();
+    assert_eq!(gate_only.len(), 1);
+}
+
+#[tokio::test]
+async fn webhook_delivery_default_source_is_webhook() {
+    let inv = fresh_inv().await;
+    let w = inv.insert_webhook(sample_insert()).await.expect("webhook");
+    let d = inv
+        .insert_delivery(InsertDelivery {
+            webhook_id: w.id,
+            event_kind: "update.success".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(d.source, DeliverySource::Webhook);
+    assert_eq!(d.webhook_id, Some(w.id));
+    assert!(d.url.is_none());
+    assert!(d.secret.is_none());
+}
+
+#[tokio::test]
+async fn delivery_source_round_trips_through_str() {
+    use std::str::FromStr;
+    for s in [
+        DeliverySource::Webhook,
+        DeliverySource::Lifecycle,
+        DeliverySource::Gate,
+    ] {
+        let parsed = DeliverySource::from_str(s.as_str()).expect("roundtrip");
+        assert_eq!(parsed, s);
+    }
+    assert!(DeliverySource::from_str("nope").is_err());
+}
+
+#[tokio::test]
+async fn claim_pending_returns_lifecycle_and_webhook_rows() {
+    let inv = fresh_inv().await;
+    let w = inv.insert_webhook(sample_insert()).await.expect("w");
+    inv.insert_delivery(InsertDelivery {
+        webhook_id: w.id,
+        event_kind: "update.success".into(),
+        payload_json: "{}".into(),
+    })
+    .await
+    .unwrap();
+    inv.insert_lifecycle_delivery(InsertLifecycleDelivery {
+        url: "https://hooks.example.com/x".into(),
+        secret: None,
+        event_kind: "deployment.completed".into(),
+        payload_json: "{}".into(),
+    })
+    .await
+    .unwrap();
+
+    let due = inv
+        .claim_pending_deliveries(Utc::now() + Duration::seconds(1), 50)
+        .await
+        .unwrap();
+    assert_eq!(due.len(), 2);
+    let sources: Vec<_> = due.iter().map(|d| d.source).collect();
+    assert!(sources.contains(&DeliverySource::Webhook));
+    assert!(sources.contains(&DeliverySource::Lifecycle));
+}

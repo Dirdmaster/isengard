@@ -8,6 +8,7 @@ pub mod bus;
 pub mod ca;
 pub mod disconnect_monitor;
 pub mod enrollment;
+pub mod hook_ingest;
 pub mod log_fanout;
 pub mod pending_actions;
 pub mod plugin_host;
@@ -143,6 +144,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
     let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
+    // Phase 12b: lifecycle-hook label ingest runs in parallel with policy_ingest.
+    let hook_ingest = Arc::new(hook_ingest::HookLabelIngest::new(inventory.clone()));
 
     // Phase 14: internal CA + enrollment service. CA is loaded-or-initialized
     // from the `ca` row (single-row table); the EnrollmentService owns the
@@ -298,6 +301,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         bus,
         routing.clone(),
         policy_ingest.clone(),
+        hook_ingest.clone(),
         ca,
         enrollment,
         revocation,

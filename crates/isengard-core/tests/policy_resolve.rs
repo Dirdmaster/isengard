@@ -48,6 +48,7 @@ fn global_only_overrides_some_fields_rest_fall_back_to_default() {
         on_failure: None,
         approver_channel: Some("ops".to_string()),
         window: None,
+        external_gate: None,
     };
     let rows = vec![(PolicyScopeType::Global, "", &global)];
 
@@ -81,6 +82,7 @@ fn fleet_overrides_global_global_fills_remaining_fields() {
         on_failure: Some(FailureHandling::Notify),
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let fleet = Policy {
         strategy: Some(UpdateStrategy::Pinned),
@@ -89,6 +91,7 @@ fn fleet_overrides_global_global_fills_remaining_fields() {
         on_failure: None,
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let rows = vec![
         (PolicyScopeType::Global, "", &global),
@@ -122,6 +125,7 @@ fn service_wins_when_all_four_scopes_set_strategy() {
         on_failure: None,
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let global = strategy_only(UpdateStrategy::Pinned);
     let fleet = strategy_only(UpdateStrategy::TagOnly);
@@ -154,6 +158,7 @@ fn container_override_beats_everything() {
         on_failure: Some(FailureHandling::Notify),
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let fleet = Policy {
         strategy: Some(UpdateStrategy::Any),
@@ -162,6 +167,7 @@ fn container_override_beats_everything() {
         on_failure: None,
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let service = Policy {
         strategy: Some(UpdateStrategy::Minor),
@@ -170,6 +176,7 @@ fn container_override_beats_everything() {
         on_failure: Some(FailureHandling::Keep),
         approver_channel: Some("svc-channel".to_string()),
         window: None,
+        external_gate: None,
     };
     let container = Policy {
         strategy: Some(UpdateStrategy::Pinned),
@@ -178,6 +185,7 @@ fn container_override_beats_everything() {
         on_failure: Some(FailureHandling::Rollback),
         approver_channel: Some("container-channel".to_string()),
         window: None,
+        external_gate: None,
     };
 
     let container_key = "0123456789abcdef/prod-blog-web-1";
@@ -222,6 +230,7 @@ fn provenance_tracks_per_field_origin_not_per_row() {
         on_failure: None,
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let stack = Policy {
         strategy: None,
@@ -230,6 +239,7 @@ fn provenance_tracks_per_field_origin_not_per_row() {
         on_failure: Some(FailureHandling::Keep),
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let service = Policy {
         strategy: None,
@@ -238,6 +248,7 @@ fn provenance_tracks_per_field_origin_not_per_row() {
         on_failure: None,
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let rows = vec![
         (PolicyScopeType::Fleet, "prod", &fleet),
@@ -272,6 +283,7 @@ fn rows_for_other_scopes_are_filtered_out() {
         on_failure: None,
         approver_channel: None,
         window: None,
+        external_gate: None,
     };
     let rows = vec![(PolicyScopeType::Fleet, "staging", &other_fleet)];
 

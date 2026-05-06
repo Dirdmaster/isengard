@@ -2513,16 +2513,21 @@ dependencies = [
  "chrono",
  "dirs",
  "futures-util",
+ "hex",
+ "hmac",
  "inventory",
  "isengard-core",
  "isengard-storage",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
  "ulid",
+ "wiremock",
 ]
 
 [[package]]

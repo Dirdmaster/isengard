@@ -17,6 +17,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::bus::EventBus;
 use crate::ca::Authority;
 use crate::enrollment::{EnrollmentService, HostInfo};
+use crate::hook_ingest::HookLabelIngest;
 use crate::log_fanout::LogFanout;
 use crate::policy_ingest::PolicyLabelIngest;
 use crate::revocation::RevocationSet;
@@ -31,6 +32,9 @@ pub struct ControllerService {
     /// Phase 9b.1: container-scope policy ingest from `isengard.policy.*`
     /// labels.
     pub policy_ingest: Arc<PolicyLabelIngest>,
+    /// Phase 12b: container-scope lifecycle-hook ingest from
+    /// `isengard.hooks.*` labels.
+    pub hook_ingest: Arc<HookLabelIngest>,
     pub ca: Arc<Authority>,
     pub enrollment: Arc<EnrollmentService>,
     /// Phase 14: in-memory revocation set the auth interceptor reads on every
@@ -51,6 +55,7 @@ impl ControllerService {
         bus: Arc<EventBus>,
         routing: Arc<RoutingPusher>,
         policy_ingest: Arc<PolicyLabelIngest>,
+        hook_ingest: Arc<HookLabelIngest>,
         ca: Arc<Authority>,
         enrollment: Arc<EnrollmentService>,
         revocation: RevocationSet,
@@ -62,6 +67,7 @@ impl ControllerService {
             bus,
             routing,
             policy_ingest,
+            hook_ingest,
             ca,
             enrollment,
             revocation,
@@ -87,6 +93,7 @@ impl ControllerService {
         let bus = Arc::new(EventBus::new());
         let routing = Arc::new(RoutingPusher::new(inventory.clone()));
         let policy_ingest = Arc::new(PolicyLabelIngest::new(inventory.clone()));
+        let hook_ingest = Arc::new(HookLabelIngest::new(inventory.clone()));
         let log_fanout = LogFanout::new();
         Self {
             inventory,
@@ -94,6 +101,7 @@ impl ControllerService {
             bus,
             routing,
             policy_ingest,
+            hook_ingest,
             ca,
             enrollment,
             revocation,
@@ -256,6 +264,7 @@ impl Controller for ControllerService {
         let bus = self.bus.clone();
         let routing = self.routing.clone();
         let policy_ingest = self.policy_ingest.clone();
+        let hook_ingest = self.hook_ingest.clone();
         let log_fanout = self.log_fanout.clone();
         let agent_hostname = host.hostname.clone();
 
@@ -361,6 +370,16 @@ impl Controller for ControllerService {
                                 "policy labels: ingest failed",
                             );
                         }
+                        // Phase 12b: lifecycle-hook label ingest. Same shape;
+                        // upserts container_hooks for any container carrying
+                        // `isengard.hooks.*` labels.
+                        if let Err(e) = hook_ingest.ingest(host_id, &report).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "hook labels: ingest failed",
+                            );
+                        }
                         if let Err(e) = routing.ingest_labels(host_id, report).await {
                             tracing::warn!(
                                 error = %e,
@@ -393,6 +412,14 @@ impl Controller for ControllerService {
                                 error = %e,
                                 agent = %agent_hostname,
                                 "policy labels: ingest_removed failed",
+                            );
+                        }
+                        // Phase 12b: drop the container_hooks row.
+                        if let Err(e) = hook_ingest.ingest_removed(host_id, &ev).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "hook labels: ingest_removed failed",
                             );
                         }
                         if let Err(e) = routing.ingest_labels_removed(host_id, ev).await {

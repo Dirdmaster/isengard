@@ -305,3 +305,75 @@ async fn update_returns_404_when_missing() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// Phase 12b/c: cross-source delivery list endpoint tests.
+
+#[tokio::test]
+async fn deliveries_by_source_filters_to_lifecycle_only() {
+    use isengard_storage::webhook::{InsertGateDelivery, InsertLifecycleDelivery};
+    let (app, handles) = setup_app().await;
+
+    // Seed one webhook delivery (12a path).
+    let secret_resp = app
+        .clone()
+        .oneshot(post_json(
+            "/webhooks",
+            serde_json::json!({"url": "https://example/h", "eventKinds": "*"}),
+        ))
+        .await
+        .unwrap();
+    let created: WebhookCreatedDto = serde_json::from_value(body_json(secret_resp).await).unwrap();
+    handles
+        .inventory
+        .insert_delivery(isengard_storage::webhook::InsertDelivery {
+            webhook_id: created.webhook.id,
+            event_kind: "update.success".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+
+    // Seed one lifecycle, one gate.
+    handles
+        .inventory
+        .insert_lifecycle_delivery(InsertLifecycleDelivery {
+            url: "https://h.example/post".into(),
+            secret: None,
+            event_kind: "deployment.completed".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+    handles
+        .inventory
+        .insert_gate_delivery(InsertGateDelivery {
+            url: "https://gate.example/decide".into(),
+            secret: None,
+            event_kind: "update.gate".into(),
+            payload_json: "{}".into(),
+        })
+        .await
+        .unwrap();
+
+    // Filter by lifecycle.
+    let resp = app
+        .clone()
+        .oneshot(get_req("/webhooks/deliveries?source=lifecycle"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = body_json(resp).await;
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["source"], "lifecycle");
+}
+
+#[tokio::test]
+async fn deliveries_by_source_with_unknown_source_returns_400() {
+    let (app, _) = setup_app().await;
+    let resp = app
+        .oneshot(get_req("/webhooks/deliveries?source=invalid"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
