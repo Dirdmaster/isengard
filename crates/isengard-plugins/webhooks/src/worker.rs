@@ -6,12 +6,20 @@ use std::time::Duration;
 
 use chrono::Utc;
 use isengard_storage::Inventory;
-use isengard_storage::webhook::{Webhook, WebhookDelivery};
+use isengard_storage::webhook::{DeliverySource, WebhookDelivery};
 use reqwest::Client;
 use tracing::{debug, warn};
 
 use crate::backoff::{MAX_ATTEMPTS, next_delay};
 use crate::sign::{SIGNATURE_HEADER, compute_signature};
+
+/// Resolved (url, secret) for one delivery row. For `source=webhook` rows
+/// we look these up via the parent `webhooks` table; for `source=lifecycle`
+/// or `source=gate` rows the row carries them directly.
+pub struct Endpoint {
+    pub url: String,
+    pub secret: String,
+}
 
 /// Run the worker forever. The caller aborts the JoinHandle on shutdown.
 pub async fn run(inventory: Arc<Inventory>, http: Client, tick: Duration, batch: i64) {
@@ -33,24 +41,31 @@ pub async fn tick_once(inventory: &Inventory, http: &Client, batch: i64) -> anyh
         return Ok(());
     }
     for delivery in due {
-        // Re-fetch the webhook each time: cheap (single SELECT) and avoids
-        // stale URL/secret if the operator edited the row mid-flight.
-        let webhook = match inventory.get_webhook(delivery.webhook_id).await? {
-            Some(w) => w,
-            None => {
+        let endpoint = match resolve_endpoint(inventory, &delivery).await {
+            Ok(Some(e)) => e,
+            Ok(None) => {
                 debug!(
                     delivery_id = delivery.id,
-                    webhook_id = delivery.webhook_id,
-                    "webhook gone; marking delivery failed"
+                    source = ?delivery.source,
+                    "endpoint gone; marking delivery failed"
                 );
                 let now = Utc::now();
                 let _ = inventory
-                    .mark_delivery_failed(delivery.id, now, delivery.attempts, "webhook deleted")
+                    .mark_delivery_failed(
+                        delivery.id,
+                        now,
+                        delivery.attempts,
+                        "endpoint resolution failed",
+                    )
                     .await;
                 continue;
             }
+            Err(e) => {
+                warn!(delivery_id = delivery.id, error = %e, "endpoint resolution errored");
+                continue;
+            }
         };
-        if let Err(e) = dispatch_one(inventory, http, &webhook, &delivery).await {
+        if let Err(e) = dispatch_one(inventory, http, &endpoint, &delivery).await {
             warn!(
                 delivery_id = delivery.id,
                 error = %e,
@@ -61,20 +76,56 @@ pub async fn tick_once(inventory: &Inventory, http: &Client, batch: i64) -> anyh
     Ok(())
 }
 
+/// Resolve a delivery row's destination URL+secret. For `Webhook` source we
+/// look up the parent `webhooks` row (cheap re-SELECT each tick: keeps the
+/// URL/secret current if the operator edits mid-flight). For `Lifecycle` /
+/// `Gate` rows the values come from the row itself.
+async fn resolve_endpoint(
+    inventory: &Inventory,
+    delivery: &WebhookDelivery,
+) -> anyhow::Result<Option<Endpoint>> {
+    match delivery.source {
+        DeliverySource::Webhook => {
+            let Some(id) = delivery.webhook_id else {
+                return Ok(None);
+            };
+            match inventory.get_webhook(id).await? {
+                Some(w) => Ok(Some(Endpoint {
+                    url: w.url,
+                    secret: w.secret,
+                })),
+                None => Ok(None),
+            }
+        }
+        DeliverySource::Lifecycle | DeliverySource::Gate => {
+            let url = match delivery.url.clone() {
+                Some(u) if !u.is_empty() => u,
+                _ => return Ok(None),
+            };
+            // Lifecycle hooks may run unsigned (no per-container secret
+            // configured): fall back to an empty key. Receivers that don't
+            // care about signing can ignore the header; receivers that do
+            // can still verify because the empty-key signature is well-defined.
+            let secret = delivery.secret.clone().unwrap_or_default();
+            Ok(Some(Endpoint { url, secret }))
+        }
+    }
+}
+
 /// Dispatch one delivery. Updates the row's status based on the outcome.
 pub async fn dispatch_one(
     inventory: &Inventory,
     http: &Client,
-    webhook: &Webhook,
+    endpoint: &Endpoint,
     delivery: &WebhookDelivery,
 ) -> anyhow::Result<()> {
     let body = delivery.payload_json.clone();
-    let signature = compute_signature(webhook.secret.as_bytes(), body.as_bytes());
+    let signature = compute_signature(endpoint.secret.as_bytes(), body.as_bytes());
     let attempts = delivery.attempts + 1;
     let now = Utc::now();
 
     let resp = http
-        .post(&webhook.url)
+        .post(&endpoint.url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(SIGNATURE_HEADER, &signature)
         .body(body)

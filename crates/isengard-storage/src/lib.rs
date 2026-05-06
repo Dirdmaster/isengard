@@ -8,6 +8,7 @@ pub mod adapter_config;
 pub mod agent_cert;
 pub mod approval_store;
 pub mod ca;
+pub mod container_hooks;
 pub mod deployment;
 pub mod enrollment_token;
 pub mod error;
@@ -50,7 +51,8 @@ pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
+pub use container_hooks::{ContainerHooks, UpsertContainerHooks};
 pub use webhook::{
-    DeliveryStatus, InsertDelivery, InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook,
-    WebhookDelivery, kind_matches,
+    DeliverySource, DeliveryStatus, InsertDelivery, InsertGateDelivery, InsertLifecycleDelivery,
+    InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook, WebhookDelivery, kind_matches,
 };
