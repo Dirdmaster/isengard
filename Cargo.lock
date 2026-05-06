@@ -1992,6 +1992,7 @@ dependencies = [
  "isengard-plugin-networking-tailscale",
  "isengard-plugin-notifier",
  "isengard-plugin-updater",
+ "isengard-plugin-webhooks",
  "isengard-storage",
  "predicates",
  "serde_json",
@@ -2193,6 +2194,29 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "isengard-plugin-webhooks"
+version = "0.1.0-alpha"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "hex",
+ "hmac",
+ "inventory",
+ "isengard-controller",
+ "isengard-core",
+ "isengard-storage",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tokio",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]
