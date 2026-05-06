@@ -13,7 +13,7 @@ pub mod enrollment;
 pub mod policies;
 pub mod routing;
 pub mod webhooks;
-mod ws;
+pub mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -88,7 +88,10 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
     if let Some(h) = handles {
         let ws_router = Router::new()
             .route("/ws/events", get(ws::ws_handler))
-            .route("/api/v1/services/{id}/logs", get(ws::handle_logs))
+            .route(
+                "/api/v1/services/{stack_id}/{service_name}/logs/ws",
+                get(ws::handle_service_logs),
+            )
             .with_state(h.clone());
 
         let install_router = Router::new()
