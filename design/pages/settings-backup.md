@@ -1,10 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: phase-11-pending
-status_note: "Backup & Restore is Phase 11"
+status: shipped
+status_note: "Phase 11A delivered the backup foundation: snapshot, age encrypt, S3/local upload, runs history, REST + UI. Restore lands in 11B."
 created: 2026-05-03
-updated: 2026-05-05
+updated: 2026-05-06
 tags:
   - design
   - page
@@ -12,7 +12,25 @@ tags:
   - backup
 ---
 
-# Settings · Backup
+# Settings, Backup
+
+## Implementation status (2026-05-06, Phase 11A)
+
+Shipped:
+- Snapshot mechanism (PRAGMA wal_checkpoint(TRUNCATE) + IMMEDIATE-tx + std::fs::copy).
+- Encryption: age passphrase via the `age` crate, fingerprint persisted (SHA-256 prefix), passphrase via env var.
+- Destinations: LocalDestination (filesystem) and S3Destination (reqwest + hand-rolled SigV4). Tested wiremock-side for PUT/GET/LIST/DELETE.
+- Interval scheduler (default daily). Re-reads config on every cycle so the enabled toggle is hot-pluggable.
+- Retention: LRU keep-N (default 14). Pruned after every successful upload, best effort.
+- REST: GET/PUT /api/v1/backup/config, POST /api/v1/backup/run-now, GET /api/v1/backup/runs.
+- UI: Settings, Backup tab + 3-step setup modal (destination, passphrase, schedule) + status panel + runs table + Run-now button.
+
+Deferred to 11B+:
+- Restore flow (download + decrypt + atomic swap + migrations).
+- age X25519 keypair recipients (passphrase-only for now).
+- Grandfather-father-son retention matrix (flat keep-N for now).
+- Bucket-root manifest.json (LIST works directly off prefix listing).
+- Provider presets beyond R2 / Custom in the modal (B2, AWS, Wasabi, MinIO all already work via the generic S3 endpoint config).
 
 Configuration + status + restore for the controller's SQLite snapshot pipeline.
 
