@@ -14,7 +14,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    FailureHandling, MaintenanceWindow, Policy, PolicyScopeType, UpdateGate, UpdateStrategy,
+    ExternalGate, FailureHandling, MaintenanceWindow, Policy, PolicyScopeType, UpdateGate,
+    UpdateStrategy,
     defaults::{DEFAULT_GATE, DEFAULT_ON_FAILURE, DEFAULT_STRATEGY},
 };
 
@@ -68,6 +69,8 @@ pub struct ResolvedProvenance {
     pub on_failure: PolicyOrigin,
     pub approver_channel: PolicyOrigin,
     pub window: PolicyOrigin,
+    /// Phase 12c: where the resolved `external_gate` came from.
+    pub external_gate: PolicyOrigin,
 }
 
 impl Default for ResolvedProvenance {
@@ -79,13 +82,14 @@ impl Default for ResolvedProvenance {
             on_failure: PolicyOrigin::Default,
             approver_channel: PolicyOrigin::Default,
             window: PolicyOrigin::Default,
+            external_gate: PolicyOrigin::Default,
         }
     }
 }
 
 /// The fully resolved policy for a target. Every field has a concrete value
 /// (or `None` for the genuinely optional fields, `paused_until`,
-/// `approver_channel`, and `window`) and a recorded origin.
+/// `approver_channel`, `window`, and `external_gate`) and a recorded origin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPolicy {
     pub strategy: UpdateStrategy,
@@ -95,6 +99,9 @@ pub struct ResolvedPolicy {
     pub approver_channel: Option<String>,
     /// Phase 9d: maintenance window. `None` means "no window constraint".
     pub window: Option<MaintenanceWindow>,
+    /// Phase 12c: external-action gate. `None` means "no gate"; the
+    /// updater proceeds to the existing decision logic.
+    pub external_gate: Option<ExternalGate>,
     pub provenance: ResolvedProvenance,
 }
 
@@ -141,6 +148,7 @@ pub fn resolve_policy(
     let mut on_failure: Option<FailureHandling> = None;
     let mut approver_channel: Option<String> = None;
     let mut window: Option<MaintenanceWindow> = None;
+    let mut external_gate: Option<ExternalGate> = None;
 
     let mut prov = ResolvedProvenance::default();
 
@@ -170,6 +178,10 @@ pub fn resolve_policy(
             window = Some(v.clone());
             prov.window = origin;
         }
+        if let Some(v) = &body.external_gate {
+            external_gate = Some(v.clone());
+            prov.external_gate = origin;
+        }
     }
 
     ResolvedPolicy {
@@ -179,6 +191,7 @@ pub fn resolve_policy(
         on_failure: on_failure.unwrap_or(DEFAULT_ON_FAILURE),
         approver_channel,
         window,
+        external_gate,
         provenance: prov,
     }
 }
