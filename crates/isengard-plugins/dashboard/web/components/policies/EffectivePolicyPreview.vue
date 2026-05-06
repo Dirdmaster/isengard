@@ -126,6 +126,14 @@ const rows = computed<Row[]>(() => {
       origin: r.provenance.approver_channel,
       empty: !r.approver_channel,
     },
+    {
+      field: 'window',
+      value: r.window
+        ? `${r.window.cron_expr} (${r.window.timezone ?? 'UTC'})`
+        : '-',
+      origin: r.provenance.window,
+      empty: !r.window,
+    },
   ]
 })
 </script>

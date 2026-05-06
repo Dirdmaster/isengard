@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import {
   scopeKeyForUrl,
   type FailureHandling,
+  type MaintenanceWindow,
   type PolicyBody,
   type PolicyDto,
   type PolicyScopeType,
@@ -15,6 +16,17 @@ import {
   type ResolvedPolicy,
 } from '~/composables/useEffectivePolicy'
 import { useToast } from '~/composables/useToast'
+import { formatFiring, nextFirings } from '~/lib/cron-preview'
+
+/** Shipped tz options for the window picker. `custom` reveals a free-form input. */
+const WINDOW_TIMEZONES = [
+  'UTC',
+  'Europe/Zurich',
+  'America/New_York',
+  'Asia/Tokyo',
+  'custom',
+] as const
+type WindowTzChoice = typeof WINDOW_TIMEZONES[number]
 
 /**
  * PolicyEditor: fields-with-inheritance form. T6 Phase 9a-9d.
@@ -219,6 +231,44 @@ const valueApproverChannel = ref<string>(
   props.existing?.body.approver_channel ?? '',
 )
 
+// ---- Window state ----------------------------------------------------------
+
+const overrideWindow = ref<boolean>(props.existing?.body.window != null)
+const valueWindowCron = ref<string>(props.existing?.body.window?.cron_expr ?? '0 2 * * 0')
+const initialTz = props.existing?.body.window?.timezone ?? ''
+const valueWindowTzChoice = ref<WindowTzChoice>(
+  initialTz === ''
+    ? 'UTC'
+    : (WINDOW_TIMEZONES.includes(initialTz as WindowTzChoice)
+      ? (initialTz as WindowTzChoice)
+      : 'custom'),
+)
+const valueWindowTzCustom = ref<string>(
+  initialTz && !WINDOW_TIMEZONES.includes(initialTz as WindowTzChoice) ? initialTz : '',
+)
+
+const resolvedWindowTz = computed<string>(() => {
+  if (valueWindowTzChoice.value === 'custom') {
+    return valueWindowTzCustom.value.trim() || 'UTC'
+  }
+  return valueWindowTzChoice.value
+})
+
+const windowPreview = computed<string[]>(() => {
+  if (!overrideWindow.value) return []
+  const expr = valueWindowCron.value.trim()
+  if (!expr) return []
+  const firings = nextFirings(expr, resolvedWindowTz.value, new Date(), 3)
+  if (firings.length === 0) return []
+  return firings.map(d => formatFiring(d, resolvedWindowTz.value))
+})
+
+const windowPreviewIsInvalid = computed<boolean>(() =>
+  overrideWindow.value
+    && valueWindowCron.value.trim() !== ''
+    && windowPreview.value.length === 0,
+)
+
 // ---- Inheritance helpers ---------------------------------------------------
 
 function inheritedStrategy(): string {
@@ -235,6 +285,12 @@ function inheritedOnFailure(): string {
 }
 function inheritedApproverChannel(): string {
   return effective.value?.approver_channel ?? '-'
+}
+function inheritedWindow(): string {
+  const w = effective.value?.window
+  if (!w) return '-'
+  const tz = w.timezone ?? 'UTC'
+  return `${w.cron_expr} (${tz})`
 }
 
 function provenanceFor(field: keyof NonNullable<ResolvedPolicy['provenance']>): string {
@@ -289,13 +345,23 @@ const hasAnyOverride = computed<boolean>(() =>
     || overrideGate.value
     || overridePausedUntil.value
     || overrideOnFailure.value
-    || overrideApproverChannel.value,
+    || overrideApproverChannel.value
+    || overrideWindow.value,
 )
 
 const canSave = computed<boolean>(() => {
   if (saving.value) return false
   if (!hasAnyOverride.value) return false
   if (scopeKeyValidationError.value) return false
+  // Block save when the operator has activated the window override but the
+  // cron is unparseable. The server's croner-backed validator may still
+  // accept patterns our tiny client parser rejects, so we only block when
+  // both a value is set AND the parser cannot make sense of it; an empty
+  // value is already covered by the empty-cron guard in buildBody.
+  if (overrideWindow.value && valueWindowCron.value.trim() !== '' && windowPreviewIsInvalid.value) {
+    // We allow save anyway: server has the authoritative parser. UI only
+    // hints at the issue. Keep this branch for future tightening.
+  }
   return true
 })
 
@@ -311,6 +377,17 @@ function buildBody(): PolicyBody {
   if (overrideApproverChannel.value) {
     const trimmed = valueApproverChannel.value.trim()
     if (trimmed !== '') body.approver_channel = trimmed
+  }
+  if (overrideWindow.value) {
+    const cron = valueWindowCron.value.trim()
+    if (cron !== '') {
+      const w: MaintenanceWindow = { cron_expr: cron }
+      const tz = resolvedWindowTz.value
+      // Skip the timezone field for the implicit-UTC default to keep the
+      // payload tidy; the server treats missing tz as UTC.
+      if (tz !== 'UTC') w.timezone = tz
+      body.window = w
+    }
   }
   return body
 }
@@ -614,6 +691,84 @@ const scopeLabel = computed<string>(() => {
         class="text-[10px] text-iso-text-muted"
       >
         Wall-clock time in your browser's timezone; stored as UTC.
+      </p>
+    </div>
+
+    <!-- Field: window (Phase 9d) ------------------------------------------ -->
+    <div class="flex flex-col gap-1.5">
+      <div class="flex items-center justify-between">
+        <Label
+          for="window_cron"
+          class="text-[11px] uppercase tracking-wider text-iso-text-secondary"
+        >
+          Maintenance window
+        </Label>
+        <label class="flex items-center gap-1.5 text-[11px] text-iso-text-muted cursor-pointer">
+          <input
+            v-model="overrideWindow"
+            type="checkbox"
+            class="accent-iso-info"
+          />
+          Override at this level
+        </label>
+      </div>
+      <div
+        class="flex flex-col gap-2 px-2 py-2 rounded-iso-sm border border-iso-border-subtle bg-iso-bg-elevated"
+        :class="overrideWindow ? '' : 'opacity-60'"
+      >
+        <Input
+          id="window_cron"
+          v-model="valueWindowCron"
+          placeholder="0 2 * * 0"
+          :disabled="!overrideWindow"
+          class="font-mono bg-iso-bg-base border-iso-border-subtle text-sm"
+        />
+        <p class="text-[10px] text-iso-text-muted">
+          Use cron syntax: minute hour day-of-month month day-of-week
+        </p>
+        <div class="flex items-center gap-2">
+          <select
+            v-model="valueWindowTzChoice"
+            :disabled="!overrideWindow"
+            class="font-mono text-xs bg-iso-bg-base border border-iso-border-subtle rounded-iso-sm px-2 py-1 text-iso-text-primary disabled:opacity-50"
+          >
+            <option v-for="tz in WINDOW_TIMEZONES" :key="tz" :value="tz">{{ tz }}</option>
+          </select>
+          <Input
+            v-if="valueWindowTzChoice === 'custom'"
+            v-model="valueWindowTzCustom"
+            placeholder="e.g. America/Los_Angeles"
+            :disabled="!overrideWindow"
+            class="font-mono bg-iso-bg-base border-iso-border-subtle text-xs"
+          />
+        </div>
+        <div v-if="overrideWindow" class="flex flex-col gap-0.5">
+          <p
+            v-if="windowPreview.length > 0"
+            class="text-[10px] text-iso-text-muted"
+          >
+            Next 3 firings: {{ windowPreview.join(' / ') }}
+          </p>
+          <p
+            v-else-if="windowPreviewIsInvalid"
+            class="text-[10px] text-iso-error"
+          >
+            (invalid expression)
+          </p>
+        </div>
+      </div>
+      <p
+        v-if="!overrideWindow"
+        class="text-[10px] text-iso-text-muted"
+      >
+        Currently: <span class="font-mono">{{ inheritedWindow() }}</span>
+        ({{ provenanceFor('window') }})
+      </p>
+      <p
+        v-else
+        class="text-[10px] text-iso-text-muted"
+      >
+        Outside this window updates emit update.deferred and skip recreation.
       </p>
     </div>
 

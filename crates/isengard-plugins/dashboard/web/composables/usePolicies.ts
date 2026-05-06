@@ -13,12 +13,23 @@ export type UpdateStrategy = 'pinned' | 'tag-only' | 'minor' | 'any'
 export type UpdateGate = 'auto' | 'approval' | 'never'
 export type FailureHandling = 'rollback' | 'keep' | 'notify'
 
+/**
+ * Mirror of `crates/isengard-core/src/policy/mod.rs::MaintenanceWindow`.
+ * Phase 9d. `timezone` is optional; `null` / missing resolves to UTC at the
+ * controller. Standard 5-field cron syntax (`min hour dom mon dow`).
+ */
+export interface MaintenanceWindow {
+  cron_expr: string
+  timezone?: string
+}
+
 export interface PolicyBody {
   strategy?: UpdateStrategy
   gate?: UpdateGate
   paused_until?: string
   on_failure?: FailureHandling
   approver_channel?: string
+  window?: MaintenanceWindow
 }
 
 export interface PolicyDto {

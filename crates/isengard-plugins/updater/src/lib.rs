@@ -248,12 +248,8 @@ async fn do_cycle(
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_else(|| "unknown".to_string());
                 info!(container = %name, next_window = %when_str, "policy deferred (outside window)");
-                let event = build_deferred_event(
-                    &owned_ctx,
-                    &name,
-                    host_id_hex.as_deref(),
-                    next_window,
-                );
+                let event =
+                    build_deferred_event(&owned_ctx, &name, host_id_hex.as_deref(), next_window);
                 deferred += 1;
                 emit(emitter, event).await;
                 continue;

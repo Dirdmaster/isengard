@@ -124,7 +124,7 @@ Add a Window field section between `paused_until` and `on_failure`:
 - Override checkbox.
 - Cron expression `<input>` with helper line "Use cron syntax: minute hour day-of-month month day-of-week".
 - Timezone `<select>` with common entries (`UTC`, `Europe/Zurich`, `America/New_York`, `Asia/Tokyo`, `custom`). When `custom` is picked, render a free-form text input next to it.
-- Live "Next 3 firings" preview computed client-side via the npm `cronstrue`-free helper using a tiny inline parser (see implementation note below) — if the parser fails, show "(invalid expression)".
+- Live "Next 3 firings" preview computed client-side via the npm `cronstrue`-free helper using a tiny inline parser (see implementation note below). If the parser fails, show "(invalid expression)".
 - Provenance label when not overridden: "Currently: <expr> (<tz>) (inherited from STACK)".
 
 ### `<PolicyRow />`

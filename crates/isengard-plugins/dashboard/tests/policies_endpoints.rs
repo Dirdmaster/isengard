@@ -324,10 +324,7 @@ async fn post_with_malformed_window_cron_returns_400() {
             "window": { "cron_expr": "this is not a cron" }
         }
     });
-    let resp = app
-        .oneshot(post_json("/policies", body))
-        .await
-        .unwrap();
+    let resp = app.oneshot(post_json("/policies", body)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = body_json(resp).await;
     let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
@@ -392,6 +389,9 @@ async fn put_with_malformed_window_cron_returns_400() {
             "window": { "cron_expr": "garbage", "timezone": "UTC" }
         }
     });
-    let resp = app.oneshot(put_json("/policies/fleet/prod", body)).await.unwrap();
+    let resp = app
+        .oneshot(put_json("/policies/fleet/prod", body))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

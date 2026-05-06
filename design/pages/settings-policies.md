@@ -2,7 +2,7 @@
 type: design
 kind: page-spec
 status: shipped
-status_note: "Phases 9a-9d, 9e-9f, 9b.1 all shipped: storage, resolver, updater, REST, settings UI, preview, approval gate + Telegram callbacks, container-label discovery"
+status_note: "Phases 9a-9d, 9e-9f, 9b.1, 9c, 9d (windows) all shipped: storage, resolver, updater, REST, settings UI, preview, approval gate + Telegram + Discord callbacks, container-label discovery, maintenance windows"
 created: 2026-05-03
 updated: 2026-05-06
 tags:
@@ -36,8 +36,8 @@ Source design: [[Update Policies & Approval Flow]] (full schema, layering, edge 
     file. Cleanup is event-driven (on `ContainerLabelsRemoved`) plus a 1h
     reaper that drops container-scope rows whose `updated_at` is older
     than 24h.
+  - **Phase 9d**: maintenance windows. `MaintenanceWindow { cron_expr, timezone }` field on Policy + ResolvedPolicy. Updater emits `update.deferred(next_window)` outside the window. PolicyEditor gains a window picker (cron + tz dropdown + custom tz + live "Next 3 firings" preview). PolicyRow renders the window summary line. EffectivePolicyPreview includes the window row with provenance. REST validates the cron expression at write time.
 - Deferred:
-  - Maintenance windows (`window` field semantics) (Phase 9h)
   - `Minor` strategy semver-aware bumping (Phase 9i)
   - Rollback failure handler (Phase 9j; couples with Phase 10 deploy story)
   - Discord interactive messages (Phase 9g; same pattern as Telegram)
@@ -82,6 +82,8 @@ Each field is one of: `strategy`, `gate`, `window`, `paused_until`, `on_failure`
 - Inherited value shown as placeholder + provenance label ("inherited from FLEET · prod")
 - Checkbox "Override at this level" enables the input
 - Clearing the override returns to inherited
+
+The `window` field uses standard 5-field cron syntax + an IANA timezone dropdown (UTC, Europe/Zurich, America/New_York, Asia/Tokyo, custom). When overridden, the editor renders a "Next 3 firings" preview computed client-side via a small bounded walker. Outside the window, the updater emits `update.deferred(next_window)` and skips recreate. Default window duration after a firing: 1h.
 
 ## Open questions
 
