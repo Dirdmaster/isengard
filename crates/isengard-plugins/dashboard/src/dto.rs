@@ -155,6 +155,9 @@ pub struct EventsQuery {
     pub limit: Option<i64>,
     pub kind: Option<String>,
     pub host_id: Option<String>,
+    /// Phase 10c (T4 refs #50): filter events whose `metadata.deployment.id`
+    /// matches this id. Used by the History tab row-expand timeline.
+    pub deployment_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

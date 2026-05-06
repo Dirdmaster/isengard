@@ -22,6 +22,10 @@ pub struct ListQuery {
     /// `"active"` (default) or `"history"`.
     pub state: Option<String>,
     pub limit: Option<u32>,
+    /// Phase 10c (T3 refs #50): when set, returns deployments belonging to
+    /// the given group. Mutually exclusive with `stack_id` (group filter
+    /// wins).
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +124,19 @@ async fn list_deployments(
     let limit = q.limit.unwrap_or(50).min(200);
     let state_filter = q.state.as_deref().unwrap_or("active");
 
+    // Phase 10c: group_id filter takes precedence. When supplied, return every
+    // deployment belonging to the group regardless of state: callers (the
+    // group panel UI) want the full picture.
+    if let Some(gid) = q.group_id.as_deref() {
+        let deps = handles
+            .inventory
+            .list_deployments_by_group(gid)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+        let dtos: Vec<DeploymentDto> = deps.into_iter().map(DeploymentDto::from).collect();
+        return Ok(Json(dtos));
+    }
+
     let deps = match (q.stack_id, state_filter) {
         (Some(sid), "active") => {
             // `list_deployments_by_stack` returns the most recent rows for
@@ -160,7 +177,7 @@ async fn list_deployments(
     Ok(Json(deps.into_iter().map(DeploymentDto::from).collect()))
 }
 
-/// `POST /deployments/:id/abort` — request that the agent abort an
+/// `POST /deployments/:id/abort`: request that the agent abort an
 /// in-flight deployment.
 ///
 /// Returns `202 Accepted` with `{ noop: false }` once the
@@ -225,7 +242,7 @@ async fn abort_deployment(
     ))
 }
 
-/// `GET /services/deploy-strategy` — list every service with its current
+/// `GET /services/deploy-strategy`: list every service with its current
 /// per-service strategy override (or `None` when following the default).
 async fn list_service_strategies(
     State(handles): State<Arc<ControllerHandles>>,
@@ -260,7 +277,7 @@ async fn list_service_strategies(
     Ok(Json(dtos))
 }
 
-/// `PUT /services/{id}/deploy-strategy` — set or clear the per-service
+/// `PUT /services/{id}/deploy-strategy`: set or clear the per-service
 /// strategy override. `"auto"` (or `null`) clears; `"blue-green"` and
 /// `"in-place"` are the only other accepted values.
 async fn put_service_strategy(
