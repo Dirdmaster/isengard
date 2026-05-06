@@ -18,6 +18,7 @@ use crate::bus::EventBus;
 use crate::ca::Authority;
 use crate::enrollment::{EnrollmentService, HostInfo};
 use crate::hook_ingest::HookLabelIngest;
+use crate::log_fanout::LogFanout;
 use crate::policy_ingest::PolicyLabelIngest;
 use crate::revocation::RevocationSet;
 use crate::routing::RoutingPusher;
@@ -40,6 +41,10 @@ pub struct ControllerService {
     /// RPC. Carried on the service so future handlers (e.g. an admin RPC for
     /// `revoke_agent`) can mutate it without re-fetching from inventory.
     pub revocation: RevocationSet,
+    /// Phase 13B: log subscription registry. Inbound `AgentMessage::LogChunk`
+    /// frames on the Sync stream are routed through this fanout to the
+    /// dashboard's WebSocket tasks.
+    pub log_fanout: Arc<LogFanout>,
 }
 
 impl ControllerService {
@@ -54,6 +59,7 @@ impl ControllerService {
         ca: Arc<Authority>,
         enrollment: Arc<EnrollmentService>,
         revocation: RevocationSet,
+        log_fanout: Arc<LogFanout>,
     ) -> Self {
         Self {
             inventory,
@@ -65,6 +71,7 @@ impl ControllerService {
             ca,
             enrollment,
             revocation,
+            log_fanout,
         }
     }
 
@@ -87,6 +94,7 @@ impl ControllerService {
         let routing = Arc::new(RoutingPusher::new(inventory.clone()));
         let policy_ingest = Arc::new(PolicyLabelIngest::new(inventory.clone()));
         let hook_ingest = Arc::new(HookLabelIngest::new(inventory.clone()));
+        let log_fanout = LogFanout::new();
         Self {
             inventory,
             journal,
@@ -97,6 +105,7 @@ impl ControllerService {
             ca,
             enrollment,
             revocation,
+            log_fanout,
         }
     }
 }
@@ -256,6 +265,7 @@ impl Controller for ControllerService {
         let routing = self.routing.clone();
         let policy_ingest = self.policy_ingest.clone();
         let hook_ingest = self.hook_ingest.clone();
+        let log_fanout = self.log_fanout.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -384,6 +394,14 @@ impl Controller for ControllerService {
                                 "labels: push_to_host after ingest failed",
                             );
                         }
+                    }
+                    Some(isengard_proto::pb::agent_message::Payload::LogChunk(chunk)) => {
+                        // Phase 13B: route the chunk to the matching
+                        // dashboard subscription. Dropped chunks are
+                        // surfaced as `dropped` frames on the WebSocket;
+                        // unknown subscriptions are simply dropped (the
+                        // client already disconnected).
+                        let _ = log_fanout.route(chunk).await;
                     }
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(
                         ev,

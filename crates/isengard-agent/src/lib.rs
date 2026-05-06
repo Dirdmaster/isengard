@@ -10,6 +10,7 @@ pub mod deployment;
 pub mod enroll;
 pub mod events;
 pub mod labels;
+pub mod logs;
 pub mod proxy;
 pub mod sync;
 pub mod tls;
@@ -375,12 +376,21 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
 
+    // Phase 13B: optional log source for `StartLogStream` subscriptions.
+    // Same `docker` handle as the labels watcher and the deployment driver;
+    // tests / docker-less envs skip log streaming the same way they skip
+    // those subsystems.
+    let log_source = docker
+        .as_ref()
+        .map(|d| Arc::new(crate::logs::BollardLogSource { docker: d.clone() }));
+
     // The sync loop borrows `events_rx` for its lifetime — own it here.
     let sync_endpoint = endpoint.clone();
     let sync_agent_id = agent_id.clone();
     let sync_cancel = cancel.clone();
     let sync_proxy_state = proxy_state.clone();
     let sync_supervisor = supervisor_for_sync.clone();
+    let sync_log_source = log_source.clone();
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_endpoint,
@@ -391,6 +401,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             &mut agent_msg_rx,
             sync_proxy_state,
             sync_supervisor,
+            sync_log_source,
         )
         .await
     };

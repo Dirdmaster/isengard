@@ -103,6 +103,7 @@ async fn deployment_event_upserts_into_inventory() {
         metadata_json: None,
         created_at: now,
         updated_at: now,
+        group_id: None,
     };
 
     let mut metadata = serde_json::Map::new();

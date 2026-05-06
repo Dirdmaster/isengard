@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import EmptyState from '~/components/EmptyState.vue'
 import EventRow from '~/components/EventRow.vue'
 import KvRow from '~/components/KvRow.vue'
+import LogsPanel from '~/components/LogsPanel.vue'
 import StatusPill from '~/components/StatusPill.vue'
 import EffectivePolicyPreview from '~/components/policies/EffectivePolicyPreview.vue'
 import TopBar from '~/components/TopBar.vue'
@@ -262,31 +263,13 @@ function formatTime(iso: string | null): string {
 
         <!-- RIGHT COLUMN: logs placeholder + routing + events + other instances -->
         <div class="flex flex-col gap-4">
-          <!-- Logs placeholder -->
-          <section
-            class="rounded-iso-lg border-2 border-dashed border-iso-border-subtle bg-iso-bg-elevated p-6 flex flex-col items-start gap-2"
-          >
-            <div class="flex items-center gap-2">
-              <Icon name="lucide:terminal" class="w-4 h-4 text-iso-text-muted" />
-              <span class="text-sm font-semibold text-iso-text-primary">
-                Logs
-              </span>
-            </div>
-            <p class="text-sm text-iso-text-muted leading-relaxed">
-              Logs streaming arrives in Phase 13B. The agent will tail
-              <code class="font-mono text-iso-text-secondary">docker logs</code>
-              and forward batches over the existing gRPC sync stream; the
-              dashboard subscribes via WebSocket for the lifetime of this page.
-            </p>
-            <a
-              href="https://github.com/Dirdmaster/isengard/issues/57"
-              target="_blank"
-              rel="noopener"
-              class="text-[11px] text-iso-info underline"
-            >
-              Track progress on issue #57
-            </a>
-          </section>
+          <!-- Live logs panel (Phase 13B). Mounts a WebSocket against
+               /api/v1/services/:stack_id/:service_name/logs/ws and renders
+               backfill + live tail with pause/resume + filter + per-host tabs. -->
+          <LogsPanel
+            :stack-id="stackId"
+            :service-name="serviceName"
+          />
 
           <!-- Routing rules -->
           <section class="rounded-iso-lg border border-iso-border-subtle bg-iso-bg-elevated overflow-hidden">

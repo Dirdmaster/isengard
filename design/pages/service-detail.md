@@ -2,7 +2,7 @@
 type: design
 kind: page-spec
 status: partial
-status_note: "Phase 13A shipped: route, two-column layout, metadata, effective policy, last deployment, recent events, routing rules, multi-host other_instances list. Logs panel is a placeholder pointing at issue #57; logs streaming + restart/exec shell + per-host selector are still owed by 13B-13J."
+status_note: "Phase 13A + 13B shipped. 13A: route, two-column layout, metadata, effective policy, last deployment, recent events, routing rules, multi-host other_instances list. 13B: live logs streaming (WebSocket + agent bollard tail + multi-host fanout, pause/resume, host tabs, level + regex filter). Restart, Exec shell, per-host selector chip row, env vars / volumes / networks panels remain owed by 13C-13J."
 created: 2026-05-03
 updated: 2026-05-06
 tags:
@@ -14,8 +14,9 @@ tags:
 ## Implementation status (2026-05-06)
 
 - Shipped (13A): `/stacks/[id]/services/[name]` route, `<PageHeader>` with breadcrumb + Force update + Open routing actions, two-column `grid-cols-[1fr_2fr]` body, metadata card (image/state/host/last-seen/deploy override), `<EffectivePolicyPreview>`, last deployment summary, recent events list, routing rules table, other-instances per-host list. Stack overview rows now drill in via `<NuxtLink>`.
-- Deferred (13B+): live logs streaming (issue #57), Restart and Exec shell actions, per-host instance selector chip row, env vars / volumes / networks panels (require agent introspection plumbing), policy paused banner, deployment-in-progress card, ANSI / search / download log polish.
-- Drift: page does not yet ship a `<HostSelector />` chip row. Multi-host instances are shown as a compact per-host table at the bottom of the right column instead.
+- Shipped (13B): `<LogsPanel>` replaces the placeholder card. WebSocket endpoint `GET /api/v1/services/:stack_id/:service_name/logs/ws` opens an agent-side bollard `docker logs -f` tail per involved host (subscription_id-multiplexed over the existing Sync stream via new `StartLogStream` / `StopLogStream` ControllerMessages and a new `LogChunk` AgentMessage). Backfill, live tail, dropped-on-backpressure, unavailable-on-error, multi-host aggregation, host tabs, level + regex filter, pause/resume, last-N tail slider, hard-cap 5000 lines. 6 server-side integration tests + 4 agent unit tests + proto round-trips.
+- Deferred (13C+): Restart and Exec shell actions, per-host instance selector chip row, env vars / volumes / networks panels (require agent introspection plumbing), policy paused banner, deployment-in-progress card, ANSI / search / download log polish.
+- Drift: page does not yet ship a `<HostSelector />` chip row. Multi-host instances are shown as a compact per-host table at the bottom of the right column instead. The `<LogsPanel>` does ship per-host tabs internally so the chip row is not strictly needed for the logs use case.
 
 # Service detail
 
