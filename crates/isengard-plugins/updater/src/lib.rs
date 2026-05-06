@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod dispatch_helpers;
+pub mod gate;
 pub mod image_ref;
 pub mod labels;
 pub mod policy;
