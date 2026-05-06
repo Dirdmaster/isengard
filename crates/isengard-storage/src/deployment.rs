@@ -396,6 +396,43 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Link an existing deployment row to a group. Used by the controller
+    /// orchestrator after it has dispatched a wave of deployments and wants to
+    /// associate them with their parent group. Phase 10c.
+    pub async fn set_deployment_group(&self, deployment_id: &str, group_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE deployments SET group_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(group_id)
+        .bind(deployment_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// List every deployment that belongs to `group_id`, oldest first. Used by
+    /// the dashboard's group panel and by the orchestrator's wave-completion
+    /// check. Phase 10c.
+    pub async fn list_deployments_by_group(&self, group_id: &str) -> Result<Vec<Deployment>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, host_id, stack_id, service_name, strategy, state,
+                   blue_container, green_container, blue_digest, green_digest,
+                   public_hostname, health_path, container_port,
+                   healthcheck_started_at, healthcheck_passed_at, switched_at,
+                   drained_at, finished_at, error, metadata_json,
+                   created_at, updated_at
+            FROM deployments
+            WHERE group_id = ?
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(group_id)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter().map(row_to_deployment).collect()
+    }
+
     pub async fn mark_orphan_deployments_failed(
         &self,
         host_id: HostId,
