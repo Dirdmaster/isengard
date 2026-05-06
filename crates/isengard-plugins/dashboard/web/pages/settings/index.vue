@@ -31,6 +31,9 @@
           <div v-else-if="activeTab === 'webhooks'">
             <WebhooksSettings />
           </div>
+          <div v-else-if="activeTab === 'backup'">
+            <BackupSettings />
+          </div>
         </SettingsTabs>
       </div>
     </div>
@@ -46,5 +49,6 @@ const tabs = [
   { key: 'deployments', label: 'Deployments' },
   { key: 'notifier', label: 'Notifier' },
   { key: 'webhooks', label: 'Webhooks' },
+  { key: 'backup', label: 'Backup' },
 ]
 </script>

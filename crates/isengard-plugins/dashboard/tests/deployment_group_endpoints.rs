@@ -62,6 +62,7 @@ async fn setup_app() -> (Router, Router, Arc<Inventory>, HostId, StackId) {
         routing,
         enrollment,
         revocation,
+        db_path: std::path::PathBuf::from(":memory:"),
         log_fanout: isengard_controller::log_fanout::LogFanout::new(),
     });
 

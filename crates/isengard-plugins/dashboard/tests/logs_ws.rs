@@ -51,6 +51,7 @@ async fn make_handles() -> Arc<ControllerHandles> {
         routing,
         enrollment,
         revocation,
+        db_path: std::path::PathBuf::from(":memory:"),
         log_fanout: LogFanout::new(),
     })
 }

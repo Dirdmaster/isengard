@@ -39,6 +39,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         routing,
         enrollment,
         revocation,
+        db_path: std::path::PathBuf::from(":memory:"),
         log_fanout: isengard_controller::log_fanout::LogFanout::new(),
     });
     let app = policies::router(handles.clone());
