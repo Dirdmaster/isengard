@@ -686,6 +686,7 @@ mod tests {
             routing,
             enrollment,
             revocation,
+            db_path: std::path::PathBuf::from(":memory:"),
         })
     }
 

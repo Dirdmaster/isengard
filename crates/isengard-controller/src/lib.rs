@@ -50,6 +50,10 @@ pub struct ControllerHandles {
     /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
     /// `revoke_agent` (which both writes the DB row and updates this set).
     pub revocation: RevocationSet,
+    /// Phase 11a: on-disk path to the controller's SQLite file. Surfaced so
+    /// the backup plugin can open its own pool for WAL checkpoint + file
+    /// copy without needing a public `Inventory::pool()` getter.
+    pub db_path: std::path::PathBuf,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -155,6 +159,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         routing: routing.clone(),
         enrollment: enrollment.clone(),
         revocation: revocation.clone(),
+        db_path: db_path.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;

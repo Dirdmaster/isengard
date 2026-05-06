@@ -62,6 +62,7 @@ async fn setup_app() -> (axum::Router, Arc<Inventory>, HostId, StackId) {
         routing,
         enrollment,
         revocation,
+        db_path: std::path::PathBuf::from(":memory:"),
     });
 
     let app = deployments::router(handles);

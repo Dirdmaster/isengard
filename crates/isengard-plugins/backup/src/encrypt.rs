@@ -35,7 +35,10 @@ pub enum EncryptError {
 
 /// Encrypt `plaintext` with a passphrase. Output is the binary age format
 /// (no armor); store as `<name>.db.age` on the destination.
-pub fn encrypt_with_passphrase(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, EncryptError> {
+pub fn encrypt_with_passphrase(
+    plaintext: &[u8],
+    passphrase: &str,
+) -> Result<Vec<u8>, EncryptError> {
     if passphrase.is_empty() {
         return Err(EncryptError::EmptyPassphrase);
     }

@@ -39,6 +39,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         routing,
         enrollment,
         revocation,
+        db_path: std::path::PathBuf::from(":memory:"),
     });
     let app = policies::router(handles.clone());
     (app, handles)

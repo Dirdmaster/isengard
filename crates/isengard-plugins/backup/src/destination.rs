@@ -124,10 +124,7 @@ impl BackupDestination for LocalDestination {
             if !meta.is_file() {
                 continue;
             }
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
             out.push(RemoteObject {
                 name,
                 size: meta.len() as i64,
@@ -187,11 +184,7 @@ impl S3Destination {
 
     /// Path-style URL. R2, AWS S3, MinIO all accept `<endpoint>/<bucket>/<key>`.
     fn url_for_key(&self, key: &str) -> Result<reqwest::Url, DestinationError> {
-        let base = self
-            .cfg
-            .endpoint
-            .trim_end_matches('/')
-            .to_string();
+        let base = self.cfg.endpoint.trim_end_matches('/').to_string();
         let prefix = self.cfg.prefix.trim_matches('/');
         let key_part = if prefix.is_empty() {
             key.to_string()
