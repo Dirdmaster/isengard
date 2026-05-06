@@ -29,7 +29,7 @@ use axum::routing::{get, put};
 use chrono::{DateTime, Utc};
 use isengard_controller::ControllerHandles;
 use isengard_core::policy::{
-    Policy, PolicyContext, PolicyScopeType, ResolvedPolicy, resolve_policy,
+    Policy, PolicyContext, PolicyScopeType, ResolvedPolicy, parse_cron, resolve_policy,
 };
 use isengard_storage::policy::{InsertPolicy, PolicyRow};
 use serde::{Deserialize, Serialize};
@@ -127,12 +127,15 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 ///
 /// 1. `global` requires an empty `scope_key`; every other scope requires a
 ///    non-empty `scope_key`.
+/// 2. Phase 9d: when `body.window` is set, the cron expression must parse.
+///    Timezone parsing is intentionally lenient (warn-only on read; we
+///    don't reject custom values here) so operators can paste niche IANA
+///    names without an API roundtrip.
 fn validate_policy(
     scope_type: PolicyScopeType,
     scope_key: &str,
     body: &Policy,
 ) -> Result<(), Response> {
-    let _ = body;
     match scope_type {
         PolicyScopeType::Global if !scope_key.is_empty() => {
             return Err(err(
@@ -148,6 +151,15 @@ fn validate_policy(
             ));
         }
         _ => {}
+    }
+
+    if let Some(window) = &body.window {
+        if let Err(e) = parse_cron(&window.cron_expr) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid window cron: {e}"),
+            ));
+        }
     }
 
     Ok(())

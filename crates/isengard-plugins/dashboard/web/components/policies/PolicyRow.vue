@@ -158,6 +158,14 @@ const summary = computed<SummaryLine[]>(() => {
       override: true,
     })
   }
+  if (b.window) {
+    const tz = b.window.timezone ?? 'UTC'
+    out.push({
+      key: 'window',
+      text: `Window: ${b.window.cron_expr} (${tz})`,
+      override: true,
+    })
+  }
 
   if (out.length === 0) {
     out.push({

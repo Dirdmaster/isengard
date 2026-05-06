@@ -186,6 +186,7 @@ async fn do_cycle(
     let mut unknown = 0usize;
     let mut pinned = 0usize;
     let mut paused = 0usize;
+    let mut deferred = 0usize;
     let mut pending_approval = 0usize;
     let mut pending_approval_dedup = 0usize;
 
@@ -236,6 +237,20 @@ async fn do_cycle(
                         paused += 1;
                     }
                 }
+                emit(emitter, event).await;
+                continue;
+            }
+            // Phase 9d: outside the maintenance window. Emit
+            // `update.deferred` and skip recreation. The cycle moves on;
+            // no approval row is persisted.
+            crate::policy::PolicyDecision::Deferred { next_window } => {
+                let when_str = next_window
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".to_string());
+                info!(container = %name, next_window = %when_str, "policy deferred (outside window)");
+                let event =
+                    build_deferred_event(&owned_ctx, &name, host_id_hex.as_deref(), next_window);
+                deferred += 1;
                 emit(emitter, event).await;
                 continue;
             }
@@ -448,6 +463,7 @@ async fn do_cycle(
         unknown,
         pinned,
         paused,
+        deferred,
         pending_approval,
         pending_approval_dedup,
         "updater cycle complete"
@@ -459,13 +475,14 @@ async fn do_cycle(
             kind: isengard_core::event::kinds::UPDATE_CHECKED.into(),
             occurred_at: Utc::now(),
             summary: format!(
-                "cycle: candidates={} up_to_date={} needs_update={} unknown={} pinned={} paused={} pending_approval={} pending_approval_dedup={}",
+                "cycle: candidates={} up_to_date={} needs_update={} unknown={} pinned={} paused={} deferred={} pending_approval={} pending_approval_dedup={}",
                 candidates.len(),
                 up_to_date,
                 needs_update,
                 unknown,
                 pinned,
                 paused,
+                deferred,
                 pending_approval,
                 pending_approval_dedup,
             ),
@@ -476,6 +493,7 @@ async fn do_cycle(
                 "unknown": unknown,
                 "pinned": pinned,
                 "paused": paused,
+                "deferred": deferred,
                 "pending_approval": pending_approval,
                 "pending_approval_dedup": pending_approval_dedup,
             }),
@@ -653,6 +671,52 @@ fn build_policy_skipped_event(
     };
     Event {
         kind: isengard_core::event::kinds::UPDATE_POLICY_SKIPPED.into(),
+        occurred_at: Utc::now(),
+        summary,
+        container_name: Some(container_name.to_string()),
+        metadata: payload,
+        ..Default::default()
+    }
+}
+
+/// Construct the `update.deferred` event payload (Phase 9d):
+///
+/// ```json
+/// {
+///   "service": "...",
+///   "container": "...",
+///   "host_id": "...",
+///   "next_window": "<RFC3339 UTC, optional>"
+/// }
+/// ```
+///
+/// `next_window` is omitted from the JSON when the cron has no future
+/// occurrence (extremely rare; a malformed cron also lands here because
+/// `is_in_window` returns false on parse error).
+fn build_deferred_event(
+    ctx: &crate::policy::OwnedPolicyContext,
+    container_name: &str,
+    host_id_hex: Option<&str>,
+    next_window: Option<chrono::DateTime<Utc>>,
+) -> Event {
+    let service = ctx
+        .service
+        .clone()
+        .unwrap_or_else(|| container_name.to_string());
+    let mut payload = serde_json::json!({
+        "service": service,
+        "container": container_name,
+        "host_id": host_id_hex.unwrap_or(""),
+    });
+    if let Some(t) = next_window {
+        payload["next_window"] = serde_json::Value::String(t.to_rfc3339());
+    }
+    let summary = match next_window {
+        Some(t) => format!("deferred {service} (next window {})", t.to_rfc3339()),
+        None => format!("deferred {service} (next window unknown)"),
+    };
+    Event {
+        kind: isengard_core::event::kinds::UPDATE_DEFERRED.into(),
         occurred_at: Utc::now(),
         summary,
         container_name: Some(container_name.to_string()),
