@@ -14,10 +14,13 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 hex = "0.4"
+hmac = "0.12"
 inventory.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-storage.workspace = true
+quick-xml = { version = "0.36", features = ["serialize"] }
+reqwest.workspace = true
 secrecy = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -27,9 +30,11 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
+url = "2"
 
 [dev-dependencies]
 isengard-storage = { workspace = true }
 sqlx = { workspace = true }
 tempfile.workspace = true
 tokio = { workspace = true }
+wiremock.workspace = true

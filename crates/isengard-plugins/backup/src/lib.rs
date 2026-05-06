@@ -14,6 +14,7 @@ use isengard_core::{
 };
 use tracing::info;
 
+pub mod destination;
 pub mod encrypt;
 pub mod snapshot;
 

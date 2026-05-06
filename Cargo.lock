@@ -2343,10 +2343,13 @@ dependencies = [
  "async-trait",
  "chrono",
  "hex",
+ "hmac",
  "inventory",
  "isengard-controller",
  "isengard-core",
  "isengard-storage",
+ "quick-xml",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",
@@ -2356,6 +2359,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -3527,6 +3532,16 @@ name = "protobuf"
 version = "2.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+ "serde",
+]
 
 [[package]]
 name = "quinn"
