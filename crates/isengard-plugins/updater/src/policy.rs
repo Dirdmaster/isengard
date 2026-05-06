@@ -19,7 +19,8 @@
 use chrono::{DateTime, Utc};
 use isengard_core::approval_store::PendingApprovalBody;
 use isengard_core::policy::{
-    PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateGate, UpdateStrategy, resolve_policy,
+    PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateGate, UpdateStrategy, is_in_window,
+    next_window_after, resolve_policy,
 };
 use isengard_core::{HostId, LoadedPolicy};
 use std::collections::HashMap;
@@ -36,11 +37,18 @@ const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 /// Decision returned by [`policy_decision`]. Mirrors the cycle's branching:
 /// `Skip` short-circuits with a reason that is then translated into a
 /// `update.policy_skipped` event, `Proceed` falls through to the existing
-/// recreate path, and `PendingApproval` (Phase 9e) parks the candidate by
-/// persisting an approval row + emitting `update.pending_approval`.
+/// recreate path, `Deferred` (Phase 9d) emits `update.deferred` with the
+/// next firing time, and `PendingApproval` (Phase 9e) parks the candidate
+/// by persisting an approval row + emitting `update.pending_approval`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
     Skip(SkipReason),
+    /// Phase 9d: outside the resolved policy's maintenance window.
+    /// `next_window` is when the next firing is expected, in UTC. Used by
+    /// the cycle to populate the `update.deferred` event payload.
+    Deferred {
+        next_window: Option<DateTime<Utc>>,
+    },
     Proceed,
     /// `gate=Approval` resolved. The cycle persists this body via the
     /// `ApprovalStore` (idempotently) and emits `update.pending_approval`.
@@ -153,15 +161,20 @@ pub struct ApprovalContext<'a> {
     pub proposed_digest: &'a str,
 }
 
-/// Apply the Phase 9b skip rules + Phase 9e approval gate to a resolved
-/// policy.
+/// Apply the Phase 9b skip rules + Phase 9d window check + Phase 9e
+/// approval gate to a resolved policy.
 ///
-/// Three-stage logic:
+/// Order:
 ///
 /// 1. `strategy=Pinned` -> `Skip(Pinned)`.
 /// 2. `paused_until > now` -> `Skip(Paused { until })`.
-/// 3. `gate=Approval` AND `approval_ctx.is_some()` -> `PendingApproval(body)`.
-/// 4. Otherwise -> `Proceed`.
+/// 3. `window.is_some() && !is_in_window(now)` -> `Deferred { next_window }`.
+/// 4. `gate=Approval` AND `approval_ctx.is_some()` -> `PendingApproval(body)`.
+/// 5. Otherwise -> `Proceed`.
+///
+/// The window check runs after Pinned and paused so a pinned-AND-windowed
+/// service still emits `update.policy_skipped` (the more specific signal),
+/// matching the design's edge-case table.
 ///
 /// `approval_ctx` is `None` when the cycle is in its early skip phase
 /// (digests not yet fetched). The `gate=Approval` branch only triggers
@@ -169,8 +182,8 @@ pub struct ApprovalContext<'a> {
 /// to thread into the body. Calling with `None` and `gate=Approval`
 /// returns `Proceed` (the caller will re-invoke after the registry probe).
 ///
-/// `now` is supplied by the caller so tests can drive the paused_until edge
-/// without sleeping or freezing the clock.
+/// `now` is supplied by the caller so tests can drive the time-sensitive
+/// edges (paused_until, window) without sleeping or freezing the clock.
 pub fn decision_from_resolved(
     resolved: &ResolvedPolicy,
     ctx: &PolicyContext<'_>,
@@ -183,6 +196,13 @@ pub fn decision_from_resolved(
     if let Some(until) = resolved.paused_until {
         if until > now {
             return PolicyDecision::Skip(SkipReason::Paused { until });
+        }
+    }
+    if let Some(window) = &resolved.window {
+        if !is_in_window(window, now) {
+            return PolicyDecision::Deferred {
+                next_window: next_window_after(window, now),
+            };
         }
     }
     if resolved.gate == UpdateGate::Approval {
@@ -287,8 +307,8 @@ pub fn policy_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
-    use isengard_core::policy::{Policy, UpdateGate, UpdateStrategy};
+    use chrono::{Duration, TimeZone};
+    use isengard_core::policy::{MaintenanceWindow, Policy, UpdateGate, UpdateStrategy};
 
     fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -509,6 +529,105 @@ mod tests {
     #[test]
     fn ghcr_compare_url_returns_none_for_non_sha_digests() {
         assert!(ghcr_compare_url("ghcr.io/o/r", "md5:abc", "sha256:def").is_none());
+    }
+
+    /// Phase 9d: a window matching `now` lets the cycle proceed.
+    #[test]
+    fn window_in_window_proceeds() {
+        let policy = Policy {
+            window: Some(MaintenanceWindow {
+                cron_expr: "0 2 * * 0".to_string(),
+                timezone: None,
+            }),
+            ..Default::default()
+        };
+        let snapshot = vec![LoadedPolicy {
+            scope_type: PolicyScopeType::Global,
+            scope_key: String::new(),
+            body: policy,
+        }];
+        let owned = policy_context_from_container(None, None, None, "x");
+        // 2026-05-03 02:30 UTC is 30 min after the Sunday 02:00 firing.
+        let now = Utc.with_ymd_and_hms(2026, 5, 3, 2, 30, 0).unwrap();
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, now);
+        assert_eq!(dec, PolicyDecision::Proceed);
+    }
+
+    /// Phase 9d: a window not matching `now` returns Deferred with the
+    /// upcoming firing time as `next_window`.
+    #[test]
+    fn window_outside_window_returns_deferred() {
+        let policy = Policy {
+            window: Some(MaintenanceWindow {
+                cron_expr: "0 2 * * 0".to_string(),
+                timezone: None,
+            }),
+            ..Default::default()
+        };
+        let snapshot = vec![LoadedPolicy {
+            scope_type: PolicyScopeType::Global,
+            scope_key: String::new(),
+            body: policy,
+        }];
+        let owned = policy_context_from_container(None, None, None, "x");
+        // Tuesday 12:00 UTC: next firing is Sunday 02:00 UTC.
+        let now = Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap();
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, now);
+        match dec {
+            PolicyDecision::Deferred { next_window } => {
+                let next = next_window.expect("next_window populated");
+                assert_eq!(next, Utc.with_ymd_and_hms(2026, 5, 10, 2, 0, 0).unwrap());
+            }
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+    }
+
+    /// Phase 9d edge case: Pinned wins over an outside-window check. The
+    /// more specific signal (`Skip(Pinned)`) is what the cycle emits.
+    #[test]
+    fn window_pinned_wins_over_outside_window() {
+        let policy = Policy {
+            strategy: Some(UpdateStrategy::Pinned),
+            window: Some(MaintenanceWindow {
+                cron_expr: "0 2 * * 0".to_string(),
+                timezone: None,
+            }),
+            ..Default::default()
+        };
+        let snapshot = vec![LoadedPolicy {
+            scope_type: PolicyScopeType::Global,
+            scope_key: String::new(),
+            body: policy,
+        }];
+        let owned = policy_context_from_container(None, None, None, "x");
+        // Outside the Sunday 02:00 window.
+        let now = Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap();
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, now);
+        assert_eq!(dec, PolicyDecision::Skip(SkipReason::Pinned));
+    }
+
+    /// Phase 9d edge case: paused_until in the future wins over the window
+    /// check. Same precedence rule as Pinned.
+    #[test]
+    fn window_paused_wins_over_outside_window() {
+        let until = Utc.with_ymd_and_hms(2026, 5, 7, 0, 0, 0).unwrap();
+        let policy = Policy {
+            paused_until: Some(until),
+            window: Some(MaintenanceWindow {
+                cron_expr: "0 2 * * 0".to_string(),
+                timezone: None,
+            }),
+            ..Default::default()
+        };
+        let snapshot = vec![LoadedPolicy {
+            scope_type: PolicyScopeType::Global,
+            scope_key: String::new(),
+            body: policy,
+        }];
+        let owned = policy_context_from_container(None, None, None, "x");
+        let now = Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap();
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, now);
+        assert_eq!(dec, PolicyDecision::Skip(SkipReason::Paused { until }));
     }
 
     impl OwnedPolicyContext {
