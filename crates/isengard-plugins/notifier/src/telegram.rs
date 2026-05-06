@@ -250,6 +250,49 @@ impl TelegramChannel {
     }
 }
 
+/// Stateless helper: edit a previously-sent Telegram message text and drop
+/// the inline keyboard. Used by the dashboard's Telegram callback handler,
+/// which has only the bot token + chat_id + message_id (no full
+/// `TelegramChannel` instance).
+///
+/// `api_base` defaults to `https://api.telegram.org` when `None`. Tests
+/// override it to point at a `wiremock::MockServer`.
+pub async fn edit_telegram_message_text(
+    api_base: Option<&str>,
+    bot_token: &str,
+    chat_id: &str,
+    message_id: i64,
+    text: &str,
+) -> anyhow::Result<()> {
+    let base = api_base.unwrap_or(DEFAULT_API_BASE);
+    let url = format!("{base}/bot{bot_token}/editMessageText");
+    let body = EditMessageBody {
+        chat_id,
+        message_id,
+        text,
+        parse_mode: "HTML",
+        reply_markup: None,
+    };
+    let http = Client::builder()
+        .user_agent(concat!("isengard-notifier/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| anyhow::anyhow!("building http client: {e}"))?;
+    let resp = http
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("telegram editMessageText transport: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "telegram editMessageText non-success: status={status} body={body}"
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl NotifyChannel for TelegramChannel {
     fn name(&self) -> &'static str {
