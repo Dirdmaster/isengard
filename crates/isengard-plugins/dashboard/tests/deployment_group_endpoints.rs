@@ -62,6 +62,7 @@ async fn setup_app() -> (Router, Router, Arc<Inventory>, HostId, StackId) {
         routing,
         enrollment,
         revocation,
+        log_fanout: isengard_controller::log_fanout::LogFanout::new(),
     });
 
     let groups_app = isengard_plugin_dashboard::deployment_groups::router(handles.clone());

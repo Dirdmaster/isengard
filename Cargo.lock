@@ -2206,12 +2206,14 @@ dependencies = [
  "isengard-core",
  "isengard-storage",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "ulid",
+ "wiremock",
 ]
 
 [[package]]

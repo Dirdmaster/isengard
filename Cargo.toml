@@ -110,6 +110,9 @@ dirs = "6.0.0"
 # futures utilities (consume bollard pull streams)
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 
+# semver parsing for the updater's Minor strategy (Phase 9e)
+semver = "1.0"
+
 # tempfile (test helpers)
 tempfile = "3.14.0"
 
