@@ -1928,6 +1928,7 @@ dependencies = [
  "isengard-agent",
  "isengard-controller",
  "isengard-core",
+ "isengard-plugin-backup",
  "isengard-plugin-dashboard",
  "isengard-plugin-networking-cf-tunnel",
  "isengard-plugin-networking-none",
@@ -2019,6 +2020,26 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "ulid",
+]
+
+[[package]]
+name = "isengard-plugin-backup"
+version = "0.1.0-alpha"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "inventory",
+ "isengard-controller",
+ "isengard-core",
+ "isengard-storage",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

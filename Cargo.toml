@@ -10,6 +10,7 @@ members = [
     "crates/isengard-plugins/updater",
     "crates/isengard-plugins/dashboard",
     "crates/isengard-plugins/notifier",
+    "crates/isengard-plugins/backup",
     "crates/isengard-plugins/networking-none",
     "crates/isengard-plugins/networking-tailscale",
     "crates/isengard-plugins/networking-cf-tunnel",
@@ -120,6 +121,7 @@ isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
 isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }
 isengard-plugin-notifier = { path = "crates/isengard-plugins/notifier", version = "0.1.0-alpha" }
 isengard-plugin-dashboard = { path = "crates/isengard-plugins/dashboard", version = "0.1.0-alpha" }
+isengard-plugin-backup = { path = "crates/isengard-plugins/backup", version = "0.1.0-alpha" }
 isengard-plugin-networking-none = { path = "crates/isengard-plugins/networking-none", version = "0.1.0-alpha" }
 isengard-plugin-networking-tailscale = { path = "crates/isengard-plugins/networking-tailscale", version = "0.1.0-alpha" }
 isengard-plugin-networking-cf-tunnel = { path = "crates/isengard-plugins/networking-cf-tunnel", version = "0.1.0-alpha" }
