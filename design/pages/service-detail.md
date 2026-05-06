@@ -1,15 +1,21 @@
 ---
 type: design
 kind: page-spec
-status: phase-13-pending
-status_note: "Service Detail & Logs Streaming is Phase 13"
+status: partial
+status_note: "Phase 13A shipped: route, two-column layout, metadata, effective policy, last deployment, recent events, routing rules, multi-host other_instances list. Logs panel is a placeholder pointing at issue #57; logs streaming + restart/exec shell + per-host selector are still owed by 13B-13J."
 created: 2026-05-03
-updated: 2026-05-05
+updated: 2026-05-06
 tags:
   - design
   - page
   - logs
 ---
+
+## Implementation status (2026-05-06)
+
+- Shipped (13A): `/stacks/[id]/services/[name]` route, `<PageHeader>` with breadcrumb + Force update + Open routing actions, two-column `grid-cols-[1fr_2fr]` body, metadata card (image/state/host/last-seen/deploy override), `<EffectivePolicyPreview>`, last deployment summary, recent events list, routing rules table, other-instances per-host list. Stack overview rows now drill in via `<NuxtLink>`.
+- Deferred (13B+): live logs streaming (issue #57), Restart and Exec shell actions, per-host instance selector chip row, env vars / volumes / networks panels (require agent introspection plumbing), policy paused banner, deployment-in-progress card, ANSI / search / download log polish.
+- Drift: page does not yet ship a `<HostSelector />` chip row. Multi-host instances are shown as a compact per-host table at the bottom of the right column instead.
 
 # Service detail
 

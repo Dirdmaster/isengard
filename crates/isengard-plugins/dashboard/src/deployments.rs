@@ -24,7 +24,7 @@ pub struct ListQuery {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentDto {
     pub id: String,
     pub host_id: String,
