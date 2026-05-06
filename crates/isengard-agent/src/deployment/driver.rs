@@ -391,15 +391,32 @@ impl<D: DriverDeps> Driver<D> {
             DrainOutcome::GreenUnhealthy => {
                 // Post-switch collapse. Transition to Recovering so the UI
                 // can show the rollback in flight, swap routing back to
-                // blue, kill green, mark Failed with the recovery reason.
+                // blue, kill green.
                 self.transition(DeploymentState::Recovering).await?;
                 self.recover_to_blue("post_switch_collapse_recovered").await;
                 let _ = self.deps.stop_and_remove(&green_id).await;
-                self.transition(DeploymentState::Failed).await?;
-                self.emit(
-                    "deployment.failed",
-                    Some("post_switch_collapse_recovered".into()),
-                );
+
+                // Phase 9F: if the resolved policy says Rollback and we
+                // captured a previous_digest, attempt a re-pull. This
+                // lands on RolledBack / RollbackFailed regardless of
+                // whether the in-flight blue snapshot helped (we're
+                // now reconstructing from the recorded digest, which
+                // is more durable than the live container).
+                if matches!(self.failure_handling, FailureHandling::Rollback)
+                    && self.deployment.previous_digest.is_some()
+                {
+                    self.attempt_rollback("post_switch_collapse_recovered".to_string())
+                        .await;
+                } else {
+                    self.transition(DeploymentState::Failed).await?;
+                    self.emit(
+                        "deployment.failed",
+                        Some("post_switch_collapse_recovered".into()),
+                    );
+                    if matches!(self.failure_handling, FailureHandling::Keep) {
+                        self.apply_keep_pause().await;
+                    }
+                }
             }
         }
         Ok(())
@@ -2114,6 +2131,168 @@ mod tests {
         assert!(
             (23..=25).contains(&delta),
             "Keep should pause for ~24h, got {delta}h"
+        );
+    }
+
+    /// Post-switch collapse + Rollback policy: green flips unhealthy
+    /// during the drain, the driver enters Recovering, swaps back to
+    /// blue, then attempts a re-pull at `previous_digest`. Final state
+    /// is `RolledBack` and the deps' rollback hook fired.
+    #[tokio::test]
+    async fn rollback_on_post_switch_collapse() {
+        let (inv, d) = setup_with_previous_digest(
+            DeploymentState::Pending,
+            "sha256:previous_ccc",
+        )
+        .await;
+        let id = d.id.clone();
+        let (addr, _accept) = live_addr();
+
+        struct Deps {
+            addr: SocketAddr,
+            rollback_calls: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl DriverDeps for Deps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                Ok(("green-id".into(), self.addr))
+            }
+            async fn stop_and_remove(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(50))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                Some(synthetic_blue())
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                Ok(())
+            }
+            async fn pull_and_recreate_at_digest(
+                &self,
+                _d: &Deployment,
+                _previous: &str,
+            ) -> Result<()> {
+                self.rollback_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let bus = crate::proxy::ProxyEventBus::new();
+        let rx = bus.subscribe();
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+        let deps = Arc::new(Deps {
+            addr,
+            rollback_calls: rollback_calls.clone(),
+        });
+        let driver = Driver::new(d, deps, inv.clone(), Arc::new(NoopEmitter))
+            .with_healthcheck_overrides(Duration::from_millis(10), 1, Duration::from_millis(500))
+            .with_drain_overrides(Duration::from_secs(10), Duration::from_secs(1))
+            .with_proxy_events(rx)
+            .with_failure_policy(FailureHandling::Rollback);
+
+        let driver_task = tokio::spawn(driver.run());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        bus.publish(crate::proxy::ProxyEvent::UpstreamHealthChanged {
+            public_hostname: "blog.test".into(),
+            container_id: "green-id".into(),
+            healthy: false,
+        });
+        driver_task.await.unwrap();
+
+        let after = inv.get_deployment(&id).await.unwrap().expect("row");
+        assert_eq!(after.state, DeploymentState::RolledBack);
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 1);
+        assert!(after.rollback_attempted_at.is_some());
+    }
+
+    /// Post-switch collapse + Rollback policy + re-pull fails: final
+    /// state is `RollbackFailed`, error mentions the original collapse
+    /// AND the rollback failure.
+    #[tokio::test]
+    async fn rollback_failure_after_collapse_marks_rollback_failed() {
+        let (inv, d) = setup_with_previous_digest(
+            DeploymentState::Pending,
+            "sha256:previous_ddd",
+        )
+        .await;
+        let id = d.id.clone();
+        let (addr, _accept) = live_addr();
+
+        struct Deps {
+            addr: SocketAddr,
+        }
+        #[async_trait]
+        impl DriverDeps for Deps {
+            async fn start_green(&self, _d: &Deployment) -> Result<(String, SocketAddr)> {
+                Ok(("green-id".into(), self.addr))
+            }
+            async fn stop_and_remove(&self, _id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn build_health_checker(&self, _d: &Deployment) -> HealthChecker {
+                HealthChecker::tcp_only(Duration::from_millis(50))
+            }
+            async fn swap_upstream_to_green(
+                &self,
+                _d: &Deployment,
+                _gid: &str,
+                _addr: SocketAddr,
+                _grace: Duration,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn snapshot_current_upstream(&self, _d: &Deployment) -> Option<Upstream> {
+                Some(synthetic_blue())
+            }
+            async fn swap_back_to_blue(&self, _h: &str, _b: &Upstream) -> Result<()> {
+                Ok(())
+            }
+            async fn pull_and_recreate_at_digest(
+                &self,
+                _d: &Deployment,
+                _previous: &str,
+            ) -> Result<()> {
+                Err(anyhow!("manifest unknown"))
+            }
+        }
+
+        let bus = crate::proxy::ProxyEventBus::new();
+        let rx = bus.subscribe();
+        let driver = Driver::new(d, Arc::new(Deps { addr }), inv.clone(), Arc::new(NoopEmitter))
+            .with_healthcheck_overrides(Duration::from_millis(10), 1, Duration::from_millis(500))
+            .with_drain_overrides(Duration::from_secs(10), Duration::from_secs(1))
+            .with_proxy_events(rx)
+            .with_failure_policy(FailureHandling::Rollback);
+        let driver_task = tokio::spawn(driver.run());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        bus.publish(crate::proxy::ProxyEvent::UpstreamHealthChanged {
+            public_hostname: "blog.test".into(),
+            container_id: "green-id".into(),
+            healthy: false,
+        });
+        driver_task.await.unwrap();
+
+        let after = inv.get_deployment(&id).await.unwrap().expect("row");
+        assert_eq!(after.state, DeploymentState::RollbackFailed);
+        let err = after.error.expect("error");
+        assert!(
+            err.contains("post_switch_collapse_recovered"),
+            "should preserve collapse cause, got {err:?}"
+        );
+        assert!(
+            err.contains("rollback_failed"),
+            "should mention rollback_failed, got {err:?}"
         );
     }
 }
