@@ -26,6 +26,7 @@ rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 subtle.workspace = true
+rand.workspace = true
 tokio = { workspace = true }
 tower.workspace = true
 tracing.workspace = true
