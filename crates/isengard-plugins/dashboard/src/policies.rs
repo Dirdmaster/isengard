@@ -29,7 +29,7 @@ use axum::routing::{get, put};
 use chrono::{DateTime, Utc};
 use isengard_controller::ControllerHandles;
 use isengard_core::policy::{
-    Policy, PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateGate, resolve_policy,
+    Policy, PolicyContext, PolicyScopeType, ResolvedPolicy, resolve_policy,
 };
 use isengard_storage::policy::{InsertPolicy, PolicyRow};
 use serde::{Deserialize, Serialize};
@@ -127,13 +127,12 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 ///
 /// 1. `global` requires an empty `scope_key`; every other scope requires a
 ///    non-empty `scope_key`.
-/// 2. `body.gate == Approval` is rejected with 422 until Phase 9e wires the
-///    enforcement path.
 fn validate_policy(
     scope_type: PolicyScopeType,
     scope_key: &str,
     body: &Policy,
 ) -> Result<(), Response> {
+    let _ = body;
     match scope_type {
         PolicyScopeType::Global if !scope_key.is_empty() => {
             return Err(err(
@@ -149,13 +148,6 @@ fn validate_policy(
             ));
         }
         _ => {}
-    }
-
-    if matches!(body.gate, Some(UpdateGate::Approval)) {
-        return Err(err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "gate=approval is not enforced until Phase 9e",
-        ));
     }
 
     Ok(())
