@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EventEmitter, HostId, UpdateDispatcher};
+use crate::{EventEmitter, HostId, PolicyLoader, UpdateDispatcher};
 
 /// Which mode the host is running in. Affects which capability sub-traits a
 /// plugin's lifecycle hooks are called through.
@@ -46,6 +46,12 @@ pub struct PluginContext {
     /// `HostId`; `None` outside the agent (controller mode, plugin loaders
     /// in unit tests).
     pub host_id: Option<HostId>,
+    /// Optional policy loader. Plugins that respect update policies (the
+    /// updater, primarily) call `list()` to fetch the current policy
+    /// snapshot before deciding whether to act on a candidate. `None`
+    /// outside the agent or when the agent runtime hasn't wired the
+    /// loader yet (older agents, certain test harnesses).
+    pub policy_loader: Option<Arc<dyn PolicyLoader>>,
 }
 
 impl PluginContext {
@@ -57,6 +63,7 @@ impl PluginContext {
             bus: None,
             update_dispatcher: None,
             host_id: None,
+            policy_loader: None,
         }
     }
 
@@ -79,6 +86,11 @@ impl PluginContext {
         self.host_id = Some(host_id);
         self
     }
+
+    pub fn with_policy_loader(mut self, loader: Arc<dyn PolicyLoader>) -> Self {
+        self.policy_loader = Some(loader);
+        self
+    }
 }
 
 impl std::fmt::Debug for PluginContext {
@@ -91,6 +103,10 @@ impl std::fmt::Debug for PluginContext {
             .field(
                 "update_dispatcher",
                 &self.update_dispatcher.as_ref().map(|_| "<dispatcher>"),
+            )
+            .field(
+                "policy_loader",
+                &self.policy_loader.as_ref().map(|_| "<policy_loader>"),
             )
             .finish()
     }

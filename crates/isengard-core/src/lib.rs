@@ -8,6 +8,7 @@ pub mod labels;
 pub mod networking;
 pub mod plugin;
 pub mod policy;
+pub mod policy_loader;
 pub mod registration;
 pub mod update_dispatch;
 
@@ -21,5 +22,6 @@ pub use error::{CoreError, Result};
 pub use event::{Event, EventEmitter, NoopEmitter, arc_emitter};
 pub use plugin::{AgentPlugin, ControllerPlugin, EventSubscriber, HttpHandler, Plugin};
 pub use policy::*;
+pub use policy_loader::{LoadedPolicy, PolicyLoader, PolicyLoaderError};
 pub use registration::{Capability, PluginRegistration, registrations_for};
 pub use update_dispatch::{DispatchOutcome, UpdateDispatcher, UpdateTriggerInfo};

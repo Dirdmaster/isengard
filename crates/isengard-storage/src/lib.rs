@@ -34,7 +34,7 @@ pub use host::{EnrollHost, Host, HostId};
 pub use host_action::{HostAction, HostActionId, HostActionKind};
 pub use inventory::Inventory;
 pub use journal::{EventRow, InsertEvent, Journal};
-pub use policy::{InsertPolicy, PolicyRow, PolicyScopeType};
+pub use policy::{InsertPolicy, InventoryPolicyLoader, PolicyRow, PolicyScopeType};
 pub use routing_rule::{
     InsertRoutingRule, RoutingRule, RoutingRuleId, RoutingRuleSource, RoutingRuleState, TlsMode,
 };

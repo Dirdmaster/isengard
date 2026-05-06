@@ -11,6 +11,7 @@ pub mod auth;
 pub mod dispatch_helpers;
 pub mod image_ref;
 pub mod labels;
+pub mod policy;
 pub mod recreate;
 pub mod registry;
 pub mod self_id;
@@ -24,8 +25,9 @@ use bollard::Docker;
 use bollard::container::ListContainersOptions;
 use chrono::Utc;
 use isengard_core::{
-    AgentPlugin, Capability, CoreError, DispatchOutcome, Event, EventEmitter, HostId, Plugin,
-    PluginContext, PluginRegistration, Result, UpdateDispatcher, UpdateTriggerInfo,
+    AgentPlugin, Capability, CoreError, DispatchOutcome, Event, EventEmitter, HostId, LoadedPolicy,
+    Plugin, PluginContext, PluginRegistration, PolicyLoader, Result, UpdateDispatcher,
+    UpdateTriggerInfo,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -55,6 +57,14 @@ pub struct Updater {
     /// `UpdateTriggerInfo` so the dispatcher's downstream lookups
     /// (routing rules, deployment dedupe) target the right host.
     host_id: Option<HostId>,
+    /// Set in `init` from `PluginContext::policy_loader`. When `Some`, the
+    /// cycle pulls the full policy snapshot at the start and resolves
+    /// per-candidate (Phase 9b: respects Pinned + paused_until).
+    policy_loader: Option<Arc<dyn PolicyLoader>>,
+    /// Cached fleet name for this host. Looked up once during `init` (when
+    /// both a policy_loader and a host_id are wired) so the per-cycle path
+    /// has zero extra DB hits. `None` means "no fleet-scoped rows match".
+    fleet: Option<String>,
     cancel: Arc<Notify>,
     task: Option<JoinHandle<()>>,
 }
@@ -68,6 +78,8 @@ impl Updater {
             emitter: None,
             dispatcher: None,
             host_id: None,
+            policy_loader: None,
+            fleet: None,
             cancel: Arc::new(Notify::new()),
             task: None,
         }
@@ -114,12 +126,22 @@ async fn emit(emitter: Option<&Arc<dyn EventEmitter>>, event: Event) {
 /// has taken over). If it returns `PerformInPlace`, we fall through to the
 /// existing `recreate::update_container` call. `host_id` is forwarded into
 /// every `UpdateTriggerInfo`.
+///
+/// Phase 9b: when `policy_loader` is `Some`, the cycle pulls the policy
+/// snapshot once at the start, resolves a `ResolvedPolicy` per candidate
+/// (using the candidate's compose labels + cached fleet + host_id), and
+/// short-circuits with `update.policy_skipped` for `Pinned` services and
+/// services with active `paused_until`. All other resolved-policy fields
+/// are computed but NOT enforced; Phase 9e+ adds them.
+#[allow(clippy::too_many_arguments)]
 async fn do_cycle(
     docker: &Docker,
     registry: &RegistryClient,
     emitter: Option<&Arc<dyn EventEmitter>>,
     dispatcher: Option<&Arc<dyn UpdateDispatcher>>,
     host_id: Option<HostId>,
+    policy_loader: Option<&Arc<dyn PolicyLoader>>,
+    fleet: Option<&str>,
 ) -> anyhow::Result<()> {
     let opts = ListContainersOptions::<String> {
         all: false,
@@ -135,9 +157,25 @@ async fn do_cycle(
         .filter(|c| isengard_enabled(c.labels.as_ref()))
         .collect();
 
+    // Phase 9b: load the policy snapshot once per cycle. On loader error
+    // we behave as if no policies exist (fail-safe: don't block updates).
+    let policy_snapshot: Vec<LoadedPolicy> = match policy_loader {
+        Some(loader) => match loader.list().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(error = %e, "policy loader list failed; running cycle without policies");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    let host_id_hex = host_id.map(|h| h.to_string());
+
     let mut up_to_date = 0usize;
     let mut needs_update = 0usize;
     let mut unknown = 0usize;
+    let mut pinned = 0usize;
+    let mut paused = 0usize;
 
     for c in &candidates {
         let name = c
@@ -152,6 +190,37 @@ async fn do_cycle(
             debug!(container = %name, image = %image_str, "skipping digest-pinned or unparseable image");
             continue;
         };
+
+        // Phase 9b policy gate: build the resolver context from the
+        // candidate's compose labels + cached fleet + host_id, then
+        // short-circuit on Pinned / paused_until.
+        let owned_ctx = crate::policy::policy_context_from_container(
+            c.labels.as_ref(),
+            fleet,
+            host_id_hex.as_deref(),
+            &name,
+        );
+        let projected = crate::policy::project_for_resolver(&policy_snapshot);
+        let resolved = isengard_core::policy::resolve_policy(&projected, &owned_ctx.as_ref());
+        match crate::policy::decision_from_resolved(&resolved, Utc::now()) {
+            crate::policy::PolicyDecision::Skip(reason) => {
+                let event =
+                    build_policy_skipped_event(&owned_ctx, &name, host_id_hex.as_deref(), &reason);
+                match reason {
+                    crate::policy::SkipReason::Pinned => {
+                        info!(container = %name, reason = "pinned", "policy skip");
+                        pinned += 1;
+                    }
+                    crate::policy::SkipReason::Paused { until } => {
+                        info!(container = %name, reason = "paused", until = %until, "policy skip");
+                        paused += 1;
+                    }
+                }
+                emit(emitter, event).await;
+                continue;
+            }
+            crate::policy::PolicyDecision::Proceed => {}
+        }
 
         let local_digest = match docker.inspect_image(image_str).await {
             Ok(i) => i
@@ -258,7 +327,7 @@ async fn do_cycle(
                         emit(
                             emitter,
                             Event {
-                                kind: "update.success".into(),
+                                kind: isengard_core::event::kinds::UPDATE_SUCCESS.into(),
                                 occurred_at: Utc::now(),
                                 summary: format!("updated {name} to {remote}"),
                                 container_name: Some(name.clone()),
@@ -276,7 +345,7 @@ async fn do_cycle(
                         emit(
                             emitter,
                             Event {
-                                kind: "update.failed".into(),
+                                kind: isengard_core::event::kinds::UPDATE_FAILED.into(),
                                 occurred_at: Utc::now(),
                                 summary: format!("update failed for {name}: {err_str}"),
                                 container_name: Some(name.clone()),
@@ -298,32 +367,87 @@ async fn do_cycle(
 
     info!(
         candidates = candidates.len(),
-        up_to_date, needs_update, unknown, "updater cycle complete"
+        up_to_date, needs_update, unknown, pinned, paused, "updater cycle complete"
     );
 
     emit(
         emitter,
         Event {
-            kind: "update.checked".into(),
+            kind: isengard_core::event::kinds::UPDATE_CHECKED.into(),
             occurred_at: Utc::now(),
             summary: format!(
-                "cycle: candidates={} up_to_date={} needs_update={} unknown={}",
+                "cycle: candidates={} up_to_date={} needs_update={} unknown={} pinned={} paused={}",
                 candidates.len(),
                 up_to_date,
                 needs_update,
-                unknown
+                unknown,
+                pinned,
+                paused,
             ),
             metadata: serde_json::json!({
                 "candidates": candidates.len(),
                 "up_to_date": up_to_date,
                 "needs_update": needs_update,
                 "unknown": unknown,
+                "pinned": pinned,
+                "paused": paused,
             }),
             ..Default::default()
         },
     )
     .await;
     Ok(())
+}
+
+/// Construct the `update.policy_skipped` event payload defined by the
+/// Phase 9b spec:
+///
+/// ```json
+/// {
+///   "service": "...",
+///   "container": "...",
+///   "host_id": "...",
+///   "reason": "pinned" | "paused",
+///   "until": "<RFC3339, paused only>"
+/// }
+/// ```
+///
+/// The `service` field falls back to the container name when the candidate
+/// isn't a compose-managed container (so downstream notifier rules always
+/// have a non-empty value to display).
+fn build_policy_skipped_event(
+    ctx: &crate::policy::OwnedPolicyContext,
+    container_name: &str,
+    host_id_hex: Option<&str>,
+    reason: &crate::policy::SkipReason,
+) -> Event {
+    let service = ctx
+        .service
+        .clone()
+        .unwrap_or_else(|| container_name.to_string());
+    let mut payload = serde_json::json!({
+        "service": service,
+        "container": container_name,
+        "host_id": host_id_hex.unwrap_or(""),
+        "reason": reason.as_str(),
+    });
+    if let crate::policy::SkipReason::Paused { until } = reason {
+        payload["until"] = serde_json::Value::String(until.to_rfc3339());
+    }
+    let summary = match reason {
+        crate::policy::SkipReason::Pinned => format!("skipped {service} (pinned)"),
+        crate::policy::SkipReason::Paused { until } => {
+            format!("skipped {service} (paused until {})", until.to_rfc3339())
+        }
+    };
+    Event {
+        kind: isengard_core::event::kinds::UPDATE_POLICY_SKIPPED.into(),
+        occurred_at: Utc::now(),
+        summary,
+        container_name: Some(container_name.to_string()),
+        metadata: payload,
+        ..Default::default()
+    }
 }
 
 #[async_trait]
@@ -406,6 +530,29 @@ impl Plugin for Updater {
             info!("updater wired to update dispatcher (blue-green path enabled)");
         }
         self.host_id = ctx.host_id;
+
+        // Phase 9b: pick up the policy loader. When wired, the cycle
+        // resolves a `ResolvedPolicy` per candidate and respects Pinned +
+        // paused_until. Cache the host's fleet name once so per-cycle
+        // resolution doesn't re-hit the DB for it.
+        self.policy_loader = ctx.policy_loader.clone();
+        if let (Some(loader), Some(host_id)) = (self.policy_loader.as_ref(), self.host_id) {
+            match loader.fleet_for(host_id).await {
+                Ok(fleet) => {
+                    info!(
+                        fleet = fleet.as_deref().unwrap_or("<none>"),
+                        "updater wired to policy loader"
+                    );
+                    self.fleet = fleet;
+                }
+                Err(e) => {
+                    warn!(error = %e, "policy loader fleet_for lookup failed; defaulting to None");
+                    self.fleet = None;
+                }
+            }
+        } else if self.policy_loader.is_some() {
+            info!("updater wired to policy loader (no host_id; fleet=None)");
+        }
         Ok(())
     }
 
@@ -421,6 +568,8 @@ impl Plugin for Updater {
         let emitter = self.emitter.clone();
         let dispatcher = self.dispatcher.clone();
         let host_id = self.host_id;
+        let policy_loader = self.policy_loader.clone();
+        let fleet = self.fleet.clone();
         let cancel = self.cancel.clone();
         let interval = self.cycle_interval;
 
@@ -439,6 +588,8 @@ impl Plugin for Updater {
                             emitter.as_ref(),
                             dispatcher.as_ref(),
                             host_id,
+                            policy_loader.as_ref(),
+                            fleet.as_deref(),
                         ).await {
                             // Don't crash the task on a single bad cycle; just log
                             // and try again next tick. Phase 3b adds retry policy.
@@ -488,6 +639,8 @@ impl AgentPlugin for Updater {
             self.emitter.as_ref(),
             self.dispatcher.as_ref(),
             self.host_id,
+            self.policy_loader.as_ref(),
+            self.fleet.as_deref(),
         )
         .await
         .map_err(|e| init_err(format!("cycle failed: {e}")))

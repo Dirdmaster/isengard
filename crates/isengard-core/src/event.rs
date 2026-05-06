@@ -12,6 +12,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::HostId;
 
+/// Canonical event-kind strings emitted by the updater plugin. Re-exported
+/// so subscribers (notifier, journal filters, dashboard streams) and tests
+/// can refer to them by symbol rather than by raw string literal.
+pub mod kinds {
+    /// Cycle summary, one per `do_cycle` invocation.
+    pub const UPDATE_CHECKED: &str = "update.checked";
+    /// A `needs_update` candidate was successfully recreated.
+    pub const UPDATE_SUCCESS: &str = "update.success";
+    /// A `needs_update` candidate failed to recreate.
+    pub const UPDATE_FAILED: &str = "update.failed";
+    /// A candidate was skipped because the resolved policy said so.
+    /// Phase 9b: emitted for `strategy=Pinned` and active `paused_until`.
+    pub const UPDATE_POLICY_SKIPPED: &str = "update.policy_skipped";
+}
+
 /// A journal event. Plugin-defined `kind` strings (e.g. "update.success",
 /// "agent.connect") drive subscriber filtering. Optional fields are populated
 /// when relevant; `metadata` is a free-form JSON escape hatch.

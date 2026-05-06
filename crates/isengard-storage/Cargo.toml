@@ -9,6 +9,7 @@ repository.workspace = true
 description = "SQLite-backed inventory for Isengard controller"
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 isengard-core = { workspace = true }
 serde = { workspace = true }

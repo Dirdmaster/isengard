@@ -9,11 +9,14 @@
 //! (`isengard_storage::policy::PolicyScopeType`) keep compiling.
 
 use crate::error::{Error, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use isengard_core::policy::Policy;
 // Re-export so external crates can keep their existing import path.
 pub use isengard_core::policy::PolicyScopeType;
+use isengard_core::policy_loader::{LoadedPolicy, PolicyLoader, PolicyLoaderError};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// A row from the `policies` table. `body` is the parsed `Policy`; the raw
 /// JSON column is dropped on read (the resolver only ever needs the typed
@@ -158,6 +161,50 @@ impl crate::inventory::Inventory {
             .execute(self.pool())
             .await?;
         Ok(r.rows_affected() > 0)
+    }
+}
+
+/// Production [`PolicyLoader`] backed by an `Arc<Inventory>`. The agent
+/// runtime constructs one of these and threads it through `PluginContext`
+/// so the updater plugin can fetch policies without a hard storage dep.
+pub struct InventoryPolicyLoader {
+    inv: Arc<crate::inventory::Inventory>,
+}
+
+impl InventoryPolicyLoader {
+    pub fn new(inv: Arc<crate::inventory::Inventory>) -> Self {
+        Self { inv }
+    }
+}
+
+#[async_trait]
+impl PolicyLoader for InventoryPolicyLoader {
+    async fn list(&self) -> std::result::Result<Vec<LoadedPolicy>, PolicyLoaderError> {
+        let rows = self
+            .inv
+            .list_policies()
+            .await
+            .map_err(|e| PolicyLoaderError(format!("list_policies: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| LoadedPolicy {
+                scope_type: r.scope_type,
+                scope_key: r.scope_key,
+                body: r.body,
+            })
+            .collect())
+    }
+
+    async fn fleet_for(
+        &self,
+        host_id: isengard_core::HostId,
+    ) -> std::result::Result<Option<String>, PolicyLoaderError> {
+        let host = self
+            .inv
+            .get_host(crate::host::HostId(host_id))
+            .await
+            .map_err(|e| PolicyLoaderError(format!("get_host: {e}")))?;
+        Ok(host.map(|h| h.fleet))
     }
 }
 

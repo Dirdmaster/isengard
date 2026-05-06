@@ -2118,6 +2118,7 @@ dependencies = [
  "futures-util",
  "inventory",
  "isengard-core",
+ "isengard-storage",
  "reqwest",
  "serde",
  "serde_json",
@@ -2144,6 +2145,7 @@ dependencies = [
 name = "isengard-storage"
 version = "0.1.0-alpha"
 dependencies = [
+ "async-trait",
  "chrono",
  "isengard-core",
  "serde",
