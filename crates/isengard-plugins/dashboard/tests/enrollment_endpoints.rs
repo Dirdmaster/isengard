@@ -32,6 +32,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         routing,
         enrollment: enrollment_svc,
         revocation,
+        log_fanout: isengard_controller::log_fanout::LogFanout::new(),
     });
 
     let app = enrollment::router(handles.clone());
