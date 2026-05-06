@@ -3,11 +3,18 @@ import type { Stack } from '~/stores/stacks'
 import type { Service } from '~/stores/services'
 import type { EventRow as EventRowType } from '~/stores/events'
 import EventRow from '~/components/EventRow.vue'
+import EffectivePolicyPreview from '~/components/policies/EffectivePolicyPreview.vue'
 
 interface Props {
   stack: Stack
   services: Service[]
   recentEvents: EventRowType[]
+  /**
+   * Fleet name for the stack's host. Used to scope the
+   * `<EffectivePolicyPreview />` query per service. Optional: when missing
+   * (host not yet hydrated, or unknown fleet) the preview is omitted.
+   */
+  fleet?: string
 }
 
 defineProps<Props>()
@@ -79,6 +86,13 @@ function stateClasses(state: Service['state']) {
               </button>
             </div>
           </div>
+          <EffectivePolicyPreview
+            v-if="svc.name"
+            :fleet="fleet"
+            :stack="stack.name"
+            :service="svc.name"
+            :host_id="svc.host_id"
+          />
         </div>
       </template>
     </section>
