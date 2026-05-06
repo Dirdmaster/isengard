@@ -135,7 +135,7 @@ async fn list_groups(
                 all.extend(gs);
             }
             // Newest first overall.
-            all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+            all.sort_by_key(|g| std::cmp::Reverse(g.started_at));
             all.truncate(limit as usize);
             all
         }
