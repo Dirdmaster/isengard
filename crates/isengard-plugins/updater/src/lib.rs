@@ -16,6 +16,7 @@ pub mod recreate;
 pub mod registry;
 pub mod self_id;
 pub mod self_update;
+pub mod tag_cache;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +38,7 @@ use crate::auth::DockerConfig;
 use crate::image_ref::ImageRef;
 use crate::labels::isengard_enabled;
 use crate::registry::RegistryClient;
+use crate::tag_cache::TagCache;
 
 const PLUGIN_NAME: &str = "updater";
 const DEFAULT_CYCLE_INTERVAL_SECS: u64 = 30;
@@ -50,6 +52,10 @@ pub struct Updater {
     /// by the inventory factory before init runs.
     docker: Option<Docker>,
     registry: Option<Arc<RegistryClient>>,
+    /// Phase 9e: per-image tag cache for the `Minor` strategy. Built at
+    /// plugin init with the default 1h TTL; shared across cycles so the
+    /// per-cycle cost stays at one cache lookup per Minor candidate.
+    tag_cache: Arc<TagCache>,
     cycle_interval: Duration,
     emitter: Option<Arc<dyn EventEmitter>>,
     /// Set in `init` from `PluginContext::update_dispatcher`. When `Some`,
@@ -82,6 +88,7 @@ impl Updater {
         Self {
             docker: None,
             registry: None,
+            tag_cache: Arc::new(TagCache::with_default_ttl()),
             cycle_interval: Duration::from_secs(DEFAULT_CYCLE_INTERVAL_SECS),
             emitter: None,
             dispatcher: None,
@@ -127,6 +134,67 @@ async fn emit(emitter: Option<&Arc<dyn EventEmitter>>, event: Event) {
     }
 }
 
+/// Phase 9e: when the resolved strategy is `Minor`, list the registry's
+/// tags via the cache, pick the highest patch+minor on the same major,
+/// and (if strictly greater than the current tag) HEAD the bumped tag
+/// to obtain its digest. Returns `(bumped_image_ref, bumped_digest)`
+/// or `None` if no bump applies.
+///
+/// All errors are swallowed and degrade to `None`. Rationale: a transient
+/// registry failure during tag listing should NOT escalate to a cycle
+/// abort; the next cycle retries and the existing TagOnly digest path
+/// still runs in the meantime.
+pub async fn maybe_minor_bump(
+    registry: &RegistryClient,
+    tag_cache: &Arc<TagCache>,
+    current: &ImageRef,
+) -> Option<(ImageRef, String)> {
+    let current_version = crate::tag_cache::parse_tag(&current.tag)?;
+    let tags = match tag_cache
+        .get_or_fetch(current, || async { registry.list_tags(current).await })
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                image = %current,
+                error = %e,
+                "tag-list fetch failed; minor strategy degraded to tag-only"
+            );
+            return None;
+        }
+    };
+    let bumped = crate::tag_cache::pick_highest_minor(&tags, &current_version)?;
+    // Reconstruct the tag string preserving the leading `v` if the running
+    // image carried one, so `:1.2.3` stays `:1.3.0` and `:v1.2.3` becomes
+    // `:v1.3.0`.
+    let bumped_tag = if current.tag.starts_with('v') || current.tag.starts_with('V') {
+        format!("v{bumped}")
+    } else {
+        bumped.to_string()
+    };
+    let bumped_ref = current.with_tag(&bumped_tag);
+    let bumped_digest = match registry.head_digest(&bumped_ref).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            warn!(
+                image = %bumped_ref,
+                "minor bump tag exists in tags-list but registry returned no digest; skipping"
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!(
+                image = %bumped_ref,
+                error = %e,
+                "minor bump HEAD failed; skipping"
+            );
+            return None;
+        }
+    };
+    Some((bumped_ref, bumped_digest))
+}
+
 /// One cycle of work. Filter candidates by `isengard.enable=true`, compare
 /// each one's local digest against its remote registry digest, classify, log.
 ///
@@ -152,6 +220,7 @@ async fn do_cycle(
     policy_loader: Option<&Arc<dyn PolicyLoader>>,
     approval_store: Option<&Arc<dyn ApprovalStore>>,
     fleet: Option<&str>,
+    tag_cache: &Arc<TagCache>,
 ) -> anyhow::Result<()> {
     let opts = ListContainersOptions::<String> {
         all: false,
@@ -196,9 +265,13 @@ async fn do_cycle(
             .and_then(|ns| ns.first())
             .map(|s| s.trim_start_matches('/').to_string())
             .unwrap_or_else(|| "<unknown>".into());
-        let image_str = c.image.as_deref().unwrap_or("");
+        let original_image_str = c.image.as_deref().unwrap_or("").to_string();
+        // `image_str` is a borrowed alias that will be reassigned below if
+        // the Phase 9e Minor strategy bumps the tag. The original string
+        // (for `inspect_image`) lives in `original_image_str`.
+        let mut image_str: String = original_image_str.clone();
 
-        let Some(image_ref) = ImageRef::parse(image_str) else {
+        let Some(mut image_ref) = ImageRef::parse(&image_str) else {
             debug!(container = %name, image = %image_str, "skipping digest-pinned or unparseable image");
             continue;
         };
@@ -246,7 +319,11 @@ async fn do_cycle(
             | crate::policy::PolicyDecision::PendingApproval(_) => {}
         }
 
-        let local_digest = match docker.inspect_image(image_str).await {
+        // Phase 9b: local digest probe uses the ORIGINAL image string
+        // (the tag actually running on this host). Even when the Minor
+        // strategy bumps to a newer tag below, the local digest must
+        // reflect what's running, not the proposed tag.
+        let local_digest = match docker.inspect_image(&original_image_str).await {
             Ok(i) => i
                 .repo_digests
                 .as_ref()
@@ -254,12 +331,12 @@ async fn do_cycle(
                 .and_then(|d| d.split_once('@'))
                 .map(|(_, dig)| dig.to_string()),
             Err(e) => {
-                warn!(container = %name, image = %image_str, error = %e, "inspect_image failed");
+                warn!(container = %name, image = %original_image_str, error = %e, "inspect_image failed");
                 None
             }
         };
 
-        let remote_digest = match registry.head_digest(&image_ref).await {
+        let mut remote_digest = match registry.head_digest(&image_ref).await {
             Ok(d) => d,
             Err(e) => {
                 warn!(container = %name, image = %image_str, error = %e, "registry HEAD failed");
@@ -267,6 +344,29 @@ async fn do_cycle(
                 continue;
             }
         };
+
+        // Phase 9e Minor strategy: when the resolved policy is `Minor`,
+        // additionally check the registry's tag list for a higher
+        // patch+minor on the current major. If the picked tag is strictly
+        // greater than the running tag AND has a different digest, we
+        // override `image_ref` / `image_str` / `remote_digest` so the
+        // downstream classification, approval, and recreate paths all
+        // target the bumped tag.
+        if resolved.strategy == isengard_core::policy::UpdateStrategy::Minor {
+            if let Some((bumped_ref, bumped_digest)) =
+                maybe_minor_bump(registry, tag_cache, &image_ref).await
+            {
+                info!(
+                    container = %name,
+                    from = %image_ref.tag,
+                    to = %bumped_ref.tag,
+                    "minor strategy: tag bump available"
+                );
+                image_str = bumped_ref.to_string();
+                image_ref = bumped_ref;
+                remote_digest = Some(bumped_digest);
+            }
+        }
 
         match (local_digest.as_deref(), remote_digest.as_deref()) {
             (Some(local), Some(remote)) if local == remote => {
@@ -290,7 +390,7 @@ async fn do_cycle(
                 // operator's eventual decide_pending_approval call queues
                 // the apply_update HostAction that the agent picks up.
                 let approval_ctx = crate::policy::ApprovalContext {
-                    image: image_str,
+                    image: image_str.as_str(),
                     current_digest: local,
                     proposed_digest: remote,
                 };
@@ -306,7 +406,7 @@ async fn do_cycle(
                         emitter,
                         body,
                         &name,
-                        image_str,
+                        &image_str,
                         local,
                         remote,
                     )
@@ -791,6 +891,7 @@ impl Plugin for Updater {
         let policy_loader = self.policy_loader.clone();
         let approval_store = self.approval_store.clone();
         let fleet = self.fleet.clone();
+        let tag_cache = self.tag_cache.clone();
         let cancel = self.cancel.clone();
         let interval = self.cycle_interval;
 
@@ -812,6 +913,7 @@ impl Plugin for Updater {
                             policy_loader.as_ref(),
                             approval_store.as_ref(),
                             fleet.as_deref(),
+                            &tag_cache,
                         ).await {
                             // Don't crash the task on a single bad cycle; just log
                             // and try again next tick. Phase 3b adds retry policy.
@@ -864,6 +966,7 @@ impl AgentPlugin for Updater {
             self.policy_loader.as_ref(),
             self.approval_store.as_ref(),
             self.fleet.as_deref(),
+            &self.tag_cache,
         )
         .await
         .map_err(|e| init_err(format!("cycle failed: {e}")))

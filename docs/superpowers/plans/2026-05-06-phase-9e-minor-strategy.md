@@ -1,4 +1,4 @@
-# Phase 9e: Minor Strategy (semver-aware tag bumping) — implementation plan
+# Phase 9e: Minor Strategy (semver-aware tag bumping): implementation plan
 
 Implementation plan for [[2026-05-06-phase-9e-minor-strategy-design]]. Branch: `feat/phase-9e`. Worktree: `~/Projects/isengard/.worktrees/phase-9e`. Base: `next` at `56f6d9a`. Closes issue #47.
 
@@ -54,7 +54,7 @@ Before declaring done:
 - New end-to-end unit test in `lib.rs` (or new `tests/minor_strategy.rs`): with a faked registry / docker double, a `Minor` policy plus a registry that lists `[1.2.3, 1.2.4, 1.3.0, 2.0.0]` for a container running `1.2.3` triggers a recreate at `1.3.0`.
 - Pre-existing `TagOnly`, `Pinned`, `Any` paths unchanged (regression coverage from existing tests stays green).
 
-### T4: Wrap-up — design + release notes
+### T4: Wrap-up: design + release notes
 
 **Files**:
 - `design/pages/settings-policies.md`: move "Minor strategy" line from Deferred to Shipped; bump status_note.
@@ -79,7 +79,7 @@ Before declaring done:
 
 - Tag listing on Docker Hub for `library/<name>` requires the same `pull` scope as manifest fetch; the existing bearer-token logic already requests it. No additional auth work needed.
 - Some private registries don't paginate via `Link`. The cap protects us; missing tags just mean a missed bump on this cycle.
-- Semver crate's `Version::parse` rejects `latest`, `nightly`, etc. We swallow those silently — by design.
+- Semver crate's `Version::parse` rejects `latest`, `nightly`, etc. We swallow those silently: by design.
 
 ## Commit shape (small + per-task)
 
