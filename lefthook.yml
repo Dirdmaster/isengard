@@ -3,31 +3,56 @@
 # Activate locally:  `lefthook install`  (or `just install-hooks`)
 # These run before `git push` and mirror the CI gates so failures are caught
 # locally instead of round-tripping through GitHub Actions.
+#
+# WHY the `env -u GIT_DIR ...` prefix on every command:
+# git sets GIT_DIR (and friends) in the environment when invoking hooks. The
+# vars leak through lefthook into cargo and any tool that shells out to git.
+# `cargo deny check` syncs its advisory database via `git -C <db> reset --hard
+# FETCH_HEAD`. The `-C` flag changes cwd, but GIT_DIR overrides cwd-based repo
+# discovery, so the reset hits THIS repo's worktree instead of the advisory db.
+# The local branch silently loses its tip on every push. We saw it three times
+# on 2026-05-04 to 2026-05-06 before tracking it down. Recovery was a manual
+# `git reset --hard <sha>` from reflog. Fix: unset the leaked vars before any
+# cargo invocation so subprocess git calls discover the right repo from cwd.
+#
+# Vars unset:
+#   GIT_DIR             - main culprit
+#   GIT_WORK_TREE       - companion to GIT_DIR
+#   GIT_INDEX_FILE      - per-worktree index path
+#   GIT_OBJECT_DIRECTORY- per-repo object dir
+#   GIT_PREFIX          - cwd-relative path lefthook does not need
+#   GIT_EXEC_PATH       - tells subprocess git where to find core helpers
+#   GIT_EDITOR          - hooks set this to "true" which would break commits
+#
+# Cargo deny is the immediate offender; we apply the same prefix to every
+# command in case other cargo subcommands grow git ops later.
 
 pre-push:
   # Run sequentially so output is readable. All gates are fast (< 2 min total).
   parallel: false
   commands:
     fmt-check:
-      run: cargo fmt --check
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo fmt --check
       tags: rust
 
     clippy:
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo clippy --workspace --all-targets -- -D warnings
       tags: rust
 
     test:
       # Prefer nextest (faster, better output); fall back to cargo test.
       run: |
-        if command -v cargo-nextest >/dev/null 2>&1; then
-          cargo nextest run --workspace
-        else
-          cargo test --workspace
-        fi
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR sh -c '
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            cargo nextest run --workspace
+          else
+            cargo test --workspace
+          fi
+        '
       tags: rust
 
     deny:
-      # cargo-deny MUST run locally — CI runs the same gate, and a silent
+      # cargo-deny MUST run locally: CI runs the same gate, and a silent
       # local skip caused 3 red-CI pushes on 2026-04-30. If you don't have
       # cargo-deny installed, run `just install-hooks` (it bootstraps it)
       # or `cargo install cargo-deny`.
@@ -38,7 +63,7 @@ pre-push:
           echo "  Or:          just install-hooks"
           exit 1
         fi
-        cargo deny check
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo deny check
       tags: rust
 
 # Skip hooks on a single push by setting LEFTHOOK=0:
