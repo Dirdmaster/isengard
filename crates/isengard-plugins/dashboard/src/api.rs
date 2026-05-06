@@ -876,6 +876,7 @@ mod tests {
             routing,
             enrollment,
             revocation,
+            log_fanout: isengard_controller::log_fanout::LogFanout::new(),
         })
     }
 

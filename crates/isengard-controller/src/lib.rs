@@ -8,6 +8,7 @@ pub mod bus;
 pub mod ca;
 pub mod disconnect_monitor;
 pub mod enrollment;
+pub mod log_fanout;
 pub mod pending_actions;
 pub mod plugin_host;
 pub mod policy_ingest;
@@ -51,6 +52,12 @@ pub struct ControllerHandles {
     /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
     /// `revoke_agent` (which both writes the DB row and updates this set).
     pub revocation: RevocationSet,
+    /// Phase 13B: subscription registry for log streaming. Dashboard's
+    /// WebSocket handler `register`s a fresh subscription, then sends
+    /// `StartLogStream` ControllerMessages via `routing.register_sender` to
+    /// each involved host. Inbound `AgentMessage::LogChunk` frames are
+    /// routed through this fanout to the matching WebSocket task.
+    pub log_fanout: Arc<log_fanout::LogFanout>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -150,6 +157,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
+    let log_fanout = log_fanout::LogFanout::new();
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
         journal: journal.clone(),
@@ -157,6 +165,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         routing: routing.clone(),
         enrollment: enrollment.clone(),
         revocation: revocation.clone(),
+        log_fanout: log_fanout.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -272,6 +281,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         ca,
         enrollment,
         revocation,
+        log_fanout,
     ));
 
     // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.
