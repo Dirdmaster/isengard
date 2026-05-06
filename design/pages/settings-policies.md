@@ -1,10 +1,10 @@
 ---
 type: design
 kind: page-spec
-status: phase-9-pending
-status_note: "Update Policies + Approval Flow is Phase 9"
+status: shipped
+status_note: "Phase 9a-9d shipped: storage, resolver, updater, REST, settings UI, preview"
 created: 2026-05-03
-updated: 2026-05-05
+updated: 2026-05-06
 tags:
   - design
   - page
@@ -17,6 +17,23 @@ tags:
 The layered update-policy editor. Where users configure what should auto-update, what needs approval, and when updates may run.
 
 Source design: [[Update Policies & Approval Flow]] (full schema, layering, edge cases).
+
+## Implementation status (2026-05-06)
+
+- Shipped:
+  - Storage migration 0016 (`policies` table, polymorphic scope columns, UNIQUE constraint per scope)
+  - `Policy` struct + `PolicyResolver` with provenance tracking per field
+  - Updater respects `strategy=Pinned` and active `paused_until`; emits `update.policy_skipped` events
+  - REST `/api/v1/policies` CRUD + `/api/v1/policies/effective` query endpoint
+  - Settings → Policies page with `<PolicyRow>` list + `<PolicyEditor>` modal (field-level inheritance with override checkboxes)
+  - `<EffectivePolicyPreview>` on Stack detail (per-service resolved policy with provenance labels)
+- Deferred:
+  - `gate=Approval` enforcement (Phase 9e): UI accepts the value, updater does not yet block on approval
+  - Notifier interactive callbacks for approve/deny (Phases 9f-9g)
+  - Maintenance windows (`window` field semantics) (Phase 9h)
+  - `Minor` strategy semver-aware bumping (Phase 9i)
+  - Rollback failure handler (Phase 9j; couples with Phase 10 deploy story)
+  - Container-label policy discovery (Phase 9b.1)
 
 ## Route
 

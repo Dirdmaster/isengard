@@ -283,6 +283,13 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     };
 
     // -- plugin lifecycle ----------------------------------------------
+    //
+    // Phase 9b: build a `PolicyLoader` backed by the agent inventory so the
+    // updater plugin can consult the policies table once per cycle.
+    let policy_loader: Arc<dyn isengard_core::PolicyLoader> = Arc::new(
+        isengard_storage::InventoryPolicyLoader::new(Arc::new(inventory.clone())),
+    );
+
     let plugins = load_plugins();
     info!(plugin_count = plugins.len(), "plugins discovered");
 
@@ -296,7 +303,8 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             .unwrap_or(serde_json::Value::Null);
         let mut ctx = PluginContext::new(HostMode::Agent, plugin_config)
             .with_events(emitter.clone())
-            .with_host_id(core_host_id);
+            .with_host_id(core_host_id)
+            .with_policy_loader(policy_loader.clone());
         if let Some(d) = update_dispatcher.clone() {
             ctx = ctx.with_update_dispatcher(d);
         }

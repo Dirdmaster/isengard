@@ -166,6 +166,7 @@ const stackTabs = [
           :stack="stack"
           :services="services"
           :recent-events="recentEvents"
+          :fleet="host.fleet"
           @expose="openExposeFor"
         />
         <StackComposeTab v-else-if="activeTab === 'compose'" />
