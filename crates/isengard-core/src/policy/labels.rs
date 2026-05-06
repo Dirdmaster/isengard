@@ -67,9 +67,7 @@ impl std::error::Error for ParseLabelError {}
 ///
 /// Unknown `isengard.policy.<future_field>` keys are ignored so adding new
 /// fields in later phases stays backward-compatible.
-pub fn parse_policy_labels(
-    labels: &HashMap<String, String>,
-) -> Result<Policy, ParseLabelError> {
+pub fn parse_policy_labels(labels: &HashMap<String, String>) -> Result<Policy, ParseLabelError> {
     let mut p = Policy::default();
 
     if let Some(v) = labels.get(LABEL_STRATEGY) {

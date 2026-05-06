@@ -94,10 +94,7 @@ impl PolicyLabelIngest {
         // should still hit the same scope_key.
         {
             let mut guard = self.by_container.lock().await;
-            guard.insert(
-                (host_id, report.container_id.clone()),
-                scope_key.clone(),
-            );
+            guard.insert((host_id, report.container_id.clone()), scope_key.clone());
         }
 
         let any_field_set = body.strategy.is_some()
@@ -140,11 +137,7 @@ impl PolicyLabelIngest {
     /// the scope_key from the in-memory map. If the map has no entry (the
     /// remove arrived without a prior report on this controller boot), the
     /// periodic reaper will catch the row by `updated_at` age.
-    pub async fn ingest_removed(
-        &self,
-        host_id: HostId,
-        ev: &ContainerLabelsRemoved,
-    ) -> Result<()> {
+    pub async fn ingest_removed(&self, host_id: HostId, ev: &ContainerLabelsRemoved) -> Result<()> {
         let scope_key = {
             let mut guard = self.by_container.lock().await;
             guard.remove(&(host_id, ev.container_id.clone()))
@@ -252,11 +245,7 @@ mod tests {
         let (inv, host) = setup().await;
         let ingest = PolicyLabelIngest::new(inv.clone());
 
-        let r = report(
-            "cid-1",
-            "web",
-            &[("isengard.policy.strategy", "pinned")],
-        );
+        let r = report("cid-1", "web", &[("isengard.policy.strategy", "pinned")]);
         ingest.ingest(host, &r).await.unwrap();
 
         let key = container_scope_key(host, "web");
@@ -275,8 +264,10 @@ mod tests {
 
         // Pre-seed a container-scope row.
         let key = container_scope_key(host, "api");
-        let mut body = Policy::default();
-        body.strategy = Some(UpdateStrategy::Pinned);
+        let body = Policy {
+            strategy: Some(UpdateStrategy::Pinned),
+            ..Policy::default()
+        };
         inv.insert_policy(InsertPolicy {
             scope_type: PolicyScopeType::Container,
             scope_key: key.clone(),
@@ -302,11 +293,7 @@ mod tests {
         let (inv, host) = setup().await;
         let ingest = PolicyLabelIngest::new(inv.clone());
 
-        let r = report(
-            "cid-1",
-            "web",
-            &[("isengard.policy.strategy", "pinned")],
-        );
+        let r = report("cid-1", "web", &[("isengard.policy.strategy", "pinned")]);
         ingest.ingest(host, &r).await.unwrap();
         let key = container_scope_key(host, "web");
         assert!(
@@ -341,8 +328,10 @@ mod tests {
 
         // Pre-seed a known-good row.
         let key = container_scope_key(host, "web");
-        let mut body = Policy::default();
-        body.strategy = Some(UpdateStrategy::Pinned);
+        let body = Policy {
+            strategy: Some(UpdateStrategy::Pinned),
+            ..Policy::default()
+        };
         inv.insert_policy(InsertPolicy {
             scope_type: PolicyScopeType::Container,
             scope_key: key.clone(),
@@ -353,11 +342,7 @@ mod tests {
 
         // Now ingest a report whose strategy label is garbage. Expect: no
         // panic, no row mutation.
-        let r = report(
-            "cid-1",
-            "web",
-            &[("isengard.policy.strategy", "pinneded")],
-        );
+        let r = report("cid-1", "web", &[("isengard.policy.strategy", "pinneded")]);
         ingest.ingest(host, &r).await.unwrap();
 
         let row = inv
@@ -371,8 +356,10 @@ mod tests {
     #[tokio::test]
     async fn reaper_with_now_within_max_age_keeps_rows() {
         let (inv, _host) = setup().await;
-        let mut body = Policy::default();
-        body.strategy = Some(UpdateStrategy::Pinned);
+        let body = Policy {
+            strategy: Some(UpdateStrategy::Pinned),
+            ..Policy::default()
+        };
         inv.insert_policy(InsertPolicy {
             scope_type: PolicyScopeType::Container,
             scope_key: "hosta/web".into(),
@@ -401,8 +388,10 @@ mod tests {
         let (inv, _host) = setup().await;
 
         // One container row.
-        let mut body = Policy::default();
-        body.strategy = Some(UpdateStrategy::Pinned);
+        let body = Policy {
+            strategy: Some(UpdateStrategy::Pinned),
+            ..Policy::default()
+        };
         inv.insert_policy(InsertPolicy {
             scope_type: PolicyScopeType::Container,
             scope_key: "hosta/old".into(),

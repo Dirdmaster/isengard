@@ -6,13 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use isengard_controller::policy_ingest::PolicyLabelIngest;
-use isengard_core::policy::{
-    PolicyContext, PolicyOrigin, UpdateStrategy, resolve_policy,
-};
+use isengard_core::policy::{PolicyContext, PolicyOrigin, UpdateStrategy, resolve_policy};
 use isengard_proto::pb::{ContainerLabelsRemoved, ContainerLabelsReport};
-use isengard_storage::{
-    EnrollHost, InsertPolicy, Inventory, policy::PolicyScopeType,
-};
+use isengard_storage::{EnrollHost, InsertPolicy, Inventory, policy::PolicyScopeType};
 use tempfile::{TempDir, tempdir};
 
 async fn setup() -> (TempDir, Arc<Inventory>, isengard_storage::HostId) {
@@ -59,11 +55,7 @@ async fn label_discovered_policy_persists_as_container_scope() {
     ingest
         .ingest(
             host,
-            &report(
-                "cid-1",
-                "web",
-                &[("isengard.policy.strategy", "pinned")],
-            ),
+            &report("cid-1", "web", &[("isengard.policy.strategy", "pinned")]),
         )
         .await
         .unwrap();
@@ -87,8 +79,10 @@ async fn resolver_uses_container_scope_after_label_ingest() {
     let ingest = PolicyLabelIngest::new(inv.clone());
 
     // Pre-seed a less-specific service row so we can prove container wins.
-    let mut svc_body = isengard_core::policy::Policy::default();
-    svc_body.strategy = Some(UpdateStrategy::TagOnly);
+    let svc_body = isengard_core::policy::Policy {
+        strategy: Some(UpdateStrategy::TagOnly),
+        ..isengard_core::policy::Policy::default()
+    };
     inv.insert_policy(InsertPolicy {
         scope_type: PolicyScopeType::Service,
         scope_key: "default/blog/web".into(),
@@ -101,11 +95,7 @@ async fn resolver_uses_container_scope_after_label_ingest() {
     ingest
         .ingest(
             host,
-            &report(
-                "cid-1",
-                "web",
-                &[("isengard.policy.strategy", "pinned")],
-            ),
+            &report("cid-1", "web", &[("isengard.policy.strategy", "pinned")]),
         )
         .await
         .unwrap();
@@ -139,11 +129,7 @@ async fn removed_container_drops_its_policy_row() {
     ingest
         .ingest(
             host,
-            &report(
-                "cid-1",
-                "web",
-                &[("isengard.policy.strategy", "pinned")],
-            ),
+            &report("cid-1", "web", &[("isengard.policy.strategy", "pinned")]),
         )
         .await
         .unwrap();
@@ -183,8 +169,10 @@ async fn malformed_label_value_does_not_crash_ingest() {
 
     // Seed a known-good row.
     let key = format!("{host}/web");
-    let mut body = isengard_core::policy::Policy::default();
-    body.strategy = Some(UpdateStrategy::Pinned);
+    let body = isengard_core::policy::Policy {
+        strategy: Some(UpdateStrategy::Pinned),
+        ..isengard_core::policy::Policy::default()
+    };
     inv.insert_policy(InsertPolicy {
         scope_type: PolicyScopeType::Container,
         scope_key: key.clone(),
@@ -226,11 +214,7 @@ async fn dropping_policy_labels_deletes_existing_row() {
     ingest
         .ingest(
             host,
-            &report(
-                "cid-1",
-                "web",
-                &[("isengard.policy.strategy", "pinned")],
-            ),
+            &report("cid-1", "web", &[("isengard.policy.strategy", "pinned")]),
         )
         .await
         .unwrap();
