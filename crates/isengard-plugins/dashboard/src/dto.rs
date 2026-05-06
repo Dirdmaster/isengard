@@ -2,8 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use isengard_core::Event;
-use isengard_storage::{EventRow, Host, Stack};
+use isengard_core::policy::ResolvedPolicy;
+use isengard_storage::{EventRow, Host, RoutingRule, Service, Stack};
 use serde::{Deserialize, Serialize};
+
+use crate::deployments::DeploymentDto;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HostDto {
@@ -184,15 +187,58 @@ impl From<Stack> for StackDto {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceDto {
-    /// Synthetic id: `{host_id}:{container_name}`. Containers don't have
-    /// stable database ids in v1; they're tracked by name within a host.
+    /// Service primary key (i64) rendered as a string for JSON consistency.
     pub id: String,
     pub host_id: String,
+    /// Hostname resolved from inventory; `None` when the host could not be
+    /// looked up (deleted out-of-band, or batch translation skipped it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     pub stack_id: Option<String>,
     pub name: String,
     pub image: String,
     /// One of "running", "stopped", "restarting", "unknown".
     pub state: String,
+    pub last_seen_at: DateTime<Utc>,
+    pub deploy_strategy_override: Option<String>,
+}
+
+impl ServiceDto {
+    /// Build a DTO from a storage row, optionally enriched with the host's
+    /// hostname for display. Pass `None` for `hostname` when the caller
+    /// cannot resolve it (e.g. batch endpoints that skip the inventory
+    /// lookup).
+    pub fn from_service(s: Service, hostname: Option<String>) -> Self {
+        Self {
+            id: s.id.to_string(),
+            host_id: ulid::Ulid::from(s.host_id).to_string(),
+            hostname,
+            stack_id: s.stack_id.map(|sid| sid.0.to_string()),
+            name: s.name,
+            image: s.image,
+            state: s.state.as_str().to_string(),
+            last_seen_at: s.last_seen_at,
+            deploy_strategy_override: s.deploy_strategy_override,
+        }
+    }
+}
+
+/// Envelope returned by `GET /api/v1/services/:stack_id/:service_name`.
+///
+/// Carries everything the service detail page needs in a single round-trip:
+/// the primary container row, any other instances of the same service in
+/// the same stack across other hosts, the resolved effective policy, the
+/// most recent deployment for the service (if any), the last 50 events
+/// scoped to the host (filtered to this container when possible), and the
+/// fleet-wide routing rules attached to the service.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceDetailDto {
+    pub service: ServiceDto,
+    pub other_instances: Vec<ServiceDto>,
+    pub effective_policy: ResolvedPolicy,
+    pub last_deployment: Option<DeploymentDto>,
+    pub recent_events: Vec<EventDto>,
+    pub routing_rules: Vec<RoutingRule>,
 }
 
 #[derive(Debug, Clone, Serialize)]

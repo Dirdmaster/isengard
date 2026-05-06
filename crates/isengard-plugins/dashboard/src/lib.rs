@@ -5,10 +5,10 @@
 
 #![allow(clippy::result_large_err)]
 
-mod api;
+pub mod api;
 pub mod approvals;
 pub mod deployments;
-mod dto;
+pub mod dto;
 pub mod enrollment;
 pub mod policies;
 pub mod routing;
