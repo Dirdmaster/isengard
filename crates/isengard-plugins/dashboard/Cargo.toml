@@ -16,6 +16,7 @@ chrono.workspace = true
 inventory.workspace = true
 isengard-controller.workspace = true
 isengard-core.workspace = true
+isengard-plugin-backup.workspace = true
 isengard-plugin-notifier.workspace = true
 isengard-proto.workspace = true
 isengard-storage.workspace = true

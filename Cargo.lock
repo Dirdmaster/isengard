@@ -2374,6 +2374,7 @@ dependencies = [
  "inventory",
  "isengard-controller",
  "isengard-core",
+ "isengard-plugin-backup",
  "isengard-plugin-notifier",
  "isengard-proto",
  "isengard-storage",
