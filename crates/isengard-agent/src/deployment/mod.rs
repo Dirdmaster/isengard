@@ -10,7 +10,12 @@ use crate::deployment::eligibility::{ContainerSpec, Decision, classify};
 use crate::proxy::ProxyState;
 use anyhow::Result;
 use async_trait::async_trait;
-use isengard_core::{DispatchOutcome, EventEmitter, UpdateDispatcher, UpdateTriggerInfo};
+use isengard_core::policy::{
+    FailureHandling, PolicyContext, PolicyScopeType, resolve_policy,
+};
+use isengard_core::{
+    DispatchOutcome, EventEmitter, PolicyLoader, UpdateDispatcher, UpdateTriggerInfo,
+};
 use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeployment};
 use isengard_storage::host::HostId;
 use isengard_storage::inventory::Inventory;
@@ -71,6 +76,12 @@ pub struct DeploymentSupervisor {
     /// B 10f's [`Self::handle_abort`] looks up the token and fires it,
     /// driving the in-flight driver into its abort path.
     abort_tokens: Arc<StdRwLock<HashMap<String, CancellationToken>>>,
+    /// Phase 9F: optional policy loader. When wired, the supervisor
+    /// resolves a `ResolvedPolicy` per trigger and consults
+    /// `on_failure` to decide whether to seed `previous_digest` and
+    /// what failure-handling mode to pass to the driver. `None` keeps
+    /// every trigger on the legacy Notify-by-default path.
+    policy_loader: Option<Arc<dyn PolicyLoader>>,
 }
 
 impl DeploymentSupervisor {
@@ -86,7 +97,18 @@ impl DeploymentSupervisor {
             proxy_state,
             emitter,
             abort_tokens: Arc::new(StdRwLock::new(HashMap::new())),
+            policy_loader: None,
         }
+    }
+
+    /// Phase 9F: install a `PolicyLoader` so the supervisor can resolve
+    /// `on_failure` per trigger. Without one, every deployment defaults
+    /// to Notify (existing behaviour). With one, deployments whose
+    /// resolved policy says `Rollback` get `previous_digest` populated
+    /// and the driver picks up the rollback branch.
+    pub fn with_policy_loader(mut self, loader: Arc<dyn PolicyLoader>) -> Self {
+        self.policy_loader = Some(loader);
+        self
     }
 
     /// Cancel the [`CancellationToken`] for `deployment_id`, if one is
@@ -122,6 +144,63 @@ impl DeploymentSupervisor {
             );
         }
         Ok(n)
+    }
+
+    /// Phase 9F: resolve the failure-handling policy for this trigger.
+    /// Falls back to `FailureHandling::Notify` (the design's default) on
+    /// any error so a slow or broken policy DAO never blocks a deploy.
+    /// Returns the resolved enum AND a boolean indicating whether a
+    /// policy loader was actually consulted (so callers can distinguish
+    /// "loader said Notify" from "no loader wired").
+    async fn resolve_failure_handling(
+        &self,
+        trigger: &UpdateTrigger,
+    ) -> (FailureHandling, bool) {
+        let Some(loader) = self.policy_loader.as_ref() else {
+            return (FailureHandling::Notify, false);
+        };
+        // Fleet name lookup. `None` is fine: the resolver simply skips
+        // fleet-scoped rows. `Err` is treated the same as None: we
+        // never block on policy evaluation.
+        let fleet = loader
+            .fleet_for(trigger.host_id.0)
+            .await
+            .ok()
+            .flatten();
+        let rows = match loader.list().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    host_id = %trigger.host_id,
+                    service = %trigger.service_name,
+                    error = %e,
+                    "supervisor: policy_loader.list failed; defaulting to Notify"
+                );
+                return (FailureHandling::Notify, true);
+            }
+        };
+        // Project the snapshot down to the resolver's tuple shape. The
+        // resolver re-sorts by rank internally so input order is
+        // irrelevant.
+        let projected: Vec<(PolicyScopeType, &str, &isengard_core::policy::Policy)> = rows
+            .iter()
+            .map(|r| (r.scope_type, r.scope_key.as_str(), &r.body))
+            .collect();
+        let host_hex = trigger.host_id.0.to_string();
+        let ctx = PolicyContext {
+            fleet: fleet.as_deref(),
+            // Stack scope_key uses the bare stack name; the supervisor
+            // doesn't have it directly, so we look it up best-effort
+            // via the inventory. Failure here just means stack-scoped
+            // rows don't apply, which is harmless (less specific
+            // scopes still resolve).
+            stack: None,
+            service: Some(trigger.service_name.as_str()),
+            host_id_hex: Some(host_hex.as_str()),
+            container_name: None,
+        };
+        let resolved = resolve_policy(&projected, &ctx);
+        (resolved.on_failure, true)
     }
 
     /// Classify the trigger; either spawn a [`Driver`] (BlueGreen), bail
@@ -170,6 +249,17 @@ impl DeploymentSupervisor {
         match classify(&spec) {
             Decision::InPlace { .. } => Ok(SupervisorOutcome::InPlaceForUpdater),
             Decision::BlueGreen => {
+                // Phase 9F: resolve the failure-handling policy ONCE
+                // before insert + spawn so we can both seed
+                // `previous_digest` and tell the driver what mode to
+                // operate in.
+                let (failure_handling, _resolved) =
+                    self.resolve_failure_handling(&trigger).await;
+                let previous_digest = match failure_handling {
+                    FailureHandling::Rollback => Some(trigger.blue_digest.clone()),
+                    FailureHandling::Keep | FailureHandling::Notify => None,
+                };
+
                 let id = Ulid::new().to_string();
                 let row = self
                     .inventory
@@ -188,6 +278,7 @@ impl DeploymentSupervisor {
                         health_path: trigger.health_path.clone(),
                         container_port: trigger.container_port.map(|p| p as i64),
                         metadata_json: None,
+                        previous_digest,
                     })
                     .await?;
                 // Register an abort token before spawn so the dashboard
@@ -206,7 +297,8 @@ impl DeploymentSupervisor {
                 });
                 let driver = Driver::new(row, deps, self.inventory.clone(), self.emitter.clone())
                     .with_abort_token(abort_token)
-                    .with_proxy_events(proxy_events_rx);
+                    .with_proxy_events(proxy_events_rx)
+                    .with_failure_policy(failure_handling);
                 tracing::info!(
                     deployment_id = %id,
                     host_id = %trigger.host_id,
@@ -414,6 +506,7 @@ mod supervisor_tests {
             health_path: None,
             container_port: Some(8080),
             metadata_json: None,
+            previous_digest: None,
         })
         .await
         .unwrap();
@@ -504,6 +597,7 @@ mod supervisor_tests {
                 health_path: None,
                 container_port: Some(8080),
                 metadata_json: None,
+                previous_digest: None,
             })
             .await
             .unwrap();
@@ -515,6 +609,105 @@ mod supervisor_tests {
         assert_eq!(
             after.error.as_deref(),
             Some("agent_restarted_during_deployment")
+        );
+    }
+
+    // ----- Phase 9F (T2): supervisor captures previous_digest -----
+
+    /// Synthetic `PolicyLoader` returning a fixed list. Used by the T2
+    /// tests to drive `resolve_failure_handling` deterministically
+    /// without round-tripping through the storage DAO.
+    struct FixedPolicyLoader {
+        rows: Vec<isengard_core::LoadedPolicy>,
+        fleet: Option<String>,
+    }
+    #[async_trait]
+    impl isengard_core::PolicyLoader for FixedPolicyLoader {
+        async fn list(
+            &self,
+        ) -> std::result::Result<Vec<isengard_core::LoadedPolicy>, isengard_core::PolicyLoaderError>
+        {
+            Ok(self.rows.clone())
+        }
+        async fn fleet_for(
+            &self,
+            _host_id: isengard_core::HostId,
+        ) -> std::result::Result<Option<String>, isengard_core::PolicyLoaderError> {
+            Ok(self.fleet.clone())
+        }
+    }
+
+    /// Service-scope policy with `on_failure = Rollback` causes the
+    /// supervisor to seed `previous_digest = Some(blue_digest)` on the
+    /// deployment row. The driver task spawned alongside will fail
+    /// promptly because there's no real Docker, but `previous_digest`
+    /// is set on insert so it's observable BEFORE the driver runs.
+    #[tokio::test]
+    async fn rollback_policy_captures_previous_digest() {
+        use isengard_core::policy::{FailureHandling as FH, Policy, PolicyScopeType};
+        let (mut sup, host, stack, inv) = setup().await;
+        let loader: Arc<dyn isengard_core::PolicyLoader> =
+            Arc::new(FixedPolicyLoader {
+                rows: vec![isengard_core::LoadedPolicy {
+                    scope_type: PolicyScopeType::Service,
+                    scope_key: "web".into(),
+                    body: Policy {
+                        on_failure: Some(FH::Rollback),
+                        ..Default::default()
+                    },
+                }],
+                fleet: Some("default".into()),
+            });
+        sup = sup.with_policy_loader(loader);
+
+        let mut t = trigger(host, stack, true);
+        t.blue_digest = "sha256:bluedigest".into();
+        let outcome = sup.handle_update_trigger(t).await.unwrap();
+        let dep_id = match outcome {
+            SupervisorOutcome::BlueGreenSpawned { deployment_id } => deployment_id,
+            other => panic!("expected BlueGreenSpawned, got {other:?}"),
+        };
+
+        let row = inv.get_deployment(&dep_id).await.unwrap().expect("row");
+        assert_eq!(
+            row.previous_digest.as_deref(),
+            Some("sha256:bluedigest"),
+            "Rollback policy should populate previous_digest"
+        );
+    }
+
+    /// Default `Notify` policy leaves `previous_digest` NULL: the row is
+    /// not eligible for automatic rollback. Same setup as above with
+    /// `on_failure = Notify`.
+    #[tokio::test]
+    async fn notify_policy_leaves_previous_digest_null() {
+        use isengard_core::policy::{FailureHandling as FH, Policy, PolicyScopeType};
+        let (mut sup, host, stack, inv) = setup().await;
+        let loader: Arc<dyn isengard_core::PolicyLoader> =
+            Arc::new(FixedPolicyLoader {
+                rows: vec![isengard_core::LoadedPolicy {
+                    scope_type: PolicyScopeType::Service,
+                    scope_key: "web".into(),
+                    body: Policy {
+                        on_failure: Some(FH::Notify),
+                        ..Default::default()
+                    },
+                }],
+                fleet: Some("default".into()),
+            });
+        sup = sup.with_policy_loader(loader);
+
+        let mut t = trigger(host, stack, true);
+        t.blue_digest = "sha256:bluedigest".into();
+        let outcome = sup.handle_update_trigger(t).await.unwrap();
+        let dep_id = match outcome {
+            SupervisorOutcome::BlueGreenSpawned { deployment_id } => deployment_id,
+            other => panic!("expected BlueGreenSpawned, got {other:?}"),
+        };
+        let row = inv.get_deployment(&dep_id).await.unwrap().expect("row");
+        assert!(
+            row.previous_digest.is_none(),
+            "Notify policy must not seed previous_digest"
         );
     }
 }

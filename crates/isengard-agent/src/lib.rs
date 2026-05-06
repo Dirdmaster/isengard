@@ -250,6 +250,14 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
+    // Phase 9b: build a `PolicyLoader` backed by the agent inventory so the
+    // updater plugin can consult the policies table once per cycle. Phase
+    // 9F: also passed into the supervisor so it can resolve `on_failure`
+    // and seed `previous_digest` for Rollback-policy deployments.
+    let policy_loader: Arc<dyn isengard_core::PolicyLoader> = Arc::new(
+        isengard_storage::InventoryPolicyLoader::new(Arc::new(inventory.clone())),
+    );
+
     // Hold onto the supervisor `Arc` so the sync loop can dispatch
     // `AbortDeployment` payloads into [`DeploymentSupervisor::handle_abort`].
     // The dispatcher path consumes a clone via `SupervisorDispatcher`; the
@@ -257,12 +265,15 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let mut supervisor_for_sync: Option<Arc<DeploymentSupervisor>> = None;
     let update_dispatcher: Option<Arc<dyn UpdateDispatcher>> = match docker.as_ref() {
         Some(docker) => {
-            let supervisor = Arc::new(DeploymentSupervisor::new(
-                inventory.clone(),
-                docker.clone(),
-                proxy_state.clone(),
-                emitter.clone(),
-            ));
+            let supervisor = Arc::new(
+                DeploymentSupervisor::new(
+                    inventory.clone(),
+                    docker.clone(),
+                    proxy_state.clone(),
+                    emitter.clone(),
+                )
+                .with_policy_loader(policy_loader.clone()),
+            );
             match supervisor.reconcile_orphans(storage_host_id).await {
                 Ok(0) => {}
                 Ok(n) => warn!(
@@ -285,12 +296,6 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 
     // -- plugin lifecycle ----------------------------------------------
     //
-    // Phase 9b: build a `PolicyLoader` backed by the agent inventory so the
-    // updater plugin can consult the policies table once per cycle.
-    let policy_loader: Arc<dyn isengard_core::PolicyLoader> = Arc::new(
-        isengard_storage::InventoryPolicyLoader::new(Arc::new(inventory.clone())),
-    );
-
     // Phase 9e: build an `ApprovalStore` backed by the same inventory so the
     // updater can persist + dedupe pending-approval rows when a candidate's
     // resolved policy gates on `Approval`.

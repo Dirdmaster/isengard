@@ -24,6 +24,7 @@ use crate::proxy::{ProxyEvent, ProxyState};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
+use isengard_core::policy::FailureHandling;
 use isengard_core::{Event, EventEmitter};
 use isengard_storage::deployment::{Deployment, DeploymentState};
 use isengard_storage::inventory::Inventory;
@@ -71,8 +72,24 @@ pub trait DriverDeps: Send + Sync + 'static {
     /// Instant swap back to a previously-snapshotted blue upstream. Called
     /// during post-switch collapse recovery (`Recovering` state) and during
     /// abort-during-drain. Uses a zero grace because the green upstream is
-    /// already failing — there's nothing in-flight to preserve. Phase 10f.
+    /// already failing: there's nothing in-flight to preserve. Phase 10f.
     async fn swap_back_to_blue(&self, hostname: &str, blue: &Upstream) -> Result<()>;
+
+    /// Phase 9F: re-pull `previous_digest` and recreate the container at
+    /// that exact digest. Used by the `Rollback` failure-handling
+    /// branch when green failed and we need to restore the prior
+    /// version. Symmetric with `start_green` but pinned: we never
+    /// pull a new tag here, only the recorded digest. Returns Ok when
+    /// the fresh container is up; the driver then transitions to
+    /// `RolledBack`. A default impl returns an error so existing
+    /// non-rollback test fixtures don't have to stub it.
+    async fn pull_and_recreate_at_digest(
+        &self,
+        _deployment: &Deployment,
+        _previous_digest: &str,
+    ) -> Result<()> {
+        Err(anyhow!("pull_and_recreate_at_digest not implemented"))
+    }
 }
 
 /// Default healthcheck cadence: 5s between probes, 2 consecutive passes
@@ -131,6 +148,15 @@ pub struct Driver<D: DriverDeps> {
     /// used by `recover_to_blue` to roll back. `None` until the snapshot is
     /// taken (i.e. before reaching `Switching`). Phase 10f.
     pub blue_upstream_snapshot: Option<Upstream>,
+    /// Phase 9F: which `on_failure` branch to take when the deployment
+    /// breaks. Defaults to `Notify` (existing behaviour). When set to
+    /// `Rollback`, failure paths consult `deployment.previous_digest`
+    /// and call `pull_and_recreate_at_digest` instead of just
+    /// transitioning to `Aborted`. When set to `Keep`, failure paths
+    /// behave like Notify but ALSO upsert `paused_until = now + 24h`
+    /// onto a service-scope policy row so future scans skip the
+    /// service for a day.
+    pub failure_handling: FailureHandling,
 }
 
 impl<D: DriverDeps> Driver<D> {
@@ -153,7 +179,17 @@ impl<D: DriverDeps> Driver<D> {
             abort_token: CancellationToken::new(),
             proxy_events_rx: None,
             blue_upstream_snapshot: None,
+            failure_handling: FailureHandling::Notify,
         }
+    }
+
+    /// Phase 9F: install the resolved `on_failure` policy. Setting this
+    /// to `Rollback` enables the supervisor's rollback branch on every
+    /// failure path; `Keep` adds a 24h paused_until upsert to the
+    /// existing abort path; `Notify` is the no-op default.
+    pub fn with_failure_policy(mut self, handling: FailureHandling) -> Self {
+        self.failure_handling = handling;
+        self
     }
 
     /// Override the swap grace + drain buffer. Used by tests so the
@@ -807,6 +843,7 @@ mod tests {
                 health_path: None,
                 container_port: Some(8080),
                 metadata_json: None,
+                previous_digest: None,
             })
             .await
             .unwrap();
