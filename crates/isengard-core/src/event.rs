@@ -25,6 +25,24 @@ pub mod kinds {
     /// A candidate was skipped because the resolved policy said so.
     /// Phase 9b: emitted for `strategy=Pinned` and active `paused_until`.
     pub const UPDATE_POLICY_SKIPPED: &str = "update.policy_skipped";
+    /// A `needs_update` candidate resolved with `gate=Approval`. The updater
+    /// has persisted a `pending_open` approval row and is waiting on a
+    /// dashboard or notifier callback decision before recreating.
+    pub const UPDATE_PENDING_APPROVAL: &str = "update.pending_approval";
+    /// An operator (or auto-decider) approved a pending update via the
+    /// dashboard or a notifier callback. The agent will pick up the queued
+    /// `apply_update` HostAction on its next sync.
+    pub const UPDATE_APPROVED: &str = "update.approved";
+    /// An operator rejected a pending update. No recreate happens until the
+    /// digest changes again.
+    pub const UPDATE_REJECTED: &str = "update.rejected";
+    /// An operator snoozed a pending update. The service-scope policy is
+    /// updated with `paused_until = now + N hours`; the next scan skips.
+    pub const UPDATE_SNOOZED: &str = "update.snoozed";
+    /// A pending approval row aged past its `expires_at` and was
+    /// auto-transitioned to `pending_expired` by the controller's periodic
+    /// expiry tick.
+    pub const UPDATE_EXPIRED: &str = "update.expired";
 }
 
 /// A journal event. Plugin-defined `kind` strings (e.g. "update.success",

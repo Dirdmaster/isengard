@@ -139,7 +139,8 @@ async fn post_duplicate_scope_returns_409() {
 }
 
 #[tokio::test]
-async fn post_with_gate_approval_returns_422() {
+async fn post_with_gate_approval_now_accepted() {
+    // Phase 9b lifted the 422 guard now that the updater enforces gate=approval.
     let (app, _h) = setup_app().await;
     let body = serde_json::json!({
         "scopeType": "global",
@@ -147,11 +148,9 @@ async fn post_with_gate_approval_returns_422() {
         "body": { "gate": "approval" }
     });
     let resp = app.oneshot(post_json("/policies", body)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(resp.status(), StatusCode::CREATED);
     let v = body_json(resp).await;
-    let msg = v["error"].as_str().unwrap();
-    assert!(msg.contains("approval"), "got: {msg}");
-    assert!(msg.contains("9e"), "got: {msg}");
+    assert_eq!(v["body"]["gate"], "approval");
 }
 
 #[tokio::test]

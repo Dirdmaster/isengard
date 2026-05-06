@@ -2,7 +2,7 @@
 type: design
 kind: page-spec
 status: shipped
-status_note: "Phase 9a-9d shipped: storage, resolver, updater, REST, settings UI, preview"
+status_note: "Phase 9a-9d shipped: storage, resolver, updater, REST, settings UI, preview. Phase 9e-9f: gate=approval enforcement + interactive callbacks"
 created: 2026-05-03
 updated: 2026-05-06
 tags:
@@ -27,13 +27,13 @@ Source design: [[Update Policies & Approval Flow]] (full schema, layering, edge 
   - REST `/api/v1/policies` CRUD + `/api/v1/policies/effective` query endpoint
   - Settings → Policies page with `<PolicyRow>` list + `<PolicyEditor>` modal (field-level inheritance with override checkboxes)
   - `<EffectivePolicyPreview>` on Stack detail (per-service resolved policy with provenance labels)
+  - **Phase 9e-9f**: `gate=Approval` enforcement (updater persists pending rows, surfaces them via [[approvals]] queue + Telegram interactive messages); see `design/pages/approvals.md` for the queue surface
 - Deferred:
-  - `gate=Approval` enforcement (Phase 9e): UI accepts the value, updater does not yet block on approval
-  - Notifier interactive callbacks for approve/deny (Phases 9f-9g)
   - Maintenance windows (`window` field semantics) (Phase 9h)
   - `Minor` strategy semver-aware bumping (Phase 9i)
   - Rollback failure handler (Phase 9j; couples with Phase 10 deploy story)
   - Container-label policy discovery (Phase 9b.1)
+  - Discord interactive messages (Phase 9g; same pattern as Telegram)
 
 ## Route
 
@@ -90,4 +90,4 @@ Each field is one of: `strategy`, `gate`, `window`, `paused_until`, `on_failure`
 
 ---
 
-> Approvals tab is pending Phase 9 — not currently in TopBar.
+> Approvals tab now lives in TopBar (shipped Phase 9e-9f). See [[approvals]] for the queue surface.

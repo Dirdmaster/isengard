@@ -1,6 +1,7 @@
 //! Isengard core types: plugin trait, host services, event journal types,
 //! compile-time plugin registration.
 
+pub mod approval_store;
 pub mod context;
 pub mod error;
 pub mod event;
@@ -17,6 +18,10 @@ pub mod update_dispatch;
 /// `HostId` newtype provides `From`/`Into` conversions to/from this type.
 pub use ulid::Ulid as HostId;
 
+pub use approval_store::{
+    ApprovalStore, ApprovalStoreError, InsertPendingApproval, PendingApprovalBody,
+    PendingApprovalRecord,
+};
 pub use context::{HostMode, PluginContext};
 pub use error::{CoreError, Result};
 pub use event::{Event, EventEmitter, NoopEmitter, arc_emitter};

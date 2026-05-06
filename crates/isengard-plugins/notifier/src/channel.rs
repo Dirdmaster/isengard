@@ -3,7 +3,7 @@
 //! plain-text message body all channels send. `RateLimited<C>` wraps any
 //! channel with a token-bucket limiter + overflow batching.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -15,6 +15,45 @@ pub trait NotifyChannel: Send + Sync {
     fn name(&self) -> &'static str;
     fn matches_kind(&self, kind: &str) -> bool;
     async fn send(&self, event: &Event) -> anyhow::Result<()>;
+}
+
+/// One button on an interactive message (Telegram inline keyboard, Discord
+/// component button in 9g). The exact wire serialization is per-channel; this
+/// is the channel-agnostic shape consumers build.
+///
+/// `text` is what the user sees; `callback_data` is opaque payload echoed
+/// back when the button is clicked. Telegram caps `callback_data` at 64
+/// bytes; keep it short.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineButton {
+    pub text: String,
+    pub callback_data: String,
+}
+
+impl InlineButton {
+    pub fn new(text: impl Into<String>, callback_data: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            callback_data: callback_data.into(),
+        }
+    }
+}
+
+/// Blanket: an `Arc`-shared channel is itself a `NotifyChannel`. Lets the
+/// notifier hold the same instance both directly (for typed methods, e.g.
+/// `TelegramChannel::send_inline_keyboard`) and inside a `RateLimited<...>`
+/// wrapper for the existing one-way fan-out path.
+#[async_trait]
+impl<C: NotifyChannel + ?Sized> NotifyChannel for Arc<C> {
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+    fn matches_kind(&self, kind: &str) -> bool {
+        (**self).matches_kind(kind)
+    }
+    async fn send(&self, event: &Event) -> anyhow::Result<()> {
+        (**self).send(event).await
+    }
 }
 
 /// Plain-text format used by every channel. Multi-line, blank-line free.
@@ -222,7 +261,7 @@ mod tests {
         }
     }
     #[async_trait]
-    impl NotifyChannel for Arc<Recorder> {
+    impl NotifyChannel for Recorder {
         fn name(&self) -> &'static str {
             "recorder"
         }

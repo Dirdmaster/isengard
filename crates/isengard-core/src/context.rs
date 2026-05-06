@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EventEmitter, HostId, PolicyLoader, UpdateDispatcher};
+use crate::{ApprovalStore, EventEmitter, HostId, PolicyLoader, UpdateDispatcher};
 
 /// Which mode the host is running in. Affects which capability sub-traits a
 /// plugin's lifecycle hooks are called through.
@@ -52,6 +52,11 @@ pub struct PluginContext {
     /// outside the agent or when the agent runtime hasn't wired the
     /// loader yet (older agents, certain test harnesses).
     pub policy_loader: Option<Arc<dyn PolicyLoader>>,
+    /// Optional approval store. The updater plugin persists pending
+    /// approvals via this seam when a candidate's resolved policy gates on
+    /// `Approval`. `None` outside the agent or in test harnesses that
+    /// don't exercise the approval path.
+    pub approval_store: Option<Arc<dyn ApprovalStore>>,
 }
 
 impl PluginContext {
@@ -64,6 +69,7 @@ impl PluginContext {
             update_dispatcher: None,
             host_id: None,
             policy_loader: None,
+            approval_store: None,
         }
     }
 
@@ -91,6 +97,11 @@ impl PluginContext {
         self.policy_loader = Some(loader);
         self
     }
+
+    pub fn with_approval_store(mut self, store: Arc<dyn ApprovalStore>) -> Self {
+        self.approval_store = Some(store);
+        self
+    }
 }
 
 impl std::fmt::Debug for PluginContext {
@@ -107,6 +118,10 @@ impl std::fmt::Debug for PluginContext {
             .field(
                 "policy_loader",
                 &self.policy_loader.as_ref().map(|_| "<policy_loader>"),
+            )
+            .field(
+                "approval_store",
+                &self.approval_store.as_ref().map(|_| "<approval_store>"),
             )
             .finish()
     }
