@@ -5,9 +5,11 @@ target/
 .vscode/
 .superpowers/
 docs/
-design/
 legacy-go/
 node_modules/
+
+# design/ stays IN the build context: the dashboard's Vite/PostCSS imports
+# design/tokens.css from web/. Excluding it broke `bun run build` inside Docker.
 **/.DS_Store
 **/.nuxt/
 **/.output/

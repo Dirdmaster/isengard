@@ -9,6 +9,7 @@ pub mod agent_cert;
 pub mod approval_store;
 pub mod ca;
 pub mod deployment;
+pub mod deployment_group;
 pub mod enrollment_token;
 pub mod error;
 pub mod fleet;
@@ -23,12 +24,14 @@ pub mod service;
 pub mod setting;
 pub mod stack;
 pub mod tls_cert;
+pub mod webhook;
 
 pub use acme_account::{AcmeAccount, UpsertAcmeAccount};
 pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
 pub use agent_cert::AgentCert;
 pub use approval_store::InventoryApprovalStore;
 pub use ca::CaRow;
+pub use deployment_group::{DeploymentGroup, DeploymentGroupState, InsertDeploymentGroup};
 pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};
 pub use error::{Error, Result};
 pub use fleet::Fleet;
@@ -49,3 +52,7 @@ pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
+pub use webhook::{
+    DeliveryStatus, InsertDelivery, InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook,
+    WebhookDelivery, kind_matches,
+};

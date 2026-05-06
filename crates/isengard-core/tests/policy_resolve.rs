@@ -5,8 +5,8 @@
 
 use chrono::{TimeZone, Utc};
 use isengard_core::policy::{
-    FailureHandling, Policy, PolicyContext, PolicyOrigin, PolicyScopeType, UpdateGate,
-    UpdateStrategy,
+    FailureHandling, MaintenanceWindow, Policy, PolicyContext, PolicyOrigin, PolicyScopeType,
+    UpdateGate, UpdateStrategy,
     defaults::{DEFAULT_GATE, DEFAULT_ON_FAILURE, DEFAULT_STRATEGY},
     resolve_policy,
 };
@@ -47,6 +47,7 @@ fn global_only_overrides_some_fields_rest_fall_back_to_default() {
         paused_until: None,
         on_failure: None,
         approver_channel: Some("ops".to_string()),
+        window: None,
     };
     let rows = vec![(PolicyScopeType::Global, "", &global)];
 
@@ -79,6 +80,7 @@ fn fleet_overrides_global_global_fills_remaining_fields() {
         paused_until: None,
         on_failure: Some(FailureHandling::Notify),
         approver_channel: None,
+        window: None,
     };
     let fleet = Policy {
         strategy: Some(UpdateStrategy::Pinned),
@@ -86,6 +88,7 @@ fn fleet_overrides_global_global_fills_remaining_fields() {
         paused_until: None,
         on_failure: None,
         approver_channel: None,
+        window: None,
     };
     let rows = vec![
         (PolicyScopeType::Global, "", &global),
@@ -118,6 +121,7 @@ fn service_wins_when_all_four_scopes_set_strategy() {
         paused_until: None,
         on_failure: None,
         approver_channel: None,
+        window: None,
     };
     let global = strategy_only(UpdateStrategy::Pinned);
     let fleet = strategy_only(UpdateStrategy::TagOnly);
@@ -149,6 +153,7 @@ fn container_override_beats_everything() {
         paused_until: None,
         on_failure: Some(FailureHandling::Notify),
         approver_channel: None,
+        window: None,
     };
     let fleet = Policy {
         strategy: Some(UpdateStrategy::Any),
@@ -156,6 +161,7 @@ fn container_override_beats_everything() {
         paused_until: None,
         on_failure: None,
         approver_channel: None,
+        window: None,
     };
     let service = Policy {
         strategy: Some(UpdateStrategy::Minor),
@@ -163,6 +169,7 @@ fn container_override_beats_everything() {
         paused_until: None,
         on_failure: Some(FailureHandling::Keep),
         approver_channel: Some("svc-channel".to_string()),
+        window: None,
     };
     let container = Policy {
         strategy: Some(UpdateStrategy::Pinned),
@@ -170,6 +177,7 @@ fn container_override_beats_everything() {
         paused_until: None,
         on_failure: Some(FailureHandling::Rollback),
         approver_channel: Some("container-channel".to_string()),
+        window: None,
     };
 
     let container_key = "0123456789abcdef/prod-blog-web-1";
@@ -213,6 +221,7 @@ fn provenance_tracks_per_field_origin_not_per_row() {
         paused_until: None,
         on_failure: None,
         approver_channel: None,
+        window: None,
     };
     let stack = Policy {
         strategy: None,
@@ -220,6 +229,7 @@ fn provenance_tracks_per_field_origin_not_per_row() {
         paused_until: None,
         on_failure: Some(FailureHandling::Keep),
         approver_channel: None,
+        window: None,
     };
     let service = Policy {
         strategy: None,
@@ -227,6 +237,7 @@ fn provenance_tracks_per_field_origin_not_per_row() {
         paused_until: Some(pause),
         on_failure: None,
         approver_channel: None,
+        window: None,
     };
     let rows = vec![
         (PolicyScopeType::Fleet, "prod", &fleet),
@@ -260,6 +271,7 @@ fn rows_for_other_scopes_are_filtered_out() {
         paused_until: None,
         on_failure: None,
         approver_channel: None,
+        window: None,
     };
     let rows = vec![(PolicyScopeType::Fleet, "staging", &other_fleet)];
 
@@ -268,4 +280,51 @@ fn rows_for_other_scopes_are_filtered_out() {
     // Strategy stays at default: the staging row was ignored.
     assert_eq!(resolved.strategy, DEFAULT_STRATEGY);
     assert_eq!(resolved.provenance.strategy, PolicyOrigin::Default);
+}
+
+/// Phase 9d: window field merges per scope precedence. Stack overrides
+/// global; service overrides stack.
+#[test]
+fn window_merges_per_scope_precedence() {
+    let global = Policy {
+        window: Some(MaintenanceWindow {
+            cron_expr: "0 2 * * *".to_string(),
+            timezone: None,
+        }),
+        ..Default::default()
+    };
+    let stack = Policy {
+        window: Some(MaintenanceWindow {
+            cron_expr: "0 3 * * 0".to_string(),
+            timezone: Some("Europe/Zurich".to_string()),
+        }),
+        ..Default::default()
+    };
+    let rows = vec![
+        (PolicyScopeType::Global, "", &global),
+        (PolicyScopeType::Stack, "prod/blog", &stack),
+    ];
+
+    let resolved = resolve_policy(&rows, &ctx_full());
+
+    let w = resolved.window.as_ref().expect("window resolved");
+    assert_eq!(w.cron_expr, "0 3 * * 0");
+    assert_eq!(w.timezone.as_deref(), Some("Europe/Zurich"));
+    assert_eq!(resolved.provenance.window, PolicyOrigin::Stack);
+}
+
+/// Phase 9d: window unset on every applicable row resolves to None with
+/// Default origin.
+#[test]
+fn window_none_when_unset() {
+    let global = Policy {
+        strategy: Some(UpdateStrategy::Pinned),
+        ..Default::default()
+    };
+    let rows = vec![(PolicyScopeType::Global, "", &global)];
+
+    let resolved = resolve_policy(&rows, &ctx_full());
+
+    assert!(resolved.window.is_none());
+    assert_eq!(resolved.provenance.window, PolicyOrigin::Default);
 }

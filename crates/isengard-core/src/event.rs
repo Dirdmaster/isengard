@@ -43,6 +43,10 @@ pub mod kinds {
     /// auto-transitioned to `pending_expired` by the controller's periodic
     /// expiry tick.
     pub const UPDATE_EXPIRED: &str = "update.expired";
+    /// A `needs_update` candidate fell outside its resolved policy's
+    /// maintenance window. Phase 9d. Payload includes the `next_window`
+    /// (RFC3339, UTC) so notifier consumers can quote the back-online time.
+    pub const UPDATE_DEFERRED: &str = "update.deferred";
 }
 
 /// A journal event. Plugin-defined `kind` strings (e.g. "update.success",

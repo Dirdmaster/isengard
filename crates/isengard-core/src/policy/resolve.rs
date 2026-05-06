@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    FailureHandling, Policy, PolicyScopeType, UpdateGate, UpdateStrategy,
+    FailureHandling, MaintenanceWindow, Policy, PolicyScopeType, UpdateGate, UpdateStrategy,
     defaults::{DEFAULT_GATE, DEFAULT_ON_FAILURE, DEFAULT_STRATEGY},
 };
 
@@ -67,6 +67,7 @@ pub struct ResolvedProvenance {
     pub paused_until: PolicyOrigin,
     pub on_failure: PolicyOrigin,
     pub approver_channel: PolicyOrigin,
+    pub window: PolicyOrigin,
 }
 
 impl Default for ResolvedProvenance {
@@ -77,13 +78,14 @@ impl Default for ResolvedProvenance {
             paused_until: PolicyOrigin::Default,
             on_failure: PolicyOrigin::Default,
             approver_channel: PolicyOrigin::Default,
+            window: PolicyOrigin::Default,
         }
     }
 }
 
 /// The fully resolved policy for a target. Every field has a concrete value
-/// (or `None` for the two genuinely optional fields, `paused_until` and
-/// `approver_channel`) and a recorded origin.
+/// (or `None` for the genuinely optional fields, `paused_until`,
+/// `approver_channel`, and `window`) and a recorded origin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPolicy {
     pub strategy: UpdateStrategy,
@@ -91,6 +93,8 @@ pub struct ResolvedPolicy {
     pub paused_until: Option<DateTime<Utc>>,
     pub on_failure: FailureHandling,
     pub approver_channel: Option<String>,
+    /// Phase 9d: maintenance window. `None` means "no window constraint".
+    pub window: Option<MaintenanceWindow>,
     pub provenance: ResolvedProvenance,
 }
 
@@ -136,6 +140,7 @@ pub fn resolve_policy(
     let mut paused_until: Option<DateTime<Utc>> = None;
     let mut on_failure: Option<FailureHandling> = None;
     let mut approver_channel: Option<String> = None;
+    let mut window: Option<MaintenanceWindow> = None;
 
     let mut prov = ResolvedProvenance::default();
 
@@ -161,6 +166,10 @@ pub fn resolve_policy(
             approver_channel = Some(v.clone());
             prov.approver_channel = origin;
         }
+        if let Some(v) = &body.window {
+            window = Some(v.clone());
+            prov.window = origin;
+        }
     }
 
     ResolvedPolicy {
@@ -169,6 +178,7 @@ pub fn resolve_policy(
         paused_until,
         on_failure: on_failure.unwrap_or(DEFAULT_ON_FAILURE),
         approver_channel,
+        window,
         provenance: prov,
     }
 }

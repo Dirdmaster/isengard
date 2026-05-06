@@ -84,6 +84,7 @@ mod tests {
             routing,
             enrollment,
             revocation,
+            log_fanout: crate::log_fanout::LogFanout::new(),
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into

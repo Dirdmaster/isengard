@@ -17,6 +17,8 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::bus::EventBus;
 use crate::ca::Authority;
 use crate::enrollment::{EnrollmentService, HostInfo};
+use crate::log_fanout::LogFanout;
+use crate::policy_ingest::PolicyLabelIngest;
 use crate::revocation::RevocationSet;
 use crate::routing::RoutingPusher;
 
@@ -26,32 +28,44 @@ pub struct ControllerService {
     pub journal: Arc<Journal>,
     pub bus: Arc<EventBus>,
     pub routing: Arc<RoutingPusher>,
+    /// Phase 9b.1: container-scope policy ingest from `isengard.policy.*`
+    /// labels.
+    pub policy_ingest: Arc<PolicyLabelIngest>,
     pub ca: Arc<Authority>,
     pub enrollment: Arc<EnrollmentService>,
     /// Phase 14: in-memory revocation set the auth interceptor reads on every
     /// RPC. Carried on the service so future handlers (e.g. an admin RPC for
     /// `revoke_agent`) can mutate it without re-fetching from inventory.
     pub revocation: RevocationSet,
+    /// Phase 13B: log subscription registry. Inbound `AgentMessage::LogChunk`
+    /// frames on the Sync stream are routed through this fanout to the
+    /// dashboard's WebSocket tasks.
+    pub log_fanout: Arc<LogFanout>,
 }
 
 impl ControllerService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inventory: Arc<Inventory>,
         journal: Arc<Journal>,
         bus: Arc<EventBus>,
         routing: Arc<RoutingPusher>,
+        policy_ingest: Arc<PolicyLabelIngest>,
         ca: Arc<Authority>,
         enrollment: Arc<EnrollmentService>,
         revocation: RevocationSet,
+        log_fanout: Arc<LogFanout>,
     ) -> Self {
         Self {
             inventory,
             journal,
             bus,
             routing,
+            policy_ingest,
             ca,
             enrollment,
             revocation,
+            log_fanout,
         }
     }
 
@@ -72,14 +86,18 @@ impl ControllerService {
         );
         let bus = Arc::new(EventBus::new());
         let routing = Arc::new(RoutingPusher::new(inventory.clone()));
+        let policy_ingest = Arc::new(PolicyLabelIngest::new(inventory.clone()));
+        let log_fanout = LogFanout::new();
         Self {
             inventory,
             journal,
             bus,
             routing,
+            policy_ingest,
             ca,
             enrollment,
             revocation,
+            log_fanout,
         }
     }
 }
@@ -237,6 +255,8 @@ impl Controller for ControllerService {
         let journal = self.journal.clone();
         let bus = self.bus.clone();
         let routing = self.routing.clone();
+        let policy_ingest = self.policy_ingest.clone();
+        let log_fanout = self.log_fanout.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -331,6 +351,16 @@ impl Controller for ControllerService {
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsReport(
                         report,
                     )) => {
+                        // Phase 9b.1: container-scope policy ingest runs in
+                        // parallel with the routing-rule ingest. Both consume
+                        // the same payload; routing takes ownership last.
+                        if let Err(e) = policy_ingest.ingest(host_id, &report).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "policy labels: ingest failed",
+                            );
+                        }
                         if let Err(e) = routing.ingest_labels(host_id, report).await {
                             tracing::warn!(
                                 error = %e,
@@ -346,9 +376,25 @@ impl Controller for ControllerService {
                             );
                         }
                     }
+                    Some(isengard_proto::pb::agent_message::Payload::LogChunk(chunk)) => {
+                        // Phase 13B: route the chunk to the matching
+                        // dashboard subscription. Dropped chunks are
+                        // surfaced as `dropped` frames on the WebSocket;
+                        // unknown subscriptions are simply dropped (the
+                        // client already disconnected).
+                        let _ = log_fanout.route(chunk).await;
+                    }
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(
                         ev,
                     )) => {
+                        // Phase 9b.1: drop the container-scope policy row.
+                        if let Err(e) = policy_ingest.ingest_removed(host_id, &ev).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "policy labels: ingest_removed failed",
+                            );
+                        }
                         if let Err(e) = routing.ingest_labels_removed(host_id, ev).await {
                             tracing::warn!(
                                 error = %e,

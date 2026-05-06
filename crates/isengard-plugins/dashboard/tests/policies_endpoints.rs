@@ -39,6 +39,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         routing,
         enrollment,
         revocation,
+        log_fanout: isengard_controller::log_fanout::LogFanout::new(),
     });
     let app = policies::router(handles.clone());
     (app, handles)
@@ -310,4 +311,88 @@ async fn effective_with_fleet_and_stack_rows_tracks_provenance() {
     assert_eq!(r.provenance.on_failure, PolicyOrigin::Default);
     assert_eq!(r.provenance.paused_until, PolicyOrigin::Default);
     assert_eq!(r.provenance.approver_channel, PolicyOrigin::Default);
+}
+
+/// Phase 9d: a policy with a malformed cron in window returns 400.
+#[tokio::test]
+async fn post_with_malformed_window_cron_returns_400() {
+    let (app, _h) = setup_app().await;
+
+    let body = serde_json::json!({
+        "scopeType": "fleet",
+        "scopeKey": "prod",
+        "body": {
+            "window": { "cron_expr": "this is not a cron" }
+        }
+    });
+    let resp = app.oneshot(post_json("/policies", body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = body_json(resp).await;
+    let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("");
+    assert!(
+        err.contains("invalid window cron"),
+        "expected 'invalid window cron' in error, got: {err}"
+    );
+}
+
+/// Phase 9d: a policy with a valid window round-trips through POST and
+/// GET. Body preserves cron + timezone fields.
+#[tokio::test]
+async fn post_with_valid_window_round_trips() {
+    let (app, _h) = setup_app().await;
+
+    let body = serde_json::json!({
+        "scopeType": "fleet",
+        "scopeKey": "prod",
+        "body": {
+            "window": {
+                "cron_expr": "0 2 * * 0",
+                "timezone": "Europe/Zurich"
+            }
+        }
+    });
+    let resp = app
+        .clone()
+        .oneshot(post_json("/policies", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = app.oneshot(get_req("/policies")).await.unwrap();
+    let v = body_json(resp).await;
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    let row: PolicyDto = serde_json::from_value(arr[0].clone()).unwrap();
+    let win = row.body.window.as_ref().expect("window present");
+    assert_eq!(win.cron_expr, "0 2 * * 0");
+    assert_eq!(win.timezone.as_deref(), Some("Europe/Zurich"));
+}
+
+/// Phase 9d: PUT with a malformed cron returns 400, leaving any prior row
+/// unchanged.
+#[tokio::test]
+async fn put_with_malformed_window_cron_returns_400() {
+    let (app, h) = setup_app().await;
+    h.inventory
+        .upsert_policy(
+            isengard_core::policy::PolicyScopeType::Fleet,
+            "prod",
+            &Policy {
+                strategy: Some(UpdateStrategy::Pinned),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let body = serde_json::json!({
+        "body": {
+            "window": { "cron_expr": "garbage", "timezone": "UTC" }
+        }
+    });
+    let resp = app
+        .oneshot(put_json("/policies/fleet/prod", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

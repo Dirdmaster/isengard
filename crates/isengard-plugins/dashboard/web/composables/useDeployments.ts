@@ -23,6 +23,12 @@ export interface DeploymentDto {
   error: string | null
   created_at: string
   updated_at: string
+  /**
+   * Phase 10c (refs #50): set when this deployment is part of a multi-host
+   * rolling group. The Rust DTO doesn't expose it yet but the History tab
+   * checks for it defensively, so this is `optional` here.
+   */
+  group_id?: string | null
 }
 
 /**

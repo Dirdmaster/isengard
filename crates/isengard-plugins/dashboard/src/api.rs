@@ -8,11 +8,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use isengard_controller::ControllerHandles;
+use isengard_core::policy::{PolicyContext, resolve_policy};
 use isengard_storage::{HostId, StackId};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{debug, warn};
 
+use crate::deployments::DeploymentDto;
 use crate::dto::*;
 
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
@@ -33,6 +35,10 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         )
         .route("/services", get(list_services))
         .route("/services/{id}", get(get_service))
+        .route(
+            "/services/{stack_id}/{service_name}",
+            get(get_service_detail),
+        )
         .route("/events", get(list_events))
         .route("/events/{id}", get(get_event))
         .route("/fleets", get(list_fleets).post(create_fleet))
@@ -182,7 +188,7 @@ fn default_url() -> String {
 }
 
 /// Builds the multi-line `docker run` command shown to the user during
-/// onboarding. Single source of truth — both the wizard and any docs that
+/// onboarding. Single source of truth: both the wizard and any docs that
 /// need to embed an example install command should call this.
 fn render_docker_run_command(controller_url: &str, token: &str) -> String {
     [
@@ -300,7 +306,15 @@ async fn list_events(
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    match handles.journal.list_recent(limit).await {
+    // When a `deployment_id` filter is set, widen the journal scan so we
+    // don't lose events behind newer unrelated rows. Cap at 5000 rows for
+    // safety. Phase 10c (T4 refs #50).
+    let scan_limit = if q.deployment_id.is_some() {
+        limit.clamp(500, 5000)
+    } else {
+        limit
+    };
+    match handles.journal.list_recent(scan_limit).await {
         Ok(rows) => {
             let mut dtos: Vec<EventDto> = rows.into_iter().map(EventDto::from).collect();
             if let Some(kind) = q.kind {
@@ -308,6 +322,18 @@ async fn list_events(
             }
             if let Some(host_id_s) = q.host_id {
                 dtos.retain(|e| e.host_id.as_deref() == Some(&host_id_s));
+            }
+            if let Some(dep_id) = q.deployment_id.as_deref() {
+                dtos.retain(|e| {
+                    e.metadata
+                        .get("deployment")
+                        .and_then(|d| d.get("id"))
+                        .and_then(|v| v.as_str())
+                        == Some(dep_id)
+                });
+                if dtos.len() as i64 > limit {
+                    dtos.truncate(limit as usize);
+                }
             }
             Json(dtos).into_response()
         }
@@ -534,6 +560,190 @@ async fn get_service(
     json_err(StatusCode::NOT_FOUND, "service not found")
 }
 
+/// `GET /api/v1/services/:stack_id/:service_name` (Phase 13A).
+///
+/// Returns the everything-in-one envelope the service detail page renders:
+/// the primary `Service` row for `(stack.host_id, stack_id, service_name)`,
+/// any other instances of the same service in the same logical stack on
+/// other hosts, the resolved effective policy for the service, the most
+/// recent deployment for the service, the last 50 events scoped to the
+/// host (filtered to this container when possible), and the routing rules
+/// attached to this exact service instance.
+async fn get_service_detail(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path((stack_id, service_name)): Path<(i64, String)>,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(stack_id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}")),
+    };
+
+    let service = match handles
+        .inventory
+        .get_service_by_name(stack.host_id, Some(stack.id), &service_name)
+        .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "service not found"),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("get_service_by_name: {e}"),
+            );
+        }
+    };
+
+    // Resolve hostname for the primary service via inventory lookup. Used
+    // for display in the metadata card. We allow `None` if the host row is
+    // missing (deleted out-of-band): the page still renders.
+    let primary_host = match handles.inventory.get_host(service.host_id).await {
+        Ok(h) => h,
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_host: {e}")),
+    };
+    let fleet = primary_host.as_ref().map(|h| h.fleet.clone());
+    let primary_hostname = primary_host.as_ref().map(|h| h.hostname.clone());
+
+    // Other instances: services with the same name belonging to a stack
+    // with the same `name` on a different host. Walk every host's stacks
+    // once, filter, then load the matching service row.
+    let other_instances = match collect_other_instances(&handles, &stack, &service).await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("collect_other_instances: {e}"),
+            );
+        }
+    };
+
+    // Effective policy for this scope.
+    let policy_rows = match handles.inventory.list_policies().await {
+        Ok(r) => r,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_policies: {e}"),
+            );
+        }
+    };
+    let projected: Vec<_> = policy_rows
+        .iter()
+        .map(|r| (r.scope_type, r.scope_key.as_str(), &r.body))
+        .collect();
+    let host_id_hex = ulid::Ulid::from(service.host_id).to_string();
+    let policy_ctx = PolicyContext {
+        fleet: fleet.as_deref(),
+        stack: Some(stack.name.as_str()),
+        service: Some(service.name.as_str()),
+        host_id_hex: Some(host_id_hex.as_str()),
+        container_name: None,
+    };
+    let effective_policy = resolve_policy(&projected, &policy_ctx);
+
+    // Last deployment for this service: pull the recent stack deployments
+    // and pick the first row that matches the service name.
+    let last_deployment = match handles
+        .inventory
+        .list_deployments_by_stack(stack.id, 50)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .find(|d| d.service_name == service.name)
+            .map(DeploymentDto::from),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_deployments_by_stack: {e}"),
+            );
+        }
+    };
+
+    // Recent events: last 50 across the journal, filtered to this host
+    // and (when set) the matching container_name.
+    let recent_events = match handles.journal.list_recent(500).await {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|r| r.host_id == Some(service.host_id))
+            .filter(|r| match &r.container_name {
+                Some(name) => name == &service.name,
+                None => true,
+            })
+            .take(50)
+            .map(EventDto::from)
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_recent: {e}"),
+            );
+        }
+    };
+
+    // Routing rules attached to this exact (host, service_name).
+    let routing_rules = match handles
+        .inventory
+        .list_routing_rules_for_host(service.host_id)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|r| r.service_name == service.name)
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_routing_rules_for_host: {e}"),
+            );
+        }
+    };
+
+    let dto = ServiceDetailDto {
+        service: ServiceDto::from_service(service, primary_hostname),
+        other_instances,
+        effective_policy,
+        last_deployment,
+        recent_events,
+        routing_rules,
+    };
+    Json(dto).into_response()
+}
+
+/// Find services with the same `name` belonging to stacks named the same
+/// as `primary_stack` on hosts other than the primary service's host.
+async fn collect_other_instances(
+    handles: &Arc<ControllerHandles>,
+    primary_stack: &isengard_storage::Stack,
+    primary_service: &isengard_storage::Service,
+) -> Result<Vec<ServiceDto>, isengard_storage::Error> {
+    let stacks = handles.inventory.list_stacks(None).await?;
+    let hosts = handles.inventory.list_hosts().await?;
+    let host_by_id: std::collections::HashMap<_, _> =
+        hosts.iter().map(|h| (h.id, h.hostname.clone())).collect();
+
+    let mut out = Vec::new();
+    for s in stacks {
+        if s.host_id == primary_service.host_id {
+            continue;
+        }
+        if s.name != primary_stack.name {
+            continue;
+        }
+        let svc = match handles
+            .inventory
+            .get_service_by_name(s.host_id, Some(s.id), &primary_service.name)
+            .await?
+        {
+            Some(svc) => svc,
+            None => continue,
+        };
+        let hostname = host_by_id.get(&svc.host_id).cloned();
+        out.push(ServiceDto::from_service(svc, hostname));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Deserialize)]
 struct SparklineQuery {
     #[serde(default = "default_range")]
@@ -686,6 +896,7 @@ mod tests {
             routing,
             enrollment,
             revocation,
+            log_fanout: isengard_controller::log_fanout::LogFanout::new(),
         })
     }
 

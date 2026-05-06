@@ -8,11 +8,15 @@
 //! scope". The implicit root resolved value (when no rows exist) is exposed as
 //! the [`defaults`] module's constants.
 
+pub mod labels;
 pub mod resolve;
+pub mod window;
 
+pub use labels::{ParseLabelError, has_any_policy_label, parse_policy_labels};
 pub use resolve::{
     PolicyContext, PolicyOrigin, ResolvedPolicy, ResolvedProvenance, resolve_policy,
 };
+pub use window::{WINDOW_DURATION, is_in_window, next_window_after, parse_cron};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -127,11 +131,27 @@ pub enum FailureHandling {
     Notify,
 }
 
-/// One layer of an update-policy. A `None` field means "inherit from a less
-/// specific scope". The actual layered resolution lives in T2's resolver.
+/// Maintenance window: when may updates apply? A cron expression plus an
+/// optional IANA timezone name. `None` timezone resolves as UTC.
 ///
-/// Note: `window` (maintenance window) is deferred to Phase 9h. The field is
-/// intentionally absent here.
+/// The cron expression is standard 5-field syntax:
+/// `minute hour day-of-month month day-of-week`. Phase 9d uses the `croner`
+/// crate, which accepts both 5- and 6-field forms; the UI and validation
+/// helper text only document 5-field for clarity.
+///
+/// The window's effective duration (how long after a firing the cycle
+/// considers itself "in window") is fixed at [`window::WINDOW_DURATION`]
+/// (1h) for v1. Operators wanting longer windows use multiple cron lines or
+/// step expressions (e.g. `0 2-4 * * 0`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaintenanceWindow {
+    pub cron_expr: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub timezone: Option<String>,
+}
+
+/// One layer of an update-policy. A `None` field means "inherit from a less
+/// specific scope". The actual layered resolution lives in the resolver.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -144,6 +164,10 @@ pub struct Policy {
     pub on_failure: Option<FailureHandling>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub approver_channel: Option<String>,
+    /// Phase 9d: maintenance window. `None` means "no window constraint";
+    /// updates may apply at any time.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub window: Option<MaintenanceWindow>,
 }
 
 /// Resolver fall-back constants. These are the values the resolver uses for
@@ -201,10 +225,37 @@ mod tests {
             paused_until: None,
             on_failure: Some(FailureHandling::Keep),
             approver_channel: Some("ops".to_string()),
+            window: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Policy = serde_json::from_str(&s).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn policy_with_window_round_trips() {
+        let p = Policy {
+            window: Some(MaintenanceWindow {
+                cron_expr: "0 2 * * 0".to_string(),
+                timezone: Some("Europe/Zurich".to_string()),
+            }),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"window\""));
+        assert!(s.contains("\"cron_expr\":\"0 2 * * 0\""));
+        let back: Policy = serde_json::from_str(&s).unwrap();
+        assert_eq!(p, back);
+    }
+
+    /// Backwards-compat: rows persisted before Phase 9d (no `window` key)
+    /// must deserialize cleanly with `window = None`.
+    #[test]
+    fn policy_without_window_field_deserializes() {
+        let json = r#"{"strategy":"pinned","gate":"auto"}"#;
+        let p: Policy = serde_json::from_str(json).unwrap();
+        assert!(p.window.is_none());
+        assert_eq!(p.strategy, Some(UpdateStrategy::Pinned));
     }
 
     #[test]

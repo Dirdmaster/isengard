@@ -490,6 +490,51 @@ impl crate::inventory::Inventory {
         chat_id: i64,
         message_id: i64,
     ) -> Result<()> {
+        self.merge_approval_metadata(
+            action_id,
+            &[
+                ("notifier_chat_id", serde_json::Value::from(chat_id)),
+                ("notifier_message_id", serde_json::Value::from(message_id)),
+            ],
+        )
+        .await
+    }
+
+    /// Stash Discord notifier metadata (channel_id + message_id) on an existing
+    /// approval row. Used by Phase 9c so the dashboard callback can edit the
+    /// originating Discord message after a decision. Idempotent and disjoint
+    /// from `set_approval_message_metadata` so Telegram + Discord can coexist
+    /// on the same row.
+    pub async fn set_discord_approval_message_metadata(
+        &self,
+        action_id: &str,
+        channel_id: i64,
+        message_id: i64,
+    ) -> Result<()> {
+        self.merge_approval_metadata(
+            action_id,
+            &[
+                (
+                    "notifier_discord_channel_id",
+                    serde_json::Value::from(channel_id),
+                ),
+                (
+                    "notifier_discord_message_id",
+                    serde_json::Value::from(message_id),
+                ),
+            ],
+        )
+        .await
+    }
+
+    /// Read-modify-write merge for the approval row's metadata_json. Each
+    /// `(key, value)` pair is upserted into the JSON object. Other keys are
+    /// preserved.
+    async fn merge_approval_metadata(
+        &self,
+        action_id: &str,
+        kvs: &[(&str, serde_json::Value)],
+    ) -> Result<()> {
         // Fetch -> merge -> write rather than json_patch, which isn't
         // available across all sqlite versions. Approval rows are small.
         let existing = self
@@ -503,14 +548,9 @@ impl crate::inventory::Inventory {
             meta = serde_json::Value::Object(serde_json::Map::new());
         }
         if let Some(obj) = meta.as_object_mut() {
-            obj.insert(
-                "notifier_chat_id".to_string(),
-                serde_json::Value::from(chat_id),
-            );
-            obj.insert(
-                "notifier_message_id".to_string(),
-                serde_json::Value::from(message_id),
-            );
+            for (k, v) in kvs {
+                obj.insert((*k).to_string(), v.clone());
+            }
         }
         let meta_json = serde_json::to_string(&meta).map_err(|e| Error::Decode {
             reason: format!("serializing approval metadata: {e}"),
