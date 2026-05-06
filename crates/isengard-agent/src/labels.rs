@@ -5,8 +5,14 @@
 //! The watcher also runs an initial scan at startup so a freshly-connected
 //! agent reports the world it sees, not just deltas.
 //!
-//! Containers without an `isengard.expose*` label are filtered out at the
-//! report site — the controller only cares about ones we'd actually route.
+//! A container is reported when it carries either:
+//!
+//! - any `isengard.expose*` label (proxy / routing rules), OR
+//! - any `isengard.policy.*` label (Phase 9b.1: container-scope policy
+//!   discovery).
+//!
+//! Containers without either family of labels are filtered out: the
+//! controller has nothing to do with them.
 
 use std::collections::HashMap;
 
@@ -111,6 +117,17 @@ async fn initial_scan(docker: &Docker, out: &mpsc::Sender<AgentMessage>) -> anyh
     Ok(())
 }
 
+/// `true` if the controller wants to know about a container that carries
+/// this label key. Today: any `isengard.expose*` (routing) or
+/// `isengard.policy.*` (Phase 9b.1) key.
+///
+/// Lives here (not in `isengard-core`) because it's a coupling between the
+/// agent's report filter and the two consumer subsystems on the controller.
+/// Splitting it would force the agent to depend on every consumer crate.
+pub(crate) fn is_reportable_label_key(key: &str) -> bool {
+    key.starts_with("isengard.expose") || key.starts_with("isengard.policy.")
+}
+
 async fn inspect_to_report(
     docker: &Docker,
     cid: &str,
@@ -121,7 +138,7 @@ async fn inspect_to_report(
         .as_ref()
         .and_then(|c| c.labels.clone())
         .unwrap_or_default();
-    if !labels.keys().any(|k| k.starts_with("isengard.expose")) {
+    if !labels.keys().any(|k| is_reportable_label_key(k)) {
         return Ok(None);
     }
     let name = inspect
@@ -141,4 +158,37 @@ async fn inspect_to_report(
         image,
         labels,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_reportable_label_key;
+
+    #[test]
+    fn expose_label_is_reportable() {
+        assert!(is_reportable_label_key("isengard.expose"));
+        assert!(is_reportable_label_key("isengard.expose.port"));
+        assert!(is_reportable_label_key("isengard.expose.api.port"));
+    }
+
+    #[test]
+    fn policy_label_is_reportable() {
+        assert!(is_reportable_label_key("isengard.policy.strategy"));
+        assert!(is_reportable_label_key("isengard.policy.gate"));
+        assert!(is_reportable_label_key("isengard.policy.paused_until"));
+    }
+
+    #[test]
+    fn enable_label_alone_is_not_enough() {
+        // `isengard.enable=true` is a separate opt-in; a container with only
+        // `isengard.enable` and nothing else does not need a labels report.
+        assert!(!is_reportable_label_key("isengard.enable"));
+    }
+
+    #[test]
+    fn unrelated_labels_are_not_reportable() {
+        assert!(!is_reportable_label_key("com.docker.compose.project"));
+        assert!(!is_reportable_label_key("traefik.http.routers.api.rule"));
+        assert!(!is_reportable_label_key("isengard.stack"));
+    }
 }
