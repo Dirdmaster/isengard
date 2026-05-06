@@ -120,7 +120,7 @@ async fn pinned_service_is_skipped() {
     let snapshot = loader.list().await.expect("list");
 
     let owned = ctx_for_compose_service("prod", "blog", "web", "blog-web-1");
-    let (_resolved, decision) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+    let (_resolved, decision) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
 
     assert_eq!(decision, PolicyDecision::Skip(SkipReason::Pinned));
 
@@ -163,7 +163,7 @@ async fn paused_service_is_skipped_until_expiry() {
     let owned = ctx_for_compose_service("prod", "blog", "web", "blog-web-1");
 
     let snap_before = loader.list().await.expect("list");
-    let (_, decision_before) = policy_decision(&snap_before, &owned.as_ref(), Utc::now());
+    let (_, decision_before) = policy_decision(&snap_before, &owned.as_ref(), None, Utc::now());
     assert_eq!(
         decision_before,
         PolicyDecision::Skip(SkipReason::Paused { until: future })
@@ -185,7 +185,7 @@ async fn paused_service_is_skipped_until_expiry() {
     .expect("upsert past");
 
     let snap_after = loader.list().await.expect("list");
-    let (_, decision_after) = policy_decision(&snap_after, &owned.as_ref(), Utc::now());
+    let (_, decision_after) = policy_decision(&snap_after, &owned.as_ref(), None, Utc::now());
     assert_eq!(decision_after, PolicyDecision::Proceed);
 }
 
@@ -198,7 +198,7 @@ async fn default_policy_does_not_skip() {
     let snapshot = loader.list().await.expect("list");
 
     let owned = ctx_for_compose_service("prod", "blog", "web", "blog-web-1");
-    let (resolved, decision) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+    let (resolved, decision) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
 
     assert_eq!(decision, PolicyDecision::Proceed);
     // Defaults: TagOnly, Auto, Notify (per `isengard_core::policy::defaults`).
@@ -270,8 +270,8 @@ async fn decision_from_resolved_matches_policy_decision() {
         .collect();
     let resolved = isengard_core::policy::resolve_policy(&projected, &owned.as_ref());
     let now = Utc::now();
-    let direct = decision_from_resolved(&resolved, now);
-    let (_, via_helper) = policy_decision(&snapshot, &owned.as_ref(), now);
+    let direct = decision_from_resolved(&resolved, &owned.as_ref(), None, now);
+    let (_, via_helper) = policy_decision(&snapshot, &owned.as_ref(), None, now);
     assert_eq!(direct, via_helper);
 }
 

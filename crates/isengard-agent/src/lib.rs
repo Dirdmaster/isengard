@@ -290,6 +290,13 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         isengard_storage::InventoryPolicyLoader::new(Arc::new(inventory.clone())),
     );
 
+    // Phase 9e: build an `ApprovalStore` backed by the same inventory so the
+    // updater can persist + dedupe pending-approval rows when a candidate's
+    // resolved policy gates on `Approval`.
+    let approval_store: Arc<dyn isengard_core::ApprovalStore> = Arc::new(
+        isengard_storage::InventoryApprovalStore::new(Arc::new(inventory.clone())),
+    );
+
     let plugins = load_plugins();
     info!(plugin_count = plugins.len(), "plugins discovered");
 
@@ -304,7 +311,8 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         let mut ctx = PluginContext::new(HostMode::Agent, plugin_config)
             .with_events(emitter.clone())
             .with_host_id(core_host_id)
-            .with_policy_loader(policy_loader.clone());
+            .with_policy_loader(policy_loader.clone())
+            .with_approval_store(approval_store.clone());
         if let Some(d) = update_dispatcher.clone() {
             ctx = ctx.with_update_dispatcher(d);
         }

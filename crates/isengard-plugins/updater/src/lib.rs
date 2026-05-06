@@ -25,9 +25,9 @@ use bollard::Docker;
 use bollard::container::ListContainersOptions;
 use chrono::Utc;
 use isengard_core::{
-    AgentPlugin, Capability, CoreError, DispatchOutcome, Event, EventEmitter, HostId, LoadedPolicy,
-    Plugin, PluginContext, PluginRegistration, PolicyLoader, Result, UpdateDispatcher,
-    UpdateTriggerInfo,
+    AgentPlugin, ApprovalStore, Capability, CoreError, DispatchOutcome, Event, EventEmitter,
+    HostId, InsertPendingApproval, LoadedPolicy, Plugin, PluginContext, PluginRegistration,
+    PolicyLoader, Result, UpdateDispatcher, UpdateTriggerInfo,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -41,6 +41,9 @@ use crate::registry::RegistryClient;
 const PLUGIN_NAME: &str = "updater";
 const DEFAULT_CYCLE_INTERVAL_SECS: u64 = 30;
 const MIN_CYCLE_INTERVAL_SECS: u64 = 5;
+/// How long an approval row stays `pending_open` before the controller's
+/// auto-expire task transitions it to `pending_expired`. Phase 9e default.
+const APPROVAL_DEFAULT_TTL_HOURS: i64 = 24;
 
 pub struct Updater {
     /// Lazily set in `init`. Wrapped in Option so the struct can be constructed
@@ -61,6 +64,11 @@ pub struct Updater {
     /// cycle pulls the full policy snapshot at the start and resolves
     /// per-candidate (Phase 9b: respects Pinned + paused_until).
     policy_loader: Option<Arc<dyn PolicyLoader>>,
+    /// Set in `init` from `PluginContext::approval_store`. When `Some`, the
+    /// cycle persists a pending-approval row whenever a candidate's resolved
+    /// policy gates on `Approval` (Phase 9e). `None` outside the agent or in
+    /// test harnesses that don't exercise the approval path.
+    approval_store: Option<Arc<dyn ApprovalStore>>,
     /// Cached fleet name for this host. Looked up once during `init` (when
     /// both a policy_loader and a host_id are wired) so the per-cycle path
     /// has zero extra DB hits. `None` means "no fleet-scoped rows match".
@@ -79,6 +87,7 @@ impl Updater {
             dispatcher: None,
             host_id: None,
             policy_loader: None,
+            approval_store: None,
             fleet: None,
             cancel: Arc::new(Notify::new()),
             task: None,
@@ -141,6 +150,7 @@ async fn do_cycle(
     dispatcher: Option<&Arc<dyn UpdateDispatcher>>,
     host_id: Option<HostId>,
     policy_loader: Option<&Arc<dyn PolicyLoader>>,
+    approval_store: Option<&Arc<dyn ApprovalStore>>,
     fleet: Option<&str>,
 ) -> anyhow::Result<()> {
     let opts = ListContainersOptions::<String> {
@@ -176,6 +186,8 @@ async fn do_cycle(
     let mut unknown = 0usize;
     let mut pinned = 0usize;
     let mut paused = 0usize;
+    let mut pending_approval = 0usize;
+    let mut pending_approval_dedup = 0usize;
 
     for c in &candidates {
         let name = c
@@ -193,7 +205,10 @@ async fn do_cycle(
 
         // Phase 9b policy gate: build the resolver context from the
         // candidate's compose labels + cached fleet + host_id, then
-        // short-circuit on Pinned / paused_until.
+        // short-circuit on Pinned / paused_until. Phase 9e: gate=Approval
+        // is enforced AFTER the registry probe (we need both digests to
+        // build the approval body), so the early-skip pass passes
+        // `approval_ctx=None`.
         let owned_ctx = crate::policy::policy_context_from_container(
             c.labels.as_ref(),
             fleet,
@@ -202,7 +217,12 @@ async fn do_cycle(
         );
         let projected = crate::policy::project_for_resolver(&policy_snapshot);
         let resolved = isengard_core::policy::resolve_policy(&projected, &owned_ctx.as_ref());
-        match crate::policy::decision_from_resolved(&resolved, Utc::now()) {
+        match crate::policy::decision_from_resolved(
+            &resolved,
+            &owned_ctx.as_ref(),
+            None,
+            Utc::now(),
+        ) {
             crate::policy::PolicyDecision::Skip(reason) => {
                 let event =
                     build_policy_skipped_event(&owned_ctx, &name, host_id_hex.as_deref(), &reason);
@@ -219,7 +239,11 @@ async fn do_cycle(
                 emit(emitter, event).await;
                 continue;
             }
-            crate::policy::PolicyDecision::Proceed => {}
+            // PendingApproval is impossible here (`approval_ctx=None`
+            // guarantees the gate=Approval branch falls through to
+            // Proceed). The post-digest call below is where it materialises.
+            crate::policy::PolicyDecision::Proceed
+            | crate::policy::PolicyDecision::PendingApproval(_) => {}
         }
 
         let local_digest = match docker.inspect_image(image_str).await {
@@ -258,6 +282,58 @@ async fn do_cycle(
                     status = "needs_update"
                 );
                 needs_update += 1;
+
+                // Phase 9e: re-evaluate the resolved policy now that we
+                // have both digests. If gate=Approval, the cycle MUST NOT
+                // recreate; instead we persist a pending-approval row
+                // (idempotently) and emit `update.pending_approval`. The
+                // operator's eventual decide_pending_approval call queues
+                // the apply_update HostAction that the agent picks up.
+                let approval_ctx = crate::policy::ApprovalContext {
+                    image: image_str,
+                    current_digest: local,
+                    proposed_digest: remote,
+                };
+                let post_decision = crate::policy::decision_from_resolved(
+                    &resolved,
+                    &owned_ctx.as_ref(),
+                    Some(approval_ctx),
+                    Utc::now(),
+                );
+                if let crate::policy::PolicyDecision::PendingApproval(body) = post_decision {
+                    let outcome = handle_pending_approval(
+                        approval_store,
+                        emitter,
+                        body,
+                        &name,
+                        image_str,
+                        local,
+                        remote,
+                    )
+                    .await;
+                    match outcome {
+                        ApprovalOutcome::Persisted => {
+                            pending_approval += 1;
+                            continue;
+                        }
+                        ApprovalOutcome::Deduplicated => {
+                            pending_approval_dedup += 1;
+                            continue;
+                        }
+                        ApprovalOutcome::PersistFailed => {
+                            // Logged inside the helper. Do NOT recreate:
+                            // we promised the operator a gate.
+                            continue;
+                        }
+                        ApprovalOutcome::StoreUnavailable => {
+                            // No store wired (test harness or pre-9e
+                            // agent). Fall through to the legacy recreate
+                            // path so the cycle stays useful in those
+                            // contexts.
+                            warn!(container = %name, "gate=Approval but no ApprovalStore wired; falling through to recreate");
+                        }
+                    }
+                }
 
                 // Self-update: when the candidate is this process's own
                 // container, use rename-then-replace ordering (3d).
@@ -367,7 +443,14 @@ async fn do_cycle(
 
     info!(
         candidates = candidates.len(),
-        up_to_date, needs_update, unknown, pinned, paused, "updater cycle complete"
+        up_to_date,
+        needs_update,
+        unknown,
+        pinned,
+        paused,
+        pending_approval,
+        pending_approval_dedup,
+        "updater cycle complete"
     );
 
     emit(
@@ -376,13 +459,15 @@ async fn do_cycle(
             kind: isengard_core::event::kinds::UPDATE_CHECKED.into(),
             occurred_at: Utc::now(),
             summary: format!(
-                "cycle: candidates={} up_to_date={} needs_update={} unknown={} pinned={} paused={}",
+                "cycle: candidates={} up_to_date={} needs_update={} unknown={} pinned={} paused={} pending_approval={} pending_approval_dedup={}",
                 candidates.len(),
                 up_to_date,
                 needs_update,
                 unknown,
                 pinned,
                 paused,
+                pending_approval,
+                pending_approval_dedup,
             ),
             metadata: serde_json::json!({
                 "candidates": candidates.len(),
@@ -391,12 +476,138 @@ async fn do_cycle(
                 "unknown": unknown,
                 "pinned": pinned,
                 "paused": paused,
+                "pending_approval": pending_approval,
+                "pending_approval_dedup": pending_approval_dedup,
             }),
             ..Default::default()
         },
     )
     .await;
     Ok(())
+}
+
+/// Outcome of the `gate=Approval` branch in `do_cycle`. Drives both the
+/// per-candidate `continue`/`fall-through` decision and the cycle's
+/// `pending_approval` / `pending_approval_dedup` counter increments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalOutcome {
+    /// First-time persist succeeded; emitted `update.pending_approval`.
+    Persisted,
+    /// An open row already existed for this `(host, stack, service,
+    /// proposed_digest)` tuple; no event, no insert.
+    Deduplicated,
+    /// `ApprovalStore` not wired on this `PluginContext`. The cycle falls
+    /// through to the legacy recreate path so pre-9e harnesses still work.
+    StoreUnavailable,
+    /// Either the dedupe lookup or the insert returned an error. The
+    /// helper logs the cause; the cycle skips this candidate to avoid
+    /// honouring the gate by accident.
+    PersistFailed,
+}
+
+/// Phase 9e: persist + emit a pending approval, idempotently.
+///
+/// Returns an [`ApprovalOutcome`] describing what the cycle should do
+/// next. The function never panics; storage errors translate to
+/// `PersistFailed`.
+#[allow(clippy::too_many_arguments)]
+async fn handle_pending_approval(
+    approval_store: Option<&Arc<dyn ApprovalStore>>,
+    emitter: Option<&Arc<dyn EventEmitter>>,
+    body: isengard_core::PendingApprovalBody,
+    container_name: &str,
+    image: &str,
+    current_digest: &str,
+    proposed_digest: &str,
+) -> ApprovalOutcome {
+    let Some(store) = approval_store else {
+        return ApprovalOutcome::StoreUnavailable;
+    };
+
+    // Dedup: did we already park this exact (host, stack, service,
+    // proposed_digest) tuple? If yes, no event, no insert.
+    match store
+        .find_open_approval_for_proposed_digest(
+            body.host_id,
+            &body.stack,
+            &body.service,
+            &body.proposed_digest,
+        )
+        .await
+    {
+        Ok(Some(existing)) => {
+            debug!(
+                container = %container_name,
+                action_id = %existing.action_id,
+                proposed_digest = %proposed_digest,
+                "pending_approval already open; dedup"
+            );
+            return ApprovalOutcome::Deduplicated;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                container = %container_name,
+                error = %e,
+                "approval store dedup lookup failed; skipping recreate"
+            );
+            return ApprovalOutcome::PersistFailed;
+        }
+    }
+
+    let approver_channel = body.approver_channel.clone();
+    let host_id = body.host_id;
+    let stack = body.stack.clone();
+    let service = body.service.clone();
+    let expires_at = Utc::now() + chrono::Duration::hours(APPROVAL_DEFAULT_TTL_HOURS);
+    let ins = InsertPendingApproval {
+        body,
+        expires_at,
+        approver_channel,
+    };
+    let rec = match store.insert_pending_approval(ins).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                container = %container_name,
+                error = %e,
+                "approval store insert failed; skipping recreate"
+            );
+            return ApprovalOutcome::PersistFailed;
+        }
+    };
+
+    info!(
+        container = %container_name,
+        action_id = %rec.action_id,
+        proposed_digest = %proposed_digest,
+        "persisted pending_approval"
+    );
+
+    emit(
+        emitter,
+        Event {
+            kind: isengard_core::event::kinds::UPDATE_PENDING_APPROVAL.into(),
+            occurred_at: Utc::now(),
+            summary: format!("pending approval for {container_name}"),
+            container_name: Some(container_name.to_string()),
+            image: Some(image.to_string()),
+            old_digest: Some(current_digest.to_string()),
+            new_digest: Some(proposed_digest.to_string()),
+            metadata: serde_json::json!({
+                "action_id": rec.action_id,
+                "host_id": host_id.to_string(),
+                "stack": stack,
+                "service": service,
+                "image": image,
+                "current_digest": current_digest,
+                "proposed_digest": proposed_digest,
+            }),
+            ..Default::default()
+        },
+    )
+    .await;
+    ApprovalOutcome::Persisted
 }
 
 /// Construct the `update.policy_skipped` event payload defined by the
@@ -531,6 +742,15 @@ impl Plugin for Updater {
         }
         self.host_id = ctx.host_id;
 
+        // Phase 9e: pick up the approval store. When wired, the cycle
+        // persists a pending-approval row for any candidate whose resolved
+        // policy gates on `Approval`. `None` keeps the legacy recreate
+        // path active for older agents and test harnesses.
+        self.approval_store = ctx.approval_store.clone();
+        if self.approval_store.is_some() {
+            info!("updater wired to approval store (gate=Approval enforced)");
+        }
+
         // Phase 9b: pick up the policy loader. When wired, the cycle
         // resolves a `ResolvedPolicy` per candidate and respects Pinned +
         // paused_until. Cache the host's fleet name once so per-cycle
@@ -569,6 +789,7 @@ impl Plugin for Updater {
         let dispatcher = self.dispatcher.clone();
         let host_id = self.host_id;
         let policy_loader = self.policy_loader.clone();
+        let approval_store = self.approval_store.clone();
         let fleet = self.fleet.clone();
         let cancel = self.cancel.clone();
         let interval = self.cycle_interval;
@@ -589,6 +810,7 @@ impl Plugin for Updater {
                             dispatcher.as_ref(),
                             host_id,
                             policy_loader.as_ref(),
+                            approval_store.as_ref(),
                             fleet.as_deref(),
                         ).await {
                             // Don't crash the task on a single bad cycle; just log
@@ -640,6 +862,7 @@ impl AgentPlugin for Updater {
             self.dispatcher.as_ref(),
             self.host_id,
             self.policy_loader.as_ref(),
+            self.approval_store.as_ref(),
             self.fleet.as_deref(),
         )
         .await

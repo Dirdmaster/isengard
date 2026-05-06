@@ -17,10 +17,11 @@
 //! are surfaced by the resolver but NOT enforced here. Phase 9e+ adds them.
 
 use chrono::{DateTime, Utc};
-use isengard_core::LoadedPolicy;
+use isengard_core::approval_store::PendingApprovalBody;
 use isengard_core::policy::{
-    PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateStrategy, resolve_policy,
+    PolicyContext, PolicyScopeType, ResolvedPolicy, UpdateGate, UpdateStrategy, resolve_policy,
 };
+use isengard_core::{HostId, LoadedPolicy};
 use std::collections::HashMap;
 
 /// Compose project label. Used to derive the `stack` field of the
@@ -34,12 +35,16 @@ const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
 /// Decision returned by [`policy_decision`]. Mirrors the cycle's branching:
 /// `Skip` short-circuits with a reason that is then translated into a
-/// `update.policy_skipped` event, while `Proceed` falls through to the
-/// existing recreate path.
+/// `update.policy_skipped` event, `Proceed` falls through to the existing
+/// recreate path, and `PendingApproval` (Phase 9e) parks the candidate by
+/// persisting an approval row + emitting `update.pending_approval`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
     Skip(SkipReason),
     Proceed,
+    /// `gate=Approval` resolved. The cycle persists this body via the
+    /// `ApprovalStore` (idempotently) and emits `update.pending_approval`.
+    PendingApproval(PendingApprovalBody),
 }
 
 /// Reason a candidate was skipped. Translated to the `reason` field of the
@@ -137,11 +142,41 @@ pub fn project_for_resolver(
         .collect()
 }
 
-/// Apply the two Phase 9b skip rules to a resolved policy.
+/// Digest + image context threaded into [`decision_from_resolved`] when the
+/// caller already knows the candidate is `needs_update`. Used to build the
+/// `PendingApproval` body. `None` for the early-cycle skip check (before
+/// the registry probe runs); `Some` once the cycle has both digests in hand.
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalContext<'a> {
+    pub image: &'a str,
+    pub current_digest: &'a str,
+    pub proposed_digest: &'a str,
+}
+
+/// Apply the Phase 9b skip rules + Phase 9e approval gate to a resolved
+/// policy.
+///
+/// Three-stage logic:
+///
+/// 1. `strategy=Pinned` -> `Skip(Pinned)`.
+/// 2. `paused_until > now` -> `Skip(Paused { until })`.
+/// 3. `gate=Approval` AND `approval_ctx.is_some()` -> `PendingApproval(body)`.
+/// 4. Otherwise -> `Proceed`.
+///
+/// `approval_ctx` is `None` when the cycle is in its early skip phase
+/// (digests not yet fetched). The `gate=Approval` branch only triggers
+/// once the cycle has confirmed `needs_update` and has both digests
+/// to thread into the body. Calling with `None` and `gate=Approval`
+/// returns `Proceed` (the caller will re-invoke after the registry probe).
 ///
 /// `now` is supplied by the caller so tests can drive the paused_until edge
 /// without sleeping or freezing the clock.
-pub fn decision_from_resolved(resolved: &ResolvedPolicy, now: DateTime<Utc>) -> PolicyDecision {
+pub fn decision_from_resolved(
+    resolved: &ResolvedPolicy,
+    ctx: &PolicyContext<'_>,
+    approval_ctx: Option<ApprovalContext<'_>>,
+    now: DateTime<Utc>,
+) -> PolicyDecision {
     if resolved.strategy == UpdateStrategy::Pinned {
         return PolicyDecision::Skip(SkipReason::Pinned);
     }
@@ -150,20 +185,102 @@ pub fn decision_from_resolved(resolved: &ResolvedPolicy, now: DateTime<Utc>) -> 
             return PolicyDecision::Skip(SkipReason::Paused { until });
         }
     }
+    if resolved.gate == UpdateGate::Approval {
+        if let Some(approval) = approval_ctx {
+            let body = build_pending_approval_body(resolved, ctx, &approval);
+            return PolicyDecision::PendingApproval(body);
+        }
+    }
     PolicyDecision::Proceed
 }
 
-/// One-shot helper composing the resolver + the skip rules. Used by the
-/// integration tests so they don't have to assemble the resolver call by
-/// hand.
+/// Build a [`PendingApprovalBody`] from the resolver output + the caller's
+/// per-candidate context. Pure; no I/O. Falls back to empty strings for
+/// missing context fields so the body always has a stable shape (the
+/// dashboard renders empty strings as "<unknown>" rather than panicking on
+/// `Option`).
+///
+/// `host_id`: parsed from `ctx.host_id_hex` if present, else nil ULID.
+/// `stack` / `service` / `container_name`: from ctx or empty.
+/// `image` / `current_digest` / `proposed_digest`: from `approval`.
+/// `diff_url`: GHCR-only via [`ghcr_compare_url`]; `None` for non-GHCR images.
+/// `approver_channel`: from resolved policy.
+fn build_pending_approval_body(
+    resolved: &ResolvedPolicy,
+    ctx: &PolicyContext<'_>,
+    approval: &ApprovalContext<'_>,
+) -> PendingApprovalBody {
+    let host_id = ctx
+        .host_id_hex
+        .and_then(|h| HostId::from_string(h).ok())
+        .unwrap_or_else(HostId::nil);
+    let stack = ctx.stack.unwrap_or("").to_string();
+    let service = ctx.service.unwrap_or("").to_string();
+    let container_name = ctx.container_name.unwrap_or("").to_string();
+    let diff_url = ghcr_compare_url(
+        approval.image,
+        approval.current_digest,
+        approval.proposed_digest,
+    );
+    PendingApprovalBody {
+        host_id,
+        stack,
+        service,
+        container_name,
+        image: approval.image.to_string(),
+        current_digest: approval.current_digest.to_string(),
+        proposed_digest: approval.proposed_digest.to_string(),
+        diff_url,
+        approver_channel: resolved.approver_channel.clone(),
+    }
+}
+
+/// GHCR-only diff URL. Returns `Some("https://github.com/<owner>/<repo>/compare/<cur>...<new>")`
+/// when `image` looks like a GHCR ref (`ghcr.io/<owner>/<repo>...`) and both
+/// digests look like sha256 strings. Returns `None` for any other registry
+/// or malformed input.
+///
+/// The compare URL is best-effort: GHCR images are commonly tagged from a
+/// GitHub repo with the same `<owner>/<repo>` slug, so the link works for
+/// the typical case. When it doesn't, the dashboard renders no diff link
+/// (the field stays `None`).
+fn ghcr_compare_url(image: &str, current_digest: &str, proposed_digest: &str) -> Option<String> {
+    let stripped = image.strip_prefix("ghcr.io/")?;
+    // Drop any tag (`:vN`) suffix on the repo segment so the slug is clean.
+    let repo_slug = stripped.split(':').next()?;
+    // Compare URL only makes sense for `<owner>/<repo>` slugs; deeper
+    // namespaces (rare but legal on ghcr) get the first two segments.
+    let mut parts = repo_slug.splitn(3, '/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    // sha256 prefix is canonical for OCI digests; bail out on anything
+    // exotic so we don't render broken links.
+    if !current_digest.starts_with("sha256:") || !proposed_digest.starts_with("sha256:") {
+        return None;
+    }
+    Some(format!(
+        "https://github.com/{owner}/{repo}/compare/{current_digest}...{proposed_digest}"
+    ))
+}
+
+/// One-shot helper composing the resolver + the skip / approval rules. Used
+/// by the integration tests so they don't have to assemble the resolver call
+/// by hand.
+///
+/// `approval_ctx` is `None` for the early-cycle skip check and `Some` once
+/// the registry probe has yielded `current` + `proposed` digests.
 pub fn policy_decision(
     snapshot: &[LoadedPolicy],
     ctx: &PolicyContext<'_>,
+    approval_ctx: Option<ApprovalContext<'_>>,
     now: DateTime<Utc>,
 ) -> (ResolvedPolicy, PolicyDecision) {
     let projected = project_for_resolver(snapshot);
     let resolved = resolve_policy(&projected, ctx);
-    let decision = decision_from_resolved(&resolved, now);
+    let decision = decision_from_resolved(&resolved, ctx, approval_ctx, now);
     (resolved, decision)
 }
 
@@ -171,7 +288,7 @@ pub fn policy_decision(
 mod tests {
     use super::*;
     use chrono::Duration;
-    use isengard_core::policy::{Policy, UpdateStrategy};
+    use isengard_core::policy::{Policy, UpdateGate, UpdateStrategy};
 
     fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -222,7 +339,7 @@ mod tests {
             body: policy,
         }];
         let owned = policy_context_from_container(None, None, None, "x");
-        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
         assert_eq!(dec, PolicyDecision::Skip(SkipReason::Pinned));
     }
 
@@ -239,7 +356,7 @@ mod tests {
             body: policy,
         }];
         let owned = policy_context_from_container(None, None, None, "x");
-        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
         assert_eq!(dec, PolicyDecision::Skip(SkipReason::Paused { until }));
     }
 
@@ -255,7 +372,7 @@ mod tests {
             body: policy,
         }];
         let owned = policy_context_from_container(None, None, None, "x");
-        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
         assert_eq!(dec, PolicyDecision::Proceed);
     }
 
@@ -263,7 +380,7 @@ mod tests {
     fn empty_snapshot_proceeds() {
         let snapshot: Vec<LoadedPolicy> = vec![];
         let owned = policy_context_from_container(None, None, None, "x");
-        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
         assert_eq!(dec, PolicyDecision::Proceed);
     }
 
@@ -279,7 +396,7 @@ mod tests {
             body: policy,
         }];
         let owned = policy_context_from_container(None, None, None, "x").with_service("web".into());
-        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
         assert_eq!(dec, PolicyDecision::Skip(SkipReason::Pinned));
     }
 
@@ -295,8 +412,103 @@ mod tests {
             body: policy,
         }];
         let owned = policy_context_from_container(None, None, None, "x").with_service("api".into());
-        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Utc::now());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
         assert_eq!(dec, PolicyDecision::Proceed);
+    }
+
+    /// Phase 9e: gate=Approval with `approval_ctx=Some` returns
+    /// `PendingApproval` carrying a body built from ctx + approval_ctx.
+    #[test]
+    fn gate_approval_with_digests_returns_pending_approval() {
+        let policy = Policy {
+            gate: Some(UpdateGate::Approval),
+            approver_channel: Some("ops-team".into()),
+            ..Default::default()
+        };
+        let snapshot = vec![LoadedPolicy {
+            scope_type: PolicyScopeType::Service,
+            scope_key: "web".into(),
+            body: policy,
+        }];
+        let l = labels(&[
+            ("com.docker.compose.project", "blog"),
+            ("com.docker.compose.service", "web"),
+        ]);
+        // host_id_hex must be a valid ULID string for the body to populate it.
+        let host_ulid = HostId::new();
+        let host_str = host_ulid.to_string();
+        let owned = policy_context_from_container(
+            Some(&l),
+            Some("prod"),
+            Some(host_str.as_str()),
+            "blog-web-1",
+        );
+        let approval = ApprovalContext {
+            image: "ghcr.io/foo/bar:latest",
+            current_digest: "sha256:1111",
+            proposed_digest: "sha256:2222",
+        };
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), Some(approval), Utc::now());
+        match dec {
+            PolicyDecision::PendingApproval(body) => {
+                assert_eq!(body.host_id, host_ulid);
+                assert_eq!(body.stack, "blog");
+                assert_eq!(body.service, "web");
+                assert_eq!(body.container_name, "blog-web-1");
+                assert_eq!(body.image, "ghcr.io/foo/bar:latest");
+                assert_eq!(body.current_digest, "sha256:1111");
+                assert_eq!(body.proposed_digest, "sha256:2222");
+                assert_eq!(body.approver_channel.as_deref(), Some("ops-team"));
+                assert_eq!(
+                    body.diff_url.as_deref(),
+                    Some("https://github.com/foo/bar/compare/sha256:1111...sha256:2222")
+                );
+            }
+            other => panic!("expected PendingApproval, got {other:?}"),
+        }
+    }
+
+    /// Phase 9e: gate=Approval with `approval_ctx=None` (pre-digest stage)
+    /// falls through to `Proceed`. The cycle's early-skip phase only sees
+    /// Skip vs Proceed; gate enforcement waits for the registry probe.
+    #[test]
+    fn gate_approval_without_digests_proceeds() {
+        let policy = Policy {
+            gate: Some(UpdateGate::Approval),
+            ..Default::default()
+        };
+        let snapshot = vec![LoadedPolicy {
+            scope_type: PolicyScopeType::Service,
+            scope_key: "web".into(),
+            body: policy,
+        }];
+        let owned = policy_context_from_container(None, None, None, "x").with_service("web".into());
+        let (_, dec) = policy_decision(&snapshot, &owned.as_ref(), None, Utc::now());
+        assert_eq!(dec, PolicyDecision::Proceed);
+    }
+
+    /// GHCR helper: well-formed ghcr.io image + sha256 digests yield a
+    /// compare URL.
+    #[test]
+    fn ghcr_compare_url_for_well_formed_inputs() {
+        let url = ghcr_compare_url("ghcr.io/owner/repo:v1", "sha256:aaa", "sha256:bbb");
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/owner/repo/compare/sha256:aaa...sha256:bbb")
+        );
+    }
+
+    /// Non-GHCR images get no diff URL.
+    #[test]
+    fn ghcr_compare_url_returns_none_for_non_ghcr() {
+        assert!(ghcr_compare_url("docker.io/library/nginx", "sha256:a", "sha256:b").is_none());
+        assert!(ghcr_compare_url("registry.example.com/x/y", "sha256:a", "sha256:b").is_none());
+    }
+
+    /// Non-sha256 digests bail out (we don't render broken links).
+    #[test]
+    fn ghcr_compare_url_returns_none_for_non_sha_digests() {
+        assert!(ghcr_compare_url("ghcr.io/o/r", "md5:abc", "sha256:def").is_none());
     }
 
     impl OwnedPolicyContext {
