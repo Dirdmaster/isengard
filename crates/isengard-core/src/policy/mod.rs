@@ -8,8 +8,10 @@
 //! scope". The implicit root resolved value (when no rows exist) is exposed as
 //! the [`defaults`] module's constants.
 
+pub mod labels;
 pub mod resolve;
 
+pub use labels::{ParseLabelError, has_any_policy_label, parse_policy_labels};
 pub use resolve::{
     PolicyContext, PolicyOrigin, ResolvedPolicy, ResolvedProvenance, resolve_policy,
 };
