@@ -10,6 +10,7 @@ description = "SQLite-backed inventory for Isengard controller"
 
 [dependencies]
 chrono.workspace = true
+isengard-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

@@ -2145,6 +2145,7 @@ name = "isengard-storage"
 version = "0.1.0-alpha"
 dependencies = [
  "chrono",
+ "isengard-core",
  "serde",
  "serde_json",
  "sha2",
