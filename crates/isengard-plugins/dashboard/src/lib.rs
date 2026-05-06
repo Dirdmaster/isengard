@@ -7,6 +7,7 @@
 
 pub mod api;
 pub mod approvals;
+pub mod deployment_groups;
 pub mod deployments;
 pub mod dto;
 pub mod enrollment;
@@ -102,6 +103,7 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
             .nest("/api/v1", api::router(h.clone()))
             .nest("/api/v1", routing::router(h.clone()))
             .nest("/api/v1", deployments::router(h.clone()))
+            .nest("/api/v1", deployment_groups::router(h.clone()))
             .nest("/api/v1", policies::router(h.clone()))
             .nest("/api/v1", approvals::router(h.clone()))
             .nest("/api/v1", webhooks::router(h.clone()))
