@@ -162,6 +162,22 @@ fn validate_policy(
         }
     }
 
+    // Phase 12c: external_gate URL must be non-empty when configured.
+    if let Some(g) = &body.external_gate {
+        if g.url.trim().is_empty() {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "external_gate.url must be non-empty",
+            ));
+        }
+        if g.timeout_secs == 0 || g.timeout_secs > 300 {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "external_gate.timeout_secs must be in 1..=300",
+            ));
+        }
+    }
+
     Ok(())
 }
 

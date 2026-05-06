@@ -5,6 +5,7 @@ pub mod approval_store;
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod hooks;
 pub mod labels;
 pub mod networking;
 pub mod plugin;
@@ -25,6 +26,7 @@ pub use approval_store::{
 pub use context::{HostMode, PluginContext};
 pub use error::{CoreError, Result};
 pub use event::{Event, EventEmitter, NoopEmitter, arc_emitter};
+pub use hooks::{ParsedHooks, has_any_hook_label, parse_hook_labels};
 pub use plugin::{AgentPlugin, ControllerPlugin, EventSubscriber, HttpHandler, Plugin};
 pub use policy::*;
 pub use policy_loader::{LoadedPolicy, PolicyLoader, PolicyLoaderError};

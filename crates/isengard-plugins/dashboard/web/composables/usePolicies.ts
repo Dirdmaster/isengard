@@ -23,6 +23,21 @@ export interface MaintenanceWindow {
   timezone?: string
 }
 
+/**
+ * Phase 12c (#55): external-action gate. Mirror of
+ * `isengard-core::policy::gate::ExternalGate`.
+ *
+ * When set on a resolved policy, the updater POSTs to `url` before any
+ * update and maps the JSON response onto the existing decision flow.
+ * `secret` is optional; when present the request carries an
+ * `X-Isengard-Signature: sha256=<hex>` HMAC-SHA256 header.
+ */
+export interface ExternalGate {
+  url: string
+  secret?: string
+  timeout_secs: number
+}
+
 export interface PolicyBody {
   strategy?: UpdateStrategy
   gate?: UpdateGate
@@ -30,6 +45,7 @@ export interface PolicyBody {
   on_failure?: FailureHandling
   approver_channel?: string
   window?: MaintenanceWindow
+  external_gate?: ExternalGate
 }
 
 export interface PolicyDto {

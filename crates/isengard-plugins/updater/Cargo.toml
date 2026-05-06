@@ -13,10 +13,13 @@ anyhow.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
 chrono.workspace = true
+hex = "0.4"
+hmac = "0.12"
 inventory.workspace = true
 isengard-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 reqwest.workspace = true

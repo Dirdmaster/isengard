@@ -6,6 +6,9 @@ import { ref } from 'vue'
  */
 export type DeliveryStatus = 'pending' | 'success' | 'failed' | 'exhausted'
 
+/** Phase 12b/c: which subsystem produced the delivery row. */
+export type DeliverySource = 'webhook' | 'lifecycle' | 'gate'
+
 export interface WebhookDto {
   id: number
   url: string
@@ -23,7 +26,12 @@ export interface WebhookCreatedDto extends WebhookDto {
 
 export interface WebhookDeliveryDto {
   id: number
-  webhookId: number
+  /** Phase 12b/c: null for lifecycle / gate rows. */
+  webhookId: number | null
+  /** Phase 12b/c: which subsystem produced this row. */
+  source: DeliverySource
+  /** Phase 12b/c: inline destination URL for lifecycle / gate rows. */
+  url: string | null
   eventKind: string
   status: DeliveryStatus
   attempts: number
@@ -90,6 +98,20 @@ export function useWebhooks() {
     return api.get<WebhookDeliveryDto[]>(path)
   }
 
+  /**
+   * Phase 12b/c: list deliveries across all webhooks filtered by source
+   * (`lifecycle` or `gate`). Backs the new sub-tabs in the Webhooks
+   * settings page.
+   */
+  async function listDeliveriesBySource(
+    source: DeliverySource,
+    limit?: number,
+  ): Promise<WebhookDeliveryDto[]> {
+    const params = new URLSearchParams({ source })
+    if (limit) params.set('limit', String(limit))
+    return api.get<WebhookDeliveryDto[]>(`/webhooks/deliveries?${params.toString()}`)
+  }
+
   async function sendTest(id: number): Promise<WebhookDeliveryDto> {
     return api.post<WebhookDeliveryDto>(`/webhooks/${id}/test`)
   }
@@ -103,6 +125,7 @@ export function useWebhooks() {
     updateWebhook,
     removeWebhook,
     listDeliveries,
+    listDeliveriesBySource,
     sendTest,
   }
 }

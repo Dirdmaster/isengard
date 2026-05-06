@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod dispatch_helpers;
+pub mod gate;
 pub mod image_ref;
 pub mod labels;
 pub mod policy;
@@ -307,6 +308,17 @@ async fn do_cycle(
                     }
                     crate::policy::SkipReason::Paused { until } => {
                         info!(container = %name, reason = "paused", until = %until, "policy skip");
+                        paused += 1;
+                    }
+                    crate::policy::SkipReason::GateRejected { reason } => {
+                        info!(
+                            container = %name,
+                            reason = "gate_rejected",
+                            gate_reason = ?reason,
+                            "policy skip"
+                        );
+                        // Phase 12c: gate-rejected counts as a paused-style skip
+                        // for cycle bookkeeping.
                         paused += 1;
                     }
                 }
@@ -763,10 +775,19 @@ fn build_policy_skipped_event(
     if let crate::policy::SkipReason::Paused { until } = reason {
         payload["until"] = serde_json::Value::String(until.to_rfc3339());
     }
+    if let crate::policy::SkipReason::GateRejected { reason: Some(s) } = reason {
+        payload["gate_reason"] = serde_json::Value::String(s.clone());
+    }
     let summary = match reason {
         crate::policy::SkipReason::Pinned => format!("skipped {service} (pinned)"),
         crate::policy::SkipReason::Paused { until } => {
             format!("skipped {service} (paused until {})", until.to_rfc3339())
+        }
+        crate::policy::SkipReason::GateRejected { reason: Some(r) } => {
+            format!("skipped {service} (gate rejected: {r})")
+        }
+        crate::policy::SkipReason::GateRejected { reason: None } => {
+            format!("skipped {service} (gate rejected)")
         }
     };
     Event {

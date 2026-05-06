@@ -293,6 +293,12 @@ fn build_event(ctx: &OwnedPolicyContext, container: &str, reason: &SkipReason) -
         SkipReason::Paused { until } => {
             format!("skipped {service} (paused until {})", until.to_rfc3339())
         }
+        SkipReason::GateRejected { reason: Some(r) } => {
+            format!("skipped {service} (gate rejected: {r})")
+        }
+        SkipReason::GateRejected { reason: None } => {
+            format!("skipped {service} (gate rejected)")
+        }
     };
     Event {
         kind: "update.policy_skipped".into(),

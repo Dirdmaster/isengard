@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 pub mod backoff;
+pub mod lifecycle;
 pub mod sign;
 pub mod subscriber;
 pub mod worker;
@@ -47,6 +48,8 @@ pub struct WebhooksConfig {
 pub struct Webhooks {
     config: WebhooksConfig,
     subscriber_task: Option<JoinHandle<()>>,
+    /// Phase 12b: lifecycle-event subscriber for `deployment.*` events.
+    lifecycle_task: Option<JoinHandle<()>>,
     worker_task: Option<JoinHandle<()>>,
 }
 
@@ -55,6 +58,7 @@ impl Webhooks {
         Self {
             config: WebhooksConfig::default(),
             subscriber_task: None,
+            lifecycle_task: None,
             worker_task: None,
         }
     }
@@ -112,6 +116,14 @@ impl Plugin for Webhooks {
         // Subscriber: persist a delivery row per matching webhook on each event.
         self.subscriber_task = Some(tokio::spawn(subscriber::run(inventory.clone(), bus_rx)));
 
+        // Phase 12b: lifecycle subscriber. Distinct broadcast subscription
+        // so a lag on one tap doesn't drop the other's events.
+        let lifecycle_rx = handles.bus.subscribe();
+        self.lifecycle_task = Some(tokio::spawn(lifecycle::run(
+            inventory.clone(),
+            lifecycle_rx,
+        )));
+
         // Worker: drain pending deliveries with retry + signing.
         let http = Client::builder()
             .user_agent(concat!("isengard-webhooks/", env!("CARGO_PKG_VERSION")))
@@ -133,6 +145,9 @@ impl Plugin for Webhooks {
 
     async fn stop(&mut self) -> Result<()> {
         if let Some(t) = self.subscriber_task.take() {
+            t.abort();
+        }
+        if let Some(t) = self.lifecycle_task.take() {
             t.abort();
         }
         if let Some(t) = self.worker_task.take() {
@@ -172,6 +187,7 @@ mod tests {
     fn webhooks_new_has_no_tasks() {
         let w = Webhooks::new();
         assert!(w.subscriber_task.is_none());
+        assert!(w.lifecycle_task.is_none());
         assert!(w.worker_task.is_none());
     }
 }

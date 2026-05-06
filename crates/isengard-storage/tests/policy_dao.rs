@@ -24,6 +24,7 @@ fn full_policy() -> Policy {
         on_failure: Some(FailureHandling::Notify),
         approver_channel: Some("ops-team-chat".to_string()),
         window: None,
+        external_gate: None,
     }
 }
 
