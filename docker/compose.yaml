@@ -48,6 +48,11 @@ services:
     image: ghcr.io/weavers-engineering/isengard-agent:next
     platform: linux/amd64
     container_name: iso-agent
+    # Run as root so the agent can connect to the host docker.sock, which
+    # is owned by root:root with mode 0660. The agent already has full
+    # docker-daemon access through that socket, which is equivalent to host
+    # root anyway, so dropping to nonroot offers no real isolation here.
+    user: "0:0"
     depends_on:
       - controller
     volumes:
