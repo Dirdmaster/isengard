@@ -1,33 +1,22 @@
 <template>
   <AppShell>
-    <main class="flex-1 grid grid-cols-[1fr_340px] min-h-0 overflow-hidden">
-      <!-- Left content column: page header + StatRow + two-column body -->
-      <div class="flex flex-col gap-5 p-6 min-h-0 overflow-auto">
-        <!-- Page header: title + relative-time subtitle. Inline (not the
-             generic <PageHeader>) because the concept uses a 22px sans
-             title, not the mono 16px treatment. -->
-        <div class="flex items-center justify-between shrink-0">
-          <div class="flex flex-col gap-1">
-            <h1 class="text-[22px] font-semibold text-iso-text-primary">Home</h1>
-            <span class="text-iso-xs text-iso-text-muted">{{ subtitle }}</span>
-          </div>
-        </div>
-
-        <!-- 4-cell stat row -->
-        <StatRow />
-
-        <!-- Two-column body: activity feed (3fr) + (deploys + health) (2fr) -->
-        <div class="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 flex-1 min-h-0">
-          <ActivityCard />
-          <div class="flex flex-col gap-4 min-h-0">
-            <ActiveDeploysCard />
-            <HealthSnapshotCard />
-          </div>
+    <main class="flex-1 flex flex-col gap-5 p-6 min-h-0 overflow-auto">
+      <div class="flex items-center justify-between shrink-0">
+        <div class="flex flex-col gap-1">
+          <h1 class="text-[22px] font-semibold text-iso-text-primary">Home</h1>
+          <span class="text-iso-xs text-iso-text-muted">{{ subtitle }}</span>
         </div>
       </div>
 
-      <!-- Right rail: Inspector (renders empty-state copy when nothing selected) -->
-      <Inspector class="overflow-y-auto" />
+      <StatRow />
+
+      <div class="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 flex-1 min-h-0">
+        <ActivityCard />
+        <div class="flex flex-col gap-4 min-h-0">
+          <ActiveDeploysCard />
+          <HealthSnapshotCard />
+        </div>
+      </div>
     </main>
   </AppShell>
 </template>
