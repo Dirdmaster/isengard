@@ -1,0 +1,33 @@
+# Compose override for local development. Layers on top of compose.yaml to
+# swap GHCR image refs for images built from the working-tree Dockerfile.
+#
+# Use via:
+#   docker compose -f docker/compose.yaml -f docker/compose.dev.yaml up -d --build
+#
+# Or just: `just dev`.
+#
+# The `image:` re-tag means subsequent `docker compose up -d` (without --build)
+# reuses the locally-built images instead of generating an auto-name like
+# `next_controller`. The `target:` values match the named build stages in the
+# root Dockerfile.
+
+services:
+  controller:
+    build:
+      context: ..
+      target: controller
+    image: iso-controller:dev
+    # Override the amd64 pin from compose.yaml. The dev build is native: on
+    # Apple Silicon we get a native arm64 image (no Rosetta tax). The published
+    # GHCR images stay amd64-only (see docker/README.md "Architecture") because
+    # of the BUILDPLATFORM pin in the Dockerfile chef stage; that pin makes a
+    # cross-arch build on an arm64 host produce binaries with the wrong arch
+    # for the manifest label. Local dev sidesteps this by going native.
+    platform: ""
+
+  agent:
+    build:
+      context: ..
+      target: agent
+    image: iso-agent:dev
+    platform: ""
