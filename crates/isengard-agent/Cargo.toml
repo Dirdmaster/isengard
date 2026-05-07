@@ -23,6 +23,7 @@ isengard-core.workspace = true
 isengard-proto.workspace = true
 isengard-storage = { workspace = true }
 mdns-sd.workspace = true
+notify = { workspace = true }
 pingora-core = { workspace = true }
 pingora-http = "0.8"
 pingora-proxy = { workspace = true }

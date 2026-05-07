@@ -9,6 +9,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod compose_cmd;
 mod credentials;
 mod login;
 mod logs;
@@ -50,6 +51,13 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail logs for `<stack>/<service>` over the controller WebSocket.
     Logs(logs::LogsArgs),
+    /// v0.3d: stage a compose.yaml, preview the reconcile plan, then
+    /// (after y/N) write it to the host's `/etc/isengard/stacks/<name>/`.
+    Apply(compose_cmd::ApplyArgs),
+    /// v0.3d: show the reconcile plan for a proposed compose.yaml. Read-only.
+    Diff(compose_cmd::DiffArgs),
+    /// v0.3d: open the stack's compose.yaml in `$EDITOR`, then apply on save.
+    Edit(compose_cmd::EditArgs),
 }
 
 #[tokio::main]
@@ -62,6 +70,9 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
+        Command::Apply(args) => compose_cmd::run_apply(args, cli.context.as_deref()).await,
+        Command::Diff(args) => compose_cmd::run_diff(args, cli.context.as_deref()).await,
+        Command::Edit(args) => compose_cmd::run_edit(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {

@@ -8,6 +8,7 @@
 pub mod api;
 pub mod approvals;
 pub mod backup;
+pub mod compose_diff;
 pub mod deployment_groups;
 pub mod deployments;
 pub mod dto;

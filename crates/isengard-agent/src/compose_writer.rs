@@ -66,6 +66,13 @@ pub struct ComposeMeta {
     /// Host ULID. Cross-checked when the operator copies the directory
     /// between machines.
     pub host_id: String,
+    /// v0.3d: sha256 of the YAML the reconciler last applied to the
+    /// running containers. The watcher consults this to skip reconcile
+    /// loops triggered by the agent's own writes (which already match
+    /// the running state). Optional for back-compat with v0.3c
+    /// `meta.toml` records that lack the field.
+    #[serde(default)]
+    pub last_applied_sha256: Option<String>,
 }
 
 /// Compute the sha256 hex of `s`.
@@ -159,15 +166,117 @@ pub fn write_compose(
     std::fs::rename(&tmp_path, &path)
         .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp_path.display(), path.display()))?;
 
+    // Preserve `last_applied_sha256` across a fresh write so the watcher
+    // path can still recognise its own self-trigger after a refresh.
+    let prior_applied = read_meta(&meta_path)
+        .ok()
+        .flatten()
+        .and_then(|m| m.last_applied_sha256);
     let meta = ComposeMeta {
         source: "imported".to_string(),
         imported_at: imported_at_rfc3339.to_string(),
         last_written_sha256: new_sha,
         host_id: host_id.to_string(),
+        last_applied_sha256: prior_applied,
     };
     write_meta(&meta_path, &meta)?;
 
     Ok(WriteOutcome::Written)
+}
+
+/// Update the `last_applied_sha256` field in `meta.toml` after a
+/// successful reconcile. Creates the meta record if missing (the
+/// watcher is the first writer for v0.3d-managed stacks that pre-date
+/// v0.3c import).
+pub fn record_last_applied(dir: &Path, sha: &str) -> Result<(), anyhow::Error> {
+    let meta_path = dir.join("meta.toml");
+    let mut meta = read_meta(&meta_path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| ComposeMeta {
+            source: "managed".to_string(),
+            imported_at: chrono::Utc::now().to_rfc3339(),
+            last_written_sha256: sha.to_string(),
+            host_id: String::new(),
+            last_applied_sha256: None,
+        });
+    meta.last_applied_sha256 = Some(sha.to_string());
+    write_meta(&meta_path, &meta)
+}
+
+/// Returns `Ok(true)` when `sha` matches the recorded
+/// `last_applied_sha256` in `dir/meta.toml`. Used by the v0.3d watcher
+/// to skip reconcile loops triggered by the agent's own writes.
+pub fn matches_last_applied(dir: &Path, sha: &str) -> Result<bool, anyhow::Error> {
+    let meta_path = dir.join("meta.toml");
+    Ok(matches!(
+        read_meta(&meta_path)?.and_then(|m| m.last_applied_sha256),
+        Some(s) if s == sha
+    ))
+}
+
+/// Read the current on-disk YAML for a stack. Returns the body plus its
+/// sha256, or `Ok(None)` when the file doesn't exist yet.
+pub fn read_compose(dir: &Path) -> Result<Option<(String, String)>, anyhow::Error> {
+    let path = dir.join("compose.yaml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    let sha = sha256_hex(&body);
+    Ok(Some((body, sha)))
+}
+
+/// Outcome of a v0.3d controller-driven `WriteCompose`. Used by the
+/// agent's sync handler to build the `WriteComposeAck` proto reply.
+#[derive(Debug, Clone)]
+pub enum ApplyWriteOutcome {
+    /// Wrote the YAML; carries the sha256 of the new file.
+    Ok { written_sha256: String },
+    /// On-disk hash didn't match `expected_sha256` and `force` was
+    /// false. The dashboard renders a diff using the included current
+    /// state.
+    Conflict {
+        current_sha256: String,
+        current_yaml: String,
+    },
+    /// I/O error, parse failure, etc.
+    Error(String),
+}
+
+/// Apply a controller-driven `WriteCompose`. Verifies the optimistic
+/// concurrency check (`expected_sha256` matches what's on disk) unless
+/// `force = true`, then atomically writes the new YAML + meta.toml.
+pub fn apply_controller_write(
+    dir: &Path,
+    new_yaml: &str,
+    expected_sha256: &str,
+    host_id: &str,
+    force: bool,
+) -> ApplyWriteOutcome {
+    // Conflict check: only if a file exists. First-time writes from the
+    // dashboard pass `expected_sha256 = ""`, which we accept.
+    match read_compose(dir) {
+        Ok(Some((current_yaml, current_sha))) => {
+            if !force && expected_sha256 != current_sha {
+                return ApplyWriteOutcome::Conflict {
+                    current_sha256: current_sha,
+                    current_yaml,
+                };
+            }
+        }
+        Ok(None) => {} // first-time write, nothing to compare against
+        Err(e) => return ApplyWriteOutcome::Error(format!("{e:#}")),
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    match write_compose(dir, new_yaml, host_id, &now, true) {
+        Ok(_outcome) => ApplyWriteOutcome::Ok {
+            written_sha256: sha256_hex(new_yaml),
+        },
+        Err(e) => ApplyWriteOutcome::Error(format!("{e:#}")),
+    }
 }
 
 fn write_meta(path: &Path, meta: &ComposeMeta) -> Result<(), anyhow::Error> {

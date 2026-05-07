@@ -53,6 +53,9 @@ async fn make_handles() -> Arc<ControllerHandles> {
         revocation,
         db_path: std::path::PathBuf::from(":memory:"),
         log_fanout: LogFanout::new(),
+        compose_broker: std::sync::Arc::new(
+            isengard_controller::compose_broker::ComposeBroker::new(),
+        ),
     })
 }
 

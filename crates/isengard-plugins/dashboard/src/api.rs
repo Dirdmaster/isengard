@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -29,7 +29,11 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/hosts/{id}/actions/force-update", post(force_update_host))
         .route("/stacks", get(list_stacks))
         .route("/stacks/{id}", get(get_stack))
-        .route("/stacks/{id}/compose", get(get_stack_compose))
+        .route(
+            "/stacks/{id}/compose",
+            get(get_stack_compose).put(put_stack_compose),
+        )
+        .route("/stacks/{id}/diff", post(post_stack_diff))
         .route(
             "/stacks/{id}/actions/force-update",
             post(force_update_stack),
@@ -576,6 +580,160 @@ async fn get_stack_compose(
     }
 }
 
+/// `PUT /api/v1/stacks/:id/compose` (v0.3d).
+///
+/// Body: raw YAML text (Content-Type: application/yaml or text/plain).
+/// Header: `If-Match: <sha256>` carrying the hash the dashboard saw on
+/// load. The agent compares against the on-disk hash before writing;
+/// mismatch yields 409 with `{ current_sha256, current_yaml }`.
+///
+/// Optional query: `?force=true` to skip the conflict check (the
+/// dashboard's "Force overwrite" CTA uses it). `false` by default.
+///
+/// Status codes:
+/// - 200: file written; body echoes `{ written_sha256 }`.
+/// - 409: hash mismatch; body has `current_sha256` + `current_yaml`.
+/// - 503: agent for the stack's host is not currently connected.
+/// - 504: agent connected but didn't reply within the timeout.
+async fn put_stack_compose(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Query(q): Query<PutComposeQuery>,
+    body: String,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
+        }
+    };
+
+    // Optimistic concurrency: prefer `If-Match` (HTTP idiom) and fall
+    // back to a body-less first save (`expected_sha256 = ""`).
+    let expected = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_default();
+
+    let request_id = ulid::Ulid::new().to_string();
+    let rx = handles.compose_broker.register(request_id.clone()).await;
+
+    let msg = isengard_proto::pb::ControllerMessage {
+        payload: Some(
+            isengard_proto::pb::controller_message::Payload::WriteCompose(
+                isengard_proto::pb::WriteCompose {
+                    request_id: request_id.clone(),
+                    stack_name: stack.name.clone(),
+                    compose_yaml: body,
+                    expected_sha256: expected,
+                    force: q.force.unwrap_or(false),
+                },
+            ),
+        ),
+    };
+    if let Err(e) = handles
+        .routing
+        .send_message_to_host(stack.host_id, msg)
+        .await
+    {
+        handles.compose_broker.cancel(&request_id).await;
+        return json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("agent not connected: {e}"),
+        );
+    }
+
+    let ack = match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(ack)) => ack,
+        Ok(Err(_)) => {
+            handles.compose_broker.cancel(&request_id).await;
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "broker dropped sender");
+        }
+        Err(_) => {
+            handles.compose_broker.cancel(&request_id).await;
+            return json_err(StatusCode::GATEWAY_TIMEOUT, "agent timed out responding");
+        }
+    };
+
+    use isengard_proto::pb::write_compose_ack::Kind;
+    match Kind::try_from(ack.kind).unwrap_or(Kind::Unspecified) {
+        Kind::Ok => Json(serde_json::json!({
+            "written_sha256": ack.written_sha256,
+        }))
+        .into_response(),
+        Kind::Conflict => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "compose hash mismatch; reload before saving",
+                "current_sha256": ack.current_sha256,
+                "current_yaml": ack.current_yaml,
+            })),
+        )
+            .into_response(),
+        Kind::Error => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("agent: {}", ack.error),
+        ),
+        Kind::Unspecified => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "agent ack kind unspecified",
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PutComposeQuery {
+    /// Skip the optimistic concurrency check. False / absent by default.
+    force: Option<bool>,
+}
+
+/// `POST /api/v1/stacks/:id/diff` (v0.3d).
+///
+/// Body: raw YAML (the operator's proposed compose).
+/// Returns the [`isengard_agent::compose_reconciler::ReconcilePlan`] in
+/// JSON, or 422 if the YAML doesn't parse. Used by:
+/// - the dashboard's "Apply preview" button.
+/// - `isd diff <stack>` and `isd apply <path>`.
+///
+/// The plan is computed against the LAST IMPORTED compose snapshot the
+/// controller has cached. The agent runs the actual reconcile against
+/// the live container set on apply; small drift between this preview
+/// and reality is expected (e.g. operator restarted a container by
+/// hand).
+async fn post_stack_diff(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+    body: String,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
+        }
+    };
+    let current = match handles.inventory.get_stack_compose(stack.id).await {
+        Ok(Some(row)) => row.yaml,
+        Ok(None) => String::new(),
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("get_stack_compose: {e}"),
+            );
+        }
+    };
+    match crate::compose_diff::diff_yamls(&stack.name, &current, &body) {
+        Ok(plan) => Json(plan).into_response(),
+        Err(e) => json_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("parse compose: {e}"),
+        ),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ListServicesQuery {
     stack_id: Option<i64>,
@@ -989,6 +1147,7 @@ mod tests {
             revocation,
             db_path: std::path::PathBuf::from(":memory:"),
             log_fanout: isengard_controller::log_fanout::LogFanout::new(),
+            compose_broker: Arc::new(isengard_controller::compose_broker::ComposeBroker::new()),
         })
     }
 

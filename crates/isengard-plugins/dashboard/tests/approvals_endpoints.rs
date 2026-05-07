@@ -58,6 +58,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         revocation,
         db_path: std::path::PathBuf::from(":memory:"),
         log_fanout: isengard_controller::log_fanout::LogFanout::new(),
+        compose_broker: Arc::new(isengard_controller::compose_broker::ComposeBroker::new()),
     });
     let app = approvals::router(handles.clone());
     (app, handles)

@@ -16,6 +16,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::bus::EventBus;
 use crate::ca::Authority;
+use crate::compose_broker::ComposeBroker;
 use crate::enrollment::{EnrollmentService, HostInfo};
 use crate::hook_ingest::HookLabelIngest;
 use crate::log_fanout::LogFanout;
@@ -45,6 +46,9 @@ pub struct ControllerService {
     /// frames on the Sync stream are routed through this fanout to the
     /// dashboard's WebSocket tasks.
     pub log_fanout: Arc<LogFanout>,
+    /// v0.3d: resolves pending `WriteCompose` requests when the agent's
+    /// matching `WriteComposeAck` arrives on the Sync stream.
+    pub compose_broker: Arc<ComposeBroker>,
 }
 
 impl ControllerService {
@@ -60,6 +64,7 @@ impl ControllerService {
         enrollment: Arc<EnrollmentService>,
         revocation: RevocationSet,
         log_fanout: Arc<LogFanout>,
+        compose_broker: Arc<ComposeBroker>,
     ) -> Self {
         Self {
             inventory,
@@ -72,6 +77,7 @@ impl ControllerService {
             enrollment,
             revocation,
             log_fanout,
+            compose_broker,
         }
     }
 
@@ -95,6 +101,7 @@ impl ControllerService {
         let policy_ingest = Arc::new(PolicyLabelIngest::new(inventory.clone()));
         let hook_ingest = Arc::new(HookLabelIngest::new(inventory.clone()));
         let log_fanout = LogFanout::new();
+        let compose_broker = Arc::new(ComposeBroker::new());
         Self {
             inventory,
             journal,
@@ -106,6 +113,7 @@ impl ControllerService {
             enrollment,
             revocation,
             log_fanout,
+            compose_broker,
         }
     }
 }
@@ -285,6 +293,7 @@ impl Controller for ControllerService {
         let policy_ingest = self.policy_ingest.clone();
         let hook_ingest = self.hook_ingest.clone();
         let log_fanout = self.log_fanout.clone();
+        let compose_broker = self.compose_broker.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -454,6 +463,19 @@ impl Controller for ControllerService {
                                 stack = %report.stack_name,
                                 "compose: persist failed",
                             ),
+                        }
+                    }
+                    Some(isengard_proto::pb::agent_message::Payload::WriteComposeAck(ack)) => {
+                        // v0.3d: route the ack to the matching dashboard
+                        // PUT handler. Unknown request_ids (timed-out
+                        // dashboard, replayed agent) are dropped silently.
+                        let resolved = compose_broker.resolve(ack.clone()).await;
+                        if !resolved {
+                            tracing::debug!(
+                                agent = %agent_hostname,
+                                request_id = %ack.request_id,
+                                "compose_broker: ack for unknown request, dropping",
+                            );
                         }
                     }
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(

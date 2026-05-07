@@ -86,6 +86,7 @@ mod tests {
             revocation,
             db_path: std::path::PathBuf::from(":memory:"),
             log_fanout: crate::log_fanout::LogFanout::new(),
+            compose_broker: Arc::new(crate::compose_broker::ComposeBroker::new()),
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into

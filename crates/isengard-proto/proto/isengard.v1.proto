@@ -87,6 +87,10 @@ message AgentMessage {
     // for a stack so the controller can serve it on
     // `GET /api/v1/stacks/<id>/compose` without round-tripping to the host.
     StackComposeReport       stack_compose_report     = 7;
+    // v0.3d: agent acknowledges a `WriteCompose` ControllerMessage.
+    // Carries the request_id the controller minted so the dashboard's
+    // PUT /api/v1/stacks/<id>/compose can resolve the right pending call.
+    WriteComposeAck          write_compose_ack        = 8;
   }
 }
 
@@ -138,6 +142,11 @@ message ControllerMessage {
     StartLogStream   start_log_stream  = 6;
     // Phase 13B: cancel a previously started log subscription. Idempotent.
     StopLogStream    stop_log_stream   = 7;
+    // v0.3d: dashboard "Save" -> controller -> agent: write the supplied
+    // YAML to `/etc/isengard/stacks/<stack>/compose.yaml`. The agent fires
+    // its own inotify path immediately after, which drives the reconcile
+    // loop from the same code path as a `vim` save.
+    WriteCompose     write_compose     = 8;
   }
 }
 
@@ -221,6 +230,48 @@ message ContainerLabelsReport {
 // Agent → controller: previously reported container is gone.
 message ContainerLabelsRemoved {
   string container_id = 1;
+}
+
+// Controller -> agent (v0.3d): write the supplied YAML to the host's
+// `/etc/isengard/stacks/<stack_name>/compose.yaml`, refreshing the sibling
+// `meta.toml` on success. The agent's inotify watcher will see the
+// rename and trigger the reconcile loop just like a `vim` save would.
+//
+// `expected_sha256` is the file hash the dashboard saw when it loaded
+// the editor. The agent compares against the on-disk hash before
+// writing; mismatch -> `WriteComposeAck` with `kind = CONFLICT`.
+//
+// `force = true` skips the conflict check (used by the dashboard's
+// "Force overwrite" CTA). Defaults to false.
+message WriteCompose {
+  string request_id      = 1;
+  string stack_name      = 2;
+  string compose_yaml    = 3;
+  string expected_sha256 = 4;
+  bool   force           = 5;
+}
+
+// Agent -> controller (v0.3d): outcome of a `WriteCompose`. The controller
+// resolves the pending dashboard PUT keyed by `request_id`.
+message WriteComposeAck {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_OK          = 1;
+    // On-disk hash didn't match `expected_sha256`. `current_sha256` and
+    // `current_yaml` carry the truth so the dashboard can show a diff.
+    KIND_CONFLICT    = 2;
+    // Anything else: I/O error, parse failure, etc. `error` is a one-line
+    // human-readable message.
+    KIND_ERROR       = 3;
+  }
+  string request_id     = 1;
+  Kind   kind           = 2;
+  string error          = 3;
+  string current_sha256 = 4;
+  string current_yaml   = 5;
+  // Hash of the YAML the agent just wrote. Echoed back so the dashboard
+  // can use it as the next If-Match.
+  string written_sha256 = 6;
 }
 
 // Agent -> controller (v0.3c): imported compose.yaml for a stack on this

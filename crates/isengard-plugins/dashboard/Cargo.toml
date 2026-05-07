@@ -32,6 +32,8 @@ tokio = { workspace = true }
 tower.workspace = true
 tracing.workspace = true
 ulid.workspace = true
+sha2.workspace = true
+serde_yaml.workspace = true
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
