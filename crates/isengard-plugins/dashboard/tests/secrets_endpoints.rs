@@ -215,14 +215,16 @@ async fn post_invalid_name_returns_400() {
 async fn list_omits_values_for_many_secrets() {
     let (app, _h) = setup_app(Some("p")).await;
 
-    for (n, v) in [("alpha", "secret-A"), ("beta", "secret-B"), ("gamma", "secret-C")] {
+    for (n, v) in [
+        ("alpha", "secret-A"),
+        ("beta", "secret-B"),
+        ("gamma", "secret-C"),
+    ] {
         let req = Request::builder()
             .method("POST")
             .uri("/secrets")
             .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"name": n, "value": v}).to_string(),
-            ))
+            .body(Body::from(json!({"name": n, "value": v}).to_string()))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -237,10 +239,7 @@ async fn list_omits_values_for_many_secrets() {
     let body = body_to_json(resp).await;
     let raw = serde_json::to_string(&body).unwrap();
     for v in ["secret-A", "secret-B", "secret-C"] {
-        assert!(
-            !raw.contains(v),
-            "list endpoint leaked value {v}: {raw}"
-        );
+        assert!(!raw.contains(v), "list endpoint leaked value {v}: {raw}");
     }
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 3);
