@@ -71,14 +71,22 @@ async function loadServicesForStacks(ids: string[]) {
   servicesByStack.value = next
 }
 
-// Trigger lookups whenever the stacks list changes.
-watchEffect(() => {
-  const ids = stacksStore.items.map((s) => s.id)
-  if (ids.length) {
-    loadDeploymentsForStacks(ids)
-    loadServicesForStacks(ids)
-  }
-})
+// Trigger lookups whenever the stack list changes. Watch the joined IDs
+// (a primitive string) instead of using watchEffect so we only re-fire on
+// real list changes. The loaders mutate depByStack / servicesByStack, which
+// watchEffect was tracking via the synchronous { ...prev } clones; that
+// turned into a fetch storm (browser hit ERR_INSUFFICIENT_RESOURCES).
+watch(
+  () => stacksStore.items.map((s) => s.id).join(','),
+  (joined) => {
+    const ids = joined ? joined.split(',') : []
+    if (ids.length) {
+      loadDeploymentsForStacks(ids)
+      loadServicesForStacks(ids)
+    }
+  },
+  { immediate: true },
+)
 
 const rows = computed<StackRowData[]>(() => {
   const fleet = uiStore.activeFleet
