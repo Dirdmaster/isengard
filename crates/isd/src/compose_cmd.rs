@@ -61,20 +61,19 @@ pub struct EditArgs {
 
 #[derive(Debug, Deserialize)]
 struct StackDto {
-    id: i64,
+    id: String,
     name: String,
 }
 
+// The dashboard's compose endpoint emits stack_id as an integer while the
+// stacks-list endpoint emits it as a string (StackId is a typed wrapper that
+// serializes differently in the two paths). Skip stack_id entirely here:
+// the caller already knows the ID it requested. Same story for stack_name +
+// imported_at; we just need the YAML and the sha for optimistic concurrency.
 #[derive(Debug, Deserialize)]
 struct ComposeResponse {
-    #[allow(dead_code)]
-    stack_id: i64,
-    #[allow(dead_code)]
-    stack_name: String,
     compose_yaml: String,
     sha256: String,
-    #[allow(dead_code)]
-    imported_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -136,8 +135,8 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
     };
     let (ctx, client) = pinned_session(context).await?;
     let stack_id = resolve_stack_id(&ctx, &client, &stack).await?;
-    let current = fetch_compose(&ctx, &client, stack_id).await?;
-    let plan = preview_diff(&ctx, &client, stack_id, &body).await?;
+    let current = fetch_compose(&ctx, &client, &stack_id).await?;
+    let plan = preview_diff(&ctx, &client, &stack_id, &body).await?;
 
     println!("Stack: {} (id {})", stack, stack_id);
     println!();
@@ -168,7 +167,7 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
         .as_ref()
         .map(|c| c.sha256.clone())
         .unwrap_or_default();
-    let outcome = put_compose(&ctx, &client, stack_id, &body, &expected, args.force).await?;
+    let outcome = put_compose(&ctx, &client, &stack_id, &body, &expected, args.force).await?;
     println!("Applied. New sha256: {}", outcome.written_sha256);
     Ok(())
 }
@@ -176,7 +175,7 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
 pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
     let (ctx, client) = pinned_session(context).await?;
     let stack_id = resolve_stack_id(&ctx, &client, &args.stack).await?;
-    let current = fetch_compose(&ctx, &client, stack_id).await?;
+    let current = fetch_compose(&ctx, &client, &stack_id).await?;
     let proposed = match args.path.as_ref() {
         Some(p) => read_compose_path(p)?,
         None => String::new(),
@@ -187,7 +186,7 @@ pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
         .unwrap_or("");
 
     print_unified_diff(current_yaml, &proposed);
-    let plan = preview_diff(&ctx, &client, stack_id, &proposed).await?;
+    let plan = preview_diff(&ctx, &client, &stack_id, &proposed).await?;
     println!();
     print_plan(&plan);
     Ok(())
@@ -196,7 +195,7 @@ pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
 pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
     let (ctx, client) = pinned_session(context).await?;
     let stack_id = resolve_stack_id(&ctx, &client, &args.stack).await?;
-    let current = fetch_compose(&ctx, &client, stack_id).await?;
+    let current = fetch_compose(&ctx, &client, &stack_id).await?;
     let current_yaml = current
         .as_ref()
         .map(|c| c.compose_yaml.clone())
@@ -231,7 +230,7 @@ pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let plan = preview_diff(&ctx, &client, stack_id, &edited).await?;
+    let plan = preview_diff(&ctx, &client, &stack_id, &edited).await?;
     print_unified_diff(&current_yaml, &edited);
     println!();
     print_plan(&plan);
@@ -248,7 +247,7 @@ pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
         println!("Aborted.");
         return Ok(());
     }
-    let outcome = put_compose(&ctx, &client, stack_id, &edited, &expected, false).await?;
+    let outcome = put_compose(&ctx, &client, &stack_id, &edited, &expected, false).await?;
     println!("Applied. New sha256: {}", outcome.written_sha256);
     Ok(())
 }
@@ -283,7 +282,11 @@ fn stack_from_path(path: &std::path::Path) -> Result<String> {
     })
 }
 
-async fn resolve_stack_id(ctx: &ContextEntry, client: &reqwest::Client, name: &str) -> Result<i64> {
+async fn resolve_stack_id(
+    ctx: &ContextEntry,
+    client: &reqwest::Client,
+    name: &str,
+) -> Result<String> {
     let url = format!("{}/api/v1/stacks", ctx.controller_url);
     let resp = client
         .get(&url)
@@ -303,7 +306,7 @@ async fn resolve_stack_id(ctx: &ContextEntry, client: &reqwest::Client, name: &s
 async fn fetch_compose(
     ctx: &ContextEntry,
     client: &reqwest::Client,
-    stack_id: i64,
+    stack_id: &str,
 ) -> Result<Option<ComposeResponse>> {
     let url = format!("{}/api/v1/stacks/{stack_id}/compose", ctx.controller_url);
     let resp = client
@@ -323,7 +326,7 @@ async fn fetch_compose(
 async fn preview_diff(
     ctx: &ContextEntry,
     client: &reqwest::Client,
-    stack_id: i64,
+    stack_id: &str,
     proposed: &str,
 ) -> Result<ReconcilePlan> {
     let url = format!("{}/api/v1/stacks/{stack_id}/diff", ctx.controller_url);
@@ -343,7 +346,7 @@ async fn preview_diff(
 async fn put_compose(
     ctx: &ContextEntry,
     client: &reqwest::Client,
-    stack_id: i64,
+    stack_id: &str,
     body: &str,
     expected_sha256: &str,
     force: bool,
