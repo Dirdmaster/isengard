@@ -32,5 +32,12 @@ tracing.workspace = true
 ulid.workspace = true
 x509-parser.workspace = true
 
+# v0.3b: zone-scoped DNS resolver. The server answers A queries inside the
+# operator-configured zone; queries outside it return REFUSED so the OS
+# resolver falls back upstream.
+hickory-server.workspace = true
+hickory-proto.workspace = true
+
 [dev-dependencies]
 tempfile = "3.14.0"
+hickory-resolver.workspace = true

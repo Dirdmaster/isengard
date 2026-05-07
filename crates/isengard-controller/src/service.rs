@@ -205,6 +205,11 @@ impl Controller for ControllerService {
         // attribute heartbeats / container reports / label reports to agent
         // B by sending B's id in the Hello payload.
         let host_id = host_id_from_peer_cert(&request)?;
+        // v0.3b: capture the agent's remote address so the controller-side
+        // DNS resolver can map `<host>.<zone>` -> agent IP. Best-effort: if
+        // tonic can't surface the peer address (e.g. unix socket transport in
+        // tests) we just skip the update.
+        let remote_ip = request.remote_addr().map(|a| a.ip().to_string());
         let mut inbound = request.into_inner();
 
         // Read first frame: must be SyncHello (the agent_id field is logged
@@ -240,6 +245,20 @@ impl Controller for ControllerService {
             .ok_or_else(|| Status::unauthenticated("agent_id not in inventory; re-enroll"))?;
 
         tracing::info!(agent = %host.hostname, "agent connected for sync");
+
+        // v0.3b: persist the agent's observed LAN IP so the DNS resolver can
+        // resolve `<host>.<zone>` to it. Skipped on update failure (the
+        // resolver will simply omit the record until the next reconnect).
+        if let Some(ip) = remote_ip.as_deref() {
+            if let Err(e) = self.inventory.set_host_lan_ip(host_id, ip).await {
+                tracing::warn!(
+                    error = %e,
+                    agent = %host.hostname,
+                    %ip,
+                    "set_host_lan_ip failed; DNS resolver may miss this host until next reconnect",
+                );
+            }
+        }
 
         // Build outbound channel. Controller uses this to send HeartbeatAcks,
         // ProxyConfig pushes (Phase 8), and Phase 3+ commands.

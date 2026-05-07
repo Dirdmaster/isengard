@@ -93,6 +93,52 @@ docker compose -f docker/compose.yaml up -d agent
 
 Confirm what your context uses with `docker context inspect | grep -i host`.
 
+## DNS resolver (v0.3b)
+
+mDNS (v0.3a, agent-side) handles `.local`. For a custom zone (e.g. `.iso`, `.weavers`, `.lan`), the controller can host a small embedded DNS server that resolves `<public_hostname>.<zone>` to the LAN IP of the agent that owns the matching routing rule.
+
+### Enable
+
+Set `ISENGARD_DNS_ZONE` in the environment (or pass `--dns-zone <name>` on the controller command). Empty string disables the resolver entirely (default).
+
+```sh
+ISENGARD_DNS_ZONE=iso docker compose -f docker/compose.yaml up -d controller
+```
+
+The compose recipe binds `127.0.0.1:5300/udp` on the host so the resolver is reachable locally without exposing it on a public interface. To bind UDP 53 instead, swap the port and add `cap_add: [NET_BIND_SERVICE]` to the controller service.
+
+### macOS conditional forwarding
+
+Tell the OS to send queries for `*.iso` to the controller's resolver, and everything else to its normal upstreams:
+
+```sh
+sudo mkdir -p /etc/resolver
+sudo tee /etc/resolver/iso > /dev/null <<'EOF'
+nameserver 127.0.0.1
+port 5300
+EOF
+```
+
+The directory-style resolver config takes effect immediately; no restart required. `scutil --dns | grep -A3 iso` confirms the routing.
+
+### Linux conditional forwarding
+
+`systemd-resolved` (per-link domain routing) or `dnsmasq` (server-by-domain) both work. Example dnsmasq snippet:
+
+```conf
+server=/iso/127.0.0.1#5300
+```
+
+### Verify
+
+```sh
+dig @127.0.0.1 -p 5300 +short hello.iso        # returns the agent's LAN IP
+dig @127.0.0.1 -p 5300 nonexistent.iso         # NXDOMAIN
+dig @127.0.0.1 -p 5300 google.com              # REFUSED (we don't recurse)
+```
+
+For names ending in `.local`, the agent's mDNS responder answers; the controller filters those out of its DNS table so the two paths don't collide.
+
 ## Architecture
 
 Images currently ship `linux/amd64` only. Apple Silicon (arm64) Macs need to pull the amd64 manifest and run under Rosetta — `docker/compose.yaml` already pins `platform: linux/amd64` for both services so this works out of the box. Linux/amd64 hosts ignore the line and run native.

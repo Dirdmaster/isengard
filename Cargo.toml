@@ -163,8 +163,14 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 # read passwords / tokens without echoing to the terminal (v0.3a: `isd login`)
 rpassword = "7"
 
-# TOML for the `isd` credentials store (v0.3a)
-toml = "0.8"
+# v0.3b: embedded DNS server hosted by the controller for a configurable zone
+# (e.g. `*.iso`). Pinned to 0.25; 0.26+ requires Rust 1.88, the workspace
+# MSRV is 1.86. RUSTSEC-2026-0119 is acknowledged in deny.toml; not
+# exploitable in our deployment (resolver binds to LAN-only, agents are
+# enrolled, no untrusted DNS traffic ingresses).
+hickory-server = { version = "0.25", default-features = false, features = ["resolver"] }
+hickory-proto = { version = "0.25", default-features = false }
+hickory-resolver = { version = "0.25", default-features = false, features = ["tokio"] }
 
 [profile.release]
 lto = "thin"
