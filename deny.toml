@@ -30,28 +30,6 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2025-0069
     "RUSTSEC-2025-0069",
 
-    # hickory-proto 0.25.x: amplified CPU cost during DNS message encoding when
-    # an attacker can send messages with many records. Fix lands in 0.26.1 but
-    # that requires Rust 1.88; the workspace MSRV is 1.86 and bumping it would
-    # cascade clippy-on-1.88+ lints across the codebase. Mitigated by
-    # deployment shape: the v0.3b resolver binds to a LAN interface (default
-    # 127.0.0.1:5300, prod compose binds 53/udp on the controller host only),
-    # client traffic comes from operator-owned hosts, not the public internet.
-    # Revisit when bumping MSRV to 1.88+ for an unrelated reason.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0119
-    "RUSTSEC-2026-0119",
-
-    # hickory-proto 0.25.x: NSEC3 closest-encloser proof validation can enter
-    # an unbounded loop on cross-zone responses. The bug is only reachable
-    # through `DnssecDnsHandle` when built with `dnssec-ring` or
-    # `dnssec-aws-lc-rs`. We pin `default-features = false` and only enable
-    # `resolver` on hickory-server, so DNSSEC validation is not compiled in;
-    # the controller is also an authoritative server (it never recursively
-    # validates upstream responses), which is the path the advisory covers.
-    # Revisit alongside the MSRV bump that lets us move to 0.26.x.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0118
-    "RUSTSEC-2026-0118",
-
     # instant 0.1.13 is unmaintained (author recommends web-time). Pulled in
     # transitively via notify-types 1.0 -> notify 7.0 (v0.3d compose watcher).
     # No safe upgrade until notify 9.x leaves rc; we use it on the host (not

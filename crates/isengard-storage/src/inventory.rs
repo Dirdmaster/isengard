@@ -114,60 +114,6 @@ impl Inventory {
         Ok(result.rows_affected() == 1)
     }
 
-    /// v0.3b: stash the agent's last-seen LAN IP in the host's `metadata`
-    /// JSON column under the `lan_ip` key. The controller's DNS resolver
-    /// reads this when answering A queries for `<host>.<zone>`.
-    ///
-    /// Stored in metadata (rather than as a dedicated column) to avoid a
-    /// schema migration: the field is observational (derived from the gRPC
-    /// peer address) and may be absent or stale.
-    pub async fn set_host_lan_ip(&self, id: HostId, ip: &str) -> Result<bool> {
-        let id_bytes: &[u8] = &id.to_bytes();
-        // Read-modify-write: load metadata, merge `lan_ip`, write back.
-        let row: Option<(String,)> = sqlx::query_as("SELECT metadata FROM hosts WHERE id = ?")
-            .bind(id_bytes)
-            .fetch_optional(&self.pool)
-            .await?;
-        let Some((meta_str,)) = row else {
-            return Ok(false);
-        };
-        let mut meta: serde_json::Value =
-            serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({}));
-        if !meta.is_object() {
-            meta = serde_json::json!({});
-        }
-        if let Some(obj) = meta.as_object_mut() {
-            obj.insert("lan_ip".into(), serde_json::Value::String(ip.to_string()));
-        }
-        let new_meta = meta.to_string();
-        let result = sqlx::query("UPDATE hosts SET metadata = ? WHERE id = ?")
-            .bind(&new_meta)
-            .bind(id_bytes)
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    /// v0.3b: read the cached LAN IP for a host (set via `set_host_lan_ip`).
-    /// Returns `None` if the host doesn't exist or the metadata has no
-    /// `lan_ip` key yet (no agent connection has landed since boot).
-    pub async fn host_lan_ip(&self, id: HostId) -> Result<Option<String>> {
-        let id_bytes: &[u8] = &id.to_bytes();
-        let row: Option<(String,)> = sqlx::query_as("SELECT metadata FROM hosts WHERE id = ?")
-            .bind(id_bytes)
-            .fetch_optional(&self.pool)
-            .await?;
-        let Some((meta_str,)) = row else {
-            return Ok(None);
-        };
-        let meta: serde_json::Value =
-            serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({}));
-        Ok(meta
-            .get("lan_ip")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()))
-    }
-
     /// Remove a host from the inventory. Returns true if a row was deleted.
     pub async fn delete_host(&self, id: HostId) -> Result<bool> {
         let id_bytes: &[u8] = &id.to_bytes();
@@ -784,44 +730,6 @@ mod tests {
 
         let host = inv.get_host(id).await.unwrap().unwrap();
         assert_eq!(host.last_seen_at, Some(1_700_000_000));
-    }
-
-    #[tokio::test]
-    async fn set_and_read_host_lan_ip() {
-        let inv = Inventory::open_in_memory().await.unwrap();
-        let id = inv.enroll_host(sample_enrollment()).await.unwrap();
-
-        // No IP set yet -> None.
-        assert_eq!(inv.host_lan_ip(id).await.unwrap(), None);
-
-        let ok = inv.set_host_lan_ip(id, "192.168.1.42").await.unwrap();
-        assert!(ok);
-        assert_eq!(
-            inv.host_lan_ip(id).await.unwrap(),
-            Some("192.168.1.42".into())
-        );
-
-        // Overwrite the value.
-        let ok = inv.set_host_lan_ip(id, "10.0.0.7").await.unwrap();
-        assert!(ok);
-        assert_eq!(inv.host_lan_ip(id).await.unwrap(), Some("10.0.0.7".into()));
-
-        // Other metadata keys round-trip alongside lan_ip.
-        let host = inv.get_host(id).await.unwrap().unwrap();
-        assert_eq!(
-            host.metadata.get("lan_ip").and_then(|v| v.as_str()),
-            Some("10.0.0.7")
-        );
-    }
-
-    #[tokio::test]
-    async fn set_host_lan_ip_unknown_host_returns_false() {
-        let inv = Inventory::open_in_memory().await.unwrap();
-        let ok = inv
-            .set_host_lan_ip(HostId::new(), "192.168.1.42")
-            .await
-            .unwrap();
-        assert!(!ok);
     }
 
     #[tokio::test]

@@ -8,7 +8,6 @@ pub mod bus;
 pub mod ca;
 pub mod compose_broker;
 pub mod disconnect_monitor;
-pub mod dns;
 pub mod enrollment;
 pub mod hook_ingest;
 pub mod log_fanout;
@@ -112,13 +111,6 @@ pub struct ControllerOptions {
     pub state_dir: std::path::PathBuf,
     /// Optional config tree (per-plugin slices keyed by plugin name).
     pub config: serde_json::Value,
-    /// v0.3b: zone name served by the embedded DNS resolver (e.g. `iso`).
-    /// Empty string = resolver disabled, zero overhead.
-    pub dns_zone: String,
-    /// v0.3b: address the embedded DNS resolver binds to (UDP). Defaults to
-    /// `0.0.0.0:5300` for dev; production compose maps :53 with
-    /// `cap_add: NET_BIND_SERVICE`. Ignored when `dns_zone` is empty.
-    pub dns_listen: SocketAddr,
 }
 
 /// Discover and instantiate every plugin that advertises `Capability::Controller`.
@@ -208,37 +200,6 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         60.0,  // 60s poll
     ));
     let disconnect_handle = disconnect_monitor.start();
-
-    // v0.3b: optional DNS resolver. Off by default (`--dns-zone ""`); when a
-    // zone is configured the resolver binds to `dns_listen` and serves A
-    // queries derived from `routing_rules`. Only active for the configured
-    // zone; out-of-zone queries are REFUSED so the OS falls through to its
-    // upstream resolver. Coexists additively with the agent's mDNS responder
-    // (v0.3a) which handles `.local`.
-    let dns_handle = if opts.dns_zone.trim().is_empty() {
-        None
-    } else {
-        let resolver = dns::DnsResolver::new(opts.dns_zone.clone(), inventory.clone());
-        match resolver.start(opts.dns_listen).await {
-            Ok(handle) => {
-                info!(
-                    zone = %opts.dns_zone,
-                    listen = %opts.dns_listen,
-                    "DNS resolver started",
-                );
-                Some(handle)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    zone = %opts.dns_zone,
-                    listen = %opts.dns_listen,
-                    "DNS resolver failed to start; controller continues without it",
-                );
-                None
-            }
-        }
-    };
 
     // Phase 10c (10i, refs #50): stack-level deployment orchestrator. Owns the
     // multi-host wave plan when a stack-wide update fans out to 2+ hosts.
@@ -403,9 +364,6 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     deployment_handle.abort();
     reaper_handle.abort();
     orchestrator_handle.abort();
-    if let Some(h) = dns_handle {
-        h.abort();
-    }
 
     // -- plugin stop ----------------------------------------------------------
     plugin_host::stop_controller_plugins(&mut controller_plugins).await;

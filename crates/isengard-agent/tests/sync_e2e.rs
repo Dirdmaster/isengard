@@ -32,8 +32,6 @@ async fn spawn_controller(state_dir: std::path::PathBuf) -> SocketAddr {
             listen: addr,
             state_dir,
             config: serde_json::Value::Object(Default::default()),
-            dns_zone: String::new(),
-            dns_listen: "127.0.0.1:0".parse().unwrap(),
         })
         .await;
     });
@@ -96,7 +94,6 @@ async fn agent_heartbeats_advance_last_seen_at() {
         tls: None,
         enroll_token: None,
         bootstrap_trust: Default::default(),
-        advertise_iface: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 

@@ -41,8 +41,6 @@ async fn spawn_controller(state_dir: PathBuf) -> SocketAddr {
             listen: addr,
             state_dir,
             config: serde_json::Value::Object(Default::default()),
-            dns_zone: String::new(),
-            dns_listen: "127.0.0.1:0".parse().unwrap(),
         })
         .await;
     });
@@ -108,7 +106,6 @@ async fn agent_enrolls_writes_state_and_appears_in_inventory() {
         tls: None,
         enroll_token: None,
         bootstrap_trust: Default::default(),
-        advertise_iface: None,
     };
     let agent_handle = tokio::spawn(run_agent(opts));
 
@@ -158,7 +155,6 @@ async fn second_run_is_idempotent_no_re_enroll() {
         tls: None,
         enroll_token: None,
         bootstrap_trust: Default::default(),
-        advertise_iface: None,
     };
 
     // First run: spawn, wait for enroll, abort.

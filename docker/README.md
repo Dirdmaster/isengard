@@ -45,64 +45,12 @@ open http://127.0.0.1:9418
 docker compose -p hello -f docker/hello-stack.yaml up -d
 ```
 
-Note (v0.3a): the agent advertises any routing rule whose `public_hostname` ends in `.local` over mDNS. macOS Bonjour resolves these natively; Linux clients need `avahi-daemon` (or `systemd-resolved` with `MulticastDNS=yes`) and Windows clients need Bonjour Print Services.
+Note (v0.3): Isengard does not run DNS. Pingora (the agent's reverse proxy) is published on host loopback at `127.0.0.1:80` and `127.0.0.1:443`; you bring your own DNS pointing at the host. Two common patterns:
 
-Note (v0.3.5): on macOS, mDNS-in-Docker is broken by design (the agent's responder broadcasts on the Docker bridge inside the OrbStack/Docker Desktop VM; macOS Bonjour listens on real network interfaces; the packets never cross). Use `isd gateway` instead. See "Mac dev gateway" below.
+- `/etc/hosts` line: `127.0.0.1 hello.local` (or whatever `public_hostname` you set on the routing rule). Per-host, zero infra.
+- A real DNS / mDNS / Tailscale MagicDNS / corporate split-horizon entry pointing the public hostname at the host running the agent. This is the Traefik / Nginx Proxy Manager model.
 
 The CA export step is a current rough edge — Phase 14's mTLS makes it unavoidable today. The pending `swarm-style enrollment join command` PR rolls these steps into a single `docker run …` line that bundles the token + base64-encoded CA + URL.
-
-## Mac dev gateway (v0.3.5)
-
-`isd gateway` runs a small DNS resolver + reverse proxy on your Mac that bridges browser traffic to containerized stacks. Single foreground command, Ctrl+C tears down. This replaces v0.3a mDNS for Mac dev (mDNS still works on Linux deployments where Docker is native).
-
-One-time setup:
-
-```sh
-# 1. Build the operator CLI
-just isd-build
-
-# 2. Save controller credentials (HTTP for dev, prompts for token)
-target/release/isd login http://127.0.0.1:9418
-
-# 3. Tell macOS to route the `.isd` zone to the gateway. Idempotent;
-#    rewrites the file if you re-run with a different --dns-port.
-sudo target/release/isd gateway --install-resolver
-```
-
-Run the gateway:
-
-```sh
-target/release/isd gateway
-# DNS:   listening on 127.0.0.1:5300 for *.isd
-# HTTP:  listening on 127.0.0.1:8080
-# HTTPS: listening on 127.0.0.1:8443 (self-signed; expect a browser warning)
-```
-
-Verify end to end (in another shell):
-
-```sh
-dig @127.0.0.1 -p 5300 hello.isd +short          # -> 127.0.0.1
-curl -H 'Host: hello.isd' http://127.0.0.1:8080/  # -> hello-web body
-open http://hello.isd:8080                        # browser, after install-resolver
-```
-
-CLI reference:
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--zone <name>` | `isd` | Override the zone the gateway serves. |
-| `--dns-port <n>` | `5300` | Unprivileged. macOS resolver uses the matching port. |
-| `--port <n>` | `8080` | HTTP listener. `--port 80` needs sudo. |
-| `--tls-port <n>` | `8443` | HTTPS listener. `--tls-port 443` needs sudo. |
-| `--no-tls` | off | Disable the HTTPS listener. |
-| `--install-resolver` | off | Write `/etc/resolver/<zone>` and exit (sudo). |
-| `--uninstall-resolver` | off | Remove `/etc/resolver/<zone>` and exit (sudo). |
-| `--backend-host <host>` | `127.0.0.1` | Backend address the proxy forwards to. Set to e.g. an OrbStack container IP, or to your Docker bridge IP, when ports are not published 1:1 to localhost. |
-
-Limitations (v0.3.5):
-- The controller's `/api/v1/routing/rules` endpoint does NOT carry the agent's per-container IP, so the gateway forwards to `<backend-host>:<container_port>` (default `127.0.0.1`). For most dev compose files this means publishing `<container_port>:<container_port>` 1:1 to localhost. With OrbStack, set `--backend-host` to the container's bridge IP.
-- TLS certs are self-signed; the browser will warn the first time. Use `mkcert` or accept the warning.
-- Live routing refresh polls `/api/v1/routing/rules` every 30s. WS-driven refresh is a follow-up.
 
 ## Local dev (no GHCR wait)
 
@@ -201,52 +149,6 @@ docker compose -f docker/compose.yaml up -d agent
 ```
 
 Confirm what your context uses with `docker context inspect | grep -i host`.
-
-## DNS resolver (v0.3b)
-
-mDNS (v0.3a, agent-side) handles `.local`. For a custom zone (e.g. `.iso`, `.weavers`, `.lan`), the controller can host a small embedded DNS server that resolves `<public_hostname>.<zone>` to the LAN IP of the agent that owns the matching routing rule.
-
-### Enable
-
-Set `ISENGARD_DNS_ZONE` in the environment (or pass `--dns-zone <name>` on the controller command). Empty string disables the resolver entirely (default).
-
-```sh
-ISENGARD_DNS_ZONE=iso docker compose -f docker/compose.yaml up -d controller
-```
-
-The compose recipe binds `127.0.0.1:5300/udp` on the host so the resolver is reachable locally without exposing it on a public interface. To bind UDP 53 instead, swap the port and add `cap_add: [NET_BIND_SERVICE]` to the controller service.
-
-### macOS conditional forwarding
-
-Tell the OS to send queries for `*.iso` to the controller's resolver, and everything else to its normal upstreams:
-
-```sh
-sudo mkdir -p /etc/resolver
-sudo tee /etc/resolver/iso > /dev/null <<'EOF'
-nameserver 127.0.0.1
-port 5300
-EOF
-```
-
-The directory-style resolver config takes effect immediately; no restart required. `scutil --dns | grep -A3 iso` confirms the routing.
-
-### Linux conditional forwarding
-
-`systemd-resolved` (per-link domain routing) or `dnsmasq` (server-by-domain) both work. Example dnsmasq snippet:
-
-```conf
-server=/iso/127.0.0.1#5300
-```
-
-### Verify
-
-```sh
-dig @127.0.0.1 -p 5300 +short hello.iso        # returns the agent's LAN IP
-dig @127.0.0.1 -p 5300 nonexistent.iso         # NXDOMAIN
-dig @127.0.0.1 -p 5300 google.com              # REFUSED (we don't recurse)
-```
-
-For names ending in `.local`, the agent's mDNS responder answers; the controller filters those out of its DNS table so the two paths don't collide.
 
 ## Architecture
 
