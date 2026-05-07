@@ -539,18 +539,70 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
 
 #[derive(Debug, Deserialize)]
 struct ListServicesQuery {
-    #[allow(dead_code)] // Reserved for 5e when services are persisted.
     stack_id: Option<i64>,
+    host_id: Option<String>,
+    fleet: Option<String>,
 }
 
 async fn list_services(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Query(_q): Query<ListServicesQuery>,
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<ListServicesQuery>,
 ) -> Response {
-    // v1: services aren't persisted yet (5e adds the services table). Stack
-    // info carries service names in the proto, but we don't materialize them
-    // server-side for this query. Return empty for now; the UI handles this.
-    Json(Vec::<ServiceDto>::new()).into_response()
+    let host_filter = match q.host_id.as_deref() {
+        Some(s) => match parse_host_id(s) {
+            Ok(h) => Some(h),
+            Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
+        },
+        None => None,
+    };
+
+    let stack_filter = q.stack_id.map(StackId);
+
+    let mut services = match handles.inventory.list_services(stack_filter).await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_services: {e}"),
+            );
+        }
+    };
+
+    if let Some(host_id) = host_filter {
+        services.retain(|s| s.host_id == host_id);
+    }
+
+    // Resolve hostnames once for both fleet filtering and DTO enrichment.
+    let hosts = match handles.inventory.list_hosts().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_hosts: {e}"),
+            );
+        }
+    };
+
+    if let Some(fleet) = q.fleet.as_deref() {
+        let allowed: std::collections::HashSet<_> = hosts
+            .iter()
+            .filter(|h| h.fleet == fleet)
+            .map(|h| h.id)
+            .collect();
+        services.retain(|s| allowed.contains(&s.host_id));
+    }
+
+    let hostname_by_id: std::collections::HashMap<_, _> =
+        hosts.into_iter().map(|h| (h.id, h.hostname)).collect();
+
+    let dtos: Vec<ServiceDto> = services
+        .into_iter()
+        .map(|s| {
+            let hostname = hostname_by_id.get(&s.host_id).cloned();
+            ServiceDto::from_service(s, hostname)
+        })
+        .collect();
+    Json(dtos).into_response()
 }
 
 async fn get_service(
@@ -1243,5 +1295,146 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_services_returns_persisted_rows_filtered_by_stack() {
+        use isengard_storage::{InsertService, InsertStack, ServiceState, StackSource};
+
+        let handles = test_handles().await;
+
+        // Two hosts on different fleets. Each gets a stack with one service.
+        let host_a = handles
+            .inventory
+            .enroll_host(EnrollHost {
+                fingerprint: "fp-a".into(),
+                hostname: "host-a".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "v0.1.0".into(),
+                docker_version: "27".into(),
+                fleet: "prod".into(),
+            })
+            .await
+            .unwrap();
+        let host_b = handles
+            .inventory
+            .enroll_host(EnrollHost {
+                fingerprint: "fp-b".into(),
+                hostname: "host-b".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "v0.1.0".into(),
+                docker_version: "27".into(),
+                fleet: "staging".into(),
+            })
+            .await
+            .unwrap();
+
+        let stack_a = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id: host_a,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+        let stack_b = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id: host_b,
+                name: "metrics".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        handles
+            .inventory
+            .insert_service(InsertService {
+                host_id: host_a,
+                stack_id: Some(stack_a),
+                name: "web".into(),
+                image: "nginx:alpine".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+        handles
+            .inventory
+            .insert_service(InsertService {
+                host_id: host_b,
+                stack_id: Some(stack_b),
+                name: "prom".into(),
+                image: "prom/prometheus:latest".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles.clone());
+
+        // No filter: both services come back, each with its hostname.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/services")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.len(), 2, "expected both services with no filter");
+        let names: std::collections::HashSet<_> =
+            parsed.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert!(names.contains("web"));
+        assert!(names.contains("prom"));
+        let web = parsed.iter().find(|s| s["name"] == "web").expect("web row");
+        assert_eq!(web["hostname"], "host-a");
+
+        // stack_id filter: only stack_a's service.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/services?stack_id={}", stack_a.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["name"], "web");
+
+        // fleet filter: only services on hosts in the matching fleet.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/services?fleet=staging")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["name"], "prom");
+        assert_eq!(parsed[0]["hostname"], "host-b");
     }
 }
