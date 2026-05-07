@@ -539,18 +539,70 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
 
 #[derive(Debug, Deserialize)]
 struct ListServicesQuery {
-    #[allow(dead_code)] // Reserved for 5e when services are persisted.
     stack_id: Option<i64>,
+    host_id: Option<String>,
+    fleet: Option<String>,
 }
 
 async fn list_services(
-    State(_handles): State<Arc<ControllerHandles>>,
-    Query(_q): Query<ListServicesQuery>,
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<ListServicesQuery>,
 ) -> Response {
-    // v1: services aren't persisted yet (5e adds the services table). Stack
-    // info carries service names in the proto, but we don't materialize them
-    // server-side for this query. Return empty for now; the UI handles this.
-    Json(Vec::<ServiceDto>::new()).into_response()
+    let host_filter = match q.host_id.as_deref() {
+        Some(s) => match parse_host_id(s) {
+            Ok(h) => Some(h),
+            Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
+        },
+        None => None,
+    };
+
+    let stack_filter = q.stack_id.map(StackId);
+
+    let mut services = match handles.inventory.list_services(stack_filter).await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_services: {e}"),
+            );
+        }
+    };
+
+    if let Some(host_id) = host_filter {
+        services.retain(|s| s.host_id == host_id);
+    }
+
+    // Resolve hostnames once for both fleet filtering and DTO enrichment.
+    let hosts = match handles.inventory.list_hosts().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_hosts: {e}"),
+            );
+        }
+    };
+
+    if let Some(fleet) = q.fleet.as_deref() {
+        let allowed: std::collections::HashSet<_> = hosts
+            .iter()
+            .filter(|h| h.fleet == fleet)
+            .map(|h| h.id)
+            .collect();
+        services.retain(|s| allowed.contains(&s.host_id));
+    }
+
+    let hostname_by_id: std::collections::HashMap<_, _> =
+        hosts.into_iter().map(|h| (h.id, h.hostname)).collect();
+
+    let dtos: Vec<ServiceDto> = services
+        .into_iter()
+        .map(|s| {
+            let hostname = hostname_by_id.get(&s.host_id).cloned();
+            ServiceDto::from_service(s, hostname)
+        })
+        .collect();
+    Json(dtos).into_response()
 }
 
 async fn get_service(
