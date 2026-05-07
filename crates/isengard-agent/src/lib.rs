@@ -8,6 +8,7 @@ pub mod cert_store;
 pub mod container_snapshot;
 pub mod deployment;
 pub mod enroll;
+pub mod enroll_diagnosis;
 pub mod events;
 pub mod labels;
 pub mod logs;
@@ -132,13 +133,27 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                     )
                 })?;
             let host_info = enroll::HostInfo::detect();
-            let outcome = enroll::enroll(
+            let outcome = match enroll::enroll(
                 &opts.controller_url,
                 &enroll_token,
                 host_info,
                 opts.bootstrap_trust.clone(),
             )
-            .await?;
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    // Polish: pattern-match common ops-level enroll failures
+                    // into a friendly stderr block. The full anyhow chain is
+                    // preserved at debug level so `RUST_LOG=debug` still gets
+                    // the underlying tonic/h2/transport detail.
+                    if let Some(d) = enroll_diagnosis::diagnose(&e) {
+                        eprintln!("{}", enroll_diagnosis::render(d, &opts.controller_url));
+                        tracing::debug!(error = ?e, "enrollment failed: full error chain");
+                    }
+                    return Err(e);
+                }
+            };
             // Drop the plaintext token from memory once the bundle is in hand.
             drop(enroll_token);
 
