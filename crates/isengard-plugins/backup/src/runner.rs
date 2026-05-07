@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::config::{BackupConfig, DestinationConfig};
 use crate::destination::{BackupDestination, LocalDestination, S3Config, S3Destination};
 use crate::encrypt::encrypt_with_passphrase;
+use crate::restore::{RestoreError, RestoreOutcome, restore_from_destination};
 use crate::snapshot::create_snapshot;
 
 /// Env var the operator must set so the controller can encrypt snapshots.
@@ -189,6 +190,55 @@ impl BackupRunner {
             dest.delete(&obj.name).await?;
         }
         Ok(())
+    }
+
+    /// Run a restore from the configured destination. Used by the dashboard's
+    /// REST handler. Wraps `restore::restore_from_destination` after looking
+    /// up the source backup-run id (when the object name matches a known row)
+    /// and resolving the destination from the persisted config.
+    pub async fn restore_now(
+        &self,
+        object_name: &str,
+        passphrase: &str,
+        dry_run: bool,
+    ) -> Result<RestoreOutcome, RestoreError> {
+        let cfg = BackupConfig::load(&self.inventory)
+            .await
+            .map_err(RestoreError::Storage)?;
+        let dest = match self.build_destination(&cfg.destination) {
+            Ok(d) => d,
+            Err(RunError::NoDestination) => {
+                return Err(RestoreError::Swap(
+                    "no destination configured (run setup first)".into(),
+                ));
+            }
+            Err(other) => {
+                return Err(RestoreError::Swap(format!(
+                    "destination resolution failed: {other}"
+                )));
+            }
+        };
+
+        // Best-effort match against an existing backup_runs row. If found we
+        // record the source run id; if not (operator restoring from a
+        // foreign object) we still proceed.
+        let runs = self.inventory.list_backup_runs(200).await.ok();
+        let source_id = runs.and_then(|rs| {
+            rs.into_iter()
+                .find(|r| r.object_name.as_deref() == Some(object_name))
+                .map(|r| r.id.0)
+        });
+
+        restore_from_destination(
+            &self.inventory,
+            &self.db_path,
+            dest.as_ref(),
+            object_name,
+            source_id,
+            passphrase,
+            dry_run,
+        )
+        .await
     }
 }
 
