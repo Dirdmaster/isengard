@@ -73,12 +73,15 @@
         </button>
       </div>
     </div>
+    <AddHostModal v-if="showAddHostModal" @close="showAddHostModal = false" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useHostsStore } from '~/stores/hosts'
+import AddHostModal from './AddHostModal.vue'
 
 const ui = useUiStore()
 const router = useRouter()
@@ -108,9 +111,16 @@ function closeOnOutside() {
   newOpen.value = false
 }
 
+const hostsStore = useHostsStore()
+const showAddHostModal = ref(false)
+
 function addHost() {
   newOpen.value = false
-  router.push('/welcome?step=2&fresh=1')
+  if (hostsStore.hosts.length === 0) {
+    router.push('/welcome?step=2&fresh=1')
+  } else {
+    showAddHostModal.value = true
+  }
 }
 
 function addRoutingRule() {
