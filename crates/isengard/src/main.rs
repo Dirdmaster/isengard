@@ -94,6 +94,12 @@ enum Command {
         /// `isengard controller ca export` on the controller host.
         #[arg(long, env = "ISENGARD_CONTROLLER_CA_PEM_PATH")]
         controller_ca_pem_path: Option<std::path::PathBuf>,
+        /// Network interface name the mDNS responder advertises on (v0.3a).
+        /// Defaults to the first non-loopback IPv4 interface. Pass this on
+        /// hosts with multiple NICs where the wrong one would be picked
+        /// (e.g. a docker bridge ahead of the LAN interface).
+        #[arg(long, env = "ISENGARD_ADVERTISE_IFACE")]
+        advertise_iface: Option<String>,
     },
 }
 
@@ -223,7 +229,17 @@ async fn dispatch(command: Command) -> Result<()> {
             state_dir,
             enroll_token,
             controller_ca_pem_path,
-        } => run_agent_mode(controller, state_dir, enroll_token, controller_ca_pem_path).await,
+            advertise_iface,
+        } => {
+            run_agent_mode(
+                controller,
+                state_dir,
+                enroll_token,
+                controller_ca_pem_path,
+                advertise_iface,
+            )
+            .await
+        }
     }
 }
 
@@ -420,6 +436,7 @@ async fn run_agent_mode(
     state_dir: std::path::PathBuf,
     enroll_token: Option<String>,
     controller_ca_pem_path: Option<std::path::PathBuf>,
+    advertise_iface: Option<String>,
 ) -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
@@ -443,6 +460,7 @@ async fn run_agent_mode(
             ca_pem_path: controller_ca_pem_path,
             ca_pem: None,
         },
+        advertise_iface,
     })
     .await
 }

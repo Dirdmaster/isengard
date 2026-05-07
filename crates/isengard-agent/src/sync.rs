@@ -28,7 +28,13 @@ use crate::Result;
 use crate::backoff::Backoff;
 use crate::deployment::DeploymentSupervisor;
 use crate::logs::LogSource;
+use crate::mdns::MdnsResponder;
 use crate::proxy::ProxyState;
+
+/// Shared handle to the agent's mDNS responder. Optional: tests + docker-less
+/// environments boot the agent without one, in which case the sync loop just
+/// skips advertise calls.
+pub type MdnsHandle = Arc<tokio::sync::Mutex<MdnsResponder>>;
 
 /// Phase 13B: in-process registry of active log subscriptions on this agent.
 /// Each entry holds a `watch::Sender<bool>` whose receiver the corresponding
@@ -43,7 +49,16 @@ type LogSubs =
 /// emitted while the stream is down stay queued in the channel until the next
 /// stream comes up.
 #[instrument(
-    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor, log_source),
+    skip(
+        endpoint,
+        cancel,
+        events_rx,
+        agent_msg_rx,
+        proxy_state,
+        supervisor,
+        log_source,
+        mdns
+    ),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
@@ -57,6 +72,7 @@ pub async fn run_sync_loop<S: LogSource>(
     proxy_state: ProxyState,
     supervisor: Option<Arc<DeploymentSupervisor>>,
     log_source: Option<Arc<S>>,
+    mdns: Option<MdnsHandle>,
 ) -> Result<()> {
     // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
@@ -134,6 +150,7 @@ pub async fn run_sync_loop<S: LogSource>(
     let read_supervisor = supervisor.clone();
     let read_log_source = log_source.clone();
     let read_log_tx = tx.clone();
+    let read_mdns = mdns.clone();
     let log_subs: LogSubs = Arc::new(tokio::sync::Mutex::new(Default::default()));
     let read_log_subs = log_subs.clone();
     let mut read_task = tokio::spawn(async move {
@@ -155,8 +172,19 @@ pub async fn run_sync_loop<S: LogSource>(
                     }
                 }
                 Some(isengard_proto::pb::controller_message::Payload::ProxyConfig(cfg)) => {
+                    // Clone the rule list before handing the config to the
+                    // proxy: mDNS apply runs after the proxy has installed
+                    // the upstream registry so a router request that lands
+                    // first sees an upstream, not just a DNS record.
+                    let rules_for_mdns = cfg.rules.clone();
                     if let Err(e) = crate::proxy::apply_config(&read_proxy_state, cfg).await {
                         warn!(error = %e, "proxy: apply_config failed");
+                    }
+                    if let Some(handle) = read_mdns.as_ref() {
+                        let mut guard = handle.lock().await;
+                        if let Err(e) = guard.apply(&rules_for_mdns) {
+                            warn!(error = %e, "mdns: apply failed");
+                        }
                     }
                 }
                 Some(isengard_proto::pb::controller_message::Payload::AbortDeployment(abort)) => {
@@ -329,7 +357,16 @@ pub async fn run_sync_loop<S: LogSource>(
 /// reconnect attempt clones the *current* endpoint, so the new cert
 /// propagates the next time the stream cycles (no agent restart needed).
 #[instrument(
-    skip(endpoint, cancel, events_rx, agent_msg_rx, proxy_state, supervisor, log_source),
+    skip(
+        endpoint,
+        cancel,
+        events_rx,
+        agent_msg_rx,
+        proxy_state,
+        supervisor,
+        log_source,
+        mdns
+    ),
     fields(agent_id = %agent_id)
 )]
 #[allow(clippy::too_many_arguments)]
@@ -343,6 +380,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
     proxy_state: ProxyState,
     supervisor: Option<Arc<DeploymentSupervisor>>,
     log_source: Option<Arc<S>>,
+    mdns: Option<MdnsHandle>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -379,6 +417,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
             proxy_state.clone(),
             supervisor.clone(),
             log_source.clone(),
+            mdns.clone(),
         )
         .await;
 
