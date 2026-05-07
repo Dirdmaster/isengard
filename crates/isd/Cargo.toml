@@ -40,14 +40,10 @@ tempfile.workspace = true
 hickory-server.workspace = true
 hickory-proto.workspace = true
 async-trait.workspace = true
-hyper = { version = "1", features = ["server", "client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "client", "client-legacy", "http1"] }
 http-body-util = "0.1"
 http.workspace = true
 bytes = "1"
-rcgen.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
 time.workspace = true
 
 [dev-dependencies]
