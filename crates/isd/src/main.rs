@@ -6,11 +6,17 @@
 //!  - `isd ps`: list stacks + services
 //!  - `isd open <stack>`: open the stack's primary host in a browser
 //!  - `isd logs <stack>/<svc> -f`: tail service logs over the WebSocket
+//!
+//! v0.3.5 adds:
+//!  - `isd gateway`: DNS resolver + reverse proxy on the operator's Mac for
+//!    reaching `*.isd` (or any zone) in a browser without fighting
+//!    mDNS-in-Docker-on-Mac.
 
 use clap::{Parser, Subcommand};
 
 mod compose_cmd;
 mod credentials;
+mod gateway;
 mod login;
 mod logs;
 mod open_cmd;
@@ -58,6 +64,9 @@ enum Command {
     Diff(compose_cmd::DiffArgs),
     /// v0.3d: open the stack's compose.yaml in `$EDITOR`, then apply on save.
     Edit(compose_cmd::EditArgs),
+    /// v0.3.5: DNS + reverse proxy bridging the operator's Mac to
+    /// containerized stacks. Single foreground command; Ctrl+C tears down.
+    Gateway(gateway::GatewayArgs),
 }
 
 #[tokio::main]
@@ -73,6 +82,7 @@ async fn main() {
         Command::Apply(args) => compose_cmd::run_apply(args, cli.context.as_deref()).await,
         Command::Diff(args) => compose_cmd::run_diff(args, cli.context.as_deref()).await,
         Command::Edit(args) => compose_cmd::run_edit(args, cli.context.as_deref()).await,
+        Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {
