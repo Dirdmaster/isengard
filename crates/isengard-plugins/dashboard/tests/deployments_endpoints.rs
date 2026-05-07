@@ -86,6 +86,7 @@ fn sample_dep(host_id: HostId, stack_id: StackId, state: DeploymentState) -> Ins
         health_path: Some("/".into()),
         container_port: Some(80),
         metadata_json: None,
+        previous_digest: None,
     }
 }
 
@@ -236,4 +237,37 @@ async fn put_service_strategy_rejects_unknown_value() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Phase 9F (#48): the deployments DTO surfaces previous_digest +
+/// rollback_attempted_at when set. Insert a row with both fields
+/// populated, GET it, assert the JSON carries the values.
+#[tokio::test]
+async fn list_active_surfaces_rollback_fields() {
+    let (app, inv, host, stack) = setup_app().await;
+
+    let mut ins = sample_dep(host, stack, DeploymentState::SpinningUp);
+    ins.previous_digest = Some("sha256:before".into());
+    let inserted = inv.insert_deployment(ins).await.unwrap();
+    let when = chrono::Utc::now();
+    inv.set_deployment_rollback_attempted(&inserted.id, when)
+        .await
+        .unwrap();
+
+    let req = Request::builder()
+        .uri(format!("/deployments?stack_id={}&state=active", stack.0))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let dtos: Vec<DeploymentDto> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(dtos.len(), 1);
+    assert_eq!(dtos[0].previous_digest.as_deref(), Some("sha256:before"));
+    assert!(
+        dtos[0].rollback_attempted_at.is_some(),
+        "rollback_attempted_at should be serialized"
+    );
 }

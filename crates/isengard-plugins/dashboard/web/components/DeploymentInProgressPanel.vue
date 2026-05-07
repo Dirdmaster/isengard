@@ -18,7 +18,16 @@ const STEPS: Array<{ key: string; label: string }> = [
   { key: 'destroying_blue', label: 'destroying blue' },
 ]
 
-const TERMINAL_STATES = new Set(['done', 'aborted', 'failed'])
+// Phase 9F (#48): rolled_back + rollback_failed are terminal alongside
+// the originals; the panel collapses to AbortedPanel for the latter two.
+const TERMINAL_STATES = new Set([
+  'done',
+  'aborted',
+  'failed',
+  'rolled_back',
+  'rollback_failed',
+])
+const ROLLING_BACK = 'rolling_back'
 
 const isTerminal = computed(() => TERMINAL_STATES.has(props.deployment.state))
 const isRecovering = computed(() => props.deployment.state === 'aborted' && !!props.deployment.error)
@@ -45,20 +54,30 @@ const stateLabel = computed(() => props.deployment.state.replace(/_/g, ' '))
 
 const statePill = computed<{ state: 'success' | 'warn' | 'error' | 'info' | 'neutral'; label: string }>(() => {
   switch (props.deployment.state) {
-    case 'done':     return { state: 'success', label: 'done' }
-    case 'failed':   return { state: 'error',   label: 'failed' }
-    case 'aborted':  return { state: 'warn',    label: 'aborted' }
-    case 'pending':  return { state: 'neutral', label: 'pending' }
-    default:         return { state: 'info',    label: stateLabel.value }
+    case 'done':            return { state: 'success', label: 'done' }
+    case 'failed':          return { state: 'error',   label: 'failed' }
+    case 'aborted':         return { state: 'warn',    label: 'aborted' }
+    case 'pending':         return { state: 'neutral', label: 'pending' }
+    // Phase 9F: rolling_back is a non-terminal in-flight state; the
+    // pill stays warn-orange while the re-pull is happening.
+    case 'rolling_back':    return { state: 'warn',    label: 'rolling back' }
+    case 'rolled_back':     return { state: 'success', label: 'rolled back' }
+    case 'rollback_failed': return { state: 'error',   label: 'rollback failed' }
+    default:                return { state: 'info',    label: stateLabel.value }
   }
 })
 
 const headerDotClass = computed(() => {
-  if (props.deployment.state === 'failed')  return 'bg-iso-error'
-  if (props.deployment.state === 'aborted') return 'bg-iso-warn'
-  if (props.deployment.state === 'done')    return 'bg-iso-success'
+  if (props.deployment.state === 'failed')          return 'bg-iso-error'
+  if (props.deployment.state === 'aborted')         return 'bg-iso-warn'
+  if (props.deployment.state === 'done')            return 'bg-iso-success'
+  if (props.deployment.state === 'rolling_back')    return 'bg-iso-warn animate-pulse'
+  if (props.deployment.state === 'rolled_back')     return 'bg-iso-success'
+  if (props.deployment.state === 'rollback_failed') return 'bg-iso-error'
   return 'bg-iso-info animate-pulse'
 })
+
+const isRollingBack = computed(() => props.deployment.state === ROLLING_BACK)
 
 // ---- Digest formatting ---------------------------------------------------
 
@@ -156,6 +175,16 @@ async function abort() {
         <span class="w-3 text-center text-iso-warn">▸</span>
         <span class="text-iso-warn font-medium">Recovering</span>
         <span class="text-iso-text-muted">{{ deployment.error }}</span>
+      </li>
+
+      <!-- Phase 9F (#48): rolling-back row when the supervisor has
+           entered the rollback branch. Same warn-tinted treatment as
+           the recovery row, but it stays visible after the abort
+           timeline because the re-pull is still in flight. -->
+      <li v-if="isRollingBack" class="flex items-start gap-2 text-xs pt-1 border-t border-iso-border-subtle/40 mt-2">
+        <span class="w-3 text-center text-iso-warn animate-pulse">▸</span>
+        <span class="text-iso-warn font-medium">Rolling back</span>
+        <span class="text-iso-text-muted">re-pulling previous digest</span>
       </li>
     </ol>
   </section>

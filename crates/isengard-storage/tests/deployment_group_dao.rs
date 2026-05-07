@@ -63,6 +63,7 @@ fn sample_deployment(host_id: HostId, stack_id: StackId, service: &str) -> Inser
         health_path: Some("/healthz".into()),
         container_port: Some(8080),
         metadata_json: None,
+        previous_digest: None,
     }
 }
 

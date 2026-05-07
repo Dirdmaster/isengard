@@ -234,6 +234,7 @@ mod tests {
                 green_container: Some("blog-web-green".into()),
                 blue_digest: "sha256:aaa".into(),
                 green_digest: "sha256:bbb".into(),
+                previous_digest: None,
                 public_hostname: None,
                 health_path: None,
                 container_port: None,

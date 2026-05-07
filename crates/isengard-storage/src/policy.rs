@@ -149,6 +149,33 @@ impl crate::inventory::Inventory {
             })
     }
 
+    /// Phase 9F: pause a service-scope policy for `duration`. Upserts a
+    /// service-scope row at `service_key` with `paused_until = now +
+    /// duration`. If a row already exists, preserves every other field
+    /// and only updates `paused_until`. Used by the `Keep` failure
+    /// handler so the next updater scan skips the service for 24h
+    /// after a deploy goes wrong.
+    ///
+    /// Returns the upserted row.
+    pub async fn pause_service_policy(
+        &self,
+        service_key: &str,
+        until: DateTime<Utc>,
+    ) -> Result<PolicyRow> {
+        // Try to read the existing row first so we preserve every
+        // other field (Keep should not silently widen the policy).
+        let existing = self
+            .get_policy(PolicyScopeType::Service, service_key)
+            .await?;
+        let mut body = existing
+            .as_ref()
+            .map(|r| r.body.clone())
+            .unwrap_or_default();
+        body.paused_until = Some(until);
+        self.upsert_policy(PolicyScopeType::Service, service_key, &body)
+            .await
+    }
+
     /// Returns true iff a row was actually deleted.
     pub async fn delete_policy(
         &self,
