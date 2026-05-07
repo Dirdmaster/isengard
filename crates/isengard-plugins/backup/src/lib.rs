@@ -25,6 +25,7 @@ use tracing::{info, warn};
 pub mod config;
 pub mod destination;
 pub mod encrypt;
+pub mod restore;
 pub mod runner;
 pub mod snapshot;
 

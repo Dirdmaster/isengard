@@ -2,7 +2,7 @@
 type: design
 kind: page-spec
 status: shipped
-status_note: "Phase 11A delivered the backup foundation: snapshot, age encrypt, S3/local upload, runs history, REST + UI. Restore lands in 11B."
+status_note: "Phase 11A + 11B shipped the full backup pipeline including atomic-swap restore. Out: GFS retention matrix, age X25519 recipients, manifest.json, B2/AWS/Wasabi/MinIO presets."
 created: 2026-05-03
 updated: 2026-05-06
 tags:
@@ -14,9 +14,9 @@ tags:
 
 # Settings, Backup
 
-## Implementation status (2026-05-06, Phase 11A)
+## Implementation status (2026-05-06, Phase 11A + 11B)
 
-Shipped:
+Shipped (11A):
 - Snapshot mechanism (PRAGMA wal_checkpoint(TRUNCATE) + IMMEDIATE-tx + std::fs::copy).
 - Encryption: age passphrase via the `age` crate, fingerprint persisted (SHA-256 prefix), passphrase via env var.
 - Destinations: LocalDestination (filesystem) and S3Destination (reqwest + hand-rolled SigV4). Tested wiremock-side for PUT/GET/LIST/DELETE.
@@ -25,12 +25,20 @@ Shipped:
 - REST: GET/PUT /api/v1/backup/config, POST /api/v1/backup/run-now, GET /api/v1/backup/runs.
 - UI: Settings, Backup tab + 3-step setup modal (destination, passphrase, schedule) + status panel + runs table + Run-now button.
 
-Deferred to 11B+:
-- Restore flow (download + decrypt + atomic swap + migrations).
+Shipped (11B):
+- Restore module: download from destination, decrypt, validate the bytes parse as a real SQLite database (open + SELECT 1), atomic-swap (rename live -> .bak.<utc>, then move staged -> live), open a fresh Inventory which runs sqlx::migrate! forward over the snapshot's schema.
+- Atomic-swap rollback: on second-rename failure, the original file is restored from .bak.<ts>. The previous DB is NEVER deleted silently; operators can manually undo.
+- WAL/SHM siblings of the live path are moved aside before the swap so SQLite's recovery logic does not replay the old DB's WAL onto the snapshot bytes.
+- Storage: `restore_runs` table (migration 0023) tracks each attempt (running / success / failed) with the previous_db_backup_path and bytes_restored.
+- REST: POST /api/v1/backup/restore (sync), GET /api/v1/backup/restore-runs, GET /api/v1/backup/runs/:id/manifest (pre-flight info for the UI).
+- UI: BackupRestoreModal four-step destructive flow (pick snapshot -> verify passphrase fingerprint -> review destructive change -> type the literal phrase RESTORE). Mounted in BackupSettings.vue with a prominent red button. A status panel surfaces the most recent restore attempt including the .bak.<ts> path.
+
+Deferred (still 11+):
 - age X25519 keypair recipients (passphrase-only for now).
 - Grandfather-father-son retention matrix (flat keep-N for now).
 - Bucket-root manifest.json (LIST works directly off prefix listing).
 - Provider presets beyond R2 / Custom in the modal (B2, AWS, Wasabi, MinIO all already work via the generic S3 endpoint config).
+- Cross-version downgrade detection (sqlx panics on a backwards target schema; a friendlier "this snapshot is from a newer controller" message lands later).
 
 Configuration + status + restore for the controller's SQLite snapshot pipeline.
 

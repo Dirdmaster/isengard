@@ -42,11 +42,41 @@
           {{ runningNow ? 'Running…' : 'Run now' }}
         </button>
         <button
+          class="px-2.5 py-1.5 rounded-iso-md bg-iso-danger border border-iso-danger text-xs font-medium text-iso-bg-base"
+          @click="restoreOpen = true"
+        >
+          Restore from backup
+        </button>
+        <button
           class="px-2.5 py-1.5 rounded-iso-md bg-iso-bg-base border border-iso-border-strong text-xs text-iso-text-secondary"
           @click="modalOpen = true"
         >
           Edit
         </button>
+      </div>
+    </section>
+
+    <!-- Most recent restore attempt -->
+    <section
+      v-if="latestRestore"
+      :class="[
+        'rounded-iso-lg border bg-iso-bg-elevated p-4 flex items-center justify-between',
+        latestRestore.status === 'success' ? 'border-iso-success' : (latestRestore.status === 'failed' ? 'border-iso-danger' : 'border-iso-info'),
+      ]"
+    >
+      <div class="flex flex-col gap-0.5">
+        <span class="text-xs font-semibold text-iso-text-primary">
+          Last restore: {{ latestRestore.status }}
+        </span>
+        <span class="text-[11px] text-iso-text-muted">
+          {{ formatStarted(latestRestore.started_at) }} · source: <span class="font-mono">{{ latestRestore.source_object }}</span>
+        </span>
+        <span v-if="latestRestore.previous_db_backup_path" class="text-[11px] text-iso-text-faint font-mono">
+          Previous DB saved at {{ latestRestore.previous_db_backup_path }}
+        </span>
+        <span v-if="latestRestore.error" class="text-[11px] text-iso-danger">
+          {{ latestRestore.error }}
+        </span>
       </div>
     </section>
 
@@ -141,6 +171,12 @@
       @close="modalOpen = false"
       @saved="onSaved"
     />
+
+    <BackupRestoreModal
+      v-if="restoreOpen"
+      @close="restoreOpen = false"
+      @done="onRestoreDone"
+    />
   </div>
 </template>
 
@@ -179,6 +215,18 @@ interface BackupRunDto {
   error: string | null
 }
 
+interface RestoreRunDto {
+  id: number
+  source_object: string
+  source_backup_run_id: number | null
+  started_at: string
+  finished_at: string | null
+  status: 'running' | 'success' | 'failed'
+  previous_db_backup_path: string | null
+  bytes_restored: number | null
+  error: string | null
+}
+
 const config = ref<BackupConfigDto>({
   enabled: false,
   destination: { kind: 'none' },
@@ -187,7 +235,9 @@ const config = ref<BackupConfigDto>({
   passphrase_fingerprint: '',
 })
 const runs = ref<BackupRunDto[]>([])
+const restoreRuns = ref<RestoreRunDto[]>([])
 const modalOpen = ref(false)
+const restoreOpen = ref(false)
 const runningNow = ref(false)
 const toast = useToast()
 
@@ -247,15 +297,24 @@ const statusColorBorder = computed(() => {
 
 async function load() {
   try {
-    const [cfgResp, runsResp] = await Promise.all([
+    const [cfgResp, runsResp, restoreResp] = await Promise.all([
       $fetch<BackupConfigDto>('/api/v1/backup/config'),
       $fetch<BackupRunDto[]>('/api/v1/backup/runs', { query: { limit: 30 } }),
+      $fetch<RestoreRunDto[]>('/api/v1/backup/restore-runs', { query: { limit: 5 } }),
     ])
     config.value = cfgResp
     runs.value = runsResp
+    restoreRuns.value = restoreResp
   } catch (e) {
     toast.error(`Failed to load backup config: ${e instanceof Error ? e.message : String(e)}`)
   }
+}
+
+const latestRestore = computed(() => restoreRuns.value[0] ?? null)
+
+function onRestoreDone() {
+  restoreOpen.value = false
+  load()
 }
 
 async function runNow() {

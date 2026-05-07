@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -23,7 +23,7 @@ use isengard_controller::ControllerHandles;
 use isengard_plugin_backup::config::{BackupConfig, DestinationConfig};
 use isengard_plugin_backup::encrypt::passphrase_fingerprint;
 use isengard_plugin_backup::runner_handle;
-use isengard_storage::{BackupRun, BackupRunStatus};
+use isengard_storage::{BackupRun, BackupRunStatus, RestoreRun, RestoreRunStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
@@ -35,6 +35,9 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/backup/config", get(get_config).put(put_config))
         .route("/backup/run-now", post(run_now))
         .route("/backup/runs", get(list_runs))
+        .route("/backup/runs/{id}/manifest", get(get_run_manifest))
+        .route("/backup/restore", post(restore))
+        .route("/backup/restore-runs", get(list_restore_runs))
         .with_state(handles)
 }
 
@@ -88,6 +91,72 @@ impl From<BackupRun> for BackupRunDto {
             error: r.error,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreRunDto {
+    pub id: i64,
+    pub source_object: String,
+    pub source_backup_run_id: Option<i64>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: String,
+    pub previous_db_backup_path: Option<String>,
+    pub bytes_restored: Option<i64>,
+    pub error: Option<String>,
+}
+
+impl From<RestoreRun> for RestoreRunDto {
+    fn from(r: RestoreRun) -> Self {
+        Self {
+            id: r.id.0,
+            source_object: r.source_object,
+            source_backup_run_id: r.source_backup_run_id,
+            started_at: r.started_at.to_rfc3339(),
+            finished_at: r.finished_at.map(|t| t.to_rfc3339()),
+            status: match r.status {
+                RestoreRunStatus::Running => "running".into(),
+                RestoreRunStatus::Success => "success".into(),
+                RestoreRunStatus::Failed => "failed".into(),
+            },
+            previous_db_backup_path: r.previous_db_backup_path,
+            bytes_restored: r.bytes_restored,
+            error: r.error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestoreRequestDto {
+    /// Object name on the destination, e.g. `snapshot-20260506T120000Z.db.age`.
+    pub object_name: String,
+    pub passphrase: String,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreOutcomeDto {
+    pub run_id: i64,
+    pub source_object: String,
+    pub restored_at: String,
+    pub previous_db_backup_path: String,
+    pub bytes_restored: u64,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupRunManifestDto {
+    pub id: i64,
+    pub object_name: String,
+    pub size_bytes: i64,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    /// Stored fingerprint of the passphrase the backup was encrypted with
+    /// (12 hex chars, SHA-256 prefix). The UI compares this against the
+    /// fingerprint of the passphrase the operator pasted to confirm a match
+    /// before the destructive confirm step.
+    pub passphrase_fingerprint: String,
 }
 
 // ---------------- Handlers ----------------
@@ -245,6 +314,138 @@ async fn list_runs(
         Err(e) => json_err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("list backup runs: {e}"),
+        ),
+    }
+}
+
+/// GET /backup/runs/{id}/manifest: pre-flight info for a restore.
+///
+/// Returns the object name, size, timestamps, and the controller's stored
+/// passphrase fingerprint. The UI hashes the operator's pasted passphrase
+/// client-side and compares to `passphrase_fingerprint`; if they match, the
+/// confirm step proceeds.
+async fn get_run_manifest(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let runs = match handles.inventory.list_backup_runs(200).await {
+        Ok(r) => r,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list backup runs: {e}"),
+            );
+        }
+    };
+    let run = match runs.into_iter().find(|r| r.id.0 == id) {
+        Some(r) => r,
+        None => return json_err(StatusCode::NOT_FOUND, format!("backup run {id} not found")),
+    };
+    if run.status != BackupRunStatus::Success {
+        return json_err(
+            StatusCode::CONFLICT,
+            format!("backup run {id} is not in success state"),
+        );
+    }
+    let object_name = match run.object_name {
+        Some(n) => n,
+        None => {
+            return json_err(
+                StatusCode::CONFLICT,
+                format!("backup run {id} has no object name"),
+            );
+        }
+    };
+
+    let cfg = match BackupConfig::load(&handles.inventory).await {
+        Ok(c) => c,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("load backup config: {e}"),
+            );
+        }
+    };
+
+    let dto = BackupRunManifestDto {
+        id: run.id.0,
+        object_name,
+        size_bytes: run.size_bytes.unwrap_or(0),
+        started_at: run.started_at.to_rfc3339(),
+        finished_at: run.finished_at.map(|t| t.to_rfc3339()),
+        passphrase_fingerprint: cfg.passphrase_fingerprint,
+    };
+    Json(dto).into_response()
+}
+
+/// POST /backup/restore: synchronous restore. Returns the outcome on
+/// success (200), or 4xx for user errors (wrong passphrase, missing
+/// object, runner not started, missing fields), 5xx for infrastructure
+/// failures (network / disk / migrate).
+async fn restore(
+    State(_handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<RestoreRequestDto>,
+) -> Response {
+    if body.object_name.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "object_name is required");
+    }
+    if body.passphrase.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "passphrase is required");
+    }
+
+    let runner = match runner_handle() {
+        Some(r) => r,
+        None => {
+            warn!("restore requested but backup plugin runner is not yet started");
+            return json_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backup plugin runner is not yet started; try again shortly",
+            );
+        }
+    };
+
+    match runner
+        .restore_now(&body.object_name, &body.passphrase, body.dry_run)
+        .await
+    {
+        Ok(o) => {
+            let dto = RestoreOutcomeDto {
+                run_id: o.run_id,
+                source_object: o.source_object,
+                restored_at: o.restored_at.to_rfc3339(),
+                previous_db_backup_path: o.previous_db_backup_path,
+                bytes_restored: o.bytes_restored,
+                dry_run: o.dry_run,
+            };
+            Json(dto).into_response()
+        }
+        Err(e) => {
+            use isengard_plugin_backup::restore::RestoreError;
+            let status = match &e {
+                RestoreError::EmptyPassphrase => StatusCode::BAD_REQUEST,
+                RestoreError::Decrypt(_) => StatusCode::BAD_REQUEST,
+                RestoreError::InvalidSnapshot(_) => StatusCode::BAD_REQUEST,
+                RestoreError::Destination(_) => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            json_err(status, format!("restore: {e}"))
+        }
+    }
+}
+
+async fn list_restore_runs(
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<RunsQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(30).clamp(1, 200);
+    match handles.inventory.list_restore_runs(limit).await {
+        Ok(rows) => {
+            let dtos: Vec<RestoreRunDto> = rows.into_iter().map(RestoreRunDto::from).collect();
+            Json(dtos).into_response()
+        }
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list restore runs: {e}"),
         ),
     }
 }
@@ -602,5 +803,203 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0]["status"], "failed");
         assert_eq!(parsed[1]["status"], "success");
+    }
+
+    // ---------------- Phase 11B endpoint tests ----------------
+
+    #[tokio::test]
+    async fn restore_rejects_missing_object_name() {
+        let app = router(test_handles().await);
+        let body = json!({ "object_name": "", "passphrase": "p", "dry_run": false });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/backup/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_missing_passphrase() {
+        let app = router(test_handles().await);
+        let body = json!({ "object_name": "snapshot.db.age", "passphrase": "", "dry_run": false });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/backup/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn restore_returns_503_when_runner_not_started() {
+        let app = router(test_handles().await);
+        let body = json!({ "object_name": "snapshot.db.age", "passphrase": "p", "dry_run": false });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/backup/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn list_restore_runs_returns_empty_for_fresh_db() {
+        let app = router(test_handles().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/backup/restore-runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_restore_runs_returns_inserted_rows_newest_first() {
+        let handles = test_handles().await;
+        let now = chrono::Utc::now();
+        let id_a = handles
+            .inventory
+            .insert_restore_run("a.db.age", None, now)
+            .await
+            .unwrap();
+        let id_b = handles
+            .inventory
+            .insert_restore_run("b.db.age", Some(99), now + chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+        handles
+            .inventory
+            .finish_restore_run_success(id_a, now, "/tmp/a.bak", 100)
+            .await
+            .unwrap();
+        handles
+            .inventory
+            .finish_restore_run_failed(id_b, now + chrono::Duration::seconds(1), "boom")
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/backup/restore-runs?limit=5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["status"], "failed");
+        assert_eq!(parsed[0]["source_object"], "b.db.age");
+        assert_eq!(parsed[0]["source_backup_run_id"], 99);
+        assert_eq!(parsed[1]["status"], "success");
+        assert_eq!(parsed[1]["previous_db_backup_path"], "/tmp/a.bak");
+    }
+
+    #[tokio::test]
+    async fn manifest_returns_404_for_unknown_run() {
+        let app = router(test_handles().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/backup/runs/9999/manifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn manifest_returns_409_for_non_success_run() {
+        let handles = test_handles().await;
+        let now = chrono::Utc::now();
+        let id = handles.inventory.insert_backup_run(now).await.unwrap();
+        handles
+            .inventory
+            .finish_backup_run_failed(id, now, "boom")
+            .await
+            .unwrap();
+        let app = router(handles);
+        let uri = format!("/backup/runs/{}/manifest", id.0);
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn manifest_returns_record_for_success_run() {
+        let handles = test_handles().await;
+        // Seed a fingerprint via the config.
+        let cfg = BackupConfig {
+            enabled: true,
+            destination: DestinationConfig::Local {
+                root: "/tmp/x".into(),
+                prefix: "y".into(),
+            },
+            interval_secs: 3600,
+            retention_keep: 7,
+            passphrase_fingerprint: "deadbeefcafe".into(),
+        };
+        cfg.save(&handles.inventory).await.unwrap();
+
+        let now = chrono::Utc::now();
+        let id = handles.inventory.insert_backup_run(now).await.unwrap();
+        handles
+            .inventory
+            .finish_backup_run_success(id, now, "snapshot-test.db.age", 4242)
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let uri = format!("/backup/runs/{}/manifest", id.0);
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["object_name"], "snapshot-test.db.age");
+        assert_eq!(parsed["size_bytes"], 4242);
+        assert_eq!(parsed["passphrase_fingerprint"], "deadbeefcafe");
     }
 }
