@@ -26,3 +26,16 @@ fn controller_help_lists_listen_flag() {
         .success()
         .stdout(predicate::str::contains("--listen"));
 }
+
+#[test]
+fn token_mint_help_lists_join_command_flags() {
+    let assert = Command::cargo_bin("isengard")
+        .unwrap()
+        .args(["controller", "token", "mint", "--help"])
+        .assert()
+        .success();
+    assert
+        .stdout(predicate::str::contains("--public-addr"))
+        .stdout(predicate::str::contains("--image"))
+        .stdout(predicate::str::contains("--format"));
+}
