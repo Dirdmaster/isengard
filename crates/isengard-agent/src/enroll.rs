@@ -4,12 +4,17 @@
 //! bootstrap `Enroll` channel is resolved in this order:
 //!
 //!   1. `ISENGARD_CONTROLLER_CA_PEM_PATH` env var (or `--controller-ca-pem-path`
-//!      CLI arg) — read the CA root cert PEM from disk and pin it.
-//!   2. `ISENGARD_CONTROLLER_CA_PEM` env var — inline PEM string, pin directly.
-//!   3. Fallback: trust the platform's native root store. Works when the
+//!      CLI arg): read the CA root cert PEM from disk and pin it.
+//!   2. `ISENGARD_CONTROLLER_CA_PEM_BASE64` env var: standard-alphabet base64
+//!      of the CA root PEM. Decoded once at startup and pinned. This is the
+//!      form the swarm-style join command emits (single-line, shell-safe).
+//!   3. `ISENGARD_CONTROLLER_CA_PEM` env var: inline PEM string, pin directly.
+//!      Multiline; works for `docker run -e VAR="$(cat ca.pem)"` but breaks
+//!      in many shells, hence the base64 form.
+//!   4. Fallback: trust the platform's native root store. Works when the
 //!      controller serves a publicly-signed cert (e.g. Let's Encrypt) but
-//!      FAILS for the default self-signed internal CA — operators running
-//!      that setup MUST pass a pinned CA via 1 or 2.
+//!      FAILS for the default self-signed internal CA: operators running
+//!      that setup MUST pass a pinned CA via 1, 2, or 3.
 //!
 //! Every RPC after Enroll runs over an mTLS channel rooted at the CA returned
 //! in `EnrollResponse.ca_root_pem` (which the agent persists and reuses).
@@ -17,6 +22,7 @@
 #![allow(clippy::result_large_err)]
 
 use anyhow::{Context, Result, anyhow};
+use base64::Engine;
 
 use isengard_proto::pb::EnrollRequest;
 use isengard_proto::pb::controller_client::ControllerClient;
@@ -28,8 +34,13 @@ use crate::cert_store::CertBundle;
 /// Env var pointing at a PEM file containing the controller's CA root cert.
 /// Read once at enrollment to pin the bootstrap channel.
 pub const CONTROLLER_CA_PEM_PATH_ENV: &str = "ISENGARD_CONTROLLER_CA_PEM_PATH";
+/// Env var carrying base64 (standard alphabet, padded) of the controller's CA
+/// root PEM. Single-line, shell-safe: this is what the swarm-style
+/// `controller token mint` join command embeds. Decoded once at startup.
+pub const CONTROLLER_CA_PEM_BASE64_ENV: &str = "ISENGARD_CONTROLLER_CA_PEM_BASE64";
 /// Env var carrying the controller's CA root cert PEM inline. Used when a
-/// file path isn't convenient (e.g. CI secrets).
+/// file path isn't convenient (e.g. CI secrets). Multiline; prefer the
+/// `_BASE64` form for shell-safe transport.
 pub const CONTROLLER_CA_PEM_ENV: &str = "ISENGARD_CONTROLLER_CA_PEM";
 
 /// Optional pinned CA material for the bootstrap channel. Resolution order
@@ -124,14 +135,21 @@ pub async fn enroll(
 }
 
 /// Resolve a [`ClientTlsConfig`] for the bootstrap channel. Precedence:
-/// path env > inline env > caller-provided path > caller-provided inline >
-/// native roots fallback. The first source that yields a non-empty PEM wins.
+/// path env > base64 env > inline-pem env > caller-provided path >
+/// caller-provided inline > native roots fallback. The first source that
+/// yields a non-empty PEM wins.
 fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
     if let Ok(path) = std::env::var(CONTROLLER_CA_PEM_PATH_ENV) {
         if !path.is_empty() {
             let pem = std::fs::read_to_string(&path).with_context(|| {
                 format!("reading {CONTROLLER_CA_PEM_PATH_ENV}={path:?} for bootstrap CA")
             })?;
+            return Ok(pin_ca(&pem));
+        }
+    }
+    if let Ok(b64) = std::env::var(CONTROLLER_CA_PEM_BASE64_ENV) {
+        if !b64.is_empty() {
+            let pem = decode_base64_ca(&b64)?;
             return Ok(pin_ca(&pem));
         }
     }
@@ -156,15 +174,32 @@ fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
     // is self-signed (internal CA), so this almost always means the
     // operator forgot to wire the CA.
     tracing::warn!(
-        "no controller CA pinned (ISENGARD_CONTROLLER_CA_PEM_PATH or _PEM); \
+        "no controller CA pinned (ISENGARD_CONTROLLER_CA_PEM_PATH, _BASE64, or _PEM); \
          falling back to system trust store. This will fail with self-signed \
-         CAs — see `isengard controller ca export`."
+         CAs: re-run `isengard controller token mint --role agent` to get a \
+         join command with the CA inlined, or use `isengard controller ca export`."
     );
     Ok(ClientTlsConfig::new().with_native_roots())
 }
 
 fn pin_ca(pem: &str) -> ClientTlsConfig {
     ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem.as_bytes()))
+}
+
+/// Decode the value of `ISENGARD_CONTROLLER_CA_PEM_BASE64` into a PEM string.
+/// Whitespace inside the value is stripped (docker/compose may wrap long
+/// values onto multiple lines). Returns a precise error mentioning the env
+/// var name on either base64 decode failure or non-UTF-8 output.
+fn decode_base64_ca(value: &str) -> Result<String> {
+    let cleaned: String = value.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(cleaned.as_bytes())
+        .with_context(|| {
+            format!("decoding {CONTROLLER_CA_PEM_BASE64_ENV} (expected standard base64)")
+        })?;
+    String::from_utf8(bytes).with_context(|| {
+        format!("{CONTROLLER_CA_PEM_BASE64_ENV} did not decode to valid UTF-8 PEM")
+    })
 }
 
 #[cfg(test)]
@@ -200,5 +235,62 @@ mod bootstrap_tls_tests {
         };
         let err = build_bootstrap_tls(&trust).unwrap_err();
         assert!(format!("{err:#}").contains("bootstrap CA"));
+    }
+}
+
+#[cfg(test)]
+mod base64_ca_tests {
+    //! Unit checks for the `_BASE64` env var decode helper. Exercised here
+    //! rather than via [`build_bootstrap_tls`] to keep tests env-free
+    //! (parallel-safe).
+
+    use super::{CONTROLLER_CA_PEM_BASE64_ENV, decode_base64_ca};
+    use base64::Engine;
+
+    const STUB_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn round_trips_pem() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(STUB_PEM);
+        let decoded = decode_base64_ca(&encoded).unwrap();
+        assert_eq!(decoded, STUB_PEM);
+    }
+
+    #[test]
+    fn tolerates_internal_whitespace() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(STUB_PEM);
+        // Mimic a docker-compose .env line wrapped after 76 chars.
+        let mut wrapped = String::new();
+        for (i, ch) in encoded.chars().enumerate() {
+            if i > 0 && i % 32 == 0 {
+                wrapped.push('\n');
+            }
+            wrapped.push(ch);
+        }
+        let decoded = decode_base64_ca(&wrapped).unwrap();
+        assert_eq!(decoded, STUB_PEM);
+    }
+
+    #[test]
+    fn invalid_base64_surfaces_named_error() {
+        let err = decode_base64_ca("not-base64!@#$").unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(CONTROLLER_CA_PEM_BASE64_ENV),
+            "error should mention env var, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn non_utf8_surfaces_named_error() {
+        // 0xFF 0xFE is not valid UTF-8; encode and decode.
+        let raw = [0xFFu8, 0xFE, 0xFD];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let err = decode_base64_ca(&encoded).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(CONTROLLER_CA_PEM_BASE64_ENV),
+            "error should mention env var, got: {rendered}"
+        );
     }
 }
