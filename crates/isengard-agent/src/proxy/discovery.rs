@@ -76,7 +76,7 @@ pub fn pick_container_ip(networks: &HashMap<String, EndpointSettings>) -> Option
         .iter()
         .filter(|(name, _)| !DRIVER_ONLY_NETWORKS.contains(&name.as_str()))
         .collect();
-    sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted.sort_by_key(|(a, _)| *a);
 
     for (name, settings) in sorted {
         if let Some(ip) = settings.ip_address.as_deref().filter(|s| !s.is_empty()) {
