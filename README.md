@@ -8,31 +8,45 @@
 
 The rewrite splits Isengard into a **controller** (one per fleet, exposes a dashboard + gRPC) and **agents** (one per Docker host, talks to the controller over mTLS). All auth is bootstrapped from short-lived enrollment tokens minted by the controller; there is no long-lived shared secret.
 
+Enrollment uses a Docker Swarm-style join command: `controller token mint` prints a copy-pasteable `docker run` block with the token and the controller's CA root pre-baked in. No manual `ca export`, no side files.
+
 ```bash
 # 1. Start the controller. State (CA, sqlite, certs) lives in /var/lib/isengard.
-docker run -d --name isengard-controller \
-  -p 7777:7777 \
+docker run -d --name iso-controller \
+  -p 9417:9417 \
   -p 8080:8080 \
-  -v isengard-controller-state:/var/lib/isengard \
+  -e ISENGARD_PUBLIC_ADDR=controller.example.com:9417 \
+  -v iso-controller-state:/var/lib/isengard \
   ghcr.io/dirdmaster/isengard:next controller
 
-# 2. Export the controller's CA cert so agents can verify the controller during enrollment.
-docker exec isengard-controller isengard controller ca export > ca.pem
-
-# 3. Mint a short-lived enrollment token (default TTL 15m, single-use).
-docker exec isengard-controller isengard controller token mint --ttl 15m
-# => prints a token like: ITK_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# 4. On each agent host, start the agent with the token + CA cert.
-docker run -d --name isengard-agent \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v isengard-agent-state:/var/lib/isengard \
-  -v $(pwd)/ca.pem:/etc/isengard/ca.pem:ro \
-  -e ISENGARD_CONTROLLER_ADDR=https://controller.example.com:7777 \
-  -e ISENGARD_CONTROLLER_CA_PEM_PATH=/etc/isengard/ca.pem \
-  -e ISENGARD_ENROLL_TOKEN=ITK_xxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  ghcr.io/dirdmaster/isengard:next agent
+# 2. Mint an enrollment token. The output is a complete `docker run`
+#    command for the agent, with the token and CA pre-baked in.
+docker exec iso-controller isengard controller token mint --role agent
 ```
+
+The output looks like this; paste it on the agent host:
+
+```text
+Token minted (expires in 15m).
+
+To enroll an agent, run on the host where you want it to live:
+
+    docker run -d \
+      --name iso-agent \
+      --restart unless-stopped \
+      --platform linux/amd64 \
+      -v iso-agent-state:/var/lib/isengard \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -e ISENGARD_ENROLL_TOKEN=01HX... \
+      -e ISENGARD_CONTROLLER_CA_PEM_BASE64=LS0t... \
+      ghcr.io/dirdmaster/isengard:next \
+      agent --controller https://controller.example.com:9417 --state-dir /var/lib/isengard
+
+Token expires at 2026-05-07T11:30:00Z. Mint a new one with:
+    isengard controller token mint --role agent
+```
+
+For a single-host setup with both services in the same compose stack, see [`docker/`](./docker/) for a ready-to-go `compose.yaml`.
 
 The agent enrolls on first boot (exchanges the token for an mTLS cert bundle, persists it to `state-dir/certs/`), then uses mTLS for every subsequent RPC. Certs auto-renew at 50% TTL (default 30-day TTL = renews every ~15 days). The token is consumed immediately and cannot be reused.
 
@@ -40,13 +54,21 @@ To remove an agent:
 
 ```bash
 # Revoke its cert (immediately rejects further RPCs from that host).
-docker exec isengard-controller isengard controller agent revoke <host_id>
+docker exec iso-controller isengard controller agent revoke <host_id>
 
 # List agents to find the host_id.
-docker exec isengard-controller isengard controller agent list
+docker exec iso-controller isengard controller agent list
 ```
 
 You can also mint tokens and revoke hosts from the dashboard at `http://controller:8080` (Settings → Enrollment, and per-host Revoke buttons on the inspector).
+
+For CI / scripts that need just the bare token (no join block), pass `--format token`:
+
+```bash
+docker exec iso-controller isengard controller token mint --role agent --format token
+```
+
+This reproduces the pre-Phase-15 behaviour. You'll need to handle CA distribution yourself in that path; see [`docker/README.md`](./docker/README.md#advanced-bare-token-output).
 
 ---
 

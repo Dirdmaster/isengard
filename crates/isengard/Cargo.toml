@@ -28,6 +28,7 @@ cf-tunnel = ["dep:isengard-plugin-networking-cf-tunnel"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 hex = "0.4"

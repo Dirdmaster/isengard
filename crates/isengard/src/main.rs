@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, Subcommand};
+use base64::Engine;
+use clap::{Parser, Subcommand, ValueEnum};
 
 use isengard_controller::ca::Authority;
 use isengard_controller::enrollment::EnrollmentService;
@@ -117,8 +118,10 @@ enum ControllerAction {
 
 #[derive(Debug, Subcommand)]
 enum TokenOp {
-    /// Mint a new one-time-use enrollment token. Prints the plaintext token
-    /// on stdout (shown once — only the SHA-256 hash is persisted).
+    /// Mint a new one-time-use enrollment token. By default prints a
+    /// copy-pasteable `docker run` join command (Swarm-style); use
+    /// `--format token` for the bare token (scripts, CI). Only the
+    /// SHA-256 hash of the token is persisted on the controller.
     Mint {
         /// Role for the minted token. Currently only "agent" is supported.
         #[arg(long, default_value = "agent")]
@@ -126,7 +129,29 @@ enum TokenOp {
         /// TTL in human-readable form (e.g. "15m", "1h", "24h").
         #[arg(long, default_value = "15m")]
         ttl: humantime::Duration,
+        /// Public address (host:port) where agents should reach the
+        /// controller. Embedded in the join-command output. Required for
+        /// cross-host setups; falls back to `ISENGARD_PUBLIC_ADDR` env then
+        /// to `controller.local:9417`.
+        #[arg(long, env = "ISENGARD_PUBLIC_ADDR")]
+        public_addr: Option<String>,
+        /// Image reference to embed in the join command.
+        #[arg(long, default_value = "ghcr.io/dirdmaster/isengard:next")]
+        image: String,
+        /// Output format. `text` (default) prints the join-command block;
+        /// `token` prints just the bare token (back-compat with pre-Phase-15
+        /// flows and CI scripts).
+        #[arg(long, value_enum, default_value_t = MintFormat::Text)]
+        format: MintFormat,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MintFormat {
+    /// Full Docker Swarm-style join block (default).
+    Text,
+    /// Bare token, one line, no other output.
+    Token,
 }
 
 #[derive(Debug, Subcommand)]
@@ -178,8 +203,15 @@ async fn dispatch(command: Command) -> Result<()> {
         } => match action {
             None => run_controller(listen, state_dir).await,
             Some(ControllerAction::Token {
-                op: TokenOp::Mint { role, ttl },
-            }) => run_token_mint(state_dir, role, ttl).await,
+                op:
+                    TokenOp::Mint {
+                        role,
+                        ttl,
+                        public_addr,
+                        image,
+                        format,
+                    },
+            }) => run_token_mint(state_dir, role, ttl, public_addr, image, format).await,
             Some(ControllerAction::Agent {
                 op: AgentOp::Revoke { host_id, reason },
             }) => run_agent_revoke(state_dir, host_id, reason).await,
@@ -238,6 +270,9 @@ async fn run_token_mint(
     state_dir: std::path::PathBuf,
     role: String,
     ttl: humantime::Duration,
+    public_addr: Option<String>,
+    image: String,
+    format: MintFormat,
 ) -> Result<()> {
     let inv = Arc::new(open_inventory(&state_dir).await?);
     let ca = Arc::new(
@@ -245,16 +280,96 @@ async fn run_token_mint(
             .await
             .context("loading or initializing CA")?,
     );
-    let enr = EnrollmentService::new(inv, ca);
+    // Snapshot the CA root PEM before the service consumes the Arc; it's
+    // borrowed for the join-block path. `load_or_init` is a no-op on an
+    // already-initialized CA, so this is one read, not two.
+    let ca_pem = ca.root_cert_pem().to_string();
 
-    let role = parse_role(&role)?;
+    let enr = EnrollmentService::new(inv, ca);
+    let role_parsed = parse_role(&role)?;
     let std_ttl: std::time::Duration = ttl.into();
     let chrono_ttl =
         chrono::Duration::from_std(std_ttl).map_err(|e| anyhow!("invalid ttl {ttl}: {e}"))?;
 
-    let token = enr.mint(role, chrono_ttl).await?;
-    println!("{token}");
+    let minted_at = chrono::Utc::now();
+    let token = enr.mint(role_parsed, chrono_ttl).await?;
+
+    match format {
+        MintFormat::Token => {
+            // Legacy mode: bare token, one line. Scripts and CI rely on this.
+            println!("{token}");
+        }
+        MintFormat::Text => {
+            let host_port = resolve_public_addr(public_addr.as_deref());
+            let ca_b64 = base64::engine::general_purpose::STANDARD.encode(ca_pem.as_bytes());
+            let expires_at = minted_at + chrono_ttl;
+            let block = render_join_command(JoinCommandArgs {
+                ttl: ttl.to_string(),
+                token: &token,
+                ca_b64: &ca_b64,
+                image: &image,
+                public_addr: &host_port,
+                expires_at,
+            });
+            println!("{block}");
+        }
+    }
     Ok(())
+}
+
+/// Resolve the controller's public address (host:port) for the join command.
+/// Order: `--public-addr` flag (already in `arg`), `ISENGARD_PUBLIC_ADDR` env
+/// (already in `arg` via clap), then the `controller.local:9417` default.
+/// Listed `--listen` is intentionally *not* a fallback: bind addresses like
+/// `0.0.0.0` or `127.0.0.1` are not externally dialable and would emit a
+/// broken join command.
+fn resolve_public_addr(public_addr: Option<&str>) -> String {
+    public_addr
+        .map(str::to_owned)
+        .unwrap_or_else(|| "controller.local:9417".to_string())
+}
+
+struct JoinCommandArgs<'a> {
+    ttl: String,
+    token: &'a str,
+    ca_b64: &'a str,
+    image: &'a str,
+    public_addr: &'a str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Render the Swarm-style `docker run` join block.
+///
+/// Plain ASCII, four-space indent on the command, backslash continuations so
+/// it pastes cleanly into bash/zsh/fish. The footer reminds the operator how
+/// to mint a fresh token if this one expires before they paste it.
+fn render_join_command(a: JoinCommandArgs<'_>) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Token minted (expires in {}).\n\n", a.ttl));
+    out.push_str("To enroll an agent, run on the host where you want it to live:\n\n");
+    out.push_str("    docker run -d \\\n");
+    out.push_str("      --name iso-agent \\\n");
+    out.push_str("      --restart unless-stopped \\\n");
+    out.push_str("      --platform linux/amd64 \\\n");
+    out.push_str("      -v iso-agent-state:/var/lib/isengard \\\n");
+    out.push_str("      -v /var/run/docker.sock:/var/run/docker.sock \\\n");
+    out.push_str(&format!("      -e ISENGARD_ENROLL_TOKEN={} \\\n", a.token));
+    out.push_str(&format!(
+        "      -e ISENGARD_CONTROLLER_CA_PEM_BASE64={} \\\n",
+        a.ca_b64
+    ));
+    out.push_str(&format!("      {} \\\n", a.image));
+    out.push_str(&format!(
+        "      agent --controller https://{} --state-dir /var/lib/isengard\n\n",
+        a.public_addr
+    ));
+    out.push_str(&format!(
+        "Token expires at {}. Mint a new one with:\n",
+        a.expires_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    ));
+    out.push_str("    isengard controller token mint --role agent\n");
+    out
 }
 
 async fn run_agent_revoke(
