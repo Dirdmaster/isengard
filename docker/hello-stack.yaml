@@ -1,0 +1,39 @@
+# Example managed stack: a single hello-world web service that the
+# Isengard agent will discover, manage, and (when policies are set) update.
+#
+# Run on the host (NOT inside the control-plane compose project) so the
+# agent can manage it via the host Docker socket:
+#
+#   docker compose -p hello -f docker/hello-stack.yaml up -d
+#
+# Once running, the agent should pick it up automatically. Verify via the
+# dashboard at http://127.0.0.1:9418 -> Stacks.
+#
+# Labels:
+#   - isengard.enable=true: opt this service in to updater scans
+#   - isengard.expose.*: route hello.local through the Pingora proxy
+#                         (Phase 8); set up your /etc/hosts or skip
+#                         these labels if you only care about the deploy
+#                         lifecycle, not routing
+#
+# To exercise blue-green + healthcheck-driven rollback, change the image
+# tag and re-up: docker compose -p hello -f docker/local-smoke/hello-stack.yaml up -d
+
+services:
+  hello:
+    image: nginxdemos/hello:plain-text
+    container_name: hello-web
+    ports:
+      - "8080:80"
+    labels:
+      isengard.enable: "true"
+      # Optional Phase 8 proxy routing; remove if not exercising routing.
+      isengard.expose.host: "hello.local"
+      isengard.expose.port: "80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
