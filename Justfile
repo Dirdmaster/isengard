@@ -72,15 +72,27 @@ www-build:
 # in the same shell before `just dev`. See docker/README.md.
 compose_args := "-f docker/compose.yaml -f docker/compose.dev.yaml"
 
-# Build local images + bring up controller + agent (compose dev override)
-dev:
+# Idempotently create the shared `isengard-proxy` external network. Both the
+# control-plane stack and any routed operator stacks attach to it so pingora
+# and backends share an L3 fabric (Traefik recipe). `2>/dev/null || true`
+# keeps re-runs silent when the network already exists.
+net-up:
+    @docker network create isengard-proxy 2>/dev/null || true
+    @docker network inspect isengard-proxy >/dev/null 2>&1 \
+        && echo "✓ network isengard-proxy ready" \
+        || { echo "ERROR: failed to create or inspect isengard-proxy network"; exit 1; }
+
+# Build local images + bring up controller + agent (compose dev override).
+# Depends on `net-up` so a fresh clone doesn't fail at compose-up time on a
+# missing external network.
+dev: net-up
     docker compose {{compose_args}} up -d --build
     @echo ""
     @echo "Dashboard: http://127.0.0.1:9418"
     @echo "If this is a fresh stack, mint a token: just mint-token"
 
-# Bring up with current images (no rebuild)
-up:
+# Bring up with current images (no rebuild). Same net-up dep as `dev`.
+up: net-up
     docker compose {{compose_args}} up -d
 
 # Stop everything (keeps volumes + enrollment state)
@@ -100,8 +112,9 @@ mint-token:
     docker exec iso-controller isengard controller token mint --role agent --public-addr controller.local:9417
 
 # Bring up the example managed stack (separate Compose project so the agent
-# sees it via the host docker socket)
-hello:
+# sees it via the host docker socket). Depends on `net-up` so the stack's
+# `isengard-proxy: external: true` reference resolves on a fresh host.
+hello: net-up
     docker compose -p hello -f docker/hello-stack.yaml up -d
 
 # Tail all logs (Ctrl+C exits)

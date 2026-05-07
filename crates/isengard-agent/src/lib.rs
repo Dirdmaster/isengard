@@ -557,6 +557,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_supervisor = supervisor_for_sync.clone();
     let sync_log_source = log_source.clone();
     let sync_mdns = mdns_handle.clone();
+    let sync_docker = docker.clone();
     // v0.3d: surface the compose root + host id to the sync loop so it
     // can service `WriteCompose` ControllerMessages from the dashboard.
     let sync_compose_ctx = Some(sync::ComposeContext {
@@ -579,6 +580,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_log_source,
             sync_mdns,
             sync_compose_ctx,
+            sync_docker,
         )
         .await
     };
