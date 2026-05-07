@@ -70,6 +70,14 @@ interface Props {
    * the chosen scope is fully specified.
    */
   effective?: ResolvedPolicy
+  /**
+   * When set in `create` mode, pre-fills the scope picker with the given
+   * type+key and locks it (renders the read-only chip instead of the radio
+   * group). Used by per-resource pages (e.g. the stack-detail Settings tab)
+   * that always want a single-scope override and don't need users to choose.
+   * Ignored in edit mode, where the existing row's scope is already locked.
+   */
+  lockedScope?: { type: PolicyScopeType; key: string }
 }
 
 const props = defineProps<Props>()
@@ -83,12 +91,18 @@ const toast = useToast()
 // ---- Scope state -----------------------------------------------------------
 
 const scopeType = ref<PolicyScopeType>(
-  props.existing?.scopeType ?? 'fleet',
+  props.existing?.scopeType ?? props.lockedScope?.type ?? 'fleet',
 )
-const scopeKey = ref<string>(props.existing?.scopeKey ?? '')
+const scopeKey = ref<string>(
+  props.existing?.scopeKey ?? props.lockedScope?.key ?? '',
+)
 
 // In edit mode the scope is locked (we PUT the same scope key, not a rename).
-const scopeLocked = computed(() => props.mode === 'edit')
+// In create mode `lockedScope` also locks the picker so callers like the
+// stack-detail tab can pre-fill without exposing a needless radio group.
+const scopeLocked = computed(
+  () => props.mode === 'edit' || props.lockedScope != null,
+)
 
 // Container scope rows are discovered automatically from compose labels
 // (Phase 9b.1: `isengard.policy.*` keys on a running container). The UI
@@ -483,10 +497,15 @@ function onCancel() {
 // ---- Header label ----------------------------------------------------------
 
 const scopeLabel = computed<string>(() => {
-  if (props.mode === 'create') return ''
-  const t = (props.existing?.scopeType ?? scopeType.value).toUpperCase()
-  const k = props.existing?.scopeKey || 'global default'
-  return `${t} . ${k}`
+  if (props.mode === 'create' && !props.lockedScope) return ''
+  const t = (props.existing?.scopeType
+    ?? props.lockedScope?.type
+    ?? scopeType.value
+  ).toUpperCase()
+  const k = props.existing?.scopeKey
+    ?? props.lockedScope?.key
+    ?? 'global default'
+  return `${t} . ${k || 'global default'}`
 })
 </script>
 
