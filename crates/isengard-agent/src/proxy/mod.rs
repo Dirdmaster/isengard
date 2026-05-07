@@ -226,8 +226,63 @@ pub async fn apply_config_with_docker(
         healthcheck::spawn_loops(state.clone());
     });
 
+    // Wildcard certs from the controller (DNS-01). Install each cert under
+    // every identifier in its SAN list so SNI for either the apex
+    // (`vallee.casa`) or any subdomain covered by the wildcard
+    // (`*.vallee.casa`) resolves to the same material. No-op if the
+    // controller didn't push any wildcard certs.
+    install_wildcard_certs(state, &cfg.wildcard_certs).await;
+
     tracing::info!(generation = cfg.generation, "proxy: ProxyConfig applied");
     Ok(())
+}
+
+/// Install every wildcard cert carried in the `ProxyConfig`. Each cert is
+/// installed under every identifier in its SAN list (typically `*.foo` and
+/// `foo`) so the agent's existing SNI cert callback resolves either name.
+///
+/// The cert callback in `proxy/cert_callback.rs` does an exact-match lookup
+/// against SNI; mirroring the cert under each SAN keeps that callback
+/// unchanged. A future refactor could move wildcard matching into the
+/// callback itself; for now duplication keeps the wire-up obvious.
+async fn install_wildcard_certs(
+    state: &ProxyState,
+    wildcards: &[isengard_proto::pb::WildcardCert],
+) {
+    if wildcards.is_empty() {
+        return;
+    }
+    let cs_guard = state.cert_store.read().await;
+    let Some(cs) = cs_guard.clone() else {
+        // CertStore not installed (unit tests, agent without TLS bring-up).
+        // Drop the certs silently rather than buffering them somewhere.
+        if !wildcards.is_empty() {
+            tracing::debug!(
+                count = wildcards.len(),
+                "proxy: wildcard certs received but CertStore not installed; dropping",
+            );
+        }
+        return;
+    };
+    drop(cs_guard);
+
+    for w in wildcards {
+        if w.cert_pem.is_empty() || w.key_pem.is_empty() {
+            tracing::warn!(
+                identifiers = ?w.identifiers,
+                "proxy: wildcard cert missing PEM material; skipping",
+            );
+            continue;
+        }
+        for id in &w.identifiers {
+            let key = id.to_lowercase();
+            if let Err(e) = cs.install(&key, &w.cert_pem, &w.key_pem).await {
+                tracing::warn!(identifier = %key, error = %e, "proxy: install_wildcard_cert failed");
+            } else {
+                tracing::info!(identifier = %key, "proxy: wildcard cert installed");
+            }
+        }
+    }
 }
 
 /// Ensures `healthcheck::spawn_loops` runs at most once per process.

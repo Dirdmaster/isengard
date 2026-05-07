@@ -240,10 +240,28 @@ message ProxySettings {
 // Full proxy configuration the controller pushes to an agent. Generation
 // monotonically increases; agents may ignore older generations on reorder.
 message ProxyConfig {
-  string                host_id    = 1;
-  uint64                generation = 2;
-  repeated RoutingRule  rules      = 3;
-  ProxySettings         settings   = 4;
+  string                host_id        = 1;
+  uint64                generation     = 2;
+  repeated RoutingRule  rules          = 3;
+  ProxySettings         settings       = 4;
+  // DNS-01 wildcard certs the controller has issued. Each agent installs
+  // these in its boringssl cert resolver alongside any HTTP-01 per-host
+  // certs it owns. Empty list = no wildcards configured (or the controller
+  // hasn't issued one yet).
+  repeated WildcardCert wildcard_certs = 5;
+}
+
+// Controller -> agent: a wildcard cert the controller obtained via DNS-01.
+// Carries PEM material in-band on the existing Sync stream (mTLS-protected,
+// so private key transit is over an authenticated, encrypted channel).
+//
+// `identifiers` is the full SAN list (e.g. `["*.vallee.casa", "vallee.casa"]`).
+// The agent installs the cert under each identifier so SNI matches either
+// the apex or any subdomain covered by the wildcard.
+message WildcardCert {
+  repeated string identifiers = 1;
+  string          cert_pem    = 2;
+  string          key_pem     = 3;
 }
 
 // Agent → controller: container metadata snapshot used to derive routing rules

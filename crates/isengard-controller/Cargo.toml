@@ -39,6 +39,12 @@ tracing.workspace = true
 ulid.workspace = true
 x509-parser.workspace = true
 
+# DNS-01 ACME flow with Cloudflare provider for wildcard cert issuance.
+# `instant-acme` drives the RFC-8555 dance; `reqwest` posts TXT records to
+# the CF v4 API.
+instant-acme.workspace = true
+reqwest.workspace = true
+
 # v0.3b: zone-scoped DNS resolver. The server answers A queries inside the
 # operator-configured zone; queries outside it return REFUSED so the OS
 # resolver falls back upstream.
@@ -48,3 +54,4 @@ hickory-proto.workspace = true
 [dev-dependencies]
 tempfile = "3.14.0"
 hickory-resolver.workspace = true
+wiremock.workspace = true

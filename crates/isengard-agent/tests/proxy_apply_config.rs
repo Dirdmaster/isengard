@@ -26,6 +26,7 @@ async fn apply_config_replaces_upstream_registry() {
             adapter: "none".into(),
         }],
         settings: None,
+        wildcard_certs: vec![],
     };
 
     isengard_agent::proxy::apply_config(&state, cfg)
@@ -58,6 +59,7 @@ async fn stale_generation_is_ignored() {
             adapter: "none".into(),
         }],
         settings: None,
+        wildcard_certs: vec![],
     };
 
     isengard_agent::proxy::apply_config(&state, mk(5, 8080))
@@ -101,6 +103,7 @@ async fn concurrent_applies_higher_generation_wins() {
             adapter: "none".into(),
         }],
         settings: None,
+        wildcard_certs: vec![],
     };
 
     for trial in 0..50 {

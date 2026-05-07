@@ -43,6 +43,7 @@ async fn spawn_controller(state_dir: PathBuf) -> SocketAddr {
             config: serde_json::Value::Object(Default::default()),
             dns_zone: String::new(),
             dns_listen: "127.0.0.1:0".parse().unwrap(),
+            acme: Default::default(),
         })
         .await;
     });
