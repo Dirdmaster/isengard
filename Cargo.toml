@@ -48,7 +48,7 @@ clap = { version = "4.5.23", features = ["derive", "env"] }
 
 # logging
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
 
 # gRPC + protobuf
 tonic = { version = "0.12.3", features = ["tls", "tls-native-roots"] }
