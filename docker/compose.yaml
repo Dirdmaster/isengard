@@ -70,6 +70,13 @@ services:
       # Inside the container the path stays /var/run/docker.sock so the agent
       # finds it where bollard expects it.
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      # v0.3c compose import: per-stack `compose.yaml` lives here. The agent
+      # reverse-engineers the YAML on first discovery of any
+      # `isengard.enable=true` stack and writes
+      # `/etc/isengard/stacks/<stack>/compose.yaml` + `meta.toml`. Bind-mounted
+      # so the file persists across agent container restarts and is editable
+      # from the host. v0.3d's compose-as-truth path will read from here.
+      - /etc/isengard/stacks:/etc/isengard/stacks:rw
       # Controller's self-signed CA (Phase 14 mTLS). Export it once after the
       # controller starts:
       #   docker exec iso-controller isengard controller ca export > docker/ca.pem

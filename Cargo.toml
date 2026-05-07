@@ -83,6 +83,12 @@ mime_guess = "2.0.5"
 # crypto helpers
 subtle = "2.6.1"
 sha2 = "0.10"
+
+# YAML emitter for v0.3c compose import (deterministic key ordering).
+serde_yaml = "0.9"
+
+# TOML for sibling meta.toml records next to imported compose.yaml.
+toml = "0.8"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "x509-parser", "ring"] }
 rand = "0.8"
 x509-parser = "0.16"

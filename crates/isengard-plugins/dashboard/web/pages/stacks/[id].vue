@@ -176,7 +176,7 @@ const stackTabs = [
           :fleet="host.fleet"
           @expose="openExposeFor"
         />
-        <StackComposeTab v-else-if="activeTab === 'compose'" />
+        <StackComposeTab v-else-if="activeTab === 'compose'" :stack-id="stackId" />
         <StackHistoryTab v-else-if="activeTab === 'history'" :stack-id="stackId" />
         <StackRoutingTab
           v-else-if="activeTab === 'routing'"
