@@ -33,9 +33,12 @@ use crate::credentials::{ContextEntry, default_credentials_path, load, save};
 
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// Controller URL, e.g. `https://controller.local:9417`. The scheme is
-    /// required; only `https://` is accepted (the controller's gRPC server
-    /// is mTLS-only since Phase 14).
+    /// Controller URL, e.g. `http://127.0.0.1:9418` (dashboard, dev) or
+    /// `https://controller.local:9417` (gRPC mTLS, prod). The scheme is
+    /// required. The dashboard's REST API is currently HTTP-only;
+    /// `https://` connects to the agent gRPC port and pins the leaf cert
+    /// fingerprint, but REST calls don't actually use that port today.
+    /// Use `http://...:9418` for v0.3a until the dashboard gets TLS.
     pub controller_url: String,
 
     /// Skip the interactive fingerprint prompt. Useful for CI and scripted
@@ -58,27 +61,40 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     let url = normalize_url(&args.controller_url)?;
     println!("Connecting to {url} ...");
 
-    // Pull the leaf cert + chain by issuing a TLS handshake with verification
-    // disabled. We don't trust the response; we trust the operator's eyeballs
-    // on the printed fingerprint.
-    let chain = fetch_cert_chain(&url).await.with_context(|| {
-        format!("connecting to {url} to capture TLS cert (network reachable? scheme correct?)")
-    })?;
-    let leaf = chain.first().ok_or_else(|| {
-        anyhow!("controller TLS handshake returned no leaf certificate (unreachable?)")
-    })?;
-    let fingerprint = sha256_fingerprint(leaf);
-
-    println!();
-    println!("Controller TLS leaf certificate fingerprint:");
-    println!("  SHA-256: {fingerprint}");
-    println!();
-
-    if !args.accept_fingerprint {
-        prompt_yes_no("Accept this fingerprint and store it for future connections?")?;
+    // The dashboard's REST API is currently HTTP-only (Phase 14 deferred
+    // dashboard auth to the v1.x Cloudflare Access integration). When the
+    // operator points isd at `http://`, there's no TLS to pin; we save an
+    // empty fingerprint and surface a security banner. When they point at
+    // `https://`, the gRPC mTLS port is the only TLS surface today, so we
+    // capture the leaf cert via a no-verify handshake and pin it.
+    let fingerprint = if url.starts_with("http://") {
+        println!();
+        println!("WARNING: connecting over plain HTTP. The dashboard REST API");
+        println!("is currently unauthenticated and unencrypted. Use only on a");
+        println!("trusted local network until v1.x ships Cloudflare Access.");
+        println!();
+        String::new()
     } else {
-        println!("(--accept-fingerprint set; skipping interactive prompt)");
-    }
+        let chain = fetch_cert_chain(&url).await.with_context(|| {
+            format!("connecting to {url} to capture TLS cert (network reachable? scheme correct?)")
+        })?;
+        let leaf = chain.first().ok_or_else(|| {
+            anyhow!("controller TLS handshake returned no leaf certificate (unreachable?)")
+        })?;
+        let fp = sha256_fingerprint(leaf);
+
+        println!();
+        println!("Controller TLS leaf certificate fingerprint:");
+        println!("  SHA-256: {fp}");
+        println!();
+
+        if !args.accept_fingerprint {
+            prompt_yes_no("Accept this fingerprint and store it for future connections?")?;
+        } else {
+            println!("(--accept-fingerprint set; skipping interactive prompt)");
+        }
+        fp
+    };
 
     let token = read_token(args.token_file.as_deref())?;
     if token.trim().is_empty() {
@@ -124,9 +140,9 @@ pub async fn run(args: LoginArgs) -> Result<()> {
 
 fn normalize_url(input: &str) -> Result<String> {
     let trimmed = input.trim().trim_end_matches('/');
-    if !trimmed.starts_with("https://") {
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
         return Err(anyhow!(
-            "controller_url must start with `https://` (got {input:?})"
+            "controller_url must start with `http://` or `https://` (got {input:?})"
         ));
     }
     Ok(trimmed.to_string())
@@ -306,9 +322,21 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_rejects_non_https() {
-        assert!(normalize_url("http://controller.local:9417").is_err());
+    fn normalize_url_accepts_http_and_https() {
+        assert_eq!(
+            normalize_url("http://127.0.0.1:9418").unwrap(),
+            "http://127.0.0.1:9418"
+        );
+        assert_eq!(
+            normalize_url("https://controller.local:9417").unwrap(),
+            "https://controller.local:9417"
+        );
+    }
+
+    #[test]
+    fn normalize_url_rejects_schemeless() {
         assert!(normalize_url("controller.local:9417").is_err());
+        assert!(normalize_url("ftp://controller.local").is_err());
     }
 
     #[test]
