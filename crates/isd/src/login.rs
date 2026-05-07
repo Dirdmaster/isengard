@@ -278,6 +278,13 @@ pub fn pinned_client(_fingerprint: &str) -> Result<Client> {
 /// so the operator sees the failure loudly rather than silently trusting a
 /// rotated cert.
 pub fn verify_pinned_response(resp: &reqwest::Response, want: &str) -> Result<()> {
+    // Empty fingerprint = operator logged in over plain HTTP (dashboard REST
+    // is unauthenticated until v1.x Cloudflare Access). There's nothing to
+    // pin and reqwest doesn't populate TlsInfo for non-TLS responses. Skip
+    // the check; the security banner at login time already warned them.
+    if want.is_empty() {
+        return Ok(());
+    }
     let info = resp
         .extensions()
         .get::<reqwest::tls::TlsInfo>()
