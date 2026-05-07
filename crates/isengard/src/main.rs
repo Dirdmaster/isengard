@@ -68,6 +68,15 @@ enum Command {
         /// Created if missing.
         #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
         state_dir: std::path::PathBuf,
+        /// v0.3b: zone served by the embedded DNS resolver (e.g. `iso`).
+        /// Empty string disables the resolver entirely (default).
+        #[arg(long, env = "ISENGARD_DNS_ZONE", default_value = "")]
+        dns_zone: String,
+        /// v0.3b: UDP address the embedded DNS resolver binds to. Default
+        /// `0.0.0.0:5300` for dev; production compose can map :53 with
+        /// `cap_add: NET_BIND_SERVICE`. Ignored when `--dns-zone` is empty.
+        #[arg(long, env = "ISENGARD_DNS_LISTEN", default_value = "0.0.0.0:5300")]
+        dns_listen: String,
         #[command(subcommand)]
         action: Option<ControllerAction>,
     },
@@ -205,9 +214,11 @@ async fn dispatch(command: Command) -> Result<()> {
         Command::Controller {
             listen,
             state_dir,
+            dns_zone,
+            dns_listen,
             action,
         } => match action {
-            None => run_controller(listen, state_dir).await,
+            None => run_controller(listen, state_dir, dns_zone, dns_listen).await,
             Some(ControllerAction::Token {
                 op:
                     TokenOp::Mint {
@@ -243,20 +254,31 @@ async fn dispatch(command: Command) -> Result<()> {
     }
 }
 
-async fn run_controller(listen: String, state_dir: std::path::PathBuf) -> Result<()> {
+async fn run_controller(
+    listen: String,
+    state_dir: std::path::PathBuf,
+    dns_zone: String,
+    dns_listen: String,
+) -> Result<()> {
     let listen_addr: std::net::SocketAddr = listen
         .parse()
         .map_err(|e| anyhow!("invalid --listen address {listen:?}: {e}"))?;
+
+    let dns_listen_addr: std::net::SocketAddr = dns_listen
+        .parse()
+        .map_err(|e| anyhow!("invalid --dns-listen address {dns_listen:?}: {e}"))?;
 
     // Create state dir if missing (controller can't run without somewhere to put the db).
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
 
-    tracing::info!(%listen_addr, ?state_dir, "controller mode");
+    tracing::info!(%listen_addr, ?state_dir, dns_zone = %dns_zone, %dns_listen_addr, "controller mode");
     isengard_controller::run_controller(isengard_controller::ControllerOptions {
         listen: listen_addr,
         state_dir,
         config: serde_json::Value::Object(Default::default()),
+        dns_zone,
+        dns_listen: dns_listen_addr,
     })
     .await
 }
