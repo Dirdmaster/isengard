@@ -4,6 +4,18 @@
 >
 > **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
 
+## Production install (one command)
+
+For a fresh server: install the full stack (controller + agent + shared proxy network) with one command. No source checkout, no Rust toolchain, no Justfile. Pulls signed images from GHCR and writes config under `/etc/isengard/`.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
+```
+
+The first run writes `/etc/isengard/isengard.env` (a commented template) and exits. Edit the file, set the secrets it asks for, and re-run the same command. See [`install/README.md`](./install/README.md) for the full guide, env reference, and uninstall.
+
+The recipe in [`docker/`](./docker/) remains the dev story: source build, named volumes, `just dev`. Use `install/` for any host you want to keep running.
+
 ## Rust rewrite quick start (controller + agent)
 
 The rewrite splits Isengard into a **controller** (one per fleet, exposes a dashboard + gRPC) and **agents** (one per Docker host, talks to the controller over mTLS). All auth is bootstrapped from short-lived enrollment tokens minted by the controller; there is no long-lived shared secret.
