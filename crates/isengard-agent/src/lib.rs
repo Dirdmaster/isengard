@@ -8,6 +8,7 @@ pub mod cert_store;
 pub mod container_snapshot;
 pub mod deployment;
 pub mod enroll;
+pub mod enroll_diagnosis;
 pub mod events;
 pub mod labels;
 pub mod logs;
