@@ -6,6 +6,7 @@ mod service;
 pub mod auth;
 pub mod bus;
 pub mod ca;
+pub mod compose_broker;
 pub mod disconnect_monitor;
 pub mod dns;
 pub mod enrollment;
@@ -65,6 +66,10 @@ pub struct ControllerHandles {
     /// each involved host. Inbound `AgentMessage::LogChunk` frames are
     /// routed through this fanout to the matching WebSocket task.
     pub log_fanout: Arc<log_fanout::LogFanout>,
+    /// v0.3d: pending `WriteCompose` request resolver. Dashboard
+    /// registers a oneshot keyed by request_id; the gRPC handler
+    /// resolves it when the matching `WriteComposeAck` lands.
+    pub compose_broker: Arc<compose_broker::ComposeBroker>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -174,6 +179,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // -- plugin init/start ----------------------------------------------------
     // Load + start controller-side plugins (notifier, etc).
     let log_fanout = log_fanout::LogFanout::new();
+    let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
         journal: journal.clone(),
@@ -183,6 +189,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         revocation: revocation.clone(),
         db_path: db_path.clone(),
         log_fanout: log_fanout.clone(),
+        compose_broker: compose_broker.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -345,6 +352,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         enrollment,
         revocation,
         log_fanout,
+        compose_broker.clone(),
     ));
 
     // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.

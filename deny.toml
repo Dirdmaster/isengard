@@ -51,6 +51,14 @@ ignore = [
     # Revisit alongside the MSRV bump that lets us move to 0.26.x.
     # https://rustsec.org/advisories/RUSTSEC-2026-0118
     "RUSTSEC-2026-0118",
+
+    # instant 0.1.13 is unmaintained (author recommends web-time). Pulled in
+    # transitively via notify-types 1.0 -> notify 7.0 (v0.3d compose watcher).
+    # No safe upgrade until notify 9.x leaves rc; we use it on the host (not
+    # the browser) so the wasm-targeted advice does not apply. Revisit when
+    # notify 9.0 stable lands.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0384
+    "RUSTSEC-2024-0384",
 ]
 
 [licenses]

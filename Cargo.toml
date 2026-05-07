@@ -90,6 +90,13 @@ serde_yaml = "0.9"
 
 # TOML for sibling meta.toml records next to imported compose.yaml.
 toml = "0.8"
+
+# v0.3d: filesystem watcher (inotify on Linux, FSEvents on macOS) for the
+# agent's compose-as-truth reconcile loop.
+notify = "7"
+
+# v0.3d: text diff for `isd diff` and the dashboard conflict banner.
+similar = "2.6"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "x509-parser", "ring"] }
 rand = "0.8"
 x509-parser = "0.16"

@@ -5,8 +5,11 @@ pub mod agent_state;
 pub mod backoff;
 pub mod cert_renewal;
 pub mod cert_store;
+pub mod compose_apply;
 pub mod compose_export;
 pub mod compose_import;
+pub mod compose_reconciler;
+pub mod compose_watcher;
 pub mod compose_writer;
 pub mod container_snapshot;
 pub mod deployment;
@@ -415,9 +418,100 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             docker.clone(),
             agent_msg_tx.clone(),
             agent_id.clone(),
-            import_root,
+            import_root.clone(),
             compose_import::DEFAULT_IMPORT_INTERVAL,
         );
+
+        // v0.3d compose-as-truth: watch the same root for operator
+        // edits (vim, git pull, dashboard PUT). Each debounced change
+        // drives a reconcile sweep against the running containers.
+        let watcher_docker = docker.clone();
+        let watcher_root = import_root.clone();
+        match compose_watcher::spawn(watcher_root.clone()) {
+            Ok((mut rx, watcher)) => {
+                // Hold the watcher Arc so it isn't dropped (which would
+                // stop the underlying inotify/FSEvents subscription).
+                tokio::spawn(async move {
+                    let _watcher_keepalive = watcher;
+                    while let Some(evt) = rx.recv().await {
+                        let yaml = match std::fs::read_to_string(&evt.path) {
+                            Ok(y) => y,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    path = %evt.path.display(),
+                                    "compose_watcher: read after settle failed",
+                                );
+                                continue;
+                            }
+                        };
+                        let new_sha = compose_writer::sha256_hex(&yaml);
+                        // Skip reconcile when the on-disk hash matches
+                        // the agent's own last_applied_hash (we caused
+                        // this event ourselves via write_compose). The
+                        // first watcher event after our own write is
+                        // therefore a noop, which keeps recreate from
+                        // looping on its own writes.
+                        let stack_dir = watcher_root.join(&evt.stack_name);
+                        if compose_writer::matches_last_applied(&stack_dir, &new_sha)
+                            .unwrap_or(false)
+                        {
+                            tracing::debug!(
+                                stack = %evt.stack_name,
+                                "compose_watcher: change matches last_applied, skipping reconcile",
+                            );
+                            continue;
+                        }
+                        tracing::info!(
+                            stack = %evt.stack_name,
+                            sha256 = %new_sha,
+                            "compose_watcher: file changed, starting reconcile",
+                        );
+                        match compose_apply::reconcile_stack(
+                            watcher_docker.as_ref(),
+                            &evt.stack_name,
+                            &yaml,
+                        )
+                        .await
+                        {
+                            Ok((plan, outcomes)) => {
+                                let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
+                                if plan.is_noop() {
+                                    tracing::debug!(
+                                        stack = %evt.stack_name,
+                                        "compose_watcher: reconcile noop",
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        stack = %evt.stack_name,
+                                        ops = plan.ops.len(),
+                                        failed = failed,
+                                        "compose_watcher: reconcile applied",
+                                    );
+                                }
+                                if failed == 0 {
+                                    if let Err(e) =
+                                        compose_writer::record_last_applied(&stack_dir, &new_sha)
+                                    {
+                                        tracing::warn!(
+                                            error = %e,
+                                            stack = %evt.stack_name,
+                                            "compose_watcher: record_last_applied failed",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                stack = %evt.stack_name,
+                                "compose_watcher: reconcile failed",
+                            ),
+                        }
+                    }
+                });
+            }
+            Err(e) => warn!(error = %e, "compose_watcher: failed to spawn (continuing without)"),
+        }
     }
 
     // -- mDNS responder (v0.3a). The advertise IP is the chosen interface's
@@ -463,6 +557,15 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_supervisor = supervisor_for_sync.clone();
     let sync_log_source = log_source.clone();
     let sync_mdns = mdns_handle.clone();
+    // v0.3d: surface the compose root + host id to the sync loop so it
+    // can service `WriteCompose` ControllerMessages from the dashboard.
+    let sync_compose_ctx = Some(sync::ComposeContext {
+        root: std::path::PathBuf::from(
+            std::env::var("ISENGARD_COMPOSE_IMPORT_ROOT")
+                .unwrap_or_else(|_| compose_import::DEFAULT_IMPORT_ROOT.to_string()),
+        ),
+        host_id: agent_id.clone(),
+    });
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_endpoint,
@@ -475,6 +578,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_supervisor,
             sync_log_source,
             sync_mdns,
+            sync_compose_ctx,
         )
         .await
     };

@@ -36,6 +36,16 @@ use crate::proxy::ProxyState;
 /// skips advertise calls.
 pub type MdnsHandle = Arc<tokio::sync::Mutex<MdnsResponder>>;
 
+/// v0.3d compose context: lets the sync loop service `WriteCompose`
+/// ControllerMessages by writing to the agent's compose root and replying
+/// with a `WriteComposeAck`. `None` makes the agent ignore WriteCompose
+/// messages with a warn (used in tests / docker-less envs).
+#[derive(Clone)]
+pub struct ComposeContext {
+    pub root: std::path::PathBuf,
+    pub host_id: String,
+}
+
 /// Phase 13B: in-process registry of active log subscriptions on this agent.
 /// Each entry holds a `watch::Sender<bool>` whose receiver the corresponding
 /// `run_tail` task selects on; flipping it to `true` cancels the tail.
@@ -57,7 +67,8 @@ type LogSubs =
         proxy_state,
         supervisor,
         log_source,
-        mdns
+        mdns,
+        compose_ctx
     ),
     fields(agent_id = %agent_id)
 )]
@@ -73,6 +84,7 @@ pub async fn run_sync_loop<S: LogSource>(
     supervisor: Option<Arc<DeploymentSupervisor>>,
     log_source: Option<Arc<S>>,
     mdns: Option<MdnsHandle>,
+    compose_ctx: Option<ComposeContext>,
 ) -> Result<()> {
     // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
@@ -151,6 +163,7 @@ pub async fn run_sync_loop<S: LogSource>(
     let read_log_source = log_source.clone();
     let read_log_tx = tx.clone();
     let read_mdns = mdns.clone();
+    let read_compose_ctx = compose_ctx.clone();
     let log_subs: LogSubs = Arc::new(tokio::sync::Mutex::new(Default::default()));
     let read_log_subs = log_subs.clone();
     let mut read_task = tokio::spawn(async move {
@@ -255,6 +268,73 @@ pub async fn run_sync_loop<S: LogSource>(
                     if let Some(tx) = subs.remove(&stop.subscription_id) {
                         let _ = tx.send(true);
                     }
+                }
+                Some(isengard_proto::pb::controller_message::Payload::WriteCompose(req)) => {
+                    let Some(ctx) = read_compose_ctx.as_ref() else {
+                        warn!(
+                            request_id = %req.request_id,
+                            stack = %req.stack_name,
+                            "WriteCompose received but no ComposeContext (no docker)",
+                        );
+                        let ack = isengard_proto::pb::WriteComposeAck {
+                            request_id: req.request_id.clone(),
+                            kind: isengard_proto::pb::write_compose_ack::Kind::Error as i32,
+                            error: "agent has no compose context".into(),
+                            ..Default::default()
+                        };
+                        let _ = read_log_tx
+                            .send(AgentMessage {
+                                payload: Some(agent_message::Payload::WriteComposeAck(ack)),
+                            })
+                            .await;
+                        continue;
+                    };
+                    let stack_dir = ctx.root.join(&req.stack_name);
+                    let outcome = crate::compose_writer::apply_controller_write(
+                        &stack_dir,
+                        &req.compose_yaml,
+                        &req.expected_sha256,
+                        &ctx.host_id,
+                        req.force,
+                    );
+                    let ack = match outcome {
+                        crate::compose_writer::ApplyWriteOutcome::Ok { written_sha256 } => {
+                            isengard_proto::pb::WriteComposeAck {
+                                request_id: req.request_id.clone(),
+                                kind: isengard_proto::pb::write_compose_ack::Kind::Ok as i32,
+                                error: String::new(),
+                                current_sha256: String::new(),
+                                current_yaml: String::new(),
+                                written_sha256,
+                            }
+                        }
+                        crate::compose_writer::ApplyWriteOutcome::Conflict {
+                            current_sha256,
+                            current_yaml,
+                        } => isengard_proto::pb::WriteComposeAck {
+                            request_id: req.request_id.clone(),
+                            kind: isengard_proto::pb::write_compose_ack::Kind::Conflict as i32,
+                            error: "on-disk hash mismatch".into(),
+                            current_sha256,
+                            current_yaml,
+                            written_sha256: String::new(),
+                        },
+                        crate::compose_writer::ApplyWriteOutcome::Error(e) => {
+                            isengard_proto::pb::WriteComposeAck {
+                                request_id: req.request_id.clone(),
+                                kind: isengard_proto::pb::write_compose_ack::Kind::Error as i32,
+                                error: e,
+                                current_sha256: String::new(),
+                                current_yaml: String::new(),
+                                written_sha256: String::new(),
+                            }
+                        }
+                    };
+                    let _ = read_log_tx
+                        .send(AgentMessage {
+                            payload: Some(agent_message::Payload::WriteComposeAck(ack)),
+                        })
+                        .await;
                 }
                 _ => {
                     warn!(?msg.payload, "unexpected ControllerMessage payload");
@@ -365,7 +445,8 @@ pub async fn run_sync_loop<S: LogSource>(
         proxy_state,
         supervisor,
         log_source,
-        mdns
+        mdns,
+        compose_ctx
     ),
     fields(agent_id = %agent_id)
 )]
@@ -381,6 +462,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
     supervisor: Option<Arc<DeploymentSupervisor>>,
     log_source: Option<Arc<S>>,
     mdns: Option<MdnsHandle>,
+    compose_ctx: Option<ComposeContext>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -418,6 +500,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
             supervisor.clone(),
             log_source.clone(),
             mdns.clone(),
+            compose_ctx.clone(),
         )
         .await;
 
