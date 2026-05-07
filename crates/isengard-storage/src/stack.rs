@@ -66,6 +66,17 @@ pub struct InsertStack {
     pub source: StackSource,
 }
 
+/// v0.3c compose import: snapshot of the YAML stored on a stack row.
+/// Returned by [`crate::Inventory::get_stack_compose`]; surfaced as the
+/// body of `GET /api/v1/stacks/<id>/compose`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackComposeRow {
+    pub yaml: String,
+    pub sha256: String,
+    /// RFC3339 string: when the agent wrote this YAML to disk.
+    pub imported_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

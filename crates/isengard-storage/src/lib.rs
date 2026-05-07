@@ -56,7 +56,7 @@ pub use routing_rule::{
 pub use routing_rule_override::RoutingRuleOverride;
 pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
-pub use stack::{InsertStack, Stack, StackId, StackSource};
+pub use stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
 pub use webhook::{
     DeliverySource, DeliveryStatus, InsertDelivery, InsertGateDelivery, InsertLifecycleDelivery,

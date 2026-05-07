@@ -30,6 +30,9 @@ pingora-boringssl = "0.8"
 rcgen = "0.13"
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+toml.workspace = true
 tokio = { workspace = true }
 tokio-stream.workspace = true
 tokio-util = { workspace = true }

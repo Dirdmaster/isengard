@@ -29,6 +29,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/hosts/{id}/actions/force-update", post(force_update_host))
         .route("/stacks", get(list_stacks))
         .route("/stacks/{id}", get(get_stack))
+        .route("/stacks/{id}/compose", get(get_stack_compose))
         .route(
             "/stacks/{id}/actions/force-update",
             post(force_update_stack),
@@ -534,6 +535,44 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
         Ok(Some(s)) => Json(StackDto::from(s)).into_response(),
         Ok(None) => json_err(StatusCode::NOT_FOUND, "stack not found"),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}")),
+    }
+}
+
+/// `GET /api/v1/stacks/:id/compose` (v0.3c).
+///
+/// Returns the most recent `compose.yaml` the agent reverse-engineered
+/// from the running containers, plus its sha256 and import timestamp so
+/// the dashboard can show "imported at X" without a separate call.
+///
+/// Status codes:
+/// - `200`: stack exists and the agent has reported a compose.yaml.
+/// - `404`: stack id doesn't exist.
+/// - `204`: stack exists but no import has been recorded yet (the agent
+///   hasn't run a sweep on this host since v0.3c shipped, or the stack
+///   isn't `isengard.enable=true`).
+async fn get_stack_compose(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}")),
+    };
+    match handles.inventory.get_stack_compose(stack.id).await {
+        Ok(Some(row)) => Json(serde_json::json!({
+            "stack_id": stack.id,
+            "stack_name": stack.name,
+            "compose_yaml": row.yaml,
+            "sha256": row.sha256,
+            "imported_at": row.imported_at,
+        }))
+        .into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("get_stack_compose: {e}"),
+        ),
     }
 }
 

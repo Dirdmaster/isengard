@@ -31,3 +31,7 @@ services:
       target: agent
     image: iso-agent:dev
     platform: ""
+    # v0.3c compose import: inherit the bind-mounts from compose.yaml.
+    # `/etc/isengard/stacks` carries the agent's reverse-engineered compose
+    # YAML across container restarts; in dev that's a host directory so you
+    # can `cat /etc/isengard/stacks/hello/compose.yaml` to inspect the output.

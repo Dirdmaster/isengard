@@ -403,6 +403,40 @@ impl Controller for ControllerService {
                         // client already disconnected).
                         let _ = log_fanout.route(chunk).await;
                     }
+                    Some(isengard_proto::pb::agent_message::Payload::StackComposeReport(
+                        report,
+                    )) => {
+                        // v0.3c: persist the agent's reverse-engineered
+                        // compose.yaml so `GET /api/v1/stacks/<id>/compose`
+                        // can serve it without round-tripping to the host.
+                        match inventory
+                            .set_stack_compose(
+                                host_id,
+                                &report.stack_name,
+                                &report.compose_yaml,
+                                &report.sha256,
+                                &report.imported_at,
+                            )
+                            .await
+                        {
+                            Ok(true) => tracing::debug!(
+                                agent = %agent_hostname,
+                                stack = %report.stack_name,
+                                "compose: persisted import",
+                            ),
+                            Ok(false) => tracing::warn!(
+                                agent = %agent_hostname,
+                                stack = %report.stack_name,
+                                "compose: report for unknown stack, skipping",
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                stack = %report.stack_name,
+                                "compose: persist failed",
+                            ),
+                        }
+                    }
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(
                         ev,
                     )) => {

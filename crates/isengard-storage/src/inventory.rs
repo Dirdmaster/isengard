@@ -12,7 +12,7 @@ use crate::host::{EnrollHost, Host, HostId};
 use crate::host_action::{HostAction, HostActionId, HostActionKind};
 use crate::service::{InsertService, Service, ServiceId, ServiceState};
 use crate::setting::Setting;
-use crate::stack::{InsertStack, Stack, StackId, StackSource};
+use crate::stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};
 
 /// Wraps a `sqlx::SqlitePool` opened against a single `.db` file.
 /// Cheap to clone (the pool is `Arc`-backed inside).
@@ -201,6 +201,61 @@ impl Inventory {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// v0.3c compose import: persist the YAML the agent reverse-engineers
+    /// from the running containers in `stack`. `imported_at` is RFC3339.
+    /// Idempotent: callers may invoke with the same payload on every
+    /// reconnect without churning the row.
+    pub async fn set_stack_compose(
+        &self,
+        host_id: HostId,
+        stack_name: &str,
+        compose_yaml: &str,
+        sha256: &str,
+        imported_at: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE stacks
+               SET compose_yaml         = ?,
+                   compose_sha256       = ?,
+                   compose_imported_at  = ?
+             WHERE host_id = ? AND name = ?
+            "#,
+        )
+        .bind(compose_yaml)
+        .bind(sha256)
+        .bind(imported_at)
+        .bind(host_id.to_bytes().as_slice())
+        .bind(stack_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// v0.3c compose import: read the stored YAML for a stack. Returns
+    /// `Ok(None)` if the row exists but no import has been recorded yet.
+    pub async fn get_stack_compose(&self, id: StackId) -> Result<Option<StackComposeRow>> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT compose_yaml, compose_sha256, compose_imported_at FROM stacks WHERE id = ?",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let yaml: Option<String> = row.try_get("compose_yaml")?;
+        let sha: Option<String> = row.try_get("compose_sha256")?;
+        let imported_at: Option<String> = row.try_get("compose_imported_at")?;
+        match (yaml, sha, imported_at) {
+            (Some(yaml), Some(sha256), Some(imported_at)) => Ok(Some(StackComposeRow {
+                yaml,
+                sha256,
+                imported_at,
+            })),
+            _ => Ok(None),
+        }
     }
 
     pub async fn set_host_fleet(&self, id: HostId, fleet: &str) -> Result<bool> {

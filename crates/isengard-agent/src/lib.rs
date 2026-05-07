@@ -5,6 +5,9 @@ pub mod agent_state;
 pub mod backoff;
 pub mod cert_renewal;
 pub mod cert_store;
+pub mod compose_export;
+pub mod compose_import;
+pub mod compose_writer;
 pub mod container_snapshot;
 pub mod deployment;
 pub mod enroll;
@@ -398,6 +401,23 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                 tracing::error!(error = %e, "labels: watcher exited");
             }
         });
+
+        // v0.3c compose import: sweep `isengard.enable=true` stacks and
+        // write a reverse-engineered `compose.yaml` to disk + report it
+        // to the controller. Mounted at /etc/isengard/stacks via the
+        // bind in docker/compose.yaml so the file persists across
+        // container restarts.
+        let import_root = std::path::PathBuf::from(
+            std::env::var("ISENGARD_COMPOSE_IMPORT_ROOT")
+                .unwrap_or_else(|_| compose_import::DEFAULT_IMPORT_ROOT.to_string()),
+        );
+        compose_import::spawn(
+            docker.clone(),
+            agent_msg_tx.clone(),
+            agent_id.clone(),
+            import_root,
+            compose_import::DEFAULT_IMPORT_INTERVAL,
+        );
     }
 
     // -- mDNS responder (v0.3a). The advertise IP is the chosen interface's
