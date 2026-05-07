@@ -8,6 +8,7 @@ pub mod bus;
 pub mod ca;
 pub mod disconnect_monitor;
 pub mod enrollment;
+pub mod hook_ingest;
 pub mod log_fanout;
 pub mod pending_actions;
 pub mod plugin_host;
@@ -53,6 +54,10 @@ pub struct ControllerHandles {
     /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
     /// `revoke_agent` (which both writes the DB row and updates this set).
     pub revocation: RevocationSet,
+    /// Phase 11a: on-disk path to the controller's SQLite file. Surfaced so
+    /// the backup plugin can open its own pool for WAL checkpoint + file
+    /// copy without needing a public `Inventory::pool()` getter.
+    pub db_path: std::path::PathBuf,
     /// Phase 13B: subscription registry for log streaming. Dashboard's
     /// WebSocket handler `register`s a fresh subscription, then sends
     /// `StartLogStream` ControllerMessages via `routing.register_sender` to
@@ -139,6 +144,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
     let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
+    // Phase 12b: lifecycle-hook label ingest runs in parallel with policy_ingest.
+    let hook_ingest = Arc::new(hook_ingest::HookLabelIngest::new(inventory.clone()));
 
     // Phase 14: internal CA + enrollment service. CA is loaded-or-initialized
     // from the `ca` row (single-row table); the EnrollmentService owns the
@@ -166,6 +173,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         routing: routing.clone(),
         enrollment: enrollment.clone(),
         revocation: revocation.clone(),
+        db_path: db_path.clone(),
         log_fanout: log_fanout.clone(),
     });
     let mut controller_plugins =
@@ -293,6 +301,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         bus,
         routing.clone(),
         policy_ingest.clone(),
+        hook_ingest.clone(),
         ca,
         enrollment,
         revocation,

@@ -8,10 +8,12 @@
 //! scope". The implicit root resolved value (when no rows exist) is exposed as
 //! the [`defaults`] module's constants.
 
+pub mod gate;
 pub mod labels;
 pub mod resolve;
 pub mod window;
 
+pub use gate::{ExternalGate, GateDecision, GatePayload, GateResponse};
 pub use labels::{ParseLabelError, has_any_policy_label, parse_policy_labels};
 pub use resolve::{
     PolicyContext, PolicyOrigin, ResolvedPolicy, ResolvedProvenance, resolve_policy,
@@ -168,6 +170,11 @@ pub struct Policy {
     /// updates may apply at any time.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub window: Option<MaintenanceWindow>,
+    /// Phase 12c: external-action gate. `None` means "no gate"; the
+    /// updater applies the existing post-policy logic. `Some(...)` makes
+    /// the updater consult the gate URL before any update.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub external_gate: Option<ExternalGate>,
 }
 
 /// Resolver fall-back constants. These are the values the resolver uses for
@@ -226,10 +233,38 @@ mod tests {
             on_failure: Some(FailureHandling::Keep),
             approver_channel: Some("ops".to_string()),
             window: None,
+            external_gate: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Policy = serde_json::from_str(&s).unwrap();
         assert_eq!(p, back);
+    }
+
+    /// Phase 12c: external_gate round-trips through JSON.
+    #[test]
+    fn policy_with_external_gate_round_trips() {
+        let p = Policy {
+            external_gate: Some(ExternalGate {
+                url: "https://gate.example.com/decide".to_string(),
+                secret: Some("shh".to_string()),
+                timeout_secs: 30,
+            }),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"external_gate\""));
+        assert!(s.contains("\"timeout_secs\":30"));
+        let back: Policy = serde_json::from_str(&s).unwrap();
+        assert_eq!(p, back);
+    }
+
+    /// Backwards-compat: rows persisted before Phase 12c (no `external_gate`
+    /// key) decode cleanly with `external_gate = None`.
+    #[test]
+    fn policy_without_external_gate_field_deserializes() {
+        let json = r#"{"strategy":"pinned","gate":"auto"}"#;
+        let p: Policy = serde_json::from_str(json).unwrap();
+        assert!(p.external_gate.is_none());
     }
 
     #[test]

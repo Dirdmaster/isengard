@@ -77,6 +77,28 @@ impl ImageRef {
             tag = self.tag
         )
     }
+
+    /// Tags-list URL for a GET request: `https://<registry>/v2/<repo>/tags/list`.
+    /// `docker.io` is rewritten to `registry-1.docker.io`. Used by Phase 9e
+    /// (`Minor` strategy) to enumerate semver candidates on the registry.
+    pub fn tags_list_url(&self) -> String {
+        let host = if self.registry == "docker.io" {
+            "registry-1.docker.io"
+        } else {
+            &self.registry
+        };
+        format!("https://{host}/v2/{repo}/tags/list", repo = self.repository,)
+    }
+
+    /// Returns a copy of this ref with the tag swapped to `new_tag`.
+    /// Convenience for the Phase 9e bumped-tag path.
+    pub fn with_tag(&self, new_tag: impl Into<String>) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            repository: self.repository.clone(),
+            tag: new_tag.into(),
+        }
+    }
 }
 
 impl fmt::Display for ImageRef {
@@ -152,5 +174,29 @@ mod tests {
     fn display_round_trips() {
         let r = ImageRef::parse("ghcr.io/foo/bar:v2").unwrap();
         assert_eq!(r.to_string(), "ghcr.io/foo/bar:v2");
+    }
+
+    #[test]
+    fn tags_list_url_rewrites_dockerhub() {
+        let r = ImageRef::parse("nginx:1.25").unwrap();
+        assert_eq!(
+            r.tags_list_url(),
+            "https://registry-1.docker.io/v2/library/nginx/tags/list"
+        );
+    }
+
+    #[test]
+    fn tags_list_url_passes_other_registries_through() {
+        let r = ImageRef::parse("ghcr.io/foo/bar:v2").unwrap();
+        assert_eq!(r.tags_list_url(), "https://ghcr.io/v2/foo/bar/tags/list");
+    }
+
+    #[test]
+    fn with_tag_swaps_only_the_tag() {
+        let r = ImageRef::parse("ghcr.io/foo/bar:1.2.3").unwrap();
+        let bumped = r.with_tag("1.3.0");
+        assert_eq!(bumped.registry, "ghcr.io");
+        assert_eq!(bumped.repository, "foo/bar");
+        assert_eq!(bumped.tag, "1.3.0");
     }
 }

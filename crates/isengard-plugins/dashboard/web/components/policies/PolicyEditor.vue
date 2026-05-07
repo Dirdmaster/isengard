@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   scopeKeyForUrl,
+  type ExternalGate,
   type FailureHandling,
   type MaintenanceWindow,
   type PolicyBody,
@@ -231,6 +232,13 @@ const valueApproverChannel = ref<string>(
   props.existing?.body.approver_channel ?? '',
 )
 
+// ---- External gate state (Phase 12c, #55) ---------------------------------
+
+const overrideExternalGate = ref<boolean>(props.existing?.body.external_gate != null)
+const valueGateUrl = ref<string>(props.existing?.body.external_gate?.url ?? '')
+const valueGateSecret = ref<string>(props.existing?.body.external_gate?.secret ?? '')
+const valueGateTimeout = ref<number>(props.existing?.body.external_gate?.timeout_secs ?? 10)
+
 // ---- Window state ----------------------------------------------------------
 
 const overrideWindow = ref<boolean>(props.existing?.body.window != null)
@@ -346,7 +354,8 @@ const hasAnyOverride = computed<boolean>(() =>
     || overridePausedUntil.value
     || overrideOnFailure.value
     || overrideApproverChannel.value
-    || overrideWindow.value,
+    || overrideWindow.value
+    || overrideExternalGate.value,
 )
 
 const canSave = computed<boolean>(() => {
@@ -387,6 +396,15 @@ function buildBody(): PolicyBody {
       // payload tidy; the server treats missing tz as UTC.
       if (tz !== 'UTC') w.timezone = tz
       body.window = w
+    }
+  }
+  if (overrideExternalGate.value) {
+    const url = valueGateUrl.value.trim()
+    if (url !== '') {
+      const g: ExternalGate = { url, timeout_secs: valueGateTimeout.value }
+      const sec = valueGateSecret.value.trim()
+      if (sec !== '') g.secret = sec
+      body.external_gate = g
     }
   }
   return body
@@ -854,6 +872,77 @@ const scopeLabel = computed<string>(() => {
         class="text-[10px] text-iso-text-muted"
       >
         Notifier channel id (informational; wired in Phase 9f).
+      </p>
+    </div>
+
+    <!-- Field: external_gate (Phase 12c, #55) ----------------------------- -->
+    <div class="flex flex-col gap-1.5">
+      <div class="flex items-center justify-between">
+        <Label
+          for="ext_gate_url"
+          class="text-[11px] uppercase tracking-wider text-iso-text-secondary"
+        >
+          External gate
+        </Label>
+        <label class="flex items-center gap-1.5 text-[11px] text-iso-text-muted cursor-pointer">
+          <input
+            v-model="overrideExternalGate"
+            type="checkbox"
+            class="accent-iso-info"
+          />
+          Override at this level
+        </label>
+      </div>
+      <div
+        class="flex flex-col gap-2 px-2 py-2 rounded-iso-sm border border-iso-border-subtle bg-iso-bg-elevated"
+        :class="overrideExternalGate ? '' : 'opacity-60'"
+      >
+        <Input
+          id="ext_gate_url"
+          v-model="valueGateUrl"
+          placeholder="https://gate.example.com/decide"
+          :disabled="!overrideExternalGate"
+          class="font-mono bg-iso-bg-base border-iso-border-subtle text-sm"
+        />
+        <p class="text-[10px] text-iso-text-muted">
+          POSTed before any update; response decides approve / reject / defer / manual.
+        </p>
+        <Input
+          id="ext_gate_secret"
+          v-model="valueGateSecret"
+          placeholder="Optional HMAC secret"
+          :disabled="!overrideExternalGate"
+          class="font-mono bg-iso-bg-base border-iso-border-subtle text-sm"
+        />
+        <div class="flex items-center gap-2">
+          <Label
+            for="ext_gate_timeout"
+            class="text-[10px] uppercase tracking-wider text-iso-text-faint"
+          >
+            Timeout (s)
+          </Label>
+          <input
+            id="ext_gate_timeout"
+            v-model.number="valueGateTimeout"
+            type="number"
+            min="1"
+            max="300"
+            :disabled="!overrideExternalGate"
+            class="font-mono w-20 text-sm bg-iso-bg-base border border-iso-border-subtle rounded-iso-sm px-2 py-1 text-iso-text-primary disabled:opacity-50"
+          />
+        </div>
+      </div>
+      <p
+        v-if="!overrideExternalGate"
+        class="text-[10px] text-iso-text-muted"
+      >
+        No gate configured. Updates apply per the resolved policy without consulting an external endpoint.
+      </p>
+      <p
+        v-else
+        class="text-[10px] text-iso-text-muted"
+      >
+        Receiver must respond with JSON: { decision: "approve" | "reject" | "defer" | "manual" }.
       </p>
     </div>
 

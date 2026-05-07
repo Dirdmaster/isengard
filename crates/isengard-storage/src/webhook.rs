@@ -12,6 +12,49 @@ use crate::error::{Error, Result};
 /// Wildcard token in `event_kinds` that matches every event.
 pub const KIND_WILDCARD: &str = "*";
 
+/// Where a `webhook_deliveries` row originated. Phase 12b/c (#54 #55).
+///
+/// `Webhook` rows reference a `webhooks(id)` row (the 12a shape). `Lifecycle`
+/// and `Gate` rows carry their URL+secret inline because there is no parent
+/// row: lifecycle hooks are configured per-container via Docker labels, and
+/// gates are configured per-policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverySource {
+    /// 12a outbound webhook with a parent `webhooks` row.
+    Webhook,
+    /// 12b container lifecycle hook (`isengard.hooks.*` labels).
+    Lifecycle,
+    /// 12c external-action gate evaluation (sync POST + decision parse).
+    Gate,
+}
+
+impl DeliverySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Webhook => "webhook",
+            Self::Lifecycle => "lifecycle",
+            Self::Gate => "gate",
+        }
+    }
+}
+
+impl FromStr for DeliverySource {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "webhook" => Self::Webhook,
+            "lifecycle" => Self::Lifecycle,
+            "gate" => Self::Gate,
+            other => {
+                return Err(Error::Decode {
+                    reason: format!("unknown delivery source: {other}"),
+                });
+            }
+        })
+    }
+}
+
 /// State machine for `webhook_deliveries.status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,10 +129,23 @@ pub struct UpdateWebhook {
 }
 
 /// A row from the `webhook_deliveries` table.
+///
+/// Post-Phase-12b/c the table holds three kinds of deliveries (see
+/// [`DeliverySource`]). For `Webhook` rows the URL+secret are looked up via
+/// `webhook_id`; for `Lifecycle` and `Gate` rows they are stored on the row
+/// itself in `url` + `secret`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookDelivery {
     pub id: i64,
-    pub webhook_id: i64,
+    /// `Some` for `source=webhook` rows, `None` for lifecycle / gate rows.
+    pub webhook_id: Option<i64>,
+    pub source: DeliverySource,
+    /// Inline destination URL. Used by lifecycle / gate rows; `None` for
+    /// `webhook` rows (worker resolves via `webhook_id`).
+    pub url: Option<String>,
+    /// Inline HMAC secret. Used by lifecycle / gate rows; `None` for
+    /// `webhook` rows.
+    pub secret: Option<String>,
     pub event_kind: String,
     pub payload_json: String,
     pub status: DeliveryStatus,
@@ -100,10 +156,28 @@ pub struct WebhookDelivery {
     pub created_at: DateTime<Utc>,
 }
 
-/// Insert payload for a delivery row.
+/// Insert payload for a `source=webhook` delivery row (Phase 12a path).
 #[derive(Debug, Clone)]
 pub struct InsertDelivery {
     pub webhook_id: i64,
+    pub event_kind: String,
+    pub payload_json: String,
+}
+
+/// Insert payload for a `source=lifecycle` delivery row (Phase 12b).
+#[derive(Debug, Clone)]
+pub struct InsertLifecycleDelivery {
+    pub url: String,
+    pub secret: Option<String>,
+    pub event_kind: String,
+    pub payload_json: String,
+}
+
+/// Insert payload for a `source=gate` delivery row (Phase 12c).
+#[derive(Debug, Clone)]
+pub struct InsertGateDelivery {
+    pub url: String,
+    pub secret: Option<String>,
     pub event_kind: String,
     pub payload_json: String,
 }
@@ -207,8 +281,9 @@ impl crate::inventory::Inventory {
     pub async fn insert_delivery(&self, ins: InsertDelivery) -> Result<WebhookDelivery> {
         let res = sqlx::query(
             r#"
-            INSERT INTO webhook_deliveries (webhook_id, event_kind, payload_json, status)
-            VALUES (?, ?, ?, 'pending')
+            INSERT INTO webhook_deliveries
+              (webhook_id, source, event_kind, payload_json, status)
+            VALUES (?, 'webhook', ?, ?, 'pending')
             "#,
         )
         .bind(ins.webhook_id)
@@ -223,11 +298,63 @@ impl crate::inventory::Inventory {
         })
     }
 
+    /// Phase 12b: insert a delivery row for a container lifecycle hook.
+    /// `webhook_id` is left NULL; `url` + `secret` carry the destination
+    /// directly so the worker can dispatch without a parent row.
+    pub async fn insert_lifecycle_delivery(
+        &self,
+        ins: InsertLifecycleDelivery,
+    ) -> Result<WebhookDelivery> {
+        let res = sqlx::query(
+            r#"
+            INSERT INTO webhook_deliveries
+              (webhook_id, source, url, secret, event_kind, payload_json, status)
+            VALUES (NULL, 'lifecycle', ?, ?, ?, ?, 'pending')
+            "#,
+        )
+        .bind(&ins.url)
+        .bind(ins.secret.as_deref())
+        .bind(&ins.event_kind)
+        .bind(&ins.payload_json)
+        .execute(self.pool())
+        .await?;
+
+        let id = res.last_insert_rowid();
+        self.get_delivery(id).await?.ok_or_else(|| Error::Decode {
+            reason: format!("lifecycle delivery id={id} not found after insert"),
+        })
+    }
+
+    /// Phase 12c: insert a delivery row representing one external-gate
+    /// evaluation. The row is the audit trail; the synchronous evaluator
+    /// stamps the outcome via `mark_delivery_*` paths just like webhook rows.
+    pub async fn insert_gate_delivery(&self, ins: InsertGateDelivery) -> Result<WebhookDelivery> {
+        let res = sqlx::query(
+            r#"
+            INSERT INTO webhook_deliveries
+              (webhook_id, source, url, secret, event_kind, payload_json, status)
+            VALUES (NULL, 'gate', ?, ?, ?, ?, 'pending')
+            "#,
+        )
+        .bind(&ins.url)
+        .bind(ins.secret.as_deref())
+        .bind(&ins.event_kind)
+        .bind(&ins.payload_json)
+        .execute(self.pool())
+        .await?;
+
+        let id = res.last_insert_rowid();
+        self.get_delivery(id).await?.ok_or_else(|| Error::Decode {
+            reason: format!("gate delivery id={id} not found after insert"),
+        })
+    }
+
     pub async fn get_delivery(&self, id: i64) -> Result<Option<WebhookDelivery>> {
         let row = sqlx::query(
             r#"
-            SELECT id, webhook_id, event_kind, payload_json, status, attempts,
-                   last_attempt_at, last_error, next_retry_at, created_at
+            SELECT id, webhook_id, source, url, secret, event_kind, payload_json,
+                   status, attempts, last_attempt_at, last_error,
+                   next_retry_at, created_at
             FROM webhook_deliveries WHERE id = ?
             "#,
         )
@@ -247,8 +374,9 @@ impl crate::inventory::Inventory {
             Some(s) => {
                 sqlx::query(
                     r#"
-                    SELECT id, webhook_id, event_kind, payload_json, status, attempts,
-                           last_attempt_at, last_error, next_retry_at, created_at
+                    SELECT id, webhook_id, source, url, secret, event_kind, payload_json,
+                           status, attempts, last_attempt_at, last_error,
+                           next_retry_at, created_at
                     FROM webhook_deliveries
                     WHERE webhook_id = ? AND status = ?
                     ORDER BY id DESC LIMIT ?
@@ -263,8 +391,9 @@ impl crate::inventory::Inventory {
             None => {
                 sqlx::query(
                     r#"
-                    SELECT id, webhook_id, event_kind, payload_json, status, attempts,
-                           last_attempt_at, last_error, next_retry_at, created_at
+                    SELECT id, webhook_id, source, url, secret, event_kind, payload_json,
+                           status, attempts, last_attempt_at, last_error,
+                           next_retry_at, created_at
                     FROM webhook_deliveries
                     WHERE webhook_id = ?
                     ORDER BY id DESC LIMIT ?
@@ -279,6 +408,31 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_delivery).collect()
     }
 
+    /// Phase 12b/c: list deliveries filtered by source. Used by the
+    /// dashboard "Lifecycle hooks" / "Gates" tabs to show traffic that has
+    /// no parent webhook row.
+    pub async fn list_deliveries_by_source(
+        &self,
+        source: DeliverySource,
+        limit: i64,
+    ) -> Result<Vec<WebhookDelivery>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, webhook_id, source, url, secret, event_kind, payload_json,
+                   status, attempts, last_attempt_at, last_error,
+                   next_retry_at, created_at
+            FROM webhook_deliveries
+            WHERE source = ?
+            ORDER BY id DESC LIMIT ?
+            "#,
+        )
+        .bind(source.as_str())
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(row_to_delivery).collect()
+    }
+
     /// Pull pending deliveries due now (or with no scheduled time yet).
     /// Caller is responsible for dispatching and writing back state.
     pub async fn claim_pending_deliveries(
@@ -289,8 +443,9 @@ impl crate::inventory::Inventory {
         let now_s = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let rows = sqlx::query(
             r#"
-            SELECT id, webhook_id, event_kind, payload_json, status, attempts,
-                   last_attempt_at, last_error, next_retry_at, created_at
+            SELECT id, webhook_id, source, url, secret, event_kind, payload_json,
+                   status, attempts, last_attempt_at, last_error,
+                   next_retry_at, created_at
             FROM webhook_deliveries
             WHERE status = 'pending'
               AND (next_retry_at IS NULL OR next_retry_at <= ?)
@@ -447,9 +602,14 @@ fn row_to_delivery(r: sqlx::sqlite::SqliteRow) -> Result<WebhookDelivery> {
     use sqlx::Row;
     let status_s: String = r.try_get("status")?;
     let status: DeliveryStatus = status_s.parse()?;
+    let source_s: String = r.try_get("source")?;
+    let source: DeliverySource = source_s.parse()?;
     Ok(WebhookDelivery {
         id: r.try_get("id")?,
         webhook_id: r.try_get("webhook_id")?,
+        source,
+        url: r.try_get("url")?,
+        secret: r.try_get("secret")?,
         event_kind: r.try_get("event_kind")?,
         payload_json: r.try_get("payload_json")?,
         status,

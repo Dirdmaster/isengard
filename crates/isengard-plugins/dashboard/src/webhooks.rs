@@ -26,7 +26,8 @@ use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use isengard_controller::ControllerHandles;
 use isengard_storage::webhook::{
-    DeliveryStatus, InsertDelivery, InsertWebhook, UpdateWebhook, Webhook, WebhookDelivery,
+    DeliverySource, DeliveryStatus, InsertDelivery, InsertWebhook, UpdateWebhook, Webhook,
+    WebhookDelivery,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,8 @@ use serde::{Deserialize, Serialize};
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/webhooks", get(list_webhooks).post(create_webhook))
+        // Phase 12b/c: cross-source delivery list, filtered by `?source=`.
+        .route("/webhooks/deliveries", get(list_deliveries_by_source))
         .route(
             "/webhooks/{id}",
             get(get_webhook).put(update_webhook).delete(delete_webhook),
@@ -118,7 +121,11 @@ pub struct UpdateWebhookDto {
 #[serde(rename_all = "camelCase")]
 pub struct WebhookDeliveryDto {
     pub id: i64,
-    pub webhook_id: i64,
+    pub webhook_id: Option<i64>,
+    /// Phase 12b/c: which subsystem produced this row.
+    pub source: DeliverySource,
+    /// Phase 12b/c: inline destination URL for `lifecycle` / `gate` rows.
+    pub url: Option<String>,
     pub event_kind: String,
     pub status: DeliveryStatus,
     pub attempts: i64,
@@ -133,6 +140,8 @@ impl From<WebhookDelivery> for WebhookDeliveryDto {
         Self {
             id: d.id,
             webhook_id: d.webhook_id,
+            source: d.source,
+            url: d.url,
             event_kind: d.event_kind,
             status: d.status,
             attempts: d.attempts,
@@ -149,6 +158,15 @@ impl From<WebhookDelivery> for WebhookDeliveryDto {
 pub struct DeliveriesQuery {
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveriesBySourceQuery {
+    /// `webhook` | `lifecycle` | `gate`
+    pub source: String,
     #[serde(default)]
     pub limit: Option<i64>,
 }
@@ -316,6 +334,34 @@ async fn list_deliveries(
         Err(e) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("list_deliveries: {e}"),
+        ),
+    }
+}
+
+async fn list_deliveries_by_source(
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<DeliveriesBySourceQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let source = match q.source.parse::<DeliverySource>() {
+        Ok(s) => s,
+        Err(e) => {
+            return err(StatusCode::BAD_REQUEST, format!("bad source: {e}"));
+        }
+    };
+    match handles
+        .inventory
+        .list_deliveries_by_source(source, limit)
+        .await
+    {
+        Ok(rows) => {
+            let dtos: Vec<WebhookDeliveryDto> =
+                rows.into_iter().map(WebhookDeliveryDto::from).collect();
+            Json(dtos).into_response()
+        }
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list_deliveries_by_source: {e}"),
         ),
     }
 }

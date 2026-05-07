@@ -13,19 +13,24 @@ anyhow.workspace = true
 async-trait.workspace = true
 bollard.workspace = true
 chrono.workspace = true
+hex = "0.4"
+hmac = "0.12"
 inventory.workspace = true
 isengard-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 reqwest.workspace = true
 base64.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile.workspace = true
 ulid = { workspace = true }
 isengard-storage.workspace = true
+wiremock.workspace = true

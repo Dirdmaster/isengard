@@ -1,8 +1,8 @@
 ---
 type: design
 kind: page-spec
-status: phase-12a-implemented
-status_note: "Outbound webhooks shipped in Phase 12 Plan A (#53)"
+status: phase-12bc-implemented
+status_note: "Outbound webhooks (12a) + lifecycle hooks (12b) + external-action gates (12c)"
 created: 2026-05-03
 updated: 2026-05-06
 tags:
@@ -25,13 +25,27 @@ Phase 12a (#53) implemented:
 - HMAC-SHA256 signing in `X-Isengard-Signature: sha256=<hex>`
 - Persisted retry queue with 30s/1m/5m/30m backoff, max 5 attempts then `exhausted`
 
-Deferred (not in 12a):
+Phase 12b (#54) implemented (lifecycle hooks):
 
-- Lifecycle hooks parsed from compose labels (Phase 12e)
-- External-action gate (Phase 12f)
+- Sub-tab "Lifecycle hooks" inside the Webhooks settings panel
+- `isengard.hooks.pre_deploy|post_deploy|on_failure|secret` Docker labels parsed by the controller and stored in `container_hooks` keyed by `(host_id, container_name)`
+- Lifecycle event subscriber on the webhooks plugin enqueues a `webhook_deliveries` row with `source='lifecycle'` and per-row URL+secret
+- The 12a worker drains lifecycle rows alongside webhook rows (same retry policy, same HMAC header)
+- `GET /api/v1/webhooks/deliveries?source=lifecycle` for the cross-webhook deliveries view
+
+Phase 12c (#55) implemented (external-action gates):
+
+- New "Gates" sub-tab; lists gate evaluations as deliveries with `source='gate'`
+- New `external_gate` field on `Policy` (URL, optional secret, timeout_secs)
+- `PolicyEditor.vue` gains an "External gate" section
+- Updater consults the gate before applying any update; maps approve/reject/defer/manual JSON to the existing decision flow
+- Failure modes per spec: timeout / 5xx / 4xx / parse-fail collapse to Manual; connection refused yields a 1h `paused_until` defer with `update.gated_unreachable`
+
+Deferred (not in 12bc):
+
+- Replay-a-specific-delivery button (deferred polish)
 - Built-in destination templates (Slack/Discord/PagerDuty: Phase 12g)
 - Auto-pause on sustained failures (Phase 12h)
-- Replay-a-specific-delivery button (deferred polish)
 
 
 

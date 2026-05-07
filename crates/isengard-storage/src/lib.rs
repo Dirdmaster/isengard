@@ -7,7 +7,9 @@ pub mod acme_account;
 pub mod adapter_config;
 pub mod agent_cert;
 pub mod approval_store;
+pub mod backup_run;
 pub mod ca;
+pub mod container_hooks;
 pub mod deployment;
 pub mod deployment_group;
 pub mod enrollment_token;
@@ -30,7 +32,9 @@ pub use acme_account::{AcmeAccount, UpsertAcmeAccount};
 pub use adapter_config::{AdapterConfig, UpsertAdapterConfig};
 pub use agent_cert::AgentCert;
 pub use approval_store::InventoryApprovalStore;
+pub use backup_run::{BackupRun, BackupRunId, BackupRunStatus};
 pub use ca::CaRow;
+pub use container_hooks::{ContainerHooks, UpsertContainerHooks};
 pub use deployment_group::{DeploymentGroup, DeploymentGroupState, InsertDeploymentGroup};
 pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};
 pub use error::{Error, Result};
@@ -53,6 +57,6 @@ pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
 pub use webhook::{
-    DeliveryStatus, InsertDelivery, InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook,
-    WebhookDelivery, kind_matches,
+    DeliverySource, DeliveryStatus, InsertDelivery, InsertGateDelivery, InsertLifecycleDelivery,
+    InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook, WebhookDelivery, kind_matches,
 };

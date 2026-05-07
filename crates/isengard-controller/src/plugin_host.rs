@@ -84,6 +84,7 @@ mod tests {
             routing,
             enrollment,
             revocation,
+            db_path: std::path::PathBuf::from(":memory:"),
             log_fanout: crate::log_fanout::LogFanout::new(),
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
