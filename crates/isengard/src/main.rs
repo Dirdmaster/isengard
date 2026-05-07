@@ -1,12 +1,10 @@
 //! Isengard binary entry point. Parses subcommand, sets up tracing, dispatches
 //! to either the controller or agent runner.
 
-use std::io::IsTerminal;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
 use isengard_controller::ca::Authority;
 use isengard_controller::enrollment::EnrollmentService;
@@ -17,6 +15,7 @@ use isengard_storage::host::HostId;
 
 #[cfg(feature = "dev")]
 mod dev_plugin;
+mod tracing_init;
 
 // Force-link the notifier plugin so its `inventory::submit!` registration is
 // picked up at controller startup. The `as _` import keeps the symbol live
@@ -152,20 +151,26 @@ enum AgentOp {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let cli = Cli::parse();
 
-    let filter = cli.log.as_deref().map(EnvFilter::new).unwrap_or_else(|| {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
-    });
-    let use_ansi = std::io::stderr().is_terminal();
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(use_ansi)
-        .init();
+    let mode = match &cli.command {
+        Command::Controller { .. } => "controller",
+        Command::Agent { .. } => "agent",
+    };
+    tracing_init::init(mode, cli.log.as_deref());
 
-    match cli.command {
+    if let Err(err) = dispatch(cli.command).await {
+        tracing_init::print_error_chain(&err);
+        std::process::exit(1);
+    }
+}
+
+/// Top-level dispatch. Split out of `main` so the entry point can print a
+/// pretty error chain on `Err` instead of letting `anyhow`'s default debug
+/// formatter dump a wall of text.
+async fn dispatch(command: Command) -> Result<()> {
+    match command {
         Command::Controller {
             listen,
             state_dir,
