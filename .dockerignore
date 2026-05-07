@@ -6,7 +6,12 @@ target/
 .superpowers/
 docs/
 legacy-go/
-node_modules/
+# Match nested node_modules too (e.g. crates/.../dashboard/web/node_modules).
+# Without **/ the host's macOS-built node_modules leaks into the Docker
+# build context and bun install --frozen-lockfile sees it as already-
+# satisfied, leaving wrong-platform binaries behind that blow up at
+# nuxt generate time. Reproduces only on `just dev`; CI is always fresh.
+**/node_modules/
 
 # design/ stays IN the build context: the dashboard's Vite/PostCSS imports
 # design/tokens.css from web/. Excluding it broke `bun run build` inside Docker.
