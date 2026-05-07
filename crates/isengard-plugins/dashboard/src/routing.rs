@@ -411,7 +411,7 @@ mod tests {
         let enrollment = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
         let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
         Arc::new(ControllerHandles {
-            inventory: inv,
+            inventory: inv.clone(),
             journal: jrnl,
             bus,
             routing,
@@ -420,6 +420,10 @@ mod tests {
             db_path: std::path::PathBuf::from(":memory:"),
             log_fanout: isengard_controller::log_fanout::LogFanout::new(),
             compose_broker: Arc::new(isengard_controller::compose_broker::ComposeBroker::new()),
+            secrets: Arc::new(isengard_controller::secrets::SecretsStore::new(
+                inv.clone(),
+                None,
+            )),
         })
     }
 

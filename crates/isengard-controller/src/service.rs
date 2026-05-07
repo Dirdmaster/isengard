@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use isengard_proto::pb::controller_server::Controller;
 use isengard_proto::pb::{
-    AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, RenewCertRequest,
-    RenewCertResponse,
+    AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, FetchSecretRequest,
+    FetchSecretResponse, RenewCertRequest, RenewCertResponse,
 };
 use isengard_storage::{Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
@@ -23,6 +23,7 @@ use crate::log_fanout::LogFanout;
 use crate::policy_ingest::PolicyLabelIngest;
 use crate::revocation::RevocationSet;
 use crate::routing::RoutingPusher;
+use crate::secrets::{SecretsError, SecretsStore};
 
 #[derive(Clone)]
 pub struct ControllerService {
@@ -49,6 +50,10 @@ pub struct ControllerService {
     /// v0.3d: resolves pending `WriteCompose` requests when the agent's
     /// matching `WriteComposeAck` arrives on the Sync stream.
     pub compose_broker: Arc<ComposeBroker>,
+    /// v0.3.6: managed-secrets store. The `FetchSecret` RPC reads
+    /// through this; the auth interceptor already gated the connection
+    /// behind a valid client cert.
+    pub secrets: Arc<SecretsStore>,
 }
 
 impl ControllerService {
@@ -65,6 +70,7 @@ impl ControllerService {
         revocation: RevocationSet,
         log_fanout: Arc<LogFanout>,
         compose_broker: Arc<ComposeBroker>,
+        secrets: Arc<SecretsStore>,
     ) -> Self {
         Self {
             inventory,
@@ -78,6 +84,7 @@ impl ControllerService {
             revocation,
             log_fanout,
             compose_broker,
+            secrets,
         }
     }
 
@@ -102,6 +109,10 @@ impl ControllerService {
         let hook_ingest = Arc::new(HookLabelIngest::new(inventory.clone()));
         let log_fanout = LogFanout::new();
         let compose_broker = Arc::new(ComposeBroker::new());
+        // Tests get a passphrase-less store: any secrets RPC will
+        // surface NoPassphrase, which lets exercise of error paths
+        // without depending on env var leakage between tests.
+        let secrets = Arc::new(SecretsStore::new(inventory.clone(), None));
         Self {
             inventory,
             journal,
@@ -114,6 +125,7 @@ impl ControllerService {
             revocation,
             log_fanout,
             compose_broker,
+            secrets,
         }
     }
 }
@@ -199,6 +211,80 @@ impl Controller for ControllerService {
             agent_cert_pem: renewed.agent_cert_pem,
             agent_key_pem: renewed.agent_key_pem,
             expires_at: renewed.expires_at.to_rfc3339(),
+        }))
+    }
+
+    /// v0.3.6: agent fetches a managed secret on container start. The
+    /// CertAuthInterceptor already gated the connection: any caller
+    /// reaching this handler has a valid, non-revoked agent cert. We
+    /// derive `host_id` from the cert CN so the request body can't lie
+    /// about who's asking, then return the decrypted plaintext.
+    ///
+    /// Logs include the agent host_id and secret name. The secret VALUE
+    /// is never logged at any level.
+    async fn fetch_secret(
+        &self,
+        request: Request<FetchSecretRequest>,
+    ) -> Result<Response<FetchSecretResponse>, Status> {
+        let host_id = host_id_from_peer_cert(&request)?;
+        let req = request.into_inner();
+        let name = req.name;
+
+        // Validate the name shape up front: same rules the storage DAO
+        // applies. Catching it here yields a cleaner error than a deeper
+        // sqlx round-trip would.
+        if let Err(e) = isengard_storage::validate_secret_name(&name) {
+            tracing::warn!(host_id = %host_id, error = %e, "fetch_secret: invalid name");
+            return Err(Status::invalid_argument(format!("invalid name: {e}")));
+        }
+
+        // Look up metadata first so the response can carry updated_at
+        // even if the value is empty bytes.
+        let meta = match self.secrets.meta(&name).await {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                tracing::info!(host_id = %host_id, name = %name, "fetch_secret: not found");
+                return Err(Status::not_found(format!("secret {name:?} not found")));
+            }
+            Err(e) => {
+                tracing::warn!(host_id = %host_id, name = %name, error = %e, "fetch_secret: meta lookup failed");
+                return Err(Status::internal("secret store unavailable"));
+            }
+        };
+
+        let value = match self.secrets.fetch(&name).await {
+            Ok(v) => v,
+            Err(SecretsError::NoPassphrase) => {
+                tracing::error!(
+                    host_id = %host_id,
+                    name = %name,
+                    "fetch_secret: ISENGARD_SECRETS_PASSPHRASE not set; agent fetch refused",
+                );
+                return Err(Status::failed_precondition(
+                    "controller secrets store is locked: ISENGARD_SECRETS_PASSPHRASE not set",
+                ));
+            }
+            Err(SecretsError::NotFound(_)) => {
+                tracing::info!(host_id = %host_id, name = %name, "fetch_secret: not found at fetch time");
+                return Err(Status::not_found(format!("secret {name:?} not found")));
+            }
+            Err(e) => {
+                tracing::warn!(host_id = %host_id, name = %name, error = %e, "fetch_secret: decrypt failed");
+                return Err(Status::internal("decrypt failed"));
+            }
+        };
+
+        // Log the access; value bytes are explicitly excluded.
+        tracing::info!(
+            host_id = %host_id,
+            name = %name,
+            bytes = value.len(),
+            "fetch_secret: served",
+        );
+
+        Ok(Response::new(FetchSecretResponse {
+            value,
+            updated_at: meta.updated_at.to_rfc3339(),
         }))
     }
 

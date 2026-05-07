@@ -17,6 +17,7 @@ pub mod plugin_host;
 pub mod policy_ingest;
 pub mod revocation;
 pub mod routing;
+pub mod secrets;
 pub mod stack_deploy_orchestrator;
 pub mod sync_services;
 pub mod sync_stacks;
@@ -70,6 +71,12 @@ pub struct ControllerHandles {
     /// registers a oneshot keyed by request_id; the gRPC handler
     /// resolves it when the matching `WriteComposeAck` lands.
     pub compose_broker: Arc<compose_broker::ComposeBroker>,
+    /// v0.3.6: Isengard-managed encrypted secrets store. Operators put
+    /// secrets via `isd secret put`; agents fetch over mTLS at container
+    /// start and mount as tmpfs at `/run/secrets/<name>`. The store is
+    /// "unlocked" when `ISENGARD_SECRETS_PASSPHRASE` is set; fetch/put
+    /// calls return [`secrets::SecretsError::NoPassphrase`] otherwise.
+    pub secrets: Arc<secrets::SecretsStore>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -180,6 +187,22 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // Load + start controller-side plugins (notifier, etc).
     let log_fanout = log_fanout::LogFanout::new();
     let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
+
+    // v0.3.6: managed secrets store. Reads `ISENGARD_SECRETS_PASSPHRASE`
+    // from the env once and holds the derived key in memory. Fail loud
+    // if the DB has stored secrets but the env var is unset: starting
+    // without the key would silently break agent secret fetches.
+    let secrets_store = Arc::new(secrets::SecretsStore::from_env(inventory.clone()));
+    secrets_store
+        .boot_check()
+        .await
+        .context("secrets store boot check")?;
+    if secrets_store.is_unlocked() {
+        info!("secrets store unlocked (passphrase from env)");
+    } else {
+        info!("secrets store running without a passphrase (no stored secrets yet)");
+    }
+
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
         journal: journal.clone(),
@@ -190,6 +213,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         db_path: db_path.clone(),
         log_fanout: log_fanout.clone(),
         compose_broker: compose_broker.clone(),
+        secrets: secrets_store.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -353,6 +377,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         revocation,
         log_fanout,
         compose_broker.clone(),
+        secrets_store.clone(),
     ));
 
     // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.

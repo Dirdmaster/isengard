@@ -20,6 +20,7 @@ pub mod labels;
 pub mod logs;
 pub mod mdns;
 pub mod proxy;
+pub mod secret_fetch;
 pub mod sync;
 pub mod tls;
 
@@ -427,6 +428,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         // drives a reconcile sweep against the running containers.
         let watcher_docker = docker.clone();
         let watcher_root = import_root.clone();
+        let watcher_endpoint = endpoint.clone();
         match compose_watcher::spawn(watcher_root.clone()) {
             Ok((mut rx, watcher)) => {
                 // Hold the watcher Arc so it isn't dropped (which would
@@ -467,10 +469,17 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                             sha256 = %new_sha,
                             "compose_watcher: file changed, starting reconcile",
                         );
-                        match compose_apply::reconcile_stack(
+                        // v0.3.6: when the compose declares external
+                        // secrets, route through the variant that
+                        // fetches + tmpfs-mounts them. We always pass the
+                        // endpoint; the variant only contacts the
+                        // controller when at least one service has
+                        // `secrets:` set.
+                        match compose_apply::reconcile_stack_with_secrets(
                             watcher_docker.as_ref(),
                             &evt.stack_name,
                             &yaml,
+                            watcher_endpoint.clone(),
                         )
                         .await
                         {

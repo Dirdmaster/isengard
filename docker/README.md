@@ -265,6 +265,70 @@ The shape stays the same; the differences are typically:
 - Pin to a tagged release (`:v0.2.0`), not `:next`
 - Run multiple agents on different hosts pointing at the same controller (each gets its own enrollment token)
 
+## Secrets (v0.3.6)
+
+Isengard ships a Docker-Swarm-style managed secrets store: operator-supplied values are encrypted at rest in the controller's SQLite, ferried to agents over mTLS at container start, materialised on tmpfs, and bind-mounted at `/run/secrets/<name>` inside the workload container. Plaintext never lives on disk on the agent.
+
+### Bootstrap
+
+The controller derives the master key from `ISENGARD_SECRETS_PASSPHRASE` on boot. Required if any secrets are stored; the controller refuses to start when secrets exist but the env var is unset.
+
+```sh
+ISENGARD_SECRETS_PASSPHRASE='correct horse battery staple' \
+  docker compose -f docker/compose.yaml up -d controller
+```
+
+Pick something long and high-entropy (a passphrase manager output, a 32-byte hex blob, etc). Rotating it requires re-encrypting every stored secret; not a one-line operation.
+
+### Load a value
+
+```sh
+# From a file:
+isd secret put cf_token --from-file ~/secrets/cloudflare.token
+
+# From stdin (the operator's preferred path; nothing leaks to shell history):
+printf '%s' "$CF_TOKEN" | isd secret put cf_token
+
+# List names + timestamps. The CLI never prints values.
+isd secret list
+
+# Replace an existing value. `put` is upsert.
+printf '%s' "$NEW_TOKEN" | isd secret put cf_token
+
+# Delete.
+isd secret rm cf_token
+```
+
+### Reference from compose
+
+Top-level `secrets:` declares the names the agent should fetch; per-service `secrets:` mounts them into the workload container.
+
+```yaml
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--token-file", "/run/secrets/cf_token", "run"]
+    secrets:
+      - cf_token
+
+# Long form with custom mount path:
+#   secrets:
+#     - source: cf_token
+#       target: /etc/cloudflared/credentials.json
+
+secrets:
+  cf_token:
+    external: true
+```
+
+`external: true` is the only supported source in v0.4. File-source secrets (`file: /path`) are intentionally rejected with a clear error pointing at `isd secret put`.
+
+### Limitations (v0.3.6)
+
+- macOS dev: the agent's tmpfs root is a regular tmpdir, not a real `tmpfs` mount (Linux containers run as root with `CAP_SYS_ADMIN` and use a real mem-backed mount). Plaintext on a Mac dev box is on the same filesystem as the rest of the agent's state. Production = Linux.
+- Rotation: re-running `isd secret put` writes a new value but currently does NOT roll the dependent containers. Recreate them manually (`isd apply` after a no-op edit, or restart) for the new value to take effect.
+- No `isd secret get`. Secrets are write-only from the operator side; the agent is the only consumer that ever sees plaintext. This is intentional.
+
 ## Tear down
 
 ```sh

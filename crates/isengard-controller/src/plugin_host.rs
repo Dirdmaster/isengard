@@ -77,6 +77,7 @@ mod tests {
         let revocation = RevocationSet::load_from_inventory(&inventory)
             .await
             .unwrap();
+        let secrets = Arc::new(crate::secrets::SecretsStore::new(inventory.clone(), None));
         let handles = Arc::new(ControllerHandles {
             inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),
@@ -87,6 +88,7 @@ mod tests {
             db_path: std::path::PathBuf::from(":memory:"),
             log_fanout: crate::log_fanout::LogFanout::new(),
             compose_broker: Arc::new(crate::compose_broker::ComposeBroker::new()),
+            secrets,
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into

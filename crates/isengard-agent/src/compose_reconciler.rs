@@ -33,12 +33,50 @@ pub struct DesiredService {
     pub labels: BTreeMap<String, String>,
     pub ports: Vec<String>,
     pub restart: Option<String>,
+    /// v0.3.6: per-service secret references. Each entry names a
+    /// top-level `secrets:` key. The value's source (`external: true`)
+    /// is resolved at apply time via the agent's FetchSecret RPC.
+    /// Long-form `target:` overrides the default `/run/secrets/<name>`
+    /// mount path.
+    pub secrets: Vec<ServiceSecretRef>,
+}
+
+/// One entry in a service's `secrets:` list.
+///
+/// Compose accepts both forms:
+///   - Short:  `secrets: [foo, bar]`
+///   - Long:   `secrets: [{source: foo, target: /custom/path, mode: 0400}]`
+///
+/// `source` is the top-level secret name; `target` is the in-container
+/// mount path. We currently ignore `mode` and `uid/gid` fields: the
+/// agent always writes the file with mode 0400 owned by root, matching
+/// Docker Swarm's default semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSecretRef {
+    pub source: String,
+    pub target: Option<String>,
 }
 
 /// Parsed `compose.yaml`. Only the bits the reconciler needs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DesiredCompose {
     pub services: BTreeMap<String, DesiredService>,
+    /// v0.3.6: top-level `secrets:` map. Keys are secret names; the
+    /// declared source determines how the agent resolves them.
+    pub secrets: BTreeMap<String, TopLevelSecret>,
+}
+
+/// One top-level `secrets:` entry.
+///
+/// In v0.3.6 we only support `external: true` (resolved via the
+/// controller's FetchSecret RPC). `file:`-source secrets used to be on
+/// the roadmap but are explicitly NOT supported in v0.3.6: the parser
+/// returns a clear error pointing operators at `isd secret put`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopLevelSecret {
+    /// Resolves at apply time via the agent's FetchSecret RPC. Stored
+    /// in the controller's encrypted secrets table.
+    External,
 }
 
 /// Per-service op the reconciler will take to bring the running state
@@ -91,6 +129,64 @@ impl ReconcilePlan {
     }
 }
 
+impl DesiredCompose {
+    /// v0.3.6: validate that every per-service `secrets:` reference
+    /// points at a top-level entry declared `external: true`. Returns
+    /// the union of names actually referenced across all services so
+    /// the apply path can fetch them in one batch. Names that no
+    /// service references are silently dropped: declaring a top-level
+    /// secret without using it is a no-op.
+    pub fn referenced_external_secrets(&self) -> anyhow::Result<Vec<String>> {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for svc in self.services.values() {
+            for r in &svc.secrets {
+                match self.secrets.get(&r.source) {
+                    Some(TopLevelSecret::External) => {
+                        names.insert(r.source.clone());
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "service {:?} references secret {:?} but no \
+                             top-level `secrets.{}` entry exists",
+                            svc.name,
+                            r.source,
+                            r.source,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    /// Per-service helper: list `(secret_name, container_path)` pairs
+    /// the agent should mount into `service`. Resolves long-form
+    /// `target:` overrides; falls back to `/run/secrets/<name>` when
+    /// the operator didn't specify one.
+    pub fn service_secret_targets(&self, service: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let svc = self
+            .services
+            .get(service)
+            .ok_or_else(|| anyhow::anyhow!("service {service:?} not in compose"))?;
+        let mut out = Vec::with_capacity(svc.secrets.len());
+        for r in &svc.secrets {
+            if !matches!(self.secrets.get(&r.source), Some(TopLevelSecret::External)) {
+                return Err(anyhow::anyhow!(
+                    "service {service:?} references secret {:?} but no \
+                     top-level `external: true` entry exists",
+                    r.source,
+                ));
+            }
+            let target = r
+                .target
+                .clone()
+                .unwrap_or_else(|| format!("/run/secrets/{}", r.source));
+            out.push((r.source.clone(), target));
+        }
+        Ok(out)
+    }
+}
+
 /// Parse `compose.yaml` text into a [`DesiredCompose`]. Strict-ish: the
 /// file must have a top-level `services:` mapping; missing `image:` on
 /// a service is allowed only if `Start` would have nothing to do (the
@@ -118,7 +214,54 @@ pub fn parse_compose(yaml: &str) -> anyhow::Result<DesiredCompose> {
         let parsed = parse_service(name, svc)?;
         out.services.insert(name.clone(), parsed);
     }
+
+    // v0.3.6: top-level `secrets:` block. Optional; declared entries are
+    // resolved at apply time via the agent's FetchSecret RPC.
+    if let Value::Mapping(root_map) = &root {
+        if let Some(Value::Mapping(secrets_map)) = root_map.get(Value::String("secrets".into())) {
+            for (k, v) in secrets_map {
+                let Value::String(name) = k else { continue };
+                let Value::Mapping(spec) = v else {
+                    return Err(anyhow::anyhow!(
+                        "top-level secret {name:?} must be a mapping"
+                    ));
+                };
+                out.secrets
+                    .insert(name.clone(), parse_top_level_secret(name, spec)?);
+            }
+        }
+    }
     Ok(out)
+}
+
+fn parse_top_level_secret(name: &str, m: &Mapping) -> anyhow::Result<TopLevelSecret> {
+    // file-source secrets are explicitly rejected: v0.3.6 only ships the
+    // managed (`external: true`) path. Operators get a clear pointer at
+    // `isd secret put` instead of a silent half-implementation.
+    if m.contains_key(Value::String("file".into())) {
+        return Err(anyhow::anyhow!(
+            "secret {name:?}: file-source secrets are not supported in v0.4; \
+             use `isd secret put {name}` to load the value, then mark the \
+             secret `external: true` in compose.yaml",
+        ));
+    }
+    let external = match m.get(Value::String("external".into())) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Mapping(_)) => true, // `external: { name: foo }` form
+        Some(Value::Null) | None => false,
+        Some(other) => {
+            return Err(anyhow::anyhow!(
+                "secret {name:?}: `external:` must be a bool, got {other:?}"
+            ));
+        }
+    };
+    if !external {
+        return Err(anyhow::anyhow!(
+            "secret {name:?}: must declare `external: true` (the only \
+             supported source in v0.4); use `isd secret put` to load values",
+        ));
+    }
+    Ok(TopLevelSecret::External)
 }
 
 fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
@@ -183,6 +326,45 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
                 continue;
             };
             svc.labels.insert(key.clone(), val.clone());
+        }
+    }
+    // v0.3.6: per-service `secrets:` list. Both short and long form
+    // resolve to a `ServiceSecretRef` with `source` plus optional
+    // `target`. The actual fetch + tmpfs mount happens in compose_apply
+    // once the agent has all the per-service secrets in hand.
+    if let Some(Value::Sequence(seq)) = m.get(Value::String("secrets".into())) {
+        for entry in seq {
+            match entry {
+                Value::String(s) => svc.secrets.push(ServiceSecretRef {
+                    source: s.clone(),
+                    target: None,
+                }),
+                Value::Mapping(em) => {
+                    let source = match em.get(Value::String("source".into())) {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "service {name:?}: secret entry missing `source:` (or it isn't a string)"
+                            ));
+                        }
+                    };
+                    let target = match em.get(Value::String("target".into())) {
+                        Some(Value::String(s)) => Some(s.clone()),
+                        Some(Value::Null) | None => None,
+                        Some(other) => {
+                            return Err(anyhow::anyhow!(
+                                "service {name:?} secret {source:?}: `target:` must be a string, got {other:?}"
+                            ));
+                        }
+                    };
+                    svc.secrets.push(ServiceSecretRef { source, target });
+                }
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "service {name:?}: secrets list entries must be a name or mapping, got {other:?}"
+                    ));
+                }
+            }
         }
     }
     Ok(svc)
@@ -599,6 +781,98 @@ mod tests {
             other => panic!("expected Recreate, got {other:?}"),
         }
     }
+
+    // ----- v0.3.6 secrets parsing -----
+
+    #[test]
+    fn parse_compose_top_level_external_secret() {
+        let yaml =
+            "services:\n  web:\n    image: nginx\nsecrets:\n  cf_token:\n    external: true\n";
+        let parsed = parse_compose(yaml).unwrap();
+        assert_eq!(
+            parsed.secrets.get("cf_token"),
+            Some(&TopLevelSecret::External)
+        );
+    }
+
+    #[test]
+    fn parse_compose_short_form_per_service_secrets() {
+        let yaml = "services:\n  web:\n    image: nginx\n    secrets:\n      - cf_token\n      - db_pass\nsecrets:\n  cf_token:\n    external: true\n  db_pass:\n    external: true\n";
+        let parsed = parse_compose(yaml).unwrap();
+        let web = &parsed.services["web"];
+        assert_eq!(web.secrets.len(), 2);
+        assert_eq!(web.secrets[0].source, "cf_token");
+        assert_eq!(web.secrets[0].target, None);
+        assert_eq!(web.secrets[1].source, "db_pass");
+    }
+
+    #[test]
+    fn parse_compose_long_form_per_service_secrets() {
+        let yaml = "services:\n  web:\n    image: nginx\n    secrets:\n      - source: cf_token\n        target: /etc/secrets/cf.txt\n        mode: 0400\nsecrets:\n  cf_token:\n    external: true\n";
+        let parsed = parse_compose(yaml).unwrap();
+        let web = &parsed.services["web"];
+        assert_eq!(web.secrets[0].source, "cf_token");
+        assert_eq!(
+            web.secrets[0].target.as_deref(),
+            Some("/etc/secrets/cf.txt")
+        );
+    }
+
+    #[test]
+    fn parse_compose_file_source_secret_errors() {
+        let yaml = "services:\n  web:\n    image: nginx\nsecrets:\n  cf_token:\n    file: /var/secrets/cf.txt\n";
+        let err = parse_compose(yaml).unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("file-source secrets are not supported"));
+        assert!(s.contains("isd secret put"));
+    }
+
+    #[test]
+    fn parse_compose_secret_without_external_errors() {
+        let yaml = "services:\n  web:\n    image: nginx\nsecrets:\n  cf_token: {}\n";
+        let err = parse_compose(yaml).unwrap_err();
+        assert!(format!("{err}").contains("must declare `external: true`"));
+    }
+
+    #[test]
+    fn referenced_external_secrets_returns_used_names_only() {
+        let yaml = "services:\n  web:\n    image: nginx\n    secrets: [cf_token]\nsecrets:\n  cf_token:\n    external: true\n  unused_one:\n    external: true\n";
+        let parsed = parse_compose(yaml).unwrap();
+        let names = parsed.referenced_external_secrets().unwrap();
+        assert_eq!(names, vec!["cf_token".to_string()]);
+    }
+
+    #[test]
+    fn referenced_external_secrets_errors_on_dangling_ref() {
+        let yaml = "services:\n  web:\n    image: nginx\n    secrets: [cf_token]\n";
+        let parsed = parse_compose(yaml).unwrap();
+        let err = parsed.referenced_external_secrets().unwrap_err();
+        assert!(format!("{err}").contains("no top-level"));
+    }
+
+    #[test]
+    fn service_secret_targets_uses_default_run_secrets() {
+        let yaml = "services:\n  web:\n    image: nginx\n    secrets: [cf_token]\nsecrets:\n  cf_token:\n    external: true\n";
+        let parsed = parse_compose(yaml).unwrap();
+        let targets = parsed.service_secret_targets("web").unwrap();
+        assert_eq!(
+            targets,
+            vec![("cf_token".to_string(), "/run/secrets/cf_token".to_string())]
+        );
+    }
+
+    #[test]
+    fn service_secret_targets_honours_long_form_target() {
+        let yaml = "services:\n  web:\n    image: nginx\n    secrets:\n      - source: cf_token\n        target: /etc/cf.txt\nsecrets:\n  cf_token:\n    external: true\n";
+        let parsed = parse_compose(yaml).unwrap();
+        let targets = parsed.service_secret_targets("web").unwrap();
+        assert_eq!(
+            targets,
+            vec![("cf_token".to_string(), "/etc/cf.txt".to_string())]
+        );
+    }
+
+    // ----- existing tests below -----
 
     #[test]
     fn plan_ops_sorted_alphabetically() {

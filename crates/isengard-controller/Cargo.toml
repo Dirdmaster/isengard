@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Controller-mode runtime"
 
 [dependencies]
+# v0.3.6 secrets store: age passphrase encryption for the managed-secrets
+# values. Plaintext is decrypted on-demand when an authenticated agent
+# fetches a secret over mTLS; ciphertext is what's persisted in SQLite.
+age = { version = "0.11", default-features = false }
 anyhow.workspace = true
 async-trait.workspace = true
 base32.workspace = true
@@ -19,9 +23,11 @@ isengard-proto.workspace = true
 isengard-storage.workspace = true
 rand.workspace = true
 rcgen.workspace = true
+secrecy = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+thiserror = { workspace = true }
 time.workspace = true
 tokio = { workspace = true }
 tokio-stream.workspace = true
