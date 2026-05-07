@@ -1,7 +1,7 @@
 //! macOS `/etc/resolver/<zone>` install helper. Idempotent: rewrites the
 //! file every time so a stale port from an earlier `--dns-port` flag is
 //! corrected. Linux uses `systemd-resolved` (out of scope for v0.3.5; the
-//! gateway still works via `dig @127.0.0.1 -p 5300 ...`).
+//! gateway still works via `dig @127.0.0.1 -p 5350 ...`).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -116,8 +116,8 @@ mod tests {
 
     #[test]
     fn render_emits_two_lines_with_terminal_newline() {
-        let s = render(5300);
-        assert_eq!(s, "nameserver 127.0.0.1\nport 5300\n");
+        let s = render(5350);
+        assert_eq!(s, "nameserver 127.0.0.1\nport 5350\n");
     }
 
     #[test]

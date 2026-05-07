@@ -17,7 +17,7 @@
 //! macOS resolver picks up `.isd` via /etc/resolver/isd
 //!    |
 //!    v
-//! DNS query to 127.0.0.1:5300 (default)
+//! DNS query to 127.0.0.1:5350 (default)
 //!    |
 //!    v
 //! [`dns`] returns 127.0.0.1
@@ -31,7 +31,7 @@
 //!
 //! Locked decisions (see `1 Projects/Isengard/v0.3.5 isd gateway.md`):
 //!  - Zone default: `isd`
-//!  - DNS port: 5300 (unprivileged)
+//!  - DNS port: 5350 (unprivileged)
 //!  - HTTP/HTTPS proxy ports: 8080 / 8443 (unprivileged); --port 80 / --tls-port 443 with sudo
 //!  - TLS: self-signed via [`cert`], cached in app-config dir
 //!  - Routing source: `GET /api/v1/routing/rules` initial pull plus a 30s poll. The
@@ -64,9 +64,9 @@ pub struct GatewayArgs {
     #[arg(long, default_value = "isd")]
     pub zone: String,
 
-    /// DNS listener port. Default 5300 (unprivileged). macOS routes here via
-    /// `/etc/resolver/<zone>` containing `nameserver 127.0.0.1` + `port 5300`.
-    #[arg(long, default_value_t = 5300)]
+    /// DNS listener port. Default 5350 (unprivileged). macOS routes here via
+    /// `/etc/resolver/<zone>` containing `nameserver 127.0.0.1` + `port 5350`.
+    #[arg(long, default_value_t = 5350)]
     pub dns_port: u16,
 
     /// HTTP proxy port. Default 8080. Use `--port 80` (with sudo) for the
@@ -205,7 +205,7 @@ pub async fn run_gateway(args: GatewayArgs, context: Option<&str>) -> Result<()>
     };
 
     // Friendly nudge if the resolver isn't installed yet. We don't fail:
-    // some operators want DNS only via `dig @127.0.0.1 -p 5300 ...` for
+    // some operators want DNS only via `dig @127.0.0.1 -p 5350 ...` for
     // testing.
     if !resolver_helper::is_installed(&args.zone) {
         println!();
