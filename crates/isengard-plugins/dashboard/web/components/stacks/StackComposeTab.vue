@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import YamlEditor from './YamlEditor.vue'
 
 interface Props {
   stackId: string
 }
 const props = defineProps<Props>()
+
+// Soft-wrap toggle for the editor surface. Defaults to off so long
+// command/env lines stay on one line in read mode (matches the prior
+// <pre> behavior); flip on when editing wide YAML.
+const wrap = ref(false)
 
 interface ComposeResponse {
   stack_id: number
@@ -275,6 +281,14 @@ function forceOverwrite() {
         </div>
         <div class="flex items-center gap-2">
           <span v-if="sha256" class="font-mono">sha256: {{ sha256.slice(0, 12) }}</span>
+          <button
+            class="px-2 py-1 border border-iso-border-subtle rounded text-iso-text-muted hover:text-iso-text-primary hover:border-iso-border"
+            :class="{ 'text-iso-text-primary border-iso-border-strong': wrap }"
+            :title="wrap ? 'Disable line wrap' : 'Enable line wrap'"
+            @click="wrap = !wrap"
+          >
+            Wrap
+          </button>
           <template v-if="!editing">
             <button
               class="px-2 py-1 border border-iso-border-subtle rounded text-iso-text-muted hover:text-iso-text-primary hover:border-iso-border"
@@ -321,16 +335,20 @@ function forceOverwrite() {
         </div>
       </div>
 
-      <textarea
+      <YamlEditor
         v-if="editing"
         v-model="draft"
-        class="rounded-iso-lg border border-iso-border-subtle bg-iso-bg-elevated p-4 font-mono text-xs text-iso-text-primary min-h-[400px] focus:outline-none focus:border-iso-border-strong"
-        spellcheck="false"
+        :readonly="false"
+        :wrap="wrap"
+        min-height="400px"
       />
-      <pre
+      <YamlEditor
         v-else
-        class="rounded-iso-lg border border-iso-border-subtle bg-iso-bg-elevated p-4 font-mono text-xs text-iso-text-primary whitespace-pre overflow-auto"
-        >{{ yaml }}</pre>
+        :model-value="yaml ?? ''"
+        :readonly="true"
+        :wrap="wrap"
+        min-height="400px"
+      />
 
       <div
         v-if="plan"
