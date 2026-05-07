@@ -1,5 +1,5 @@
 <template>
-  <div class="h-14 border-t border-iso-border-subtle bg-iso-bg-elevated flex items-stretch text-xs shrink-0">
+  <div class="h-16 border-t border-iso-border-subtle bg-iso-bg-elevated flex items-stretch text-xs shrink-0">
     <!-- Left cluster: live indicator + sparkline + event count -->
     <div class="flex items-center gap-3.5 px-4 border-r border-iso-border-subtle">
       <span class="flex items-center gap-2">

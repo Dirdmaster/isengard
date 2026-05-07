@@ -61,8 +61,14 @@
   --iso-radius-full: 9999px;
 
   /* === Layout dimensions === */
-  --iso-topbar-h: 52px;
-  --iso-bottombar-h: 56px;
+  /*
+   * Density bump for larger displays (2026-05-07): topbar 52→64,
+   * bottombar 56→64. The dashboard was tuned for laptop screens (13"
+   * to 15"); on a 4K external the original strip felt thin. Reversible
+   * by snapping these back along with the font scale below.
+   */
+  --iso-topbar-h: 64px;
+  --iso-bottombar-h: 64px;
   --iso-modal-sm: 560px;
   --iso-modal-lg: 760px;
 
@@ -70,15 +76,27 @@
   --iso-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --iso-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
 
-  /* === Font size scale (size / line-height) === */
-  --iso-font-size-xs: 11px;
-  --iso-line-height-xs: 14px;
-  --iso-font-size-sm: 12px;
-  --iso-line-height-sm: 16px;
-  --iso-font-size-base: 13px;
-  --iso-line-height-base: 18px;
-  --iso-font-size-md: 14px;
-  --iso-line-height-md: 20px;
-  --iso-font-size-lg: 16px;
-  --iso-line-height-lg: 22px;
+  /*
+   * Font size scale (size / line-height).
+   *
+   * Density bump 2026-05-07: every step up by ~20% so the dashboard
+   * reads comfortably on a 4K external display. Old vs new:
+   *   xs   11/14  → 13/17
+   *   sm   12/16  → 14/19
+   *   base 13/18  → 15/22
+   *   md   14/20  → 17/24
+   *   lg   16/22  → 19/26
+   * Revert: subtract roughly 2px from each size and 3px from each
+   * line-height to land back on the laptop scale.
+   */
+  --iso-font-size-xs: 13px;
+  --iso-line-height-xs: 17px;
+  --iso-font-size-sm: 14px;
+  --iso-line-height-sm: 19px;
+  --iso-font-size-base: 15px;
+  --iso-line-height-base: 22px;
+  --iso-font-size-md: 17px;
+  --iso-line-height-md: 24px;
+  --iso-font-size-lg: 19px;
+  --iso-line-height-lg: 26px;
 }
