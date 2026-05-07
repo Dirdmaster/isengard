@@ -3,15 +3,29 @@ name: CI
 on:
   push:
     branches: [main, next, "feat/**"]
+    paths-ignore:
+      - "docs/**"
+      - "design/**"
+      - "www/**"
+      - "**/*.md"
+      - ".vscode/**"
+      - ".gitignore"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "design/**"
+      - "www/**"
+      - "**/*.md"
+      - ".vscode/**"
+      - ".gitignore"
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  build-test:
-    name: build + test
+  lint:
+    name: lint (fmt + clippy)
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +46,58 @@ jobs:
         with:
           shared-key: build
 
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  build:
+    name: build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: cargo build
+        run: cargo build --workspace
+
+  test:
+    name: test (nextest)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -39,15 +105,6 @@ jobs:
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo build
-        run: cargo build --workspace
 
       - name: cargo nextest
         run: cargo nextest run --workspace
