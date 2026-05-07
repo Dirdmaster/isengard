@@ -1,0 +1,2 @@
+# Exported CA from a running controller; regenerate per-deployment.
+ca.pem

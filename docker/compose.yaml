@@ -1,0 +1,78 @@
+# Isengard control plane: controller + agent on a Compose bridge network.
+#
+# Run from the project root:
+#
+#   docker compose -f docker/compose.yaml up -d controller
+#   docker exec iso-controller isengard controller token mint --role agent
+#   ISENGARD_ENROLL_TOKEN=<paste-token> docker compose -f docker/compose.yaml up -d agent
+#
+# Then `hello-stack.yaml` brings up an example managed stack on the host.
+# Dashboard: http://127.0.0.1:9418
+
+name: isengard
+
+services:
+  controller:
+    image: ghcr.io/weavers-engineering/isengard-controller:next
+    # Images ship amd64 only (see docker/README.md "Architecture" section).
+    # On Apple Silicon Macs this runs under Rosetta with a small perf hit;
+    # native amd64 servers ignore the line. Drop it once we ship arm64.
+    platform: linux/amd64
+    container_name: iso-controller
+    # The controller's self-signed cert is issued for SAN `controller.local`.
+    # We expose that as a Compose network alias so the agent can reach
+    # the controller AND the cert verifies. The literal Compose service
+    # name `controller` ALSO resolves to the same container.
+    hostname: controller.local
+    networks:
+      default:
+        aliases:
+          - controller.local
+    ports:
+      - "127.0.0.1:9417:9417"  # gRPC for agents
+      - "127.0.0.1:9418:9418"  # dashboard HTTP
+    volumes:
+      - controller-state:/var/lib/isengard
+    environment:
+      ISENGARD_BACKUP_PASSPHRASE: manual-test-pass-2026
+      RUST_LOG: info
+    command:
+      - controller
+      - --listen
+      - 0.0.0.0:9417
+      - --state-dir
+      - /var/lib/isengard
+    restart: unless-stopped
+
+  agent:
+    image: ghcr.io/weavers-engineering/isengard-agent:next
+    platform: linux/amd64
+    container_name: iso-agent
+    depends_on:
+      - controller
+    volumes:
+      - agent-state:/var/lib/isengard
+      # Lets the agent manage containers running on the host's Docker daemon.
+      # The agent's blue-green deploys, recreates, healthchecks all happen
+      # against the host's containers via this socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Controller's self-signed CA (Phase 14 mTLS). Export it once after the
+      # controller starts:
+      #   docker exec iso-controller isengard controller ca export > docker/ca.pem
+      - ./ca.pem:/etc/iso/ca.pem:ro
+    environment:
+      # Mint via: docker exec iso-controller isengard controller token mint --role agent
+      ISENGARD_ENROLL_TOKEN: ${ISENGARD_ENROLL_TOKEN:-}
+      ISENGARD_CONTROLLER_CA_PEM_PATH: /etc/iso/ca.pem
+      RUST_LOG: info
+    command:
+      - agent
+      - --controller
+      - https://controller.local:9417
+      - --state-dir
+      - /var/lib/isengard
+    restart: unless-stopped
+
+volumes:
+  controller-state:
+  agent-state:
