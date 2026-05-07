@@ -31,9 +31,16 @@ ISENGARD_ENROLL_TOKEN=$TOKEN \
 # 5. Open the dashboard
 open http://127.0.0.1:9418
 
-# 6. Bring up the example stack so the agent has something to manage
+# 6. (Optional) Save controller credentials for the `isd` operator CLI:
+#    cargo build -p isd --release
+#    target/release/isd login https://127.0.0.1:9417
+#    target/release/isd ps
+
+# 7. Bring up the example stack so the agent has something to manage
 docker compose -p hello -f docker/hello-stack.yaml up -d
 ```
+
+Note (v0.3a): the agent advertises any routing rule whose `public_hostname` ends in `.local` over mDNS. macOS Bonjour resolves these natively; Linux clients need `avahi-daemon` (or `systemd-resolved` with `MulticastDNS=yes`) and Windows clients need Bonjour Print Services.
 
 The CA export step is a current rough edge — Phase 14's mTLS makes it unavoidable today. The pending `swarm-style enrollment join command` PR rolls these steps into a single `docker run …` line that bundles the token + base64-encoded CA + URL.
 

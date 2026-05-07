@@ -12,6 +12,7 @@ pub mod enroll_diagnosis;
 pub mod events;
 pub mod labels;
 pub mod logs;
+pub mod mdns;
 pub mod proxy;
 pub mod sync;
 pub mod tls;
@@ -59,6 +60,12 @@ pub struct AgentOptions {
     /// `ISENGARD_CONTROLLER_CA_PEM_PATH` env > `ISENGARD_CONTROLLER_CA_PEM`
     /// env > this struct's path > this struct's inline PEM > native roots.
     pub bootstrap_trust: enroll::BootstrapTrust,
+    /// Optional name of the network interface the mDNS responder should
+    /// advertise on (v0.3a). When `None`, the responder picks the first
+    /// non-loopback IPv4 interface. When the chosen interface lacks a
+    /// non-loopback IPv4, the responder is not started and the agent logs
+    /// a warning: routing still works, just without `.local` advertisement.
+    pub advertise_iface: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -393,6 +400,30 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
+    // -- mDNS responder (v0.3a). The advertise IP is the chosen interface's
+    //    first non-loopback IPv4. Failures are non-fatal: the agent keeps
+    //    serving traffic, you just don't get `.local` advertisement until the
+    //    interface comes back. The responder advertises on the same port the
+    //    HTTP listener bound (defaults to 80 when proxy_http_port is None,
+    //    matching the production compose setup).
+    let mdns_handle: Option<sync::MdnsHandle> =
+        match mdns::pick_advertise_ip(opts.advertise_iface.as_deref()) {
+            Ok(ip) => {
+                let advertise_port = opts.proxy_http_port.unwrap_or(mdns::DEFAULT_HTTP_PORT);
+                match mdns::MdnsResponder::new(ip, advertise_port) {
+                    Ok(resp) => Some(Arc::new(tokio::sync::Mutex::new(resp))),
+                    Err(e) => {
+                        warn!(error = %e, "mdns: responder disabled (continuing)");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "mdns: cannot pick advertise interface (continuing without)");
+                None
+            }
+        };
+
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
 
@@ -411,6 +442,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_proxy_state = proxy_state.clone();
     let sync_supervisor = supervisor_for_sync.clone();
     let sync_log_source = log_source.clone();
+    let sync_mdns = mdns_handle.clone();
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_endpoint,
@@ -422,6 +454,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_proxy_state,
             sync_supervisor,
             sync_log_source,
+            sync_mdns,
         )
         .await
     };

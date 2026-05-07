@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/isengard",
+    "crates/isd",
     "crates/isengard-core",
     "crates/isengard-controller",
     "crates/isengard-agent",
@@ -137,6 +138,27 @@ isengard-plugin-networking-cf-tunnel = { path = "crates/isengard-plugins/network
 
 # external CLI lookup (used by tailscale adapter to verify `tailscale` binary)
 which = "6"
+
+# mDNS responder (v0.3a: agent advertises `*.local` records on the LAN)
+mdns-sd = { version = "0.13", default-features = false, features = ["async"] }
+
+# enumerate local network interfaces (v0.3a: pick advertising IPv4)
+if-addrs = "0.13"
+
+# CLI table rendering (v0.3a: `isd ps` pretty output)
+comfy-table = { version = "7", default-features = false }
+
+# open the OS default browser (v0.3a: `isd open <stack>`)
+open = "5"
+
+# websocket client for `isd logs -f` (v0.3a)
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+
+# read passwords / tokens without echoing to the terminal (v0.3a: `isd login`)
+rpassword = "7"
+
+# TOML for the `isd` credentials store (v0.3a)
+toml = "0.8"
 
 [profile.release]
 lto = "thin"

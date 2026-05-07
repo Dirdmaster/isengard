@@ -70,6 +70,10 @@ docker exec iso-controller isengard controller token mint --role agent --format 
 
 This reproduces the pre-Phase-15 behaviour. You'll need to handle CA distribution yourself in that path; see [`docker/README.md`](./docker/README.md#advanced-bare-token-output).
 
+## Operator CLI (`isd`)
+
+`isd` is the terminal companion to the dashboard. After the controller is up, run `cargo build -p isd --release` (or `just isd-build`) and `isd login https://controller.local:9417` once: the CLI captures the controller's TLS fingerprint, stores it alongside an API token in `~/.config/isengard/credentials.toml`, and pins both for subsequent calls. Day-to-day commands: `isd ps` (list stacks + services, `--json` for scripts), `isd open <stack>` (launch the stack's primary host in your default browser), and `isd logs <stack>/<service> -f` (stream logs over the controller WebSocket). More subcommands (`apply`, `forward`, `shell`) ship in v0.3c/d once the compose-store lands.
+
 ---
 
 # Isengard (legacy Go)

@@ -16,6 +16,10 @@ build:
 release:
     cargo build --release -p isengard
 
+# Build the operator CLI (`isd`) in release mode (v0.3a)
+isd-build:
+    cargo build --release -p isd
+
 # === Test ===
 
 # Run all tests with cargo-nextest if available, fallback to cargo test
