@@ -46,6 +46,13 @@ jobs:
         with:
           shared-key: build
 
+      # cargo clippy compiles the workspace, which runs the dashboard
+      # plugin's build.rs (it shells out to `bun run build` for the Nuxt
+      # bundle). Without bun the lint job panics before any clippy lints
+      # actually run. Keep this in sync with build + test jobs.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: cargo fmt --check
         run: cargo fmt --check
 
