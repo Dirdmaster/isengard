@@ -61,6 +61,67 @@ www:
 www-build:
     cd www && bun run build
 
+# === Local dev (Docker compose stack) ===
+
+# Compose file pair used by every recipe below. Layered: base + dev override.
+# Note: OrbStack / Colima / Rancher Desktop users must export DOCKER_SOCK
+# in the same shell before `just dev`. See docker/README.md.
+compose_args := "-f docker/compose.yaml -f docker/compose.dev.yaml"
+
+# Build local images + bring up controller + agent (compose dev override)
+dev:
+    docker compose {{compose_args}} up -d --build
+    @echo ""
+    @echo "Dashboard: http://127.0.0.1:9418"
+    @echo "If this is a fresh stack, mint a token: just mint-token"
+
+# Bring up with current images (no rebuild)
+up:
+    docker compose {{compose_args}} up -d
+
+# Stop everything (keeps volumes + enrollment state)
+down:
+    -docker compose -p hello -f docker/hello-stack.yaml down 2>/dev/null
+    docker compose {{compose_args}} down
+
+# Full reset: down + remove volumes (loses enrollment + state)
+nuke:
+    @read -r -p "This will delete all enrollment + state + volumes. Type 'nuke' to confirm: " confirm; \
+        [ "$confirm" = "nuke" ] || { echo "Aborted."; exit 1; }
+    -docker compose -p hello -f docker/hello-stack.yaml down -v 2>/dev/null
+    docker compose {{compose_args}} down -v
+
+# Mint an enrollment token; renders the docker run join command
+mint-token:
+    docker exec iso-controller isengard controller token mint --role agent --public-addr controller.local:9417
+
+# Bring up the example managed stack (separate Compose project so the agent
+# sees it via the host docker socket)
+hello:
+    docker compose -p hello -f docker/hello-stack.yaml up -d
+
+# Tail all logs (Ctrl+C exits)
+logs:
+    docker compose {{compose_args}} logs -f
+
+# Tail just the controller
+logs-controller:
+    docker logs -f iso-controller
+
+# Tail just the agent
+logs-agent:
+    docker logs -f iso-agent
+
+# Force-rebuild local images without bringing them up
+build-images:
+    docker compose {{compose_args}} build
+
+# Switch back to GHCR :next images. Useful for "is this a regression in my
+# local build, or is it broken on next too?"
+prod:
+    docker compose -f docker/compose.yaml pull controller agent
+    docker compose -f docker/compose.yaml up -d --no-build
+
 # === Smoke / demo (full controller + agent end-to-end on Docker) ===
 
 ctrl := "isengard-controller"

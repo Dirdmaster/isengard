@@ -37,6 +37,30 @@ docker compose -p hello -f docker/hello-stack.yaml up -d
 
 The CA export step is a current rough edge — Phase 14's mTLS makes it unavoidable today. The pending `swarm-style enrollment join command` PR rolls these steps into a single `docker run …` line that bundles the token + base64-encoded CA + URL.
 
+## Local dev (no GHCR wait)
+
+If you've cloned the repo and want to iterate on backend / dashboard / Dockerfile changes without waiting for GHCR rebuilds:
+
+```sh
+just dev
+```
+
+Builds local images tagged `iso-controller:dev` / `iso-agent:dev` and brings up the stack with the dev compose override (`docker/compose.dev.yaml` layered on top of `docker/compose.yaml`). Roughly 1-2 min on a warm cargo cache, 5+ min cold.
+
+Useful follow-ups:
+
+```sh
+just mint-token       # render the docker run join command
+just hello            # bring up the example managed stack
+just logs-agent       # tail agent logs
+just logs-controller  # tail controller logs
+just down             # stop (keeps volumes + enrollment state)
+just nuke             # full reset (deletes enrollment + state + volumes)
+just prod             # switch back to GHCR :next images
+```
+
+OrbStack / Colima / Rancher Desktop users: export `DOCKER_SOCK=...` in the same shell before `just dev` (see the table below).
+
 ## Conventions used
 
 - Controller listens on `0.0.0.0:9417` (gRPC) + `0.0.0.0:9418` (dashboard). Bound to `127.0.0.1` on the host so the dashboard is reachable at `http://127.0.0.1:9418` without exposing it publicly.
