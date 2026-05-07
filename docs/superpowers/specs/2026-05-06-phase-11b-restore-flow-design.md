@@ -127,7 +127,7 @@ The restore endpoint runs synchronously. A typical controller DB restores in <30
 
 - **Step 1**: pick a run from the existing `runs` history, filtered to status `success`, sorted newest-first.
 - **Step 2**: paste the passphrase. The UI hashes it client-side (Web Crypto subtle digest, same algo as `passphrase_fingerprint`) and compares to the configured fingerprint. If they don't match, "Continue" stays disabled with a hint.
-- **Step 3**: "What happens" summary — the snapshot timestamp, the destination object, the `.bak.<ts>` path the current DB will land at, and a warning that active connections will drop.
+- **Step 3**: "What happens" summary: the snapshot timestamp, the destination object, the `.bak.<ts>` path the current DB will land at, and a warning that active connections will drop.
 - **Step 4**: "Type RESTORE to confirm" text input. The "Restore" button is red and only enables when the literal phrase matches.
 
 A status panel beneath the BackupSettings status section shows the most recent restore attempt (if any), its duration, and the fallback `.bak.<ts>` path.

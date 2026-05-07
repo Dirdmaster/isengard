@@ -70,7 +70,7 @@ WAL + SHM siblings of the live path (`isengard.db-wal`, `isengard.db-shm`) are m
 
 ## What 11B does not ship
 
-- **Cross-version downgrade detection.** Restoring a newer-schema snapshot into an older controller will surface as a sqlx error during the post-swap migration; a friendlier message ("snapshot from controller v0.5; current is v0.3 — downgrades not supported") lands later.
+- **Cross-version downgrade detection.** Restoring a newer-schema snapshot into an older controller will surface as a sqlx error during the post-swap migration; a friendlier message ("snapshot from controller v0.5; current is v0.3, downgrades not supported") lands later.
 - **Live-listener drain.** The controller stays up during the restore; operators are advised to restart afterwards.
 - **Bucket-root manifest.json.** Still 11+. The current LIST + per-run manifest is sufficient for v1.
 

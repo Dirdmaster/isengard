@@ -76,7 +76,7 @@
           </div>
           <div class="flex flex-col gap-1">
             <span class="text-[10px] uppercase tracking-wide text-iso-text-muted">Pasted fingerprint</span>
-            <span class="font-mono text-iso-text-secondary">{{ pastedFingerprint || '—' }}</span>
+            <span class="font-mono text-iso-text-secondary">{{ pastedFingerprint || '...' }}</span>
           </div>
         </div>
 

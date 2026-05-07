@@ -318,7 +318,7 @@ async fn list_runs(
     }
 }
 
-/// GET /backup/runs/{id}/manifest — pre-flight info for a restore.
+/// GET /backup/runs/{id}/manifest: pre-flight info for a restore.
 ///
 /// Returns the object name, size, timestamps, and the controller's stored
 /// passphrase fingerprint. The UI hashes the operator's pasted passphrase
@@ -378,7 +378,7 @@ async fn get_run_manifest(
     Json(dto).into_response()
 }
 
-/// POST /backup/restore — synchronous restore. Returns the outcome on
+/// POST /backup/restore: synchronous restore. Returns the outcome on
 /// success (200), or 4xx for user errors (wrong passphrase, missing
 /// object, runner not started, missing fields), 5xx for infrastructure
 /// failures (network / disk / migrate).
