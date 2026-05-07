@@ -44,6 +44,24 @@ The CA export step is a current rough edge — Phase 14's mTLS makes it unavoida
 - Agent mounts `/var/run/docker.sock` from the host so it can manage containers running outside its own Compose project. The example stack runs as a separate Compose project (`-p hello`) so the agent sees it through the host socket.
 - State lives on named Docker volumes. Replace with bind mounts to a backed-up host path for production.
 
+## Docker socket path (non-Desktop runtimes)
+
+The agent bind-mounts the host Docker socket so it can manage containers running outside its own Compose project. `compose.yaml` defaults to `/var/run/docker.sock`, which works for Docker Desktop and vanilla Linux. For other Mac runtimes, export `DOCKER_SOCK` before bringing up the agent:
+
+| Runtime | Socket path |
+|---|---|
+| Docker Desktop / Linux | `/var/run/docker.sock` (default, no override needed) |
+| OrbStack | `$HOME/.orbstack/run/docker.sock` |
+| Colima | `$HOME/.colima/default/docker.sock` |
+| Rancher Desktop | `$HOME/.rd/docker.sock` |
+
+```sh
+export DOCKER_SOCK=$HOME/.orbstack/run/docker.sock
+docker compose -f docker/compose.yaml up -d agent
+```
+
+Confirm what your context uses with `docker context inspect | grep -i host`.
+
 ## Architecture
 
 Images currently ship `linux/amd64` only. Apple Silicon (arm64) Macs need to pull the amd64 manifest and run under Rosetta — `docker/compose.yaml` already pins `platform: linux/amd64` for both services so this works out of the box. Linux/amd64 hosts ignore the line and run native.
