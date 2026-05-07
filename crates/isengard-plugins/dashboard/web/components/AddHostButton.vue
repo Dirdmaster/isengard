@@ -1,16 +1,25 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useHostsStore } from '~/stores/hosts'
+import AddHostModal from './AddHostModal.vue'
 
 /**
- * Hosts page CTA. Per `design/pages/hosts.md` this enters the wizard at step 2
- * with `fresh=1` so the form is empty. Settings → Enrollment still uses
- * `<AddHostModal>` directly for the in-place flow; only the entry-point button
- * routes to the wizard.
+ * Hosts page CTA. First host: route to /welcome (full onboarding wizard
+ * with reachability checks + listening step). Subsequent hosts: open the
+ * AddHostModal directly. The wizard's framing ("Add your first host")
+ * makes no sense after the first one.
  */
 const router = useRouter()
+const hostsStore = useHostsStore()
+const showModal = ref(false)
 
 function open() {
-  router.push('/welcome?step=2&fresh=1')
+  if (hostsStore.hosts.length === 0) {
+    router.push('/welcome?step=2&fresh=1')
+  } else {
+    showModal.value = true
+  }
 }
 </script>
 
@@ -24,4 +33,5 @@ function open() {
     <Icon name="lucide:plus" class="w-3.5 h-3.5 mr-1.5" />
     Add host
   </Button>
+  <AddHostModal v-if="showModal" @close="showModal = false" />
 </template>
