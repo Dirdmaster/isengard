@@ -97,15 +97,27 @@ pub async fn run(args: OpenArgs, context: Option<&str>) -> Result<()> {
 }
 
 /// Pick the rule we want to open in a browser:
-///   1. matches `stack_id`
-///   2. is enabled (state == "enabled" or no state field at all)
-///   3. lowest `id` (stable across calls; the controller assigns ids
-///      monotonically so this is the oldest = "primary" rule).
+///   1. matches `stack_id` directly when the rule has one set; for label-
+///      discovered rules `stack_id` is None and we accept anyway. The
+///      controller's stack list filtered by name already narrowed scope,
+///      so a None-stack-id rule on a single-stack lookup is still our rule.
+///   2. operational state: `active` or `pending`. `draining` and `failed`
+///      are skipped. `pending` is included because v0.3a sees freshly
+///      label-discovered rules in this state before the proxy adopts them.
+///   3. lowest `id` (stable tiebreak across calls).
 fn pick_primary_rule(rules: &[RoutingRuleDto], stack_id: i64) -> Option<RoutingRuleDto> {
     let mut candidates: Vec<&RoutingRuleDto> = rules
         .iter()
-        .filter(|r| r.stack_id == Some(stack_id))
-        .filter(|r| matches!(r.state.as_deref(), None | Some("enabled")))
+        .filter(|r| match r.stack_id {
+            None => true,
+            Some(id) => id == stack_id,
+        })
+        .filter(|r| {
+            matches!(
+                r.state.as_deref(),
+                None | Some("active") | Some("pending") | Some("enabled")
+            )
+        })
         .collect();
     candidates.sort_by_key(|r| r.id);
     candidates.first().map(|r| (*r).clone())
@@ -149,6 +161,25 @@ mod tests {
         let rules = vec![rule(2, "ok.local", Some(1), None)];
         let chosen = pick_primary_rule(&rules, 1).unwrap();
         assert_eq!(chosen.public_hostname, "ok.local");
+    }
+
+    #[test]
+    fn pending_active_states_are_openable() {
+        let rules = vec![
+            rule(1, "a.local", Some(1), Some("pending")),
+            rule(2, "b.local", Some(1), Some("active")),
+            rule(3, "c.local", Some(1), Some("draining")),
+            rule(4, "d.local", Some(1), Some("failed")),
+        ];
+        let chosen = pick_primary_rule(&rules, 1).unwrap();
+        assert_eq!(chosen.public_hostname, "a.local");
+    }
+
+    #[test]
+    fn label_discovered_rules_with_no_stack_id_are_accepted() {
+        let rules = vec![rule(1, "label.local", None, Some("active"))];
+        let chosen = pick_primary_rule(&rules, 42).unwrap();
+        assert_eq!(chosen.public_hostname, "label.local");
     }
 
     #[test]
