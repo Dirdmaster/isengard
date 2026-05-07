@@ -55,7 +55,16 @@ services:
       # Lets the agent manage containers running on the host's Docker daemon.
       # The agent's blue-green deploys, recreates, healthchecks all happen
       # against the host's containers via this socket.
-      - /var/run/docker.sock:/var/run/docker.sock
+      #
+      # ${DOCKER_SOCK} defaults to the Docker Desktop / vanilla path. Override
+      # it for non-Desktop runtimes by exporting before `docker compose up`:
+      #   Docker Desktop:    /var/run/docker.sock              (default, works as-is)
+      #   OrbStack:          export DOCKER_SOCK=$HOME/.orbstack/run/docker.sock
+      #   Colima:            export DOCKER_SOCK=$HOME/.colima/default/docker.sock
+      #   Rancher Desktop:   export DOCKER_SOCK=$HOME/.rd/docker.sock
+      # Inside the container the path stays /var/run/docker.sock so the agent
+      # finds it where bollard expects it.
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       # Controller's self-signed CA (Phase 14 mTLS). Export it once after the
       # controller starts:
       #   docker exec iso-controller isengard controller ca export > docker/ca.pem
