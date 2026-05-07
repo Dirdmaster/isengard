@@ -222,10 +222,7 @@ async fn run_inner(
     } else {
         // Step 4a: rename live -> .bak.<ts>.
         std::fs::rename(db_path, &backup_path).map_err(|e| {
-            RestoreError::Swap(format!(
-                "rename live -> {}: {e}",
-                backup_path.display()
-            ))
+            RestoreError::Swap(format!("rename live -> {}: {e}", backup_path.display()))
         })?;
 
         // Move WAL/SHM siblings to the backup path so they are not picked
@@ -340,10 +337,7 @@ mod tests {
         std::fs::write(&live, b"x").unwrap();
         let when = chrono::Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
         let p = pick_backup_path(&live, when);
-        assert_eq!(
-            p,
-            dir.path().join("isengard.db.bak.20260506T120000Z")
-        );
+        assert_eq!(p, dir.path().join("isengard.db.bak.20260506T120000Z"));
     }
 
     #[test]
@@ -356,9 +350,6 @@ mod tests {
         let bak = dir.path().join("isengard.db.bak.20260506T120000Z");
         std::fs::write(&bak, b"old").unwrap();
         let p = pick_backup_path(&live, when);
-        assert_eq!(
-            p,
-            dir.path().join("isengard.db.bak.20260506T120000Z-1")
-        );
+        assert_eq!(p, dir.path().join("isengard.db.bak.20260506T120000Z-1"));
     }
 }

@@ -139,8 +139,7 @@ async fn restore_round_trip_recovers_seeded_row() {
 async fn dry_run_validates_without_swapping() {
     let _guard = env_lock().await;
     let pass = "dry-run-pass-2";
-    let (dir, db_path, dest_root, prefix, object_name) =
-        seed_and_backup(pass, "live-bytes").await;
+    let (dir, db_path, dest_root, prefix, object_name) = seed_and_backup(pass, "live-bytes").await;
 
     {
         let inv = Inventory::open(&db_path).await.unwrap();
@@ -180,7 +179,10 @@ async fn dry_run_validates_without_swapping() {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.contains(".bak."))
         .collect();
-    assert!(entries.is_empty(), "no .bak.<ts> on dry-run, found {entries:?}");
+    assert!(
+        entries.is_empty(),
+        "no .bak.<ts> on dry-run, found {entries:?}"
+    );
 
     drop(dir);
 }
@@ -189,8 +191,7 @@ async fn dry_run_validates_without_swapping() {
 async fn wrong_passphrase_returns_decrypt_error() {
     let _guard = env_lock().await;
     let pass = "right-pass";
-    let (dir, db_path, dest_root, prefix, object_name) =
-        seed_and_backup(pass, "anything").await;
+    let (dir, db_path, dest_root, prefix, object_name) = seed_and_backup(pass, "anything").await;
 
     let dest = LocalDestination::new(&dest_root, &prefix);
     let inv = Arc::new(Inventory::open(&db_path).await.unwrap());
@@ -221,8 +222,7 @@ async fn wrong_passphrase_returns_decrypt_error() {
 async fn missing_object_returns_destination_error() {
     let _guard = env_lock().await;
     let pass = "missing-pass";
-    let (dir, db_path, dest_root, prefix, _object_name) =
-        seed_and_backup(pass, "anything").await;
+    let (dir, db_path, dest_root, prefix, _object_name) = seed_and_backup(pass, "anything").await;
 
     let dest = LocalDestination::new(&dest_root, &prefix);
     let inv = Arc::new(Inventory::open(&db_path).await.unwrap());
@@ -248,8 +248,7 @@ async fn missing_object_returns_destination_error() {
 async fn empty_passphrase_rejected() {
     let _guard = env_lock().await;
     let pass = "valid";
-    let (dir, db_path, dest_root, prefix, object_name) =
-        seed_and_backup(pass, "anything").await;
+    let (dir, db_path, dest_root, prefix, object_name) = seed_and_backup(pass, "anything").await;
 
     let dest = LocalDestination::new(&dest_root, &prefix);
     let inv = Arc::new(Inventory::open(&db_path).await.unwrap());
@@ -369,8 +368,7 @@ async fn swap_preserves_previous_db_at_bak_path() {
 async fn restore_runs_records_failed_attempt_before_success() {
     let _guard = env_lock().await;
     let pass = "list-pass";
-    let (dir, db_path, dest_root, prefix, object_name) =
-        seed_and_backup(pass, "init").await;
+    let (dir, db_path, dest_root, prefix, object_name) = seed_and_backup(pass, "init").await;
 
     let dest = LocalDestination::new(&dest_root, &prefix);
     let inv = Arc::new(Inventory::open(&db_path).await.unwrap());
@@ -430,8 +428,7 @@ async fn migrations_apply_after_restore() {
     // Inventory after swap" path.
     let _guard = env_lock().await;
     let pass = "migrate-pass";
-    let (dir, db_path, dest_root, prefix, object_name) =
-        seed_and_backup(pass, "migrate-me").await;
+    let (dir, db_path, dest_root, prefix, object_name) = seed_and_backup(pass, "migrate-me").await;
 
     let dest = LocalDestination::new(&dest_root, &prefix);
     let inv = Arc::new(Inventory::open(&db_path).await.unwrap());

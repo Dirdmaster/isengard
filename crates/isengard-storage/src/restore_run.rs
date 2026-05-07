@@ -236,10 +236,7 @@ mod tests {
     async fn list_orders_newest_first() {
         let inv = Inventory::open_in_memory().await.unwrap();
         let now = Utc::now();
-        let _a = inv
-            .insert_restore_run("a.db.age", None, now)
-            .await
-            .unwrap();
+        let _a = inv.insert_restore_run("a.db.age", None, now).await.unwrap();
         let b = inv
             .insert_restore_run("b.db.age", None, now + chrono::Duration::seconds(1))
             .await
