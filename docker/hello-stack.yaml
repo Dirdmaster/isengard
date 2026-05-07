@@ -19,10 +19,26 @@
 # To exercise blue-green + healthcheck-driven rollback, change the image
 # tag and re-up: docker compose -p hello -f docker/local-smoke/hello-stack.yaml up -d
 
+# Shared external network so the agent's pingora can actually reach this
+# container across bridges. See `compose.yaml` for the rationale and
+# `docker/README.md` for the one-time `docker network create isengard-proxy`.
+# Operator stacks that don't join this network can still be discovered via
+# labels but the proxy can't route to them.
+networks:
+  default:
+  isengard-proxy:
+    external: true
+    name: isengard-proxy
+
 services:
   hello:
     image: nginxdemos/hello:plain-text
     container_name: hello-web
+    # `default` keeps the service on its own compose-project bridge for
+    # intra-stack talk; `isengard-proxy` is the shared fabric pingora rides.
+    networks:
+      - default
+      - isengard-proxy
     ports:
       - "8080:80"
     labels:

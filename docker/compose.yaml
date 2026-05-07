@@ -11,6 +11,26 @@
 
 name: isengard
 
+# Shared external network. Pingora (in the agent) and every operator-managed
+# stack that wants to be routed must both join this network so they share an
+# L3 fabric. Without it, the agent's pingora is on `isengard_default` while
+# operator stacks (e.g. `hello-web` on `hello_default`) sit on a different
+# bridge: routing rules get an IP the proxy can't reach, healthchecks evict,
+# and clients get 503.
+#
+# This is the Traefik recipe (`proxy: external: true`). One-time setup on
+# any host:
+#
+#   docker network create isengard-proxy
+#   # or run `just net-up` (idempotent)
+#
+# Operator stacks opt-in by attaching to `isengard-proxy` via their own
+# top-level `networks:` block (see `hello-stack.yaml` for a worked example).
+networks:
+  isengard-proxy:
+    external: true
+    name: isengard-proxy
+
 services:
   controller:
     image: ghcr.io/weavers-engineering/isengard-controller:next
@@ -65,6 +85,22 @@ services:
     user: "0:0"
     depends_on:
       - controller
+    # Two networks: `default` carries controller-talk (the Compose-managed
+    # network where the controller alias `controller.local` resolves);
+    # `isengard-proxy` is the shared L3 fabric pingora uses to reach
+    # operator stacks. Without the second attachment, every routing rule
+    # would resolve a container IP that pingora can't reach across bridges.
+    networks:
+      - default
+      - isengard-proxy
+    # Publish pingora to host loopback. Privileged ports 80/443 are bound
+    # by the docker engine, no sudo required from the operator. The proxy
+    # itself listens on 8080/8443 inside the container; we do the host-side
+    # mapping here so `curl -H "Host: hello.local" http://127.0.0.1/`
+    # works without a port suffix.
+    ports:
+      - "127.0.0.1:80:8080"
+      - "127.0.0.1:443:8443"
     volumes:
       - agent-state:/var/lib/isengard
       # Lets the agent manage containers running on the host's Docker daemon.

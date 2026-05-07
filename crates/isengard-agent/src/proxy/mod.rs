@@ -19,6 +19,7 @@ use tracing::{error, info, warn};
 use crate::tls::{CertStore, ChallengeState};
 
 pub mod cert_callback;
+pub mod discovery;
 pub mod events;
 pub mod healthcheck;
 pub mod router;
@@ -27,6 +28,7 @@ pub mod swap;
 pub mod upstreams;
 
 pub use cert_callback::IsengardCertCallback;
+pub use discovery::{SHARED_PROXY_NETWORK, pick_container_ip, resolve_container_ip};
 pub use events::{ProxyEvent, ProxyEventBus};
 pub use swap::swap_upstream;
 pub use upstreams::{Upstream, UpstreamRegistry, UpstreamState};
@@ -100,14 +102,29 @@ impl ProxyState {
 /// are dropped silently (debug log).
 ///
 /// Each `RoutingRule` becomes one entry in the registry, keyed by
-/// `public_hostname`. An empty `container_ip` defaults to `127.0.0.1` (the
-/// docker bridge IP isn't always populated in the controller's view yet).
+/// `public_hostname`. The controller leaves `container_ip` empty (it has no
+/// view of docker network IPs); the agent resolves it at apply-time via
+/// [`discovery::resolve_container_ip`] when a `docker` handle is present. If
+/// resolution fails or no Docker handle is wired (unit tests), the call
+/// falls back to `127.0.0.1` so the rule still installs and the healthcheck
+/// loop has a chance to evict it.
 ///
-/// Health is initialized to `true`; the healthcheck loop (later task) flips
-/// it once it has a real signal.
+/// Health is initialized to `true`; the healthcheck loop flips it once it
+/// has a real signal.
 pub async fn apply_config(
     state: &ProxyState,
     cfg: isengard_proto::pb::ProxyConfig,
+) -> anyhow::Result<()> {
+    apply_config_with_docker(state, cfg, None).await
+}
+
+/// Like [`apply_config`] but with an explicit Docker handle for IP
+/// discovery. The sync loop uses this entrypoint; tests stick with the
+/// no-Docker [`apply_config`] form so they don't need a daemon.
+pub async fn apply_config_with_docker(
+    state: &ProxyState,
+    cfg: isengard_proto::pb::ProxyConfig,
+    docker: Option<&bollard::Docker>,
 ) -> anyhow::Result<()> {
     // Lock-free pre-check to skip the build for obviously-stale configs.
     let last = state.last_generation.load(Ordering::Acquire);
@@ -125,19 +142,34 @@ pub async fn apply_config(
         let Some(up) = rule.upstream.as_ref() else {
             continue;
         };
-        let ip: std::net::IpAddr = if up.container_ip.is_empty() {
-            tracing::warn!(
-                hostname = %rule.public_hostname,
-                container_id = %up.container_id,
-                "proxy: ProxyConfig rule has empty container_ip; falling back to 127.0.0.1 \
-                 (the controller failed to populate the bridge IP for this rule)"
-            );
-            "127.0.0.1".parse().expect("127.0.0.1 is a valid IpAddr")
+
+        // Discovery: prefer an IP shipped by the controller (test fixtures,
+        // future controller-side discovery), then ask Docker if we have a
+        // handle, then fall back to 127.0.0.1.
+        let resolved_ip: Option<String> = if !up.container_ip.is_empty() {
+            Some(up.container_ip.clone())
+        } else if let Some(d) = docker {
+            discovery::resolve_container_ip(d, &up.container_id).await
         } else {
-            up.container_ip
-                .parse()
-                .map_err(|e| anyhow::anyhow!("bad container_ip {}: {e}", up.container_ip))?
+            None
         };
+
+        let ip: std::net::IpAddr = match resolved_ip {
+            Some(s) => s
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad container_ip {s}: {e}"))?,
+            None => {
+                tracing::warn!(
+                    hostname = %rule.public_hostname,
+                    container_id = %up.container_id,
+                    "proxy: ProxyConfig rule has empty container_ip; falling back to 127.0.0.1 \
+                     (Docker discovery returned no IP: container likely not joined to \
+                      `isengard-proxy` and not on a non-driver bridge the agent can see)"
+                );
+                "127.0.0.1".parse().expect("127.0.0.1 is a valid IpAddr")
+            }
+        };
+
         let addr = std::net::SocketAddr::new(ip, up.container_port as u16);
         new_reg.set(
             rule.public_hostname.clone(),
