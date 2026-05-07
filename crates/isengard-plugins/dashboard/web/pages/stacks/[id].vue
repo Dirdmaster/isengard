@@ -178,7 +178,11 @@ const stackTabs = [
         />
         <StackComposeTab v-else-if="activeTab === 'compose'" />
         <StackHistoryTab v-else-if="activeTab === 'history'" :stack-id="stackId" />
-        <StackRoutingTab v-else-if="activeTab === 'routing'" />
+        <StackRoutingTab
+          v-else-if="activeTab === 'routing'"
+          :stack-id="stackId"
+          :host-id="stack.host_id"
+        />
         <StackSettingsTab
           v-else-if="activeTab === 'settings'"
           :stack-id="stackId"

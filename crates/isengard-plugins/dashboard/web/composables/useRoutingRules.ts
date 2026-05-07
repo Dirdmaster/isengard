@@ -4,6 +4,12 @@ export interface RoutingRule {
   id: number
   fleet: string
   host_id: string
+  /**
+   * Optional stack scope. Present on rules associated with a specific stack;
+   * `null` for fleet-wide rules. Surfaced so per-stack views can filter
+   * client-side until a server-side `stack_id` query parameter lands.
+   */
+  stack_id: number | null
   service_name: string
   container_port: number
   public_hostname: string
