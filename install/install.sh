@@ -203,6 +203,13 @@ bootstrap_secret() {
       warn "value cannot be empty"
       continue
     fi
+    # Paste-feedback: show character count without revealing the value.
+    # Lets the operator confirm a paste worked vs hit Enter on an empty line.
+    if [[ -n "${value}" ]]; then
+      printf '    (received %d characters)\n' "${#value}"
+    else
+      printf '    (skipped)\n'
+    fi
     break
   done
 
