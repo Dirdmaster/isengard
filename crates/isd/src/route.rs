@@ -22,6 +22,7 @@ pub struct RouteArgs {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)] // CreateArgs is large but only one is alive at a time
 pub enum RouteCommand {
     /// List every routing rule across the fleet.
     List,
@@ -38,9 +39,15 @@ pub struct CreateArgs {
     /// e.g. `iso.vallee.casa`. Wildcards are not allowed in this field; an
     /// `*.example.com` cert covers any single-label subdomain when present.
     pub public_hostname: String,
-    /// Agent ULID serving the upstream. Find via `isd ps` or the dashboard.
-    #[arg(long)]
-    pub host_id: String,
+    /// Agent serving the upstream. Defaults to the only enrolled agent in
+    /// the fleet (the homelab single-host case). Pass either `--host-id`
+    /// (ULID) or `--host` (hostname) when more than one agent exists.
+    #[arg(long, conflicts_with = "host")]
+    pub host_id: Option<String>,
+    /// Agent hostname (resolved client-side to a host_id). Mutually
+    /// exclusive with `--host-id`.
+    #[arg(long, conflicts_with = "host_id")]
+    pub host: Option<String>,
     /// Upstream container hostname (DNS name resolvable on the agent's
     /// docker network) or service name. e.g. `iso-controller` to point at
     /// the controller's dashboard, `nginx` for a stack service named nginx.
@@ -109,6 +116,14 @@ struct RoutingRuleEntry {
     source: String,
 }
 
+/// Subset of `HostDto` we care about for host_id resolution.
+#[derive(Debug, Clone, Deserialize)]
+struct HostEntry {
+    id: String,
+    hostname: String,
+    fleet: String,
+}
+
 pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         RouteCommand::List => run_list(context).await,
@@ -149,9 +164,17 @@ async fn run_list(context: Option<&str>) -> Result<()> {
 
 async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
     let (ctx, client) = pinned_session(context).await?;
+    let host_id = resolve_host_id(
+        &ctx,
+        &client,
+        args.host_id.as_deref(),
+        args.host.as_deref(),
+        &args.fleet,
+    )
+    .await?;
     let body = CreateBody {
         fleet: &args.fleet,
-        host_id: &args.host_id,
+        host_id: &host_id,
         service_name: &args.service,
         container_port: args.port,
         public_hostname: &args.public_hostname,
@@ -164,6 +187,85 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
     let id = create_rule(&ctx, &client, &body).await?;
     println!("Created routing rule id={id} for {}.", args.public_hostname);
     Ok(())
+}
+
+/// Resolve the agent's host_id with this priority:
+///   1. `--host-id <ulid>` -> use literally
+///   2. `--host <hostname>` -> look up the matching agent in the fleet
+///   3. neither -> if exactly one agent in the fleet, use it; otherwise
+///      error with a numbered list so the operator can re-invoke with
+///      `--host` or `--host-id`.
+async fn resolve_host_id(
+    ctx: &ContextEntry,
+    client: &reqwest::Client,
+    host_id: Option<&str>,
+    host: Option<&str>,
+    fleet: &str,
+) -> Result<String> {
+    if let Some(id) = host_id {
+        return Ok(id.to_string());
+    }
+    let hosts = list_hosts(ctx, client, fleet).await?;
+    if let Some(name) = host {
+        let lc = name.to_lowercase();
+        let matches: Vec<&HostEntry> = hosts
+            .iter()
+            .filter(|h| h.hostname.eq_ignore_ascii_case(&lc))
+            .collect();
+        return match matches.len() {
+            0 => Err(anyhow!(
+                "no agent in fleet {fleet:?} with hostname {name:?}; \
+                 known agents:\n{}",
+                hosts_table(&hosts),
+            )),
+            1 => Ok(matches[0].id.clone()),
+            _ => {
+                let owned: Vec<HostEntry> = matches.into_iter().cloned().collect();
+                Err(anyhow!(
+                    "more than one agent in fleet {fleet:?} matches hostname \
+                     {name:?}; pass --host-id <ulid> instead. matches:\n{}",
+                    hosts_table(&owned),
+                ))
+            }
+        };
+    }
+    match hosts.len() {
+        0 => Err(anyhow!(
+            "no agents enrolled in fleet {fleet:?}; enroll one before creating routes"
+        )),
+        1 => Ok(hosts[0].id.clone()),
+        _ => Err(anyhow!(
+            "more than one agent in fleet {fleet:?}; pass --host <hostname> or \
+             --host-id <ulid>. enrolled agents:\n{}",
+            hosts_table(&hosts),
+        )),
+    }
+}
+
+fn hosts_table(hosts: &[HostEntry]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for h in hosts {
+        let _ = writeln!(&mut s, "  {}  {}  fleet={}", h.id, h.hostname, h.fleet);
+    }
+    s
+}
+
+async fn list_hosts(
+    ctx: &ContextEntry,
+    client: &reqwest::Client,
+    fleet: &str,
+) -> Result<Vec<HostEntry>> {
+    let url = format!("{}/api/v1/hosts?fleet={fleet}", ctx.controller_url);
+    let resp = client
+        .get(&url)
+        .bearer_auth(&ctx.token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
+    let entries: Vec<HostEntry> = resp.error_for_status()?.json().await?;
+    Ok(entries)
 }
 
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
@@ -234,7 +336,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_args_minimum_required() {
+    fn create_args_minimum_required_no_host() {
+        // The common homelab case: one agent, no --host-id needed.
+        // resolve_host_id fills it in at runtime.
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: RouteCommand,
+        }
+        let w = Wrap::try_parse_from([
+            "x",
+            "create",
+            "iso.vallee.casa",
+            "--service",
+            "iso-controller",
+            "--port",
+            "9418",
+        ])
+        .unwrap();
+        match w.c {
+            RouteCommand::Create(a) => {
+                assert_eq!(a.public_hostname, "iso.vallee.casa");
+                assert!(a.host_id.is_none());
+                assert!(a.host.is_none());
+                assert_eq!(a.service, "iso-controller");
+                assert_eq!(a.port, 9418);
+                assert_eq!(a.fleet, "default");
+                assert_eq!(a.protocol, "http");
+                assert_eq!(a.adapter, "none");
+                assert_eq!(a.tls_mode, "acme");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_args_with_explicit_host_id() {
         use clap::Parser;
         #[derive(Parser, Debug)]
         struct Wrap {
@@ -255,17 +393,35 @@ mod tests {
         .unwrap();
         match w.c {
             RouteCommand::Create(a) => {
-                assert_eq!(a.public_hostname, "iso.vallee.casa");
-                assert_eq!(a.host_id, "01H000000000000000000000");
-                assert_eq!(a.service, "iso-controller");
-                assert_eq!(a.port, 9418);
-                assert_eq!(a.fleet, "default");
-                assert_eq!(a.protocol, "http");
-                assert_eq!(a.adapter, "none");
-                assert_eq!(a.tls_mode, "acme");
+                assert_eq!(a.host_id.as_deref(), Some("01H000000000000000000000"));
+                assert!(a.host.is_none());
             }
             other => panic!("expected Create, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_args_host_and_host_id_conflict() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: RouteCommand,
+        }
+        let res = Wrap::try_parse_from([
+            "x",
+            "create",
+            "iso.vallee.casa",
+            "--host-id",
+            "01H000000000000000000000",
+            "--host",
+            "indra",
+            "--service",
+            "x",
+            "--port",
+            "1",
+        ]);
+        assert!(res.is_err(), "host_id + host should conflict");
     }
 
     #[test]
