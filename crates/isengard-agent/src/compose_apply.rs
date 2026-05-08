@@ -18,11 +18,14 @@ use bollard::container::{
 use bollard::secret::{
     ContainerInspectResponse, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
+use tokio::sync::RwLock;
+use tonic::transport::Endpoint;
 
 use crate::compose_reconciler::{
     DesiredCompose, DesiredService, ReconcilePlan, RunningService, ServiceOp, build_plan,
     parse_compose,
 };
+use crate::secret_fetch;
 
 /// Outcome of applying a [`ReconcilePlan`]. Each entry mirrors the
 /// matching plan op; failures attach an error string but do not abort
@@ -35,6 +38,11 @@ pub struct ApplyOutcome {
 
 /// Bring the running containers for `stack` in line with `compose_yaml`.
 /// Returns the plan that was attempted plus per-op outcomes.
+///
+/// This variant is for stacks WITHOUT external secrets. When a compose
+/// file declares any top-level `secrets: { ... external: true }`, callers
+/// should use [`reconcile_stack_with_secrets`] instead so the agent
+/// fetches + tmpfs-mounts the values at apply time.
 pub async fn reconcile_stack(
     docker: &Docker,
     stack_name: &str,
@@ -43,7 +51,42 @@ pub async fn reconcile_stack(
     let desired = parse_compose(compose_yaml)?;
     let running = list_running_for_stack(docker, stack_name).await?;
     let plan = build_plan(stack_name, &desired, &running);
-    let outcomes = apply_plan(docker, stack_name, &desired, &plan).await;
+    let outcomes = apply_plan(docker, stack_name, &desired, &plan, None).await;
+    Ok((plan, outcomes))
+}
+
+/// v0.3.6: variant of [`reconcile_stack`] that fetches every external
+/// secret referenced by the compose, materialises each on tmpfs, and
+/// bind-mounts them at the per-service target path inside each
+/// container. The endpoint holder is the same one used by the sync
+/// stream: the agent's mTLS client cert authenticates the FetchSecret
+/// RPC.
+///
+/// Cleanup for stopped containers happens inline via
+/// [`secret_fetch::cleanup_for_container`]; recreate cleans the prior
+/// container's directory before the new one is started.
+pub async fn reconcile_stack_with_secrets(
+    docker: &Docker,
+    stack_name: &str,
+    compose_yaml: &str,
+    controller_endpoint: Arc<RwLock<Endpoint>>,
+) -> anyhow::Result<(ReconcilePlan, Vec<ApplyOutcome>)> {
+    let desired = parse_compose(compose_yaml)?;
+    // Fail loud at parse time if a service references an undeclared
+    // top-level secret. The dashboard / `isd diff` already caught this
+    // for the common case, but the agent re-validates so a malformed
+    // file written directly to disk can't slip through.
+    desired.referenced_external_secrets()?;
+    let running = list_running_for_stack(docker, stack_name).await?;
+    let plan = build_plan(stack_name, &desired, &running);
+    let outcomes = apply_plan(
+        docker,
+        stack_name,
+        &desired,
+        &plan,
+        Some(controller_endpoint),
+    )
+    .await;
     Ok((plan, outcomes))
 }
 
@@ -91,11 +134,17 @@ pub async fn list_running_for_stack(
 /// Apply each op in `plan`. Returns one outcome per op, in the same
 /// order. Failures don't short-circuit: the operator gets the full
 /// summary at the end.
+///
+/// `controller_endpoint`: when `Some`, services with `secrets:` entries
+/// fetch each value over the controller's FetchSecret RPC, materialise
+/// it on tmpfs, and bind-mount the directory into the container. When
+/// `None`, secrets are silently dropped (matches the v0.3d call site).
 pub async fn apply_plan(
     docker: &Docker,
     stack_name: &str,
     desired: &DesiredCompose,
     plan: &ReconcilePlan,
+    controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
 ) -> Vec<ApplyOutcome> {
     let mut outcomes = Vec::with_capacity(plan.ops.len());
     for op in &plan.ops {
@@ -109,7 +158,15 @@ pub async fn apply_plan(
                     });
                     continue;
                 };
-                ensure_container_started(docker, stack_name, svc, None).await
+                ensure_container_started(
+                    docker,
+                    stack_name,
+                    svc,
+                    None,
+                    desired,
+                    controller_endpoint.clone(),
+                )
+                .await
             }
             ServiceOp::Recreate { service, .. } => {
                 let Some(svc) = desired.services.get(service) else {
@@ -128,16 +185,38 @@ pub async fn apply_plan(
                 let prior = existing.iter().find(|r| &r.service_name == service);
                 if let Some(prior) = prior {
                     let _ = stop_and_remove(docker, &prior.container_id).await;
+                    // Cleanup any stale tmpfs secrets from the previous
+                    // container; the new one gets a fresh fetch.
+                    let prior_container = container_name_for(stack_name, service, svc);
+                    let _ = secret_fetch::cleanup_for_container(&prior_container);
                 }
                 ensure_container_started(
                     docker,
                     stack_name,
                     svc,
                     prior.map(|r| r.container_id.as_str()),
+                    desired,
+                    controller_endpoint.clone(),
                 )
                 .await
             }
-            ServiceOp::Stop { container_id, .. } => stop_and_remove(docker, container_id).await,
+            ServiceOp::Stop {
+                service,
+                container_id,
+            } => {
+                let res = stop_and_remove(docker, container_id).await;
+                // Best-effort cleanup of any tmpfs secrets the prior
+                // container had mounted. The actual container_name is
+                // either the operator's `container_name:` or our default.
+                if let Some(svc) = desired.services.get(service) {
+                    let cn = container_name_for(stack_name, service, svc);
+                    let _ = secret_fetch::cleanup_for_container(&cn);
+                } else {
+                    let cn = format!("{stack_name}-{service}");
+                    let _ = secret_fetch::cleanup_for_container(&cn);
+                }
+                res
+            }
         };
         outcomes.push(ApplyOutcome {
             op: op.clone(),
@@ -147,20 +226,57 @@ pub async fn apply_plan(
     outcomes
 }
 
+/// Compute the container name the agent will use for this service.
+/// Mirrors the logic in [`ensure_container_started`].
+fn container_name_for(stack_name: &str, service: &str, svc: &DesiredService) -> String {
+    svc.container_name
+        .clone()
+        .unwrap_or_else(|| format!("{stack_name}-{service}"))
+}
+
 async fn ensure_container_started(
     docker: &Docker,
     stack_name: &str,
     svc: &DesiredService,
     _prior_container: Option<&str>,
+    desired: &DesiredCompose,
+    controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
 ) -> anyhow::Result<()> {
     let Some(image) = svc.image.as_ref() else {
         return Err(anyhow::anyhow!("service {} has no image", svc.name));
     };
-    let cfg = build_create_config(stack_name, svc, image)?;
-    let container_name = svc
-        .container_name
-        .clone()
-        .unwrap_or_else(|| format!("{stack_name}-{}", svc.name));
+    let container_name = container_name_for(stack_name, &svc.name, svc);
+
+    // v0.3.6: fetch + materialise external secrets BEFORE creating the
+    // container so the bind-mount source paths exist when bollard wires
+    // them in. On any failure we abort the start; the operator gets the
+    // error in the apply outcome.
+    let mut binds: Vec<String> = Vec::new();
+    if !svc.secrets.is_empty() {
+        let Some(endpoint) = controller_endpoint.clone() else {
+            return Err(anyhow::anyhow!(
+                "service {} references secrets but the agent has no \
+                 controller endpoint configured for FetchSecret",
+                svc.name,
+            ));
+        };
+        // Cleanup any leftover host directory before we re-fetch.
+        let _ = secret_fetch::cleanup_for_container(&container_name);
+        let targets = desired.service_secret_targets(&svc.name)?;
+        let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
+        let materialised = secret_fetch::fetch_and_materialise(endpoint, &container_name, &names)
+            .await
+            .map_err(|e| anyhow::anyhow!("fetch + materialise secrets for {}: {e}", svc.name))?;
+        // Compose target paths from the long-form `target:` (or default
+        // `/run/secrets/<name>`) and pair them up with the materialised
+        // host paths. The order is stable: `service_secret_targets` and
+        // `fetch_and_materialise` both walk the same `svc.secrets` list.
+        for (m, (_, target)) in materialised.iter().zip(targets.iter()) {
+            binds.push(format!("{}:{}:ro", m.host_path.to_string_lossy(), target,));
+        }
+    }
+
+    let cfg = build_create_config(stack_name, svc, image, binds)?;
     // Best-effort: a previous run may have left a container with the
     // same name. Stop+remove it before creating a new one. bollard's
     // create_container errors out on conflict, which is the most
@@ -188,6 +304,7 @@ fn build_create_config(
     stack_name: &str,
     svc: &DesiredService,
     image: &str,
+    binds: Vec<String>,
 ) -> anyhow::Result<Config<String>> {
     // Environment: KEY=VALUE pairs.
     let mut env: Vec<String> = svc
@@ -260,6 +377,7 @@ fn build_create_config(
             Some(port_bindings)
         },
         restart_policy,
+        binds: if binds.is_empty() { None } else { Some(binds) },
         ..Default::default()
     };
 
@@ -378,7 +496,7 @@ mod tests {
             image: Some("nginx".into()),
             ..Default::default()
         };
-        let cfg = build_create_config("hello", &svc, "nginx").unwrap();
+        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
         let labels = cfg.labels.unwrap();
         assert_eq!(labels["com.docker.compose.project"], "hello");
         assert_eq!(labels["com.docker.compose.service"], "web");
@@ -393,9 +511,51 @@ mod tests {
             ..Default::default()
         };
         svc.environment.insert("FOO".into(), "bar".into());
-        let cfg = build_create_config("hello", &svc, "nginx").unwrap();
+        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
         let env = cfg.env.unwrap();
         assert!(env.iter().any(|e| e == "FOO=bar"));
+    }
+
+    #[test]
+    fn build_config_passes_through_binds_when_provided() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        let binds = vec!["/run/isengard-secrets/hello-web/cf:/run/secrets/cf:ro".to_string()];
+        let cfg = build_create_config("hello", &svc, "nginx", binds.clone()).unwrap();
+        assert_eq!(cfg.host_config.unwrap().binds, Some(binds));
+    }
+
+    #[test]
+    fn build_config_no_binds_means_none_in_host_config() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
+        assert!(cfg.host_config.unwrap().binds.is_none());
+    }
+
+    #[test]
+    fn container_name_for_uses_default_when_unset() {
+        let svc = DesiredService {
+            name: "web".into(),
+            ..Default::default()
+        };
+        assert_eq!(container_name_for("hello", "web", &svc), "hello-web");
+    }
+
+    #[test]
+    fn container_name_for_honours_override() {
+        let svc = DesiredService {
+            name: "web".into(),
+            container_name: Some("my-web".into()),
+            ..Default::default()
+        };
+        assert_eq!(container_name_for("hello", "web", &svc), "my-web");
     }
 
     #[test]
@@ -406,7 +566,7 @@ mod tests {
             restart: Some("unless-stopped".into()),
             ..Default::default()
         };
-        let cfg = build_create_config("hello", &svc, "nginx").unwrap();
+        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
         let rp = cfg.host_config.unwrap().restart_policy.unwrap();
         assert!(matches!(
             rp.name,

@@ -23,6 +23,7 @@ pub mod policy;
 pub mod restore_run;
 pub mod routing_rule;
 pub mod routing_rule_override;
+pub mod secret;
 pub mod service;
 pub mod setting;
 pub mod stack;
@@ -54,6 +55,7 @@ pub use routing_rule::{
     InsertRoutingRule, RoutingRule, RoutingRuleId, RoutingRuleSource, RoutingRuleState, TlsMode,
 };
 pub use routing_rule_override::RoutingRuleOverride;
+pub use secret::{SecretMeta, validate_secret_name};
 pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};

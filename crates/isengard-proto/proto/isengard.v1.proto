@@ -21,6 +21,13 @@ service Controller {
   // Phase 14: agent rotates its mTLS client cert before expiry. Authenticated
   // by the existing cert presented on the connection.
   rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
+  // v0.3.6: agent fetches an Isengard-managed secret value at container
+  // start time. Authenticated by the agent's mTLS client cert; the
+  // controller side decrypts on demand and returns the plaintext bytes.
+  // Plaintext is never persisted on the agent: it lands in a tmpfs
+  // mount inside the operator's workload container.
+  rpc FetchSecret(FetchSecretRequest) returns (FetchSecretResponse);
 }
 
 // ============ ENROLL ============
@@ -56,6 +63,27 @@ message RenewCertResponse {
   string agent_key_pem = 2;
   // RFC3339
   string expires_at = 3;
+}
+
+// ============ SECRETS (v0.3.6) ============
+
+// Agent -> controller: "I'm starting a container that needs the secret named
+// `name`; please decrypt and ship me the bytes." Authenticated by the
+// agent's mTLS client cert; the controller's interceptor already gated the
+// connection. Plaintext is returned in `value`.
+message FetchSecretRequest {
+  string name = 1;
+}
+
+// Controller -> agent: secret value bytes plus the timestamp of last
+// rotation, so the agent can avoid recreating containers when nothing has
+// changed.
+message FetchSecretResponse {
+  // Raw value bytes. Treat as opaque; agents write to tmpfs without any
+  // re-encoding (matches Docker / Kubernetes secret semantics).
+  bytes value      = 1;
+  // RFC3339; lets the agent skip work when the on-disk value is up to date.
+  string updated_at = 2;
 }
 
 // ============ SYNC ============

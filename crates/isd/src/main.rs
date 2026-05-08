@@ -21,6 +21,7 @@ mod login;
 mod logs;
 mod open_cmd;
 mod ps;
+mod secret;
 mod table;
 
 #[derive(Parser, Debug)]
@@ -67,6 +68,10 @@ enum Command {
     /// v0.3.5: DNS + reverse proxy bridging the operator's Mac to
     /// containerized stacks. Single foreground command; Ctrl+C tears down.
     Gateway(gateway::GatewayArgs),
+    /// v0.3.6: manage Isengard-managed secrets. `put` upserts, `list`
+    /// shows names only (no values), `rm` deletes.
+    #[command(subcommand)]
+    Secret(secret::SecretCommand),
 }
 
 #[tokio::main]
@@ -83,6 +88,9 @@ async fn main() {
         Command::Diff(args) => compose_cmd::run_diff(args, cli.context.as_deref()).await,
         Command::Edit(args) => compose_cmd::run_edit(args, cli.context.as_deref()).await,
         Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
+        Command::Secret(cmd) => {
+            secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
+        }
     };
 
     if let Err(e) = result {
