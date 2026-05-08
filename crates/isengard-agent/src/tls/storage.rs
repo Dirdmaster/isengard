@@ -33,14 +33,16 @@ impl TlsStorage {
         Self { root }
     }
 
-    /// Path to the cert file for `hostname`.
+    /// Path to the cert file for `hostname`. Wildcard hostnames are encoded
+    /// (`*.foo.com` -> `_wildcard_.foo.com`) so the on-disk filename never
+    /// contains `*` (which is shell-glob-unsafe even though POSIX allows it).
     fn cert_path(&self, hostname: &str) -> PathBuf {
-        self.root.join(format!("{hostname}.crt"))
+        self.root.join(format!("{}.crt", encode_for_path(hostname)))
     }
 
-    /// Path to the key file for `hostname`.
+    /// Path to the key file for `hostname`. Same encoding as `cert_path`.
     fn key_path(&self, hostname: &str) -> PathBuf {
-        self.root.join(format!("{hostname}.key"))
+        self.root.join(format!("{}.key", encode_for_path(hostname)))
     }
 
     /// Write the cert and key for `hostname`. Creates the root directory if
@@ -144,8 +146,10 @@ async fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 /// Reject hostnames that could escape the storage root or break shell tooling.
-/// Allows the DNS label charset (ASCII alnum, dot, hyphen). Refuses empty,
-/// path separators, parent-dir traversals, and any other character.
+/// Allows the DNS label charset (ASCII alnum, dot, hyphen). A leading `*.`
+/// is permitted for wildcard certs; the remainder is validated as a normal
+/// DNS hostname. Refuses empty, path separators, parent-dir traversals, and
+/// any other character.
 fn validate_hostname(hostname: &str) -> Result<()> {
     if hostname.is_empty() {
         anyhow::bail!("hostname is empty");
@@ -153,13 +157,33 @@ fn validate_hostname(hostname: &str) -> Result<()> {
     if hostname.contains('/') || hostname.contains('\\') || hostname.contains("..") {
         anyhow::bail!("hostname {hostname:?} contains path-traversal characters");
     }
-    if let Some(c) = hostname
+    let rest = hostname.strip_prefix("*.").unwrap_or(hostname);
+    if rest.is_empty() {
+        anyhow::bail!("hostname {hostname:?} has nothing after '*.'");
+    }
+    if rest.contains('*') {
+        anyhow::bail!("hostname {hostname:?} contains '*' outside leading wildcard label");
+    }
+    if let Some(c) = rest
         .chars()
         .find(|c| !(c.is_ascii_alphanumeric() || *c == '.' || *c == '-'))
     {
         anyhow::bail!("hostname {hostname:?} contains invalid character {c:?}");
     }
     Ok(())
+}
+
+/// Encode a hostname for use as an on-disk filename. The cache key in
+/// `cert_store` keeps the canonical wildcard form (`*.foo.com`) so
+/// `lookup_wildcard` can find it; the filename swaps that for a literal
+/// `_wildcard_.` prefix to avoid `*` in shell paths. Underscores are
+/// rejected by `validate_hostname` so the encoded form can never collide
+/// with a real input.
+fn encode_for_path(hostname: &str) -> String {
+    match hostname.strip_prefix("*.") {
+        Some(rest) => format!("_wildcard_.{rest}"),
+        None => hostname.to_string(),
+    }
 }
 
 /// Sanity-check that the PEM blobs at least carry BEGIN markers. Catches
