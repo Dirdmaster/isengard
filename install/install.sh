@@ -254,7 +254,14 @@ bootstrap_secret() {
       --master-key-file "${ISENGARD_MASTER_KEY}" \
       --state-dir "${ISENGARD_PREFIX}/controller" >/dev/null
   else
-    printf '%s' "${value}" | docker run --rm -i \
+    # --user 0:0: the distroless image defaults to nonroot, but the master
+    # key is mode 0600 root on the host. The bind-mount carries those
+    # perms inside the container, so a nonroot reader gets EACCES and the
+    # bootstrap exits silently (set -e then kills the install with no
+    # visible error). Run the one-shot as root for the seconds it takes
+    # to encrypt + write. Same threat-model as the agent's user: "0:0"
+    # for docker.sock access.
+    printf '%s' "${value}" | docker run --rm -i --user 0:0 \
       -v "${ISENGARD_PREFIX}/controller:/var/lib/isengard" \
       -v "${ISENGARD_MASTER_KEY}:/run/secrets/master.key:ro" \
       "${ISENGARD_CONTROLLER_IMAGE}" \
