@@ -65,9 +65,18 @@ services:
       # at a known path so backups and disaster recovery don't depend on
       # docker volume internals.
       - ${ISENGARD_PREFIX:-/var/lib/isengard}/controller:/var/lib/isengard
+      # Master key. install.sh generates 32 random bytes at first run and
+      # writes the file mode 0600 root. We bind-mount it read-only inside
+      # the container at /run/secrets/master.key (matching Docker Swarm's
+      # default secret path). The controller reads the raw bytes once on
+      # boot and decrypts the secrets DB; refuses to start without it.
+      - ${ISENGARD_MASTER_KEY:-/etc/isengard/master.key}:/run/secrets/master.key:ro
     env_file:
-      # Operator-managed env. install.sh writes a template here on first run
-      # and refuses to start the stack until you've filled it in.
+      # Non-secret config only. install.sh prompts for ACME values on
+      # first run and writes them here. Secret values (Cloudflare API
+      # token, backup passphrase, etc.) are NEVER in this file: they
+      # live encrypted in the controller's SQLite, keyed by the master
+      # key file above.
       - ${ISENGARD_ENV_FILE:-/etc/isengard/isengard.env}
     environment:
       # Default to a structured log level appropriate for production. Override
@@ -78,6 +87,10 @@ services:
       # by the agent; this is the additive custom-zone path.
       ISENGARD_DNS_ZONE: ${ISENGARD_DNS_ZONE:-}
       ISENGARD_DNS_LISTEN: 0.0.0.0:5300
+      # Where the controller looks for the raw 32-byte master key.
+      # Matches the bind-mount above. Override only if you also override
+      # the bind-mount target.
+      ISENGARD_MASTER_KEY_FILE: /run/secrets/master.key
     command:
       - controller
       - --listen

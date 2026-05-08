@@ -3,16 +3,29 @@
 # from pre-built GHCR images. No source checkout required.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
 #
 # Or for the cautious path (recommended for first-time installs):
 #   curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh -o install.sh
 #   less install.sh
-#   bash install.sh
+#   sudo bash install.sh
 #
-# Re-running this script is idempotent: existing dirs, network, env file,
-# and compose.yaml are left in place; only missing pieces are created. The
-# stack is brought up via `docker compose up -d`, which is itself idempotent.
+# First run:
+#   1. Generates a 32-byte random master key at /etc/isengard/master.key
+#      (mode 0600 root). The operator never types or sees it.
+#   2. Interactively prompts for individual secret values (Cloudflare
+#      DNS API token, backup passphrase, ...). Each entered value is
+#      piped to `isengard secret bootstrap <name>` which encrypts it
+#      with the master key and writes the ciphertext to the controller's
+#      SQLite. Plaintext NEVER touches a file on the host.
+#   3. Prompts for non-secret config (ACME email, ACME domains, ACME
+#      directory) and writes /etc/isengard/isengard.env.
+#   4. Pulls images, creates the docker network, brings up the stack.
+#
+# Re-runs (master key already present): skips key generation and secret
+# prompts; just brings up the stack. To re-prompt, delete
+# /etc/isengard/master.key (rotates: every existing secret row becomes
+# undecryptable, so don't do this on a populated stack).
 
 set -euo pipefail
 
@@ -28,6 +41,7 @@ ISENGARD_PREFIX="${ISENGARD_PREFIX:-/var/lib/isengard}"
 ISENGARD_ETC="${ISENGARD_ETC:-/etc/isengard}"
 ISENGARD_ENV_FILE="${ISENGARD_ENV_FILE:-${ISENGARD_ETC}/isengard.env}"
 ISENGARD_COMPOSE_FILE="${ISENGARD_COMPOSE_FILE:-${ISENGARD_ETC}/compose.yaml}"
+ISENGARD_MASTER_KEY="${ISENGARD_MASTER_KEY:-${ISENGARD_ETC}/master.key}"
 
 # Source ref for the install assets. Defaults to whatever branch the script
 # was fetched from; override to pin to a tag (e.g. ISENGARD_REF=v0.3.5) once
@@ -38,6 +52,12 @@ ISENGARD_RAW_BASE="${ISENGARD_RAW_BASE:-https://raw.githubusercontent.com/Weaver
 # Shared docker network for the pingora proxy + every routed stack.
 ISENGARD_PROXY_NETWORK="${ISENGARD_PROXY_NETWORK:-isengard-proxy}"
 
+# Image used for one-shot bootstrap subcommands (`isengard secret bootstrap`).
+# Same image as the controller; we run it with `--rm` and the same bind-mounts
+# the controller will use, so the encrypted SQLite is written exactly where
+# the running controller will read it.
+ISENGARD_CONTROLLER_IMAGE="${ISENGARD_CONTROLLER_IMAGE:-ghcr.io/weavers-engineering/isengard-controller:${ISENGARD_IMAGE_TAG:-next}}"
+
 # ---------------------------------------------------------------------------
 # Logging helpers. Plain text, no colors (broken on some piped CI logs).
 # ---------------------------------------------------------------------------
@@ -46,8 +66,6 @@ log()  { printf '[isengard] %s\n' "$*"; }
 warn() { printf '[isengard] WARN: %s\n' "$*" >&2; }
 die()  { printf '[isengard] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Trap unhandled errors so the operator sees the offending line instead of a
-# silent `set -e` exit.
 on_err() {
   local exit_code=$?
   local line=${1:-?}
@@ -68,16 +86,20 @@ require_cmd() {
 
 preflight() {
   log "preflight: checking dependencies"
-  require_cmd docker
+  require_cmd openssl
 
-  # `docker compose` (v2 plugin) vs the legacy `docker-compose` shim. We need
-  # the v2 plugin for env_file + bind-mount semantics this compose file uses.
-  if ! docker compose version >/dev/null 2>&1; then
-    die "docker compose v2 plugin not found. Install via:
+  # Smoke-test mode (ISENGARD_LOCAL_BIN set, ISENGARD_SKIP_BRING_UP set)
+  # exercises the master key + bootstrap + env path without needing
+  # docker. Skip the docker checks in that mode so contributors can run
+  # `bash install/install.sh` without a docker daemon.
+  if [[ -z "${ISENGARD_LOCAL_BIN:-}" || -z "${ISENGARD_SKIP_BRING_UP:-}" ]]; then
+    require_cmd docker
+    if ! docker compose version >/dev/null 2>&1; then
+      die "docker compose v2 plugin not found. Install via:
        https://docs.docker.com/compose/install/linux/"
+    fi
   fi
 
-  # Need either curl or wget to fetch compose.yaml from the source ref.
   if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     die "neither curl nor wget is installed; one is needed to fetch compose.yaml"
   fi
@@ -102,12 +124,213 @@ setup_dirs() {
   mkdir -p "${ISENGARD_PREFIX}/controller"
   mkdir -p "${ISENGARD_PREFIX}/agent"
   mkdir -p "${ISENGARD_PREFIX}/stacks"
-  # Tighten the env file's parent dir: it's about to hold passphrases.
+  # Tighten the etc dir: it's about to hold the master key file.
   chmod 0750 "${ISENGARD_ETC}" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: write the env template if it doesn't exist.
+# Step 2: master key. Generated once on first run; never overwritten.
+# ---------------------------------------------------------------------------
+
+# Returns 0 if the master key file exists and is the right size, 1 otherwise.
+master_key_ready() {
+  if [[ ! -f "${ISENGARD_MASTER_KEY}" ]]; then
+    return 1
+  fi
+  # File must be exactly 32 bytes; the controller hard-rejects anything
+  # else and refuses to boot.
+  local size
+  size=$(wc -c <"${ISENGARD_MASTER_KEY}" | tr -d '[:space:]')
+  if [[ "${size}" != "32" ]]; then
+    warn "${ISENGARD_MASTER_KEY} exists but is ${size} bytes (expected 32). Refusing to overwrite."
+    die  "delete ${ISENGARD_MASTER_KEY} manually, then re-run install.sh."
+  fi
+  return 0
+}
+
+setup_master_key() {
+  if master_key_ready; then
+    log "key: ${ISENGARD_MASTER_KEY} already present (${ISENGARD_MASTER_KEY##*/})"
+    return 0
+  fi
+  log "key: generating fresh 32-byte master key at ${ISENGARD_MASTER_KEY}"
+  openssl rand 32 >"${ISENGARD_MASTER_KEY}"
+  chmod 0600 "${ISENGARD_MASTER_KEY}"
+  # Match the controller container's UID. The ghcr controller image runs
+  # as root (matches the agent recipe); root:root with 0600 is correct.
+  chown 0:0 "${ISENGARD_MASTER_KEY}" 2>/dev/null || true
+  log "key: master key created. Operator never sees the value; back up the file out of band."
+}
+
+# ---------------------------------------------------------------------------
+# Step 3: interactive secret bootstrap. Prompts the operator for each
+# named secret; pipes the value into the controller's bootstrap subcommand
+# which encrypts it with the master key and writes ciphertext to SQLite.
+# Plaintext NEVER hits the host filesystem.
+# ---------------------------------------------------------------------------
+
+# bootstrap_secret <name> <prompt> [<allow_empty>]
+# Prompts the operator (hidden input). If they press Enter on an empty
+# line and allow_empty is "yes", the secret is skipped. Otherwise the
+# value is piped into `isengard secret bootstrap <name>`.
+bootstrap_secret() {
+  local name="$1"
+  local prompt="$2"
+  local allow_empty="${3:-yes}"
+
+  # `read -s` (silent) keeps the value off the terminal. We do not echo
+  # the value back, ever. The shell variable `value` is unset on the way
+  # out so a stray `set` won't dump it.
+  local value=""
+  while :; do
+    printf '  %s' "${prompt}"
+    if [[ "${allow_empty}" == "yes" ]]; then
+      printf ' (press Enter to skip)'
+    fi
+    printf ': '
+    # If stdin isn't a TTY (curl|bash with no -t), `read -s` still works
+    # but the operator gets no chance to type anything. Print a clear
+    # error so they know to re-run with a TTY.
+    if [[ ! -t 0 ]]; then
+      die "stdin is not a TTY; re-run install.sh from an interactive shell so secrets can be entered hidden"
+    fi
+    if ! IFS= read -rs value; then
+      printf '\n'
+      value=""
+    fi
+    printf '\n'
+    if [[ -z "${value}" && "${allow_empty}" != "yes" ]]; then
+      warn "value cannot be empty"
+      continue
+    fi
+    break
+  done
+
+  if [[ -z "${value}" ]]; then
+    log "  skip: ${name}"
+    return 0
+  fi
+
+  log "  bootstrap: ${name}"
+  # If the operator pre-built a local `isengard` binary (e.g. CI on a
+  # source checkout) we use it directly; this is also how the on-host
+  # smoke test in `install/README.md` validates the end-to-end flow
+  # without needing the GHCR image pulled. Otherwise fall back to a
+  # one-shot container that bind-mounts the master key + state dir.
+  if [[ -n "${ISENGARD_LOCAL_BIN:-}" && -x "${ISENGARD_LOCAL_BIN}" ]]; then
+    printf '%s' "${value}" | "${ISENGARD_LOCAL_BIN}" secret bootstrap "${name}" \
+      --master-key-file "${ISENGARD_MASTER_KEY}" \
+      --state-dir "${ISENGARD_PREFIX}/controller" >/dev/null
+  else
+    printf '%s' "${value}" | docker run --rm -i \
+      -v "${ISENGARD_PREFIX}/controller:/var/lib/isengard" \
+      -v "${ISENGARD_MASTER_KEY}:/run/secrets/master.key:ro" \
+      "${ISENGARD_CONTROLLER_IMAGE}" \
+      secret bootstrap "${name}" \
+        --master-key-file /run/secrets/master.key \
+        --state-dir /var/lib/isengard \
+      >/dev/null
+  fi
+
+  # Wipe the value out of process memory before the next iteration.
+  value=""
+}
+
+bootstrap_secrets_if_first_run() {
+  if [[ -f "${ISENGARD_PREFIX}/controller/isengard.db" ]]; then
+    log "secrets: existing controller DB at ${ISENGARD_PREFIX}/controller/isengard.db; skipping interactive prompt"
+    log "secrets: manage with 'isd secret put|list|rm' against the running dashboard"
+    return 0
+  fi
+
+  if [[ -n "${ISENGARD_LOCAL_BIN:-}" && -x "${ISENGARD_LOCAL_BIN}" ]]; then
+    log "secrets: using local binary ${ISENGARD_LOCAL_BIN} for bootstrap"
+  else
+    log "secrets: pulling controller image so the bootstrap one-shots can run"
+    docker pull "${ISENGARD_CONTROLLER_IMAGE}" >/dev/null
+  fi
+
+  cat <<EOF
+
+  =====================================================================
+  Bootstrapping secrets. Each value is encrypted with the master key
+  and written to the controller's SQLite. Plaintext is NEVER stored
+  on disk; values you enter here are not echoed and not logged.
+
+  Press Enter on an empty line to skip any optional secret.
+  =====================================================================
+
+EOF
+  bootstrap_secret cf_dns_api_token "Cloudflare DNS API token (DNS-01 wildcards)" yes
+  bootstrap_secret backup_passphrase "Backup passphrase (encrypted snapshots)" yes
+  log "secrets: done"
+}
+
+# ---------------------------------------------------------------------------
+# Step 4: plain (non-secret) config. Prompts for ACME email / domains /
+# directory and writes /etc/isengard/isengard.env. Re-runs leave the env
+# file alone.
+# ---------------------------------------------------------------------------
+
+prompt_plain_config() {
+  if [[ -f "${ISENGARD_ENV_FILE}" ]]; then
+    log "env: ${ISENGARD_ENV_FILE} already exists; leaving in place"
+    return 0
+  fi
+
+  log "env: prompting for non-secret config (visible input)"
+
+  local acme_email=""
+  local acme_domains=""
+  local acme_directory="https://acme-staging-v02.api.letsencrypt.org/directory"
+
+  if [[ -t 0 ]]; then
+    printf '  ACME contact email (leave blank for internal-only deploys): '
+    IFS= read -r acme_email || acme_email=""
+    printf '  ACME pre-issue domains, comma-separated (e.g. *.example.com,foo.example.com): '
+    IFS= read -r acme_domains || acme_domains=""
+    printf '  ACME directory URL [default: Let'\''s Encrypt staging]: '
+    local input=""
+    IFS= read -r input || input=""
+    if [[ -n "${input}" ]]; then
+      acme_directory="${input}"
+    fi
+  else
+    warn "stdin is not a TTY; writing env file with empty defaults"
+  fi
+
+  log "env: writing template to ${ISENGARD_ENV_FILE}"
+  # Pull the comment/structure from the example file but materialise the
+  # operator-supplied values. We write it ourselves rather than `cat >>`
+  # so the file always has a known shape.
+  umask 0027
+  cat >"${ISENGARD_ENV_FILE}" <<EOF
+# Isengard non-secret config. Written by install/install.sh.
+#
+# Secrets (Cloudflare API token, backup passphrase, ...) are NEVER in
+# this file. They live encrypted in the controller's SQLite, keyed by
+# /etc/isengard/master.key. Manage them via:
+#   isd secret put <name>       # while the stack is up
+#   isengard secret bootstrap <name>  # at install time, see install.sh
+
+# ACME contact email. Required only if you publish public HTTPS routes.
+ISENGARD_ACME_EMAIL=${acme_email}
+
+# Comma-separated hostnames the agent should pre-issue certs for.
+# Wildcards (*.example.com) require DNS-01, which uses the
+# 'cf_dns_api_token' bootstrapped secret.
+ISENGARD_ACME_DOMAINS=${acme_domains}
+
+# ACME directory URL. Staging by default until you confirm cert issue
+# works; switch to https://acme-v02.api.letsencrypt.org/directory for
+# production.
+ISENGARD_ACME_DIRECTORY=${acme_directory}
+EOF
+  chmod 0640 "${ISENGARD_ENV_FILE}"
+}
+
+# ---------------------------------------------------------------------------
+# Step 5: drop compose.yaml in place.
 # ---------------------------------------------------------------------------
 
 # `fetch URL OUTPATH` writes the URL to OUTPATH using whichever of curl/wget
@@ -121,52 +344,6 @@ fetch() {
     wget -qO "${out}" "${url}" || die "fetch failed: ${url}"
   fi
 }
-
-setup_env_file() {
-  if [[ -f "${ISENGARD_ENV_FILE}" ]]; then
-    log "env: ${ISENGARD_ENV_FILE} already exists; leaving in place"
-    return 0
-  fi
-
-  log "env: writing template to ${ISENGARD_ENV_FILE}"
-  # If we're being piped through `bash` from curl, isengard.env.example is not
-  # on disk: fetch it from the ref. If we were invoked with the source tree
-  # nearby (operator did a `git clone` or downloaded the install/ dir), prefer
-  # the local copy so offline installs work.
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
-  local local_template="${script_dir}/isengard.env.example"
-
-  if [[ -f "${local_template}" ]]; then
-    cp "${local_template}" "${ISENGARD_ENV_FILE}"
-  else
-    fetch "${ISENGARD_RAW_BASE}/isengard.env.example" "${ISENGARD_ENV_FILE}"
-  fi
-  chmod 0640 "${ISENGARD_ENV_FILE}"
-
-  cat <<EOF
-
-  =====================================================================
-  Wrote env template to ${ISENGARD_ENV_FILE}
-  Edit it now to set:
-    - ISENGARD_ACME_EMAIL          (if you'll publish HTTPS routes)
-    - ISENGARD_SECRETS_PASSPHRASE  (if you'll store stack secrets)
-    - ISENGARD_BACKUP_PASSPHRASE   (if you'll enable backups)
-    - ISENGARD_CF_DNS_API_TOKEN    (if you'll use DNS-01 wildcards)
-
-  Then re-run this script to bring the stack up.
-  =====================================================================
-
-EOF
-  # Exit 0 on first run: forcing the operator to fill in the env file before
-  # we start anything is the safer default than starting with all-empty
-  # passphrases.
-  exit 0
-}
-
-# ---------------------------------------------------------------------------
-# Step 3: drop compose.yaml in place.
-# ---------------------------------------------------------------------------
 
 setup_compose_file() {
   if [[ -f "${ISENGARD_COMPOSE_FILE}" ]]; then
@@ -188,7 +365,7 @@ setup_compose_file() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 4: shared docker network.
+# Step 6: shared docker network.
 # ---------------------------------------------------------------------------
 
 setup_network() {
@@ -201,17 +378,14 @@ setup_network() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 5: pull images + bring the stack up.
+# Step 7: pull images + bring the stack up.
 # ---------------------------------------------------------------------------
 
 bring_up() {
-  # Export the path overrides so compose's `${VAR:-default}` substitution
-  # picks them up. Compose reads substitution variables from the shell env
-  # (in addition to --env-file), so an export here overrides any defaults
-  # baked into compose.yaml.
   export ISENGARD_PREFIX
   export ISENGARD_ENV_FILE
   export ISENGARD_COMPOSE_FILE
+  export ISENGARD_MASTER_KEY
 
   log "images: pulling latest"
   docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" pull
@@ -221,7 +395,7 @@ bring_up() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: print next steps.
+# Step 8: print next steps.
 # ---------------------------------------------------------------------------
 
 post_install_hints() {
@@ -234,17 +408,19 @@ post_install_hints() {
   Logs:       docker logs -f iso-controller
               docker logs -f iso-agent
 
+  Secrets:
+    - Master key:     ${ISENGARD_MASTER_KEY} (mode 0600 root)
+    - Encrypted DB:   ${ISENGARD_PREFIX}/controller/isengard.db
+    - Bootstrap more: re-run install.sh after deleting isengard.db, OR
+                      use 'isd secret put <name>' against the dashboard.
+
   To enroll the agent (first time only):
     1. Mint a token:
        docker exec iso-controller isengard controller token mint --role agent
-    2. Paste the token into ${ISENGARD_ENV_FILE} as
-       ISENGARD_ENROLL_TOKEN=<token>
-       and re-run this script. Or pass it inline:
-         ISENGARD_ENROLL_TOKEN=<token> bash install.sh
+    2. Paste the token at the prompt the agent shows in its logs, or
+       export ISENGARD_ENROLL_TOKEN=<token> and 'docker compose up -d agent'.
 
-  Operator CLI (\`isd\`):
-    Build once on a workstation:  cargo build -p isd --release
-    Then:  isd login http://127.0.0.1:9418
+  Operator CLI (\`isd\`): build once on a workstation, then 'isd login'.
 
   Docs:
     install/README.md  (this directory)
@@ -262,11 +438,17 @@ main() {
   log "Isengard install starting (ref=${ISENGARD_REF}, prefix=${ISENGARD_PREFIX})"
   preflight
   setup_dirs
-  # On first run setup_env_file writes the template and exits 0; the operator
-  # fills it in and re-runs. On subsequent runs the existing file is left
-  # alone and we proceed to the rest of the steps.
-  setup_env_file
+  setup_master_key
+  bootstrap_secrets_if_first_run
+  prompt_plain_config
   setup_compose_file
+  # ISENGARD_SKIP_BRING_UP=1 is for the on-host smoke test that
+  # validates the master key + bootstrap + env path without needing
+  # docker images pulled. Production installs always run the full path.
+  if [[ -n "${ISENGARD_SKIP_BRING_UP:-}" ]]; then
+    log "stack: ISENGARD_SKIP_BRING_UP set; skipping network + compose up"
+    return 0
+  fi
   setup_network
   bring_up
   post_install_hints
