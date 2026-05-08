@@ -2599,11 +2599,13 @@ dependencies = [
  "hickory-resolver",
  "hickory-server",
  "http",
+ "instant-acme",
  "isengard-core",
  "isengard-proto",
  "isengard-storage",
  "rand 0.8.6",
  "rcgen",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",
@@ -2618,6 +2620,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "ulid",
+ "wiremock",
  "x509-parser",
 ]
 

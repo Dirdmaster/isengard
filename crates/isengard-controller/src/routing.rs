@@ -20,7 +20,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use isengard_proto::pb::{
     ContainerLabelsRemoved, ContainerLabelsReport, ControllerMessage, Healthcheck, ProxyConfig,
-    ProxySettings, RoutingRule as ProtoRule, TlsMode, Upstream, controller_message::Payload,
+    ProxySettings, RoutingRule as ProtoRule, TlsMode, Upstream, WildcardCert as ProtoWildcardCert,
+    controller_message::Payload,
 };
 use isengard_storage::{
     HostId, InsertRoutingRule, Inventory, RoutingRule as StorageRule, RoutingRuleSource,
@@ -28,6 +29,8 @@ use isengard_storage::{
 };
 use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
+
+use crate::acme::WildcardCertStore;
 
 #[derive(Default)]
 struct PerHostState {
@@ -54,6 +57,10 @@ pub struct RoutingPusher {
     inv: Arc<Inventory>,
     by_host: Mutex<HashMap<HostId, PerHostState>>,
     senders: Mutex<Senders>,
+    /// Wildcard certs the controller has issued. Snapshotted on every
+    /// `build_for_host` so each push includes the current cert material.
+    /// Optional so non-ACME deployments don't pay any cost.
+    wildcard_certs: Option<Arc<WildcardCertStore>>,
 }
 
 impl RoutingPusher {
@@ -62,21 +69,43 @@ impl RoutingPusher {
             inv,
             by_host: Mutex::new(HashMap::new()),
             senders: Mutex::new(Senders::default()),
+            wildcard_certs: None,
         }
     }
 
+    /// Attach the wildcard cert store. Called from `run_controller` when
+    /// the ACME subsystem is enabled.
+    pub fn with_wildcard_certs(mut self, store: Arc<WildcardCertStore>) -> Self {
+        self.wildcard_certs = Some(store);
+        self
+    }
+
     /// Build the latest `ProxyConfig` for a host. Generation increments only
-    /// when the rule-set has actually changed since the previous build.
+    /// when the rule-set or the wildcard-cert set has actually changed since
+    /// the previous build.
     pub async fn build_for_host(&self, host_id: HostId) -> Result<ProxyConfig> {
         let rules = self.inv.list_routing_rules_for_host(host_id).await?;
+        let wildcards = match &self.wildcard_certs {
+            Some(store) => store.snapshot().await,
+            None => Vec::new(),
+        };
 
-        let hash = hash_rules(&self.inv, &rules).await?;
+        let hash = hash_rules_and_wildcards(&self.inv, &rules, &wildcards).await?;
         let mut guard = self.by_host.lock().await;
         let entry = guard.entry(host_id).or_default();
         if entry.last_hash != hash {
             entry.generation += 1;
             entry.last_hash = hash;
         }
+
+        let proto_wildcards: Vec<ProtoWildcardCert> = wildcards
+            .iter()
+            .map(|w| ProtoWildcardCert {
+                identifiers: w.identifiers.clone(),
+                cert_pem: w.cert_pem.clone(),
+                key_pem: w.key_pem.clone(),
+            })
+            .collect();
 
         Ok(ProxyConfig {
             host_id: host_id.to_string(),
@@ -88,6 +117,7 @@ impl RoutingPusher {
                 acme_contact_email: String::new(),
                 log_sample_rate: 0.0,
             }),
+            wildcard_certs: proto_wildcards,
         })
     }
 
@@ -132,6 +162,23 @@ impl RoutingPusher {
                 payload: Some(Payload::ProxyConfig(cfg)),
             };
             let _ = tx.try_send(Ok(msg));
+        }
+        Ok(())
+    }
+
+    /// Push the latest `ProxyConfig` to every host with a currently
+    /// registered Sync sender. Used by the ACME wildcard pusher: when the
+    /// scheduler issues or renews a cert, every connected agent should get
+    /// the new cert material on the next sweep.
+    pub async fn push_to_all_hosts(&self) -> Result<()> {
+        let hosts: Vec<HostId> = {
+            let senders = self.senders.lock().await;
+            senders.by_host.keys().copied().collect()
+        };
+        for host in hosts {
+            if let Err(e) = self.push_to_host(host).await {
+                tracing::warn!(host = %host, error = %e, "push_to_all_hosts: per-host push failed");
+            }
         }
         Ok(())
     }
@@ -300,7 +347,11 @@ fn to_proto(r: StorageRule) -> ProtoRule {
     }
 }
 
-async fn hash_rules(inv: &Inventory, rules: &[StorageRule]) -> Result<u64> {
+async fn hash_rules_and_wildcards(
+    inv: &Inventory,
+    rules: &[StorageRule],
+    wildcards: &[Arc<crate::acme::WildcardCert>],
+) -> Result<u64> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
@@ -320,6 +371,15 @@ async fn hash_rules(inv: &Inventory, rules: &[StorageRule]) -> Result<u64> {
             o.field.hash(&mut h);
             o.value_json.to_string().hash(&mut h);
         }
+    }
+    // Hash wildcard certs too: a freshly-issued or renewed cert must bump
+    // the generation so agents see it. Using `cert_pem` is enough — issuance
+    // / renewal always produces new cert bytes.
+    for w in wildcards {
+        for id in &w.identifiers {
+            id.hash(&mut h);
+        }
+        w.cert_pem.hash(&mut h);
     }
     Ok(h.finish())
 }

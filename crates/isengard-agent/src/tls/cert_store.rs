@@ -43,9 +43,22 @@ impl CertStore {
         }
     }
 
-    /// Look up a `CertEntry` by SNI hostname. Cache-first, then disk.
+    /// Look up a `CertEntry` by SNI hostname. Cache-first, then disk; finally
+    /// a wildcard match against any cached entry whose key starts with `*.`.
+    ///
+    /// Wildcard match obeys RFC 6125: `*.foo.com` covers `bar.foo.com` (one
+    /// label deeper) but not `foo.com` (the apex itself; that needs a
+    /// dedicated entry, which the controller always installs alongside any
+    /// wildcard) and not `a.b.foo.com` (two labels deeper).
     pub async fn lookup(&self, hostname: &str) -> Option<Arc<CertEntry>> {
         if let Some(e) = self.cache.read().await.get(hostname).cloned() {
+            return Some(e);
+        }
+        // Wildcard match before disk: certs received via `ProxyConfig` are
+        // installed in the cache under each SAN. A SNI for `home.vallee.casa`
+        // won't have a literal entry but `*.vallee.casa` will, and that's the
+        // cert that should serve.
+        if let Some(e) = self.lookup_wildcard(hostname).await {
             return Some(e);
         }
         match self.load_from_disk(hostname).await {
@@ -68,6 +81,18 @@ impl CertStore {
                 None
             }
         }
+    }
+
+    /// Walk the cache looking for any `*.<base>` key where `<base>` is the
+    /// parent zone of `hostname` (one DNS label up). Returns on first hit.
+    async fn lookup_wildcard(&self, hostname: &str) -> Option<Arc<CertEntry>> {
+        let parent = match hostname.split_once('.') {
+            Some((_, rest)) if rest.contains('.') => rest,
+            // No parent zone or single-label hostname: nothing to match against.
+            _ => return None,
+        };
+        let candidate = format!("*.{parent}");
+        self.cache.read().await.get(&candidate).cloned()
     }
 
     /// Install a new cert for `hostname`. Parses the PEM material BEFORE

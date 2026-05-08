@@ -41,6 +41,7 @@ async fn spawn_controller_on(
             config: serde_json::Value::Object(Default::default()),
             dns_zone: String::new(),
             dns_listen: "127.0.0.1:0".parse().unwrap(),
+            acme: Default::default(),
         })
         .await;
     });

@@ -77,6 +77,24 @@ enum Command {
         /// `cap_add: NET_BIND_SERVICE`. Ignored when `--dns-zone` is empty.
         #[arg(long, env = "ISENGARD_DNS_LISTEN", default_value = "0.0.0.0:5300")]
         dns_listen: String,
+        /// ACME contact email for the LE account. Required to enable
+        /// DNS-01 wildcard cert issuance.
+        #[arg(long, env = "ISENGARD_ACME_EMAIL")]
+        acme_email: Option<String>,
+        /// Cloudflare API token with `Zone:DNS:Edit`. Required to enable
+        /// DNS-01 wildcard cert issuance via the CF provider.
+        #[arg(long, env = "ISENGARD_CF_DNS_API_TOKEN")]
+        cf_dns_api_token: Option<String>,
+        /// Comma-separated list of domains to obtain certs for, e.g.
+        /// `*.vallee.casa,vallee.casa`. The wildcard and its apex are
+        /// auto-paired into a single LE order.
+        #[arg(long, env = "ISENGARD_ACME_DOMAINS", default_value = "")]
+        acme_domains: String,
+        /// ACME directory URL. Defaults to LE production. Set to the LE
+        /// staging URL for dry-runs:
+        ///   https://acme-staging-v02.api.letsencrypt.org/directory
+        #[arg(long, env = "ISENGARD_ACME_DIRECTORY", default_value = "")]
+        acme_directory: String,
         #[command(subcommand)]
         action: Option<ControllerAction>,
     },
@@ -258,9 +276,25 @@ async fn dispatch(command: Command) -> Result<()> {
             state_dir,
             dns_zone,
             dns_listen,
+            acme_email,
+            cf_dns_api_token,
+            acme_domains,
+            acme_directory,
             action,
         } => match action {
-            None => run_controller(listen, state_dir, dns_zone, dns_listen).await,
+            None => {
+                run_controller(
+                    listen,
+                    state_dir,
+                    dns_zone,
+                    dns_listen,
+                    acme_email,
+                    cf_dns_api_token,
+                    acme_domains,
+                    acme_directory,
+                )
+                .await
+            }
             Some(ControllerAction::Token {
                 op:
                     TokenOp::Mint {
@@ -382,11 +416,16 @@ async fn run_secret_list_bootstrap(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_controller(
     listen: String,
     state_dir: std::path::PathBuf,
     dns_zone: String,
     dns_listen: String,
+    acme_email: Option<String>,
+    cf_dns_api_token: Option<String>,
+    acme_domains: String,
+    acme_directory: String,
 ) -> Result<()> {
     let listen_addr: std::net::SocketAddr = listen
         .parse()
@@ -400,6 +439,13 @@ async fn run_controller(
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
 
+    let acme = isengard_controller::acme::AcmeConfig {
+        email: acme_email,
+        cf_api_token: cf_dns_api_token,
+        domains: acme_domains,
+        directory_url: acme_directory,
+    };
+
     tracing::info!(%listen_addr, ?state_dir, dns_zone = %dns_zone, %dns_listen_addr, "controller mode");
     isengard_controller::run_controller(isengard_controller::ControllerOptions {
         listen: listen_addr,
@@ -407,6 +453,7 @@ async fn run_controller(
         config: serde_json::Value::Object(Default::default()),
         dns_zone,
         dns_listen: dns_listen_addr,
+        acme,
     })
     .await
 }

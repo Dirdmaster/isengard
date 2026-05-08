@@ -3,6 +3,7 @@
 
 mod service;
 
+pub mod acme;
 pub mod auth;
 pub mod bus;
 pub mod ca;
@@ -128,6 +129,8 @@ pub struct ControllerOptions {
     /// `0.0.0.0:5300` for dev; production compose maps :53 with
     /// `cap_add: NET_BIND_SERVICE`. Ignored when `dns_zone` is empty.
     pub dns_listen: SocketAddr,
+    /// DNS-01 ACME wildcard cert config. Empty = subsystem disabled.
+    pub acme: acme::AcmeConfig,
 }
 
 /// Discover and instantiate every plugin that advertises `Capability::Controller`.
@@ -164,7 +167,62 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     let bus = Arc::new(crate::bus::EventBus::new());
 
-    let routing = Arc::new(routing::RoutingPusher::new(inventory.clone()));
+    // v0.3.6: managed secrets store. Reads the raw 32-byte master key
+    // from the file at `ISENGARD_MASTER_KEY_FILE` (default
+    // `/run/secrets/master.key`, bind-mounted by the install compose
+    // recipe). Initialised early so the ACME bootstrap can fall back to
+    // the encrypted store for the CF token when the env var is absent.
+    let secrets_store = Arc::new(
+        secrets::SecretsStore::from_env(inventory.clone())
+            .context("loading master key for secrets store (set ISENGARD_MASTER_KEY_FILE or write /run/secrets/master.key)")?,
+    );
+    secrets_store
+        .boot_check()
+        .await
+        .context("secrets store boot check")?;
+    info!("secrets store unlocked (master key loaded)");
+
+    // ACME (DNS-01) subsystem. Optional: only initialised when the operator
+    // has configured email + token + at least one domain. The wildcard cert
+    // store is plumbed into the routing pusher so every push includes the
+    // current cert material.
+    //
+    // CF token resolution: env-provided ISENGARD_CF_DNS_API_TOKEN wins; if
+    // absent, fall back to the encrypted secrets store under the name
+    // `cf_dns_api_token` (set by the installer). This means the install
+    // recipe can keep the token entirely out of env / compose config.
+    let mut acme_with_token = opts.acme.clone();
+    if acme_with_token.cf_api_token.is_none() {
+        match secrets_store.fetch("cf_dns_api_token").await {
+            Ok(value) => match String::from_utf8(value) {
+                Ok(tok) => {
+                    info!("acme: cf_dns_api_token loaded from encrypted secrets store");
+                    acme_with_token.cf_api_token = Some(tok);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "acme: cf_dns_api_token in secrets store is not valid utf-8; ignoring");
+                }
+            },
+            Err(secrets::SecretsError::NotFound(_)) => {
+                tracing::debug!("acme: no cf_dns_api_token in secrets store");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "acme: failed to read cf_dns_api_token from secrets store");
+            }
+        }
+    }
+    let validated_acme = acme_with_token.validated();
+    let wildcard_store = validated_acme
+        .as_ref()
+        .map(|_| Arc::new(acme::WildcardCertStore::new()));
+
+    let routing = Arc::new({
+        let base = routing::RoutingPusher::new(inventory.clone());
+        match wildcard_store.clone() {
+            Some(store) => base.with_wildcard_certs(store),
+            None => base,
+        }
+    });
     let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
     // Phase 12b: lifecycle-hook label ingest runs in parallel with policy_ingest.
     let hook_ingest = Arc::new(hook_ingest::HookLabelIngest::new(inventory.clone()));
@@ -189,22 +247,6 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // Load + start controller-side plugins (notifier, etc).
     let log_fanout = log_fanout::LogFanout::new();
     let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
-
-    // v0.3.6: managed secrets store. Reads the raw 32-byte master key
-    // from the file at `ISENGARD_MASTER_KEY_FILE` (default
-    // `/run/secrets/master.key`, bind-mounted by the install compose
-    // recipe). Fails loud if the file is missing, unreadable, or the
-    // wrong size: starting without the key would silently break agent
-    // secret fetches.
-    let secrets_store = Arc::new(
-        secrets::SecretsStore::from_env(inventory.clone())
-            .context("loading master key for secrets store (set ISENGARD_MASTER_KEY_FILE or write /run/secrets/master.key)")?,
-    );
-    secrets_store
-        .boot_check()
-        .await
-        .context("secrets store boot check")?;
-    info!("secrets store unlocked (master key loaded)");
 
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
@@ -266,6 +308,70 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
             }
         }
     };
+
+    // ACME (DNS-01) wildcard cert scheduler. Spawns only when the validated
+    // config has email + token + domains. Misconfigured deployments fail
+    // closed: token verification at boot prints an explicit warning so the
+    // operator notices before the scheduler tries (and rate-limits) LE.
+    if let (Some(cfg), Some(store)) = (validated_acme.clone(), wildcard_store.clone()) {
+        let token = cfg.cf_api_token.clone();
+        let email = cfg.email.clone();
+        let directory = cfg.directory_url.clone();
+        let groups = cfg.groups.clone();
+        let inv_for_acme = inventory.clone();
+        let store_for_routing = store.clone();
+        let routing_for_push = routing.clone();
+        // Verify the CF token at boot in a separate task so a slow CF API
+        // doesn't delay gRPC bind. The scheduler still spawns; if the token
+        // is bad it'll fail in `present` with a clear error.
+        let token_for_verify = token.clone();
+        tokio::spawn(async move {
+            let api = acme::CloudflareApi::new(token_for_verify);
+            match api.verify_token().await {
+                Ok(()) => info!("acme: Cloudflare API token verified"),
+                Err(e) => tracing::warn!(error = %e, "acme: Cloudflare API token verify failed"),
+            }
+        });
+
+        let dns_provider = acme::CloudflareDnsProvider::new(token);
+        let acme_client = Arc::new(acme::AcmeDns01Client::new(
+            inv_for_acme,
+            email,
+            directory.clone(),
+            dns_provider,
+        ));
+        info!(
+            directory = %directory,
+            groups = groups.len(),
+            "acme: DNS-01 scheduler enabled",
+        );
+        acme::spawn_renewal_scheduler(
+            inventory.clone(),
+            store_for_routing.clone(),
+            acme_client.clone(),
+            groups,
+        );
+
+        // Push the latest cert material to every registered agent whenever
+        // the store changes. The scheduler installs into the store, but
+        // nothing currently re-pushes ProxyConfig on cert change. A simple
+        // "re-push every connected host on a 5-minute cadence" sweeper keeps
+        // the wire-up obvious without needing a notify channel.
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+            ticker.tick().await; // skip immediate
+            loop {
+                ticker.tick().await;
+                let snap = store_for_routing.snapshot().await;
+                if snap.is_empty() {
+                    continue;
+                }
+                if let Err(e) = routing_for_push.push_to_all_hosts().await {
+                    tracing::warn!(error = %e, "acme: push_to_all_hosts failed");
+                }
+            }
+        });
+    }
 
     // Phase 10c (10i, refs #50): stack-level deployment orchestrator. Owns the
     // multi-host wave plan when a stack-wide update fans out to 2+ hosts.

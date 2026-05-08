@@ -18,7 +18,7 @@ chrono.workspace = true
 futures-util.workspace = true
 hostname.workspace = true
 if-addrs.workspace = true
-instant-acme = "0.7"
+instant-acme.workspace = true
 isengard-core.workspace = true
 isengard-proto.workspace = true
 isengard-storage = { workspace = true }
