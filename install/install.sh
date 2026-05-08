@@ -188,18 +188,23 @@ bootstrap_secret() {
       printf ' (press Enter to skip)'
     fi
     printf ': '
-    # If stdin isn't a TTY (curl|bash with no -t), `read -s` still works
-    # but the operator gets no chance to type anything. Print a clear
-    # error so they know to re-run with a TTY.
-    if [[ ! -t 0 ]]; then
-      die "stdin is not a TTY; re-run install.sh from an interactive shell so secrets can be entered hidden"
+    # When piped (curl | sudo bash) stdin is the pipe, not a TTY. Open
+    # /dev/tty on FD 9 so the read loop can take hidden input from the
+    # operator's actual terminal. Fall back to stdin (FD 0) only when
+    # /dev/tty isn't available (truly headless).
+    if exec 9</dev/tty 2>/dev/null; then
+      :
+    elif [[ -t 0 ]]; then
+      exec 9<&0
+    else
+      die "no controlling terminal available for secret input; run 'sudo bash install.sh' from an interactive shell"
     fi
     # Read one character at a time so we can echo `*` per input
     # character (including pastes) and handle backspace. Plain `read -s`
     # gives no visual confirmation that paste actually landed.
     value=""
     local char
-    while IFS= read -rsn1 char; do
+    while IFS= read -rsn1 -u 9 char; do
       if [[ -z "${char}" ]]; then
         # Enter pressed
         break
@@ -311,19 +316,29 @@ prompt_plain_config() {
   local acme_domains=""
   local acme_directory="https://acme-staging-v02.api.letsencrypt.org/directory"
 
-  if [[ -t 0 ]]; then
+  # Same TTY-or-fallback dance as the secret prompts: prefer /dev/tty so
+  # `curl | sudo bash` works, fall back to stdin only when there's a TTY
+  # already on FD 0, otherwise skip with empty defaults.
+  local input_fd=""
+  if exec 9</dev/tty 2>/dev/null; then
+    input_fd=9
+  elif [[ -t 0 ]]; then
+    input_fd=0
+  fi
+
+  if [[ -n "${input_fd}" ]]; then
     printf '  ACME contact email (leave blank for internal-only deploys): '
-    IFS= read -r acme_email || acme_email=""
+    IFS= read -r -u "${input_fd}" acme_email || acme_email=""
     printf '  ACME pre-issue domains, comma-separated (e.g. *.example.com,foo.example.com): '
-    IFS= read -r acme_domains || acme_domains=""
+    IFS= read -r -u "${input_fd}" acme_domains || acme_domains=""
     printf '  ACME directory URL [default: Let'\''s Encrypt staging]: '
     local input=""
-    IFS= read -r input || input=""
+    IFS= read -r -u "${input_fd}" input || input=""
     if [[ -n "${input}" ]]; then
       acme_directory="${input}"
     fi
   else
-    warn "stdin is not a TTY; writing env file with empty defaults"
+    warn "no controlling terminal; writing env file with empty defaults"
   fi
 
   log "env: writing template to ${ISENGARD_ENV_FILE}"
