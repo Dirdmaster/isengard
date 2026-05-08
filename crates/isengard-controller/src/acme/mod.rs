@@ -58,11 +58,7 @@ impl AcmeConfig {
         if groups.is_empty() {
             return None;
         }
-        let directory = if self.directory_url.trim().is_empty() {
-            LE_PRODUCTION_URL.to_string()
-        } else {
-            self.directory_url
-        };
+        let directory = resolve_directory(&self.directory_url);
         Some(ValidatedAcmeConfig {
             email,
             cf_api_token: token,
@@ -78,6 +74,23 @@ pub struct ValidatedAcmeConfig {
     pub cf_api_token: String,
     pub groups: Vec<WildcardGroup>,
     pub directory_url: String,
+}
+
+/// Resolve `ISENGARD_ACME_DIRECTORY` into a real URL.
+///
+/// Accepts three forms (case-insensitive, whitespace-trimmed):
+/// - empty / unset / `production` / `prod` → LE production
+/// - `staging` / `stage` → LE staging
+/// - anything else → used as-is (treated as a directory URL)
+///
+/// Lets operators write `ISENGARD_ACME_DIRECTORY=production` instead of
+/// memorizing the LE URL when flipping between staging and prod.
+pub fn resolve_directory(input: &str) -> String {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "production" | "prod" => LE_PRODUCTION_URL.to_string(),
+        "staging" | "stage" => LE_STAGING_URL.to_string(),
+        _ => input.trim().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +151,34 @@ mod tests {
             cf_api_token: Some("t".into()),
             domains: "*.x.com".into(),
             directory_url: LE_STAGING_URL.into(),
+        };
+        let v = cfg.validated().unwrap();
+        assert_eq!(v.directory_url, LE_STAGING_URL);
+    }
+
+    #[test]
+    fn resolve_directory_accepts_aliases() {
+        assert_eq!(resolve_directory(""), LE_PRODUCTION_URL);
+        assert_eq!(resolve_directory("production"), LE_PRODUCTION_URL);
+        assert_eq!(resolve_directory("PROD"), LE_PRODUCTION_URL);
+        assert_eq!(resolve_directory("  prod  "), LE_PRODUCTION_URL);
+        assert_eq!(resolve_directory("staging"), LE_STAGING_URL);
+        assert_eq!(resolve_directory("STAGE"), LE_STAGING_URL);
+    }
+
+    #[test]
+    fn resolve_directory_passes_through_urls() {
+        let custom = "https://acme.internal.example/directory";
+        assert_eq!(resolve_directory(custom), custom);
+    }
+
+    #[test]
+    fn validated_resolves_alias_to_url() {
+        let cfg = AcmeConfig {
+            email: Some("a@b".into()),
+            cf_api_token: Some("t".into()),
+            domains: "*.x.com".into(),
+            directory_url: "staging".into(),
         };
         let v = cfg.validated().unwrap();
         assert_eq!(v.directory_url, LE_STAGING_URL);
