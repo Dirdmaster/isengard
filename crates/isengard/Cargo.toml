@@ -35,6 +35,9 @@ hex = "0.4"
 humantime = "2.1"
 inventory.workspace = true
 isengard-agent.workspace = true
+# Direct rustls dep: main.rs installs the default CryptoProvider at startup
+# (required since instant-acme 0.8 pulled in rustls-platform-verifier).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-plugin-backup.workspace = true

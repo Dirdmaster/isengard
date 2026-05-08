@@ -2623,6 +2623,7 @@ dependencies = [
  "isengard-plugin-webhooks",
  "isengard-storage",
  "predicates",
+ "rustls",
  "serde_json",
  "tokio",
  "tracing",

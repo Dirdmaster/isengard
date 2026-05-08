@@ -251,6 +251,13 @@ enum AgentOp {
 
 #[tokio::main]
 async fn main() {
+    // Install a process-level rustls CryptoProvider before any TLS session is
+    // built. Required since instant-acme 0.8 transitively pulls in a
+    // rustls-platform-verifier path that panics if the default provider is
+    // unset and Rustls cannot pick one from compile-time features. We want
+    // exactly one provider for the whole binary; do it once, here, at the top.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     let mode = match &cli.command {
