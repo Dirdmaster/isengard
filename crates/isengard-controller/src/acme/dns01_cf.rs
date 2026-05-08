@@ -166,19 +166,41 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
             if saved.directory_url == self.directory_url
                 && saved.contact_email == self.contact_email
             {
-                let creds: AccountCredentials = serde_json::from_str(&saved.account_key_pem)
-                    .context("decode acme creds JSON")?;
-                return Account::builder()
-                    .context("acme account builder")?
-                    .from_credentials(creds)
-                    .await
-                    .context("reconstruct acme account");
+                // Try to reconstruct from the saved credentials. If the
+                // serialized JSON shape changed across an instant-acme
+                // dependency bump (e.g. 0.7 -> 0.8 added a `newNonce`
+                // field), reconstruction fails and historically wedged the
+                // controller forever. Treat this as "credentials format
+                // drifted" and fall through to registering a fresh
+                // account, the same path as a directory/email change.
+                match serde_json::from_str::<AccountCredentials>(&saved.account_key_pem) {
+                    Ok(creds) => match Account::builder()
+                        .context("acme account builder")?
+                        .from_credentials(creds)
+                        .await
+                    {
+                        Ok(account) => return Ok(account),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "ACME: saved credentials no longer reconstruct (likely instant-acme dep bump); registering fresh account",
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "ACME: saved credentials JSON shape changed; registering fresh account",
+                        );
+                    }
+                }
+            } else {
+                tracing::info!(
+                    old_directory = %saved.directory_url,
+                    new_directory = %self.directory_url,
+                    "ACME: directory/email changed; registering a fresh account",
+                );
             }
-            tracing::info!(
-                old_directory = %saved.directory_url,
-                new_directory = %self.directory_url,
-                "ACME: directory/email changed; registering a fresh account",
-            );
         }
 
         let (account, creds) = Account::builder()

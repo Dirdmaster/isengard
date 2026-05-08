@@ -233,7 +233,6 @@ async fn handle_issued(
     // source-of-truth; if metadata persistence fails (e.g. FK failure on
     // wildcard_host_id() because no sentinel hosts row exists yet), we still
     // want the cert pushable to agents on the next ProxyConfig sweep.
-    // Persistence-survival of the cert PEM itself is a follow-up.
     cert_store
         .install(&cert.identifiers, &cert.cert_pem, &cert.key_pem)
         .await?;
@@ -241,6 +240,30 @@ async fn handle_issued(
     // Parse the cert to extract not_before / not_after for the metadata row.
     let (not_before, not_after, serial) = parse_cert_validity(&cert.cert_pem)?;
     let next_renewal = not_after - ChronoDuration::days(RENEW_DAYS_BEFORE_EXPIRY);
+
+    // Persist cert PEM to SQLite so a controller restart hydrates the
+    // store back instead of stranding the agent with no cert. A failure
+    // here is logged but does not unwind: the cert is in memory and
+    // serving until the next restart, by which point the next scheduler
+    // tick will have either re-issued or persisted on retry.
+    if let Err(e) = cert_store
+        .persist(
+            inventory,
+            &cert.identifiers,
+            &cert.cert_pem,
+            &cert.key_pem,
+            not_before,
+            not_after,
+            &serial,
+            "letsencrypt",
+        )
+        .await
+    {
+        warn!(
+            primary = %primary,
+            "acme: tls_wildcard_certs persist failed; cert is in memory but will not survive controller restart: {e:#}",
+        );
+    }
 
     // Metadata write is observability + scheduler input ('next_renewal_at').
     // A failure here is logged but does not unwind the issuance. The cert

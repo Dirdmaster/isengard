@@ -186,6 +186,57 @@ fn encode_for_path(hostname: &str) -> String {
     }
 }
 
+/// Reverse of `encode_for_path`. Used by `TlsStorage::list_hostnames` to
+/// derive the canonical hostname (cache key) from each on-disk filename.
+fn decode_from_path(stem: &str) -> String {
+    match stem.strip_prefix("_wildcard_.") {
+        Some(rest) => format!("*.{rest}"),
+        None => stem.to_string(),
+    }
+}
+
+impl TlsStorage {
+    /// Enumerate every hostname that has both a `.crt` and a `.key` file
+    /// under the storage root. Wildcard filenames (`_wildcard_.foo.com.crt`)
+    /// are decoded back to their canonical form (`*.foo.com`) so the
+    /// returned list matches what `cert_store` cache uses as its key.
+    ///
+    /// Missing root directory is treated as "no certs", not an error.
+    pub async fn list_hostnames(&self) -> Result<Vec<String>> {
+        match fs::read_dir(&self.root).await {
+            Ok(rd) => Ok(collect_paired_hostnames(rd).await),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => {
+                Err(e).with_context(|| format!("read tls storage dir {}", self.root.display()))
+            }
+        }
+    }
+}
+
+async fn collect_paired_hostnames(mut rd: tokio::fs::ReadDir) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut crts: HashSet<String> = HashSet::new();
+    let mut keys: HashSet<String> = HashSet::new();
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        let file_name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if let Some(stem) = file_name.strip_suffix(".crt") {
+            crts.insert(stem.to_string());
+        } else if let Some(stem) = file_name.strip_suffix(".key") {
+            keys.insert(stem.to_string());
+        }
+    }
+    let mut out: Vec<String> = crts
+        .intersection(&keys)
+        .map(|s| decode_from_path(s))
+        .collect();
+    out.sort();
+    out
+}
+
 /// Sanity-check that the PEM blobs at least carry BEGIN markers. Catches
 /// caller bugs (passing JSON, or a base64 blob that wasn't PEM-wrapped) at
 /// the storage boundary instead of letting Pingora's cert load fail later

@@ -1,2 +1,9 @@
 # Exported CA from a running controller; regenerate per-deployment.
 ca.pem
+# Dev secrets store master key. Generated locally by `just dev`-like flows.
+secrets/master.key
+# Exported CA pem for the dev compose override (agent bootstrap trust).
+# Regenerate after a controller volume wipe via:
+#   docker exec iso-controller isengard controller ca export | tail -n+2 \
+#     > docker/dev-ca/ca.pem
+dev-ca/ca.pem

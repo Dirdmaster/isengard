@@ -1,15 +1,22 @@
-//! In-memory store for issued wildcard certs. The controller hands out
-//! current cert material to agents via `RoutingPusher::push_to_host` (see
-//! `routing.rs`); this struct is the source of truth.
+//! In-memory cache + SQLite-backed store for issued wildcard certs.
+//!
+//! SQLite is the source of truth: the in-memory `HashMap` is a hot-path
+//! cache that gets hydrated at controller boot (`hydrate_from`) and
+//! synced on every install. A controller restart loses the cache but
+//! refills it from the persistent table on next boot, so the agent
+//! receives the same cert material via the next `ProxyConfig` push.
 //!
 //! Keyed by primary identifier (e.g. `*.vallee.casa`). All other identifiers
 //! covered by the same cert (the apex `vallee.casa`) are tracked alongside so
 //! the lookup-by-hostname path can match either.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use isengard_storage::{Inventory, UpsertWildcardCert};
 
 #[derive(Debug, Clone)]
 pub struct WildcardCert {
@@ -29,8 +36,34 @@ impl WildcardCertStore {
         Self::default()
     }
 
-    /// Install a freshly-issued cert. Replaces any existing cert under the
-    /// same primary identifier.
+    /// Hydrate the in-memory cache from SQLite. Called at controller boot
+    /// before the renewal scheduler ticks so a restart doesn't strand the
+    /// agent with no cert material until a fresh ACME issuance.
+    pub async fn hydrate_from(&self, inv: &Inventory) -> Result<usize> {
+        let rows = inv
+            .list_wildcard_certs()
+            .await
+            .context("hydrate wildcard certs from storage")?;
+        let count = rows.len();
+        let mut guard = self.inner.write().await;
+        guard.clear();
+        for row in rows {
+            let entry = Arc::new(WildcardCert {
+                identifiers: row.identifiers,
+                cert_pem: row.cert_pem,
+                key_pem: row.key_pem,
+            });
+            guard.insert(row.primary_identifier, entry);
+        }
+        Ok(count)
+    }
+
+    /// Install a freshly-issued cert into the in-memory cache. Replaces any
+    /// existing cert under the same primary identifier. Storage persistence
+    /// happens separately (the scheduler calls
+    /// `Inventory::upsert_wildcard_cert` alongside this so a single boot
+    /// after the issuance is enough to survive a restart even if the cert
+    /// was just minted).
     pub async fn install(
         &self,
         identifiers: &[String],
@@ -48,6 +81,38 @@ impl WildcardCertStore {
         let mut guard = self.inner.write().await;
         guard.insert(identifiers[0].clone(), entry);
         Ok(())
+    }
+
+    /// Persist the cert material to SQLite. Companion to `install` for the
+    /// cases where the caller has the parsed validity window. Idempotent:
+    /// upserts on `primary_identifier`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist(
+        &self,
+        inv: &Inventory,
+        identifiers: &[String],
+        cert_pem: &str,
+        key_pem: &str,
+        not_before: DateTime<Utc>,
+        not_after: DateTime<Utc>,
+        serial: &str,
+        issuer: &str,
+    ) -> Result<()> {
+        if identifiers.is_empty() {
+            return Err(anyhow::anyhow!("persist: identifiers must be non-empty"));
+        }
+        inv.upsert_wildcard_cert(UpsertWildcardCert {
+            primary_identifier: identifiers[0].clone(),
+            identifiers: identifiers.to_vec(),
+            cert_pem: cert_pem.to_string(),
+            key_pem: key_pem.to_string(),
+            not_before,
+            not_after,
+            serial: serial.to_string(),
+            issuer: issuer.to_string(),
+        })
+        .await
+        .context("upsert wildcard cert")
     }
 
     /// Snapshot every cert in the store. Used by the routing pusher to

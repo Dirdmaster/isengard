@@ -367,6 +367,23 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     if let Some(tls_opts) = opts.tls.as_ref() {
         let storage = tls::TlsStorage::new(tls_opts.cert_dir.clone());
         let cert_store = std::sync::Arc::new(tls::CertStore::new(storage));
+
+        // Pre-populate the cache from disk so the very first SNI handshake
+        // after boot has the cert ready, without waiting for the
+        // controller to push a `ProxyConfig`. Crucial for wildcard certs:
+        // disk-only fallback would otherwise miss because lookup is
+        // hostname-keyed but wildcard files are stored under their
+        // encoded `_wildcard_.` form.
+        match cert_store.hydrate().await {
+            Ok(0) => info!(cert_dir = ?tls_opts.cert_dir, "tls: cert store empty at boot"),
+            Ok(n) => info!(
+                cert_dir = ?tls_opts.cert_dir,
+                count = n,
+                "tls: cert store hydrated from disk",
+            ),
+            Err(e) => warn!(error = %e, "tls: cert store hydrate failed; starting empty"),
+        }
+
         proxy_state.install_cert_store(cert_store.clone()).await;
         info!(cert_dir = ?tls_opts.cert_dir, "tls: cert store installed");
 

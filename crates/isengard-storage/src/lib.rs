@@ -28,6 +28,7 @@ pub mod service;
 pub mod setting;
 pub mod stack;
 pub mod tls_cert;
+pub mod tls_wildcard_cert;
 pub mod webhook;
 
 pub use acme_account::{AcmeAccount, UpsertAcmeAccount};
@@ -60,6 +61,7 @@ pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
 pub use stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
+pub use tls_wildcard_cert::{UpsertWildcardCert, WildcardCertRow};
 pub use webhook::{
     DeliverySource, DeliveryStatus, InsertDelivery, InsertGateDelivery, InsertLifecycleDelivery,
     InsertWebhook, KIND_WILDCARD, UpdateWebhook, Webhook, WebhookDelivery, kind_matches,

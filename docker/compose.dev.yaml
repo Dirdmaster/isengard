@@ -35,3 +35,12 @@ services:
     # `/etc/isengard/stacks` carries the agent's reverse-engineered compose
     # YAML across container restarts; in dev that's a host directory so you
     # can `cat /etc/isengard/stacks/hello/compose.yaml` to inspect the output.
+    #
+    # Bind-mount the controller's CA pem so the bootstrap channel can
+    # verify the controller's self-signed leaf. In production install.sh
+    # exports this to /etc/isengard/ca.pem on the host; here we ship a
+    # checked-in dev ca via docker/dev-ca/ca.pem (regenerate after a
+    # controller volume wipe via `docker exec iso-controller isengard
+    # controller ca export > docker/dev-ca/ca.pem`).
+    volumes:
+      - ./dev-ca/ca.pem:/etc/iso/ca.pem:ro
