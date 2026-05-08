@@ -162,18 +162,18 @@ pub async fn tick<P: DnsProvider>(
         match acme.order_wildcard(&group.identifiers).await {
             Ok(cert) => {
                 if let Err(e) = handle_issued(inventory, cert_store, &cert).await {
-                    warn!(primary = %primary, error = %e, "acme: post-issuance handling failed");
+                    warn!(primary = %primary, "acme: post-issuance handling failed: {e:#}");
                     let _ = inventory
-                        .record_tls_attempt(primary, false, Some(format!("post-issue: {e}")))
+                        .record_tls_attempt(primary, false, Some(format!("post-issue: {e:#}")))
                         .await;
                 } else {
                     info!(primary = %primary, "acme: wildcard cert issued/renewed");
                 }
             }
             Err(e) => {
-                warn!(primary = %primary, error = %e, "acme: order_wildcard failed");
+                warn!(primary = %primary, "acme: order_wildcard failed: {e:#}");
                 let _ = inventory
-                    .record_tls_attempt(primary, false, Some(e.to_string()))
+                    .record_tls_attempt(primary, false, Some(format!("{e:#}")))
                     .await;
             }
         }
