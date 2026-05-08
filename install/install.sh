@@ -840,6 +840,7 @@ action_refresh_compose() {
   fi
   setup_network
   bring_up_stack --force-recreate
+  install_isd_binary
   log "action: refresh compose complete"
 }
 
@@ -865,6 +866,7 @@ action_refresh_config() {
   fi
   setup_network
   bring_up_stack --force-recreate
+  install_isd_binary
   log "action: refresh config complete"
 }
 
@@ -953,7 +955,35 @@ fresh_install() {
   fi
   setup_network
   bring_up_stack
+  install_isd_binary
   post_install_hints
+}
+
+# ---------------------------------------------------------------------------
+# Extract the `isd` operator CLI from the controller image into
+# /usr/local/bin/isd on the host. The CLI is statically linked (musl) and
+# bundled into the same scratch image as the daemon binary, so we don't
+# need a separate release pipeline. Idempotent: a second run overwrites
+# with whatever version is in the currently-cached image.
+# ---------------------------------------------------------------------------
+install_isd_binary() {
+  local image="${ISENGARD_CONTROLLER_IMAGE:-ghcr.io/weavers-engineering/isengard-controller:${ISENGARD_REF}}"
+  local target="/usr/local/bin/isd"
+  log "isd: extracting ${target} from ${image}"
+  local cid
+  if ! cid="$(docker create "${image}" 2>/dev/null)"; then
+    warn "isd: docker create failed for ${image}; skipping isd install"
+    return 0
+  fi
+  # Always clean up the throwaway container, even on copy failure.
+  if ! docker cp "${cid}:/usr/local/bin/isd" "${target}" 2>/dev/null; then
+    warn "isd: docker cp failed (image may not bundle /usr/local/bin/isd yet); skipping"
+    docker rm "${cid}" >/dev/null 2>&1 || true
+    return 0
+  fi
+  docker rm "${cid}" >/dev/null 2>&1 || true
+  chmod 0755 "${target}" 2>/dev/null || true
+  log "isd: installed ${target} ($(${target} --version 2>/dev/null || echo unknown))"
 }
 
 # ---------------------------------------------------------------------------
@@ -982,7 +1012,11 @@ post_install_hints() {
     2. Paste the token at the prompt the agent shows in its logs, or
        export ISENGARD_ENROLL_TOKEN=<token> and 'docker compose up -d agent'.
 
-  Operator CLI (\`isd\`): build once on a workstation, then 'isd login'.
+  Operator CLI:
+    - On this server: /usr/local/bin/isd (extracted from the image)
+    - On your workstation: same binary, login to http://<this-host>:9418
+    Try: isd login http://127.0.0.1:9418
+         isd ps; isd route list; isd secret list
 
   Docs:
     install/README.md  (this directory)

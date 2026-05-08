@@ -21,6 +21,7 @@ mod login;
 mod logs;
 mod open_cmd;
 mod ps;
+mod route;
 mod secret;
 mod table;
 
@@ -72,6 +73,11 @@ enum Command {
     /// shows names only (no values), `rm` deletes.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
+    /// Manage routing rules. `list` / `create` / `rm`. Most rules come from
+    /// stack compose.yaml `expose.host` annotations; this surface is for
+    /// non-stack routes (e.g., the controller dashboard) and ad-hoc edits.
+    #[command(subcommand)]
+    Route(route::RouteCommand),
 }
 
 #[tokio::main]
@@ -90,6 +96,9 @@ async fn main() {
         Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
+        }
+        Command::Route(cmd) => {
+            route::run(route::RouteArgs { command: cmd }, cli.context.as_deref()).await
         }
     };
 
