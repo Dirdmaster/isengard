@@ -469,15 +469,76 @@ bring_up_stack() {
   export ISENGARD_COMPOSE_FILE
   export ISENGARD_MASTER_KEY
 
+  # Phase 14 mTLS: agent needs the controller's CA cert to verify the
+  # bootstrap TLS handshake on first enroll. Make sure the file exists
+  # BEFORE compose tries to bind-mount it (docker would auto-create it
+  # as a directory otherwise, breaking the agent on the next start).
+  ensure_ca_placeholder
+
   log "images: pulling latest"
   docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" pull
 
+  # Bring up the controller first so we can export its CA before the
+  # agent tries to enroll. Compose's depends_on already enforces ordering
+  # but we want the CA file written ASAP.
+  log "stack: starting controller"
+  docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d controller
+
+  bootstrap_ca_export
+
   if [[ "${force_recreate}" -eq 1 ]]; then
-    log "stack: bringing up via docker compose up -d --force-recreate"
-    docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d --force-recreate
+    log "stack: bringing up agent via docker compose up -d --force-recreate"
+    docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d --force-recreate agent
   else
-    log "stack: bringing up via docker compose up -d"
-    docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d
+    log "stack: bringing up agent via docker compose up -d"
+    docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d agent
+  fi
+}
+
+# Place a 0-byte ca.pem at the host path the agent's compose entry
+# bind-mounts. If we let docker create the missing path it'll be a
+# DIRECTORY instead of a file, and the eventual real cert can never
+# replace it without manual rm. Writing an empty placeholder forces
+# docker to bind-mount the file shape.
+ensure_ca_placeholder() {
+  local ca_path="${ISENGARD_CA_FILE:-${ISENGARD_ETC}/ca.pem}"
+  if [[ ! -e "${ca_path}" ]]; then
+    : > "${ca_path}"
+    chmod 0644 "${ca_path}"
+    log "ca: created placeholder at ${ca_path} (will be populated after controller starts)"
+  fi
+}
+
+# Wait briefly for the controller to be ready, export its CA via the
+# `isengard controller ca export` subcommand, write to ISENGARD_CA_FILE.
+# Idempotent: if the cert already on disk matches the controller's, no-op.
+bootstrap_ca_export() {
+  local ca_path="${ISENGARD_CA_FILE:-${ISENGARD_ETC}/ca.pem}"
+
+  log "ca: waiting for controller readiness (up to 30s)"
+  local i
+  for i in $(seq 1 30); do
+    if docker exec iso-controller true 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  log "ca: exporting controller CA to ${ca_path}"
+  local tmp
+  tmp="$(mktemp)"
+  if docker exec iso-controller isengard controller ca export 2>/dev/null > "${tmp}"; then
+    if grep -q "BEGIN CERTIFICATE" "${tmp}"; then
+      mv "${tmp}" "${ca_path}"
+      chmod 0644 "${ca_path}"
+      log "ca: wrote $(wc -l < "${ca_path}") lines to ${ca_path}"
+    else
+      rm -f "${tmp}"
+      warn "ca: controller exported empty / non-PEM output; agent will fail to verify"
+    fi
+  else
+    rm -f "${tmp}"
+    warn "ca: failed to exec ca export against iso-controller; agent will fail to verify"
   fi
 }
 

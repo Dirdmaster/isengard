@@ -142,6 +142,11 @@ services:
       # so files persist across agent container restarts and stay editable
       # from the host.
       - ${ISENGARD_PREFIX:-/var/lib/isengard}/stacks:/etc/isengard/stacks:rw
+      # Controller's CA cert (Phase 14 mTLS). install.sh exports it after
+      # the controller is up via `isengard controller ca export` and writes
+      # it here. The agent pins it for the bootstrap channel so the
+      # self-signed controller cert verifies on first enroll.
+      - ${ISENGARD_CA_FILE:-/etc/isengard/ca.pem}:/run/secrets/ca.pem:ro
     env_file:
       - ${ISENGARD_ENV_FILE:-/etc/isengard/isengard.env}
     environment:
@@ -150,6 +155,7 @@ services:
       # Then either paste the token into isengard.env or pass it as
       # ISENGARD_ENROLL_TOKEN=... when first bringing up the agent.
       ISENGARD_ENROLL_TOKEN: ${ISENGARD_ENROLL_TOKEN:-}
+      ISENGARD_CONTROLLER_CA_PEM_PATH: /run/secrets/ca.pem
       RUST_LOG: ${RUST_LOG:-info}
     command:
       - agent
