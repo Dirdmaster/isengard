@@ -13,7 +13,16 @@ The supported way to put Isengard on a server. One command, no source checkout, 
 5. **Prompts for non-secret config** (ACME email, ACME domains, ACME directory) and writes `/etc/isengard/isengard.env`. Plain values only; the file is mode 0640.
 6. Drops `compose.yaml` into `/etc/isengard/`, creates the `isengard-proxy` docker network if missing, pulls the GHCR images, and brings up the stack via `docker compose up -d`.
 
-Re-running the script when the master key is already present skips key generation and the secret prompts; it just brings the stack up. Day-to-day secret changes happen via `isd secret put <name>` against the running dashboard.
+Re-running the script when an install is already on disk drops into a reinstall menu instead of silently short-circuiting. Choices:
+
+1. **Refresh compose.yaml only** (default). Re-fetches `/etc/isengard/compose.yaml` from the requested ref and recreates containers with `--force-recreate`. Keeps `master.key`, `isengard.env`, and the secrets DB. Use this whenever a compose-level fix ships (e.g. #107).
+2. **Refresh compose.yaml + isengard.env**. Same as 1, plus re-prompts for the non-secret ACME values. Old env file is backed up to `isengard.env.bak`. Master key + secrets DB are still preserved.
+3. **Wipe everything and reinstall** (DESTRUCTIVE). Confirms with a literal `WIPE` prompt, runs `docker compose down -v`, removes `${ISENGARD_PREFIX}` and `${ISENGARD_ETC}`, then runs the full first-time path. Erases secrets and master key.
+4. **Abort**. Exits with no changes.
+
+For CI / scripted reinstalls, set `ISENGARD_REINSTALL_MODE` to one of `refresh-compose`, `refresh-config`, `wipe`, `abort` to skip the prompt. The wipe path additionally requires `ISENGARD_WIPE_YES=1` to bypass the literal-WIPE confirmation.
+
+Day-to-day secret changes happen via `isd secret put <name>` against the running dashboard, not by re-running the install script.
 
 ## What you need before running
 
@@ -128,6 +137,8 @@ The full list of script-level overrides (set before piping to bash):
 | `ISENGARD_RAW_BASE` | computed from ref | Base URL for raw fetches; override for forks. |
 | `ISENGARD_PROXY_NETWORK` | `isengard-proxy` | Shared external docker network name. |
 | `ISENGARD_CONTROLLER_IMAGE` | `ghcr.io/weavers-engineering/isengard-controller:next` | Image used for the bootstrap one-shots. |
+| `ISENGARD_REINSTALL_MODE` | unset | When set, pre-answers the reinstall menu. One of: `refresh-compose`, `refresh-config`, `wipe`, `abort`. |
+| `ISENGARD_WIPE_YES` | unset | When `1`, bypasses the literal-`WIPE` confirmation in the wipe action. Required for non-interactive `ISENGARD_REINSTALL_MODE=wipe`. |
 
 ## Updating
 
