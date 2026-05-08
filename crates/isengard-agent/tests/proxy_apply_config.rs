@@ -128,3 +128,67 @@ async fn concurrent_applies_higher_generation_wins() {
         );
     }
 }
+
+/// Regression test for the controller-restart bug.
+///
+/// The controller's per-host `generation` counter lives in memory
+/// (`routing::by_host`) and resets to 0 on controller restart. The agent's
+/// `last_generation` keeps its prior high value across the agent's sync
+/// reconnect — so the very first push from the freshly-restarted controller
+/// (generation=1) would be discarded as "stale" by the agent's monotonicity
+/// check, leaving the agent serving the old config forever.
+///
+/// `run_sync_loop` resets `last_generation` to 0 on every fresh sync stream
+/// open. After the reset, any positive generation (including 1, the first
+/// push from a fresh controller) is accepted. This test mimics the reset
+/// directly so it runs without spinning up a real controller.
+#[tokio::test]
+async fn last_generation_reset_on_stream_open_unblocks_low_gen_push() {
+    use std::sync::atomic::Ordering;
+
+    let state = isengard_agent::proxy::ProxyState::new();
+
+    let mk = |generation: u64, port: u16, host: &str| ProxyConfig {
+        host_id: "h".into(),
+        generation,
+        rules: vec![RoutingRule {
+            id: 1,
+            public_hostname: host.into(),
+            upstream: Some(Upstream {
+                container_id: "web".into(),
+                container_ip: "127.0.0.1".into(),
+                container_port: port as u32,
+            }),
+            tls_mode: TlsMode::Acme as i32,
+            healthcheck: None,
+            adapter: "none".into(),
+        }],
+        settings: None,
+        wildcard_certs: vec![],
+    };
+
+    // Simulate the agent having processed several pushes from the previous
+    // controller incarnation: generation climbs to 5.
+    isengard_agent::proxy::apply_config(&state, mk(5, 8080, "old.test"))
+        .await
+        .unwrap();
+    assert_eq!(state.last_generation.load(Ordering::Acquire), 5);
+
+    // Without the reset, the next line (a fresh post-restart push at
+    // generation=1) would be dropped as stale — agent stays serving old.test.
+    state.last_generation.store(0, Ordering::Release);
+
+    // Fresh controller's first push: generation=1.
+    isengard_agent::proxy::apply_config(&state, mk(1, 9090, "new.test"))
+        .await
+        .unwrap();
+
+    let up = state.upstreams.read().await;
+    let got = up.get("new.test").expect("post-reset push must apply");
+    assert_eq!(got.addr.port(), 9090);
+    assert!(
+        up.get("old.test").is_none(),
+        "registry should fully replace, not merge"
+    );
+    assert_eq!(state.last_generation.load(Ordering::Acquire), 1);
+}

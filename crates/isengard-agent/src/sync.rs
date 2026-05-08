@@ -114,6 +114,17 @@ pub async fn run_sync_loop<S: LogSource>(
         .context("sending Hello to outbound channel")?;
     info!("Sync stream opened, Hello sent");
 
+    // Reset the per-stream generation counter. The controller's per-host
+    // generation lives in memory (`by_host[host_id].generation`) and resets
+    // to 0 on controller restart. If the agent kept its previous high
+    // counter, the very first push from the new controller (generation=1)
+    // would be discarded as "stale" and the agent would never see new
+    // routing rules / cert pushes until something forced a higher number.
+    // A fresh sync stream means a fresh negotiation: trust the next push.
+    proxy_state
+        .last_generation
+        .store(0, std::sync::atomic::Ordering::Release);
+
     // Spawn heartbeat task.
     let hb_tx = tx.clone();
     let interval = Duration::from_secs(u64::from(interval_secs.max(1)));
