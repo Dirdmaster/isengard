@@ -213,11 +213,25 @@ async fn handle_issued(
 ) -> Result<()> {
     let primary = &cert.identifiers[0];
 
+    // Install into the in-memory store FIRST. This is the agent-facing
+    // source-of-truth; if metadata persistence fails (e.g. FK failure on
+    // wildcard_host_id() because no sentinel hosts row exists yet), we still
+    // want the cert pushable to agents on the next ProxyConfig sweep.
+    // Persistence-survival of the cert PEM itself is a follow-up.
+    cert_store
+        .install(&cert.identifiers, &cert.cert_pem, &cert.key_pem)
+        .await?;
+
     // Parse the cert to extract not_before / not_after for the metadata row.
     let (not_before, not_after, serial) = parse_cert_validity(&cert.cert_pem)?;
     let next_renewal = not_after - ChronoDuration::days(RENEW_DAYS_BEFORE_EXPIRY);
 
-    inventory
+    // Metadata write is observability + scheduler input ('next_renewal_at').
+    // A failure here is logged but does not unwind the issuance. The cert
+    // is already in the store and serving; losing the metadata row only
+    // means the next scheduler tick may re-attempt issuance (harmless,
+    // bounded by LE rate limits + the in-process retry backoff).
+    if let Err(e) = inventory
         .upsert_tls_cert_meta(UpsertTlsCertMeta {
             public_hostname: primary.clone(),
             host_id: wildcard_host_id(),
@@ -227,12 +241,16 @@ async fn handle_issued(
             next_renewal_at: next_renewal,
             serial: Some(serial),
         })
-        .await?;
-    inventory.record_tls_attempt(primary, true, None).await?;
-
-    cert_store
-        .install(&cert.identifiers, &cert.cert_pem, &cert.key_pem)
-        .await?;
+        .await
+    {
+        warn!(
+            primary = %primary,
+            "acme: tls_cert_meta upsert failed; cert is in store but renewal scheduling is degraded: {e:#}",
+        );
+    }
+    if let Err(e) = inventory.record_tls_attempt(primary, true, None).await {
+        warn!(primary = %primary, "acme: record_tls_attempt failed: {e:#}");
+    }
 
     Ok(())
 }
