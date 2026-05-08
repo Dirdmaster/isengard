@@ -77,7 +77,7 @@ mod tests {
         let revocation = RevocationSet::load_from_inventory(&inventory)
             .await
             .unwrap();
-        let secrets = Arc::new(crate::secrets::SecretsStore::new(inventory.clone(), None));
+        let secrets = Arc::new(crate::secrets::SecretsStore::new_locked(inventory.clone()));
         let handles = Arc::new(ControllerHandles {
             inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),

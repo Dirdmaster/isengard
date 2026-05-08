@@ -271,14 +271,20 @@ Isengard ships a Docker-Swarm-style managed secrets store: operator-supplied val
 
 ### Bootstrap
 
-The controller derives the master key from `ISENGARD_SECRETS_PASSPHRASE` on boot. Required if any secrets are stored; the controller refuses to start when secrets exist but the env var is unset.
+The controller reads a 32-byte master key from a bind-mounted file (default `/run/secrets/master.key`, override with `ISENGARD_MASTER_KEY_FILE`). The installer (`install/install.sh`) generates the key on first run via `openssl rand 32`, writes it to `/etc/isengard/master.key` mode 0600 root, and bind-mounts it into the controller container.
+
+For dev:
 
 ```sh
-ISENGARD_SECRETS_PASSPHRASE='correct horse battery staple' \
-  docker compose -f docker/compose.yaml up -d controller
+mkdir -p docker/secrets
+head -c 32 /dev/urandom > docker/secrets/master.key
+chmod 600 docker/secrets/master.key
+docker compose -f docker/compose.yaml up -d controller
 ```
 
-Pick something long and high-entropy (a passphrase manager output, a 32-byte hex blob, etc). Rotating it requires re-encrypting every stored secret; not a one-line operation.
+The dev compose bind-mounts `docker/secrets/master.key` into the controller as `/run/secrets/master.key`. The controller refuses to start without it.
+
+The operator never types the master key. Day-to-day secrets management uses `isd secret put|list|rm` against the running dashboard; the master key is needed only at install time and on every controller boot (to decrypt at-rest ciphertexts).
 
 ### Load a value
 

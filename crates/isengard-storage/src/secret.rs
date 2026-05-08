@@ -1,10 +1,12 @@
-//! Isengard-managed secrets store. Rows hold the age-encrypted ciphertext
-//! for an operator-supplied value; the controller derives the master key
-//! from `ISENGARD_SECRETS_PASSPHRASE` on boot and never persists it.
+//! Isengard-managed secrets store. Rows hold a ChaCha20-Poly1305
+//! ciphertext for an operator-supplied value; the controller reads the
+//! 32-byte master key from a bind-mounted file on boot
+//! (`ISENGARD_MASTER_KEY_FILE`, default `/run/secrets/master.key`) and
+//! never persists it.
 //!
 //! The DAO surface intentionally trades in raw ciphertext bytes: the
 //! encryption layer lives one level up (controller crate) so the storage
-//! crate stays free of `age` as a dep. Callers must encrypt before
+//! crate stays free of crypto deps. Callers must encrypt before
 //! `upsert_secret` and decrypt after `get_secret_ciphertext`.
 //!
 //! Naming rules (enforced at the API boundary, not the DB): names are
@@ -164,8 +166,10 @@ impl Inventory {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Quick predicate so the controller can decide at boot whether a
-    /// missing `ISENGARD_SECRETS_PASSPHRASE` should fail loud.
+    /// Quick predicate. Retained for symmetry with the dashboard but no
+    /// longer used as a boot gate (the controller now refuses to start
+    /// if the master key file is missing, regardless of whether the DB
+    /// has stored secrets).
     pub async fn has_any_secret(&self) -> Result<bool> {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secrets")
             .fetch_one(self.pool())

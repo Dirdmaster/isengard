@@ -34,9 +34,8 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         db_path: std::path::PathBuf::from(":memory:"),
         log_fanout: isengard_controller::log_fanout::LogFanout::new(),
         compose_broker: Arc::new(isengard_controller::compose_broker::ComposeBroker::new()),
-        secrets: Arc::new(isengard_controller::secrets::SecretsStore::new(
+        secrets: Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
             inv.clone(),
-            None,
         )),
     });
     let app = webhooks::router(handles.clone());

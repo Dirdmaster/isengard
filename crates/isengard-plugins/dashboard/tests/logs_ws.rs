@@ -44,9 +44,8 @@ async fn make_handles() -> Arc<ControllerHandles> {
     let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
     let enrollment = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
     let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
-    let secrets = std::sync::Arc::new(isengard_controller::secrets::SecretsStore::new(
+    let secrets = std::sync::Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
         inv.clone(),
-        None,
     ));
     Arc::new(ControllerHandles {
         inventory: inv,

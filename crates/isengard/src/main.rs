@@ -80,6 +80,16 @@ enum Command {
         #[command(subcommand)]
         action: Option<ControllerAction>,
     },
+    /// Bootstrap-time secrets management. Used by the installer to seed
+    /// the encrypted secrets store before the controller boots; reads the
+    /// master key directly from the host filesystem and writes the
+    /// ciphertext to the same SQLite database the running controller uses.
+    /// Not for day-to-day ops: use `isd secret put|list|rm` against a
+    /// running dashboard once the stack is up.
+    Secret {
+        #[command(subcommand)]
+        op: SecretOp,
+    },
     /// Run in agent mode: registers with a controller, runs agent-side plugins
     /// (updater).
     Agent {
@@ -178,6 +188,37 @@ enum CaOp {
 }
 
 #[derive(Debug, Subcommand)]
+enum SecretOp {
+    /// Seed an encrypted secret in the controller's SQLite store. The
+    /// installer pipes the value on stdin, then the controller boots
+    /// and reads the same DB. Plaintext NEVER touches a file on the
+    /// host: stdin only.
+    Bootstrap {
+        /// Secret name (matches `isd secret put`'s rules:
+        /// `[A-Za-z0-9._-]{1,64}`).
+        name: String,
+        /// Path to the raw 32-byte master key file. The installer
+        /// generates this via `openssl rand 32 > /etc/isengard/master.key`.
+        #[arg(long)]
+        master_key_file: std::path::PathBuf,
+        /// Where the controller's SQLite database lives. Must match the
+        /// `--state-dir` the controller will boot with.
+        #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
+        state_dir: std::path::PathBuf,
+    },
+    /// List the names of secrets seeded so far. No values are read; the
+    /// installer uses this to confirm what's been bootstrapped.
+    ListBootstrap {
+        /// Path to the raw 32-byte master key file. Required so the
+        /// listing path uses the same boot guard the controller does.
+        #[arg(long)]
+        master_key_file: std::path::PathBuf,
+        #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
+        state_dir: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum AgentOp {
     /// Revoke the active cert for an agent. `host_id` is the ULID string
     /// printed by `agent list`.
@@ -197,6 +238,7 @@ async fn main() {
     let mode = match &cli.command {
         Command::Controller { .. } => "controller",
         Command::Agent { .. } => "agent",
+        Command::Secret { .. } => "secret",
     };
     tracing_init::init(mode, cli.log.as_deref());
 
@@ -251,7 +293,93 @@ async fn dispatch(command: Command) -> Result<()> {
             )
             .await
         }
+        Command::Secret { op } => match op {
+            SecretOp::Bootstrap {
+                name,
+                master_key_file,
+                state_dir,
+            } => run_secret_bootstrap(name, master_key_file, state_dir).await,
+            SecretOp::ListBootstrap {
+                master_key_file,
+                state_dir,
+            } => run_secret_list_bootstrap(master_key_file, state_dir).await,
+        },
     }
+}
+
+/// Read the master key from `master_key_file`, open the controller's
+/// SQLite at `state_dir`, read the operator-supplied secret value from
+/// stdin, encrypt with the master key, and upsert the row.
+///
+/// The plaintext lives only on stdin and in process memory. We
+/// deliberately do not log the value's length: even that is metadata
+/// the operator might prefer not to leak.
+async fn run_secret_bootstrap(
+    name: String,
+    master_key_file: std::path::PathBuf,
+    state_dir: std::path::PathBuf,
+) -> Result<()> {
+    use std::io::Read;
+
+    if name.is_empty() {
+        return Err(anyhow!("secret name must be non-empty"));
+    }
+
+    // Read raw bytes from stdin. `read_to_end` so the operator can pipe
+    // arbitrary binary (a private key PEM, a JSON blob, whatever).
+    let mut value = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut value)
+        .context("reading secret value from stdin")?;
+    if value.is_empty() {
+        return Err(anyhow!(
+            "stdin was empty; pipe the value (printf '%s' \"$VAL\" | isengard secret bootstrap {name})"
+        ));
+    }
+    // Strip exactly one trailing newline if it crept in via heredoc /
+    // `echo` so the operator doesn't have to remember `printf '%s'`.
+    if value.last() == Some(&b'\n') {
+        value.pop();
+    }
+
+    let key = isengard_controller::secrets::read_master_key(&master_key_file)
+        .with_context(|| format!("reading master key from {master_key_file:?}"))?;
+
+    let inv = Arc::new(open_inventory(&state_dir).await?);
+    let store = isengard_controller::secrets::SecretsStore::new(inv, key);
+
+    store
+        .put(&name, &value, Some("bootstrap"))
+        .await
+        .with_context(|| format!("storing secret {name:?}"))?;
+
+    println!("ok");
+    Ok(())
+}
+
+/// List the names + timestamps of bootstrapped secrets. Verifies the
+/// master key file is readable so the installer fails loud on the same
+/// guard the controller uses, even though listing names doesn't actually
+/// require decryption.
+async fn run_secret_list_bootstrap(
+    master_key_file: std::path::PathBuf,
+    state_dir: std::path::PathBuf,
+) -> Result<()> {
+    let key = isengard_controller::secrets::read_master_key(&master_key_file)
+        .with_context(|| format!("reading master key from {master_key_file:?}"))?;
+
+    let inv = Arc::new(open_inventory(&state_dir).await?);
+    let store = isengard_controller::secrets::SecretsStore::new(inv, key);
+
+    let names = store.list().await.context("listing bootstrap secrets")?;
+    if names.is_empty() {
+        println!("(no secrets bootstrapped)");
+    } else {
+        for meta in names {
+            println!("{}\t{}", meta.name, meta.updated_at.to_rfc3339());
+        }
+    }
+    Ok(())
 }
 
 async fn run_controller(

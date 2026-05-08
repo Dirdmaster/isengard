@@ -72,10 +72,12 @@ pub struct ControllerHandles {
     /// resolves it when the matching `WriteComposeAck` lands.
     pub compose_broker: Arc<compose_broker::ComposeBroker>,
     /// v0.3.6: Isengard-managed encrypted secrets store. Operators put
-    /// secrets via `isd secret put`; agents fetch over mTLS at container
-    /// start and mount as tmpfs at `/run/secrets/<name>`. The store is
-    /// "unlocked" when `ISENGARD_SECRETS_PASSPHRASE` is set; fetch/put
-    /// calls return [`secrets::SecretsError::NoPassphrase`] otherwise.
+    /// secrets via `isd secret put` (or the installer's bootstrap
+    /// subcommand); agents fetch over mTLS at container start and mount
+    /// as tmpfs at `/run/secrets/<name>`. The store is "unlocked" when
+    /// the master key file (`ISENGARD_MASTER_KEY_FILE`, default
+    /// `/run/secrets/master.key`) is readable and 32 bytes long;
+    /// otherwise the controller refuses to start.
     pub secrets: Arc<secrets::SecretsStore>,
 }
 
@@ -188,20 +190,21 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     let log_fanout = log_fanout::LogFanout::new();
     let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
 
-    // v0.3.6: managed secrets store. Reads `ISENGARD_SECRETS_PASSPHRASE`
-    // from the env once and holds the derived key in memory. Fail loud
-    // if the DB has stored secrets but the env var is unset: starting
-    // without the key would silently break agent secret fetches.
-    let secrets_store = Arc::new(secrets::SecretsStore::from_env(inventory.clone()));
+    // v0.3.6: managed secrets store. Reads the raw 32-byte master key
+    // from the file at `ISENGARD_MASTER_KEY_FILE` (default
+    // `/run/secrets/master.key`, bind-mounted by the install compose
+    // recipe). Fails loud if the file is missing, unreadable, or the
+    // wrong size: starting without the key would silently break agent
+    // secret fetches.
+    let secrets_store = Arc::new(
+        secrets::SecretsStore::from_env(inventory.clone())
+            .context("loading master key for secrets store (set ISENGARD_MASTER_KEY_FILE or write /run/secrets/master.key)")?,
+    );
     secrets_store
         .boot_check()
         .await
         .context("secrets store boot check")?;
-    if secrets_store.is_unlocked() {
-        info!("secrets store unlocked (passphrase from env)");
-    } else {
-        info!("secrets store running without a passphrase (no stored secrets yet)");
-    }
+    info!("secrets store unlocked (master key loaded)");
 
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),

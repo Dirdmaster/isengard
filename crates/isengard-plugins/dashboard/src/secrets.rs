@@ -90,10 +90,22 @@ fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
 /// knew.
 fn map_secrets_err(e: SecretsError) -> Response {
     match e {
-        SecretsError::NoPassphrase => json_err(
+        SecretsError::MasterKeyMissing => json_err(
             StatusCode::SERVICE_UNAVAILABLE,
-            "controller secrets store is locked: ISENGARD_SECRETS_PASSPHRASE not set",
+            "controller secrets store is locked: master key file not readable",
         ),
+        SecretsError::MasterKeyUnreadable(_) => json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "controller secrets store is locked: master key file not readable",
+        ),
+        SecretsError::MasterKeyWrongSize { actual } => json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("master key file is the wrong size ({actual} bytes; expected 32)"),
+        ),
+        SecretsError::CiphertextTruncated { actual } => {
+            warn!(actual, "secrets ciphertext truncated; DB row corrupted");
+            json_err(StatusCode::INTERNAL_SERVER_ERROR, "decrypt error")
+        }
         SecretsError::NotFound(name) => {
             json_err(StatusCode::NOT_FOUND, format!("secret {name:?} not found"))
         }
@@ -212,8 +224,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn map_secrets_err_no_passphrase_is_503() {
-        let resp = map_secrets_err(SecretsError::NoPassphrase);
+    async fn map_secrets_err_master_key_missing_is_503() {
+        let resp = map_secrets_err(SecretsError::MasterKeyMissing);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn map_secrets_err_master_key_wrong_size_is_503() {
+        let resp = map_secrets_err(SecretsError::MasterKeyWrongSize { actual: 16 });
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 

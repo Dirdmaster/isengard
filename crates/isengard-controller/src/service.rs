@@ -109,10 +109,10 @@ impl ControllerService {
         let hook_ingest = Arc::new(HookLabelIngest::new(inventory.clone()));
         let log_fanout = LogFanout::new();
         let compose_broker = Arc::new(ComposeBroker::new());
-        // Tests get a passphrase-less store: any secrets RPC will
-        // surface NoPassphrase, which lets exercise of error paths
-        // without depending on env var leakage between tests.
-        let secrets = Arc::new(SecretsStore::new(inventory.clone(), None));
+        // Tests get a locked (no-master-key) store: any secrets RPC
+        // will surface MasterKeyMissing, which lets exercise of error
+        // paths without writing key files in the test process.
+        let secrets = Arc::new(SecretsStore::new_locked(inventory.clone()));
         Self {
             inventory,
             journal,
@@ -254,14 +254,14 @@ impl Controller for ControllerService {
 
         let value = match self.secrets.fetch(&name).await {
             Ok(v) => v,
-            Err(SecretsError::NoPassphrase) => {
+            Err(SecretsError::MasterKeyMissing) => {
                 tracing::error!(
                     host_id = %host_id,
                     name = %name,
-                    "fetch_secret: ISENGARD_SECRETS_PASSPHRASE not set; agent fetch refused",
+                    "fetch_secret: master key not loaded; agent fetch refused",
                 );
                 return Err(Status::failed_precondition(
-                    "controller secrets store is locked: ISENGARD_SECRETS_PASSPHRASE not set",
+                    "controller secrets store is locked: master key file not readable",
                 ));
             }
             Err(SecretsError::NotFound(_)) => {

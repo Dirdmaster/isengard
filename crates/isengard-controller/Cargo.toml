@@ -9,10 +9,11 @@ repository.workspace = true
 description = "Controller-mode runtime"
 
 [dependencies]
-# v0.3.6 secrets store: age passphrase encryption for the managed-secrets
-# values. Plaintext is decrypted on-demand when an authenticated agent
-# fetches a secret over mTLS; ciphertext is what's persisted in SQLite.
-age = { version = "0.11", default-features = false }
+# v0.3.6 secrets store: ChaCha20-Poly1305 AEAD with the installer-issued
+# 32-byte master key. The key is read from a bind-mounted file on boot
+# (default /run/secrets/master.key); ciphertext is what's persisted in
+# SQLite. AEAD's AAD is the secret name to defend against row swaps.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 anyhow.workspace = true
 async-trait.workspace = true
 base32.workspace = true

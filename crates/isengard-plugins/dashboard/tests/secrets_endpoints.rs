@@ -4,9 +4,9 @@
 //! Mirrors the shape of `enrollment_endpoints.rs`: build an in-memory
 //! controller-handle bundle, mount the secrets router, drive requests
 //! through `tower::ServiceExt::oneshot`. The on-disk encryption path is
-//! exercised end-to-end (a passphrase IS provided), so a successful
-//! `put` -> `list` round-trip confirms the controller's age-passphrase
-//! flow works without leaking ciphertext to JSON.
+//! exercised end-to-end (a master key IS provided), so a successful
+//! `put` -> `list` round-trip confirms the controller's
+//! ChaCha20-Poly1305 flow works without leaking ciphertext to JSON.
 
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ use isengard_storage::journal::Journal;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-async fn setup_app(passphrase: Option<&str>) -> (axum::Router, Arc<ControllerHandles>) {
+async fn setup_app(unlocked: bool) -> (axum::Router, Arc<ControllerHandles>) {
     let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
     let journal = Arc::new(Journal::open_in_memory().await.unwrap());
     let bus = Arc::new(EventBus::new());
@@ -33,10 +33,17 @@ async fn setup_app(passphrase: Option<&str>) -> (axum::Router, Arc<ControllerHan
     let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
     let enrollment_svc = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
     let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
-    let secrets_store = Arc::new(SecretsStore::new(
-        inv.clone(),
-        passphrase.map(str::to_string),
-    ));
+    let secrets_store = if unlocked {
+        // Deterministic 32-byte test key. Real installs use a fresh
+        // openssl-rand-32 value; for round-trip tests any constant works.
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        Arc::new(SecretsStore::new(inv.clone(), key))
+    } else {
+        Arc::new(SecretsStore::new_locked(inv.clone()))
+    };
 
     let handles = Arc::new(ControllerHandles {
         inventory: inv.clone(),
@@ -67,7 +74,7 @@ async fn body_to_json(resp: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn post_then_get_then_delete_round_trip() {
-    let (app, _h) = setup_app(Some("hunter2-correct-horse")).await;
+    let (app, _h) = setup_app(true).await;
 
     // POST /api/v1/secrets
     let create_req = Request::builder()
@@ -123,7 +130,7 @@ async fn post_then_get_then_delete_round_trip() {
 
 #[tokio::test]
 async fn post_existing_name_returns_409() {
-    let (app, _h) = setup_app(Some("p")).await;
+    let (app, _h) = setup_app(true).await;
 
     let body1 = json!({"name": "dup", "value": "v1"}).to_string();
     let req = Request::builder()
@@ -148,7 +155,7 @@ async fn post_existing_name_returns_409() {
 
 #[tokio::test]
 async fn put_replaces_existing() {
-    let (app, _h) = setup_app(Some("p")).await;
+    let (app, _h) = setup_app(true).await;
 
     let req = Request::builder()
         .method("POST")
@@ -173,7 +180,7 @@ async fn put_replaces_existing() {
 
 #[tokio::test]
 async fn delete_missing_returns_404() {
-    let (app, _h) = setup_app(Some("p")).await;
+    let (app, _h) = setup_app(true).await;
     let req = Request::builder()
         .method("DELETE")
         .uri("/secrets/never-existed")
@@ -184,8 +191,8 @@ async fn delete_missing_returns_404() {
 }
 
 #[tokio::test]
-async fn post_without_passphrase_returns_503() {
-    let (app, _h) = setup_app(None).await;
+async fn post_without_master_key_returns_503() {
+    let (app, _h) = setup_app(false).await;
     let req = Request::builder()
         .method("POST")
         .uri("/secrets")
@@ -198,7 +205,7 @@ async fn post_without_passphrase_returns_503() {
 
 #[tokio::test]
 async fn post_invalid_name_returns_400() {
-    let (app, _h) = setup_app(Some("p")).await;
+    let (app, _h) = setup_app(true).await;
     let req = Request::builder()
         .method("POST")
         .uri("/secrets")
@@ -213,7 +220,7 @@ async fn post_invalid_name_returns_400() {
 
 #[tokio::test]
 async fn list_omits_values_for_many_secrets() {
-    let (app, _h) = setup_app(Some("p")).await;
+    let (app, _h) = setup_app(true).await;
 
     for (n, v) in [
         ("alpha", "secret-A"),
