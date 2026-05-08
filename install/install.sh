@@ -516,9 +516,14 @@ bootstrap_ca_export() {
   local ca_path="${ISENGARD_CA_FILE:-${ISENGARD_ETC}/ca.pem}"
 
   log "ca: waiting for controller readiness (up to 30s)"
-  local i
+  # Probe via `docker inspect` rather than `docker exec ... true`: the runtime
+  # image is `FROM scratch`, so there is no `true` binary (or any binary) to
+  # exec against. State-based detection works for any base image and avoids
+  # spawning a process inside the container just to check if it is alive.
+  local i state
   for i in $(seq 1 30); do
-    if docker exec iso-controller true 2>/dev/null; then
+    state="$(docker inspect iso-controller --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+    if [[ "${state}" == "running" ]]; then
       break
     fi
     sleep 1
