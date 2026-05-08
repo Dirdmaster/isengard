@@ -110,13 +110,27 @@ async fn create_rule(
         healthcheck_path: body.healthcheck_path,
         healthcheck_interval_secs: body.healthcheck_interval_secs.unwrap_or(10),
         auth: body.auth,
-        state: body.state.unwrap_or(RoutingRuleState::Pending),
+        // The agent's apply_config does not filter on rule state; once the
+        // rule is in storage it's eligible to route. Default to Active so
+        // the operator-facing state column reflects reality. Callers that
+        // genuinely want a staged pre-deployment rule can pass Pending.
+        state: body.state.unwrap_or(RoutingRuleState::Active),
         source: body.source.unwrap_or(RoutingRuleSource::Ui),
         source_container_id: None,
         source_imported_from: None,
     };
     match handles.inventory.insert_routing_rule(insert).await {
-        Ok(rule) => (StatusCode::CREATED, Json(rule)).into_response(),
+        Ok(rule) => {
+            // Push immediately. Without this the agent only learns of the
+            // new rule on its next sync reconnect or via the safety-net
+            // sweeper, both of which are minutes away. Failure here is
+            // logged but does not fail the create: storage already has the
+            // rule, the next push picks it up.
+            if let Err(e) = handles.routing.push_to_all_hosts().await {
+                tracing::warn!(error = %e, "post-create proxy_config push failed");
+            }
+            (StatusCode::CREATED, Json(rule)).into_response()
+        }
         Err(e) if e.to_string().to_lowercase().contains("unique") => {
             (StatusCode::CONFLICT, format!("hostname conflict: {e}")).into_response()
         }
@@ -144,6 +158,9 @@ async fn update_rule(
                 format!("update failed: {e}"),
             )
                 .into_response();
+        }
+        if let Err(e) = handles.routing.push_to_all_hosts().await {
+            tracing::warn!(error = %e, "post-update proxy_config push failed");
         }
     }
     match handles.inventory.get_routing_rule(RoutingRuleId(id)).await {
@@ -177,7 +194,12 @@ async fn delete_rule(
         .delete_routing_rule(RoutingRuleId(id))
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            if let Err(e) = handles.routing.push_to_all_hosts().await {
+                tracing::warn!(error = %e, "post-delete proxy_config push failed");
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("delete failed: {e}"),

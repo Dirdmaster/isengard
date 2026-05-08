@@ -320,7 +320,6 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         let groups = cfg.groups.clone();
         let inv_for_acme = inventory.clone();
         let store_for_routing = store.clone();
-        let routing_for_push = routing.clone();
         // Verify the CF token at boot in a separate task so a slow CF API
         // doesn't delay gRPC bind. The scheduler still spawns; if the token
         // is bad it'll fail in `present` with a clear error.
@@ -345,32 +344,19 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
             groups = groups.len(),
             "acme: DNS-01 scheduler enabled",
         );
+        // Hand the routing pusher to the scheduler so a freshly-issued or
+        // renewed wildcard cert kicks an immediate fan-out to every
+        // connected agent. The 5-minute sweeper this replaced was a
+        // placeholder; the right model is event-driven. Routing-rule edits
+        // (dashboard create/update/delete) also push synchronously from
+        // their handlers (see crates/isengard-plugins/dashboard/src/routing.rs).
         acme::spawn_renewal_scheduler(
             inventory.clone(),
             store_for_routing.clone(),
             acme_client.clone(),
             groups,
+            Some(routing.clone()),
         );
-
-        // Push the latest cert material to every registered agent whenever
-        // the store changes. The scheduler installs into the store, but
-        // nothing currently re-pushes ProxyConfig on cert change. A simple
-        // "re-push every connected host on a 5-minute cadence" sweeper keeps
-        // the wire-up obvious without needing a notify channel.
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
-            ticker.tick().await; // skip immediate
-            loop {
-                ticker.tick().await;
-                let snap = store_for_routing.snapshot().await;
-                if snap.is_empty() {
-                    continue;
-                }
-                if let Err(e) = routing_for_push.push_to_all_hosts().await {
-                    tracing::warn!(error = %e, "acme: push_to_all_hosts failed");
-                }
-            }
-        });
     }
 
     // Phase 10c (10i, refs #50): stack-level deployment orchestrator. Owns the
