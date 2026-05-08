@@ -108,11 +108,17 @@ pub fn parse_acme_domains(raw: &str) -> Vec<WildcardGroup> {
 /// Spawn the periodic renewal loop. Cancels with the runtime; no explicit
 /// shutdown handle is needed because the `Arc<>` graph drops on
 /// `run_controller` exit.
+///
+/// `routing` is the proxy-config pusher: when a cert lands or renews, the
+/// scheduler kicks an immediate fan-out to every connected agent so the
+/// new cert is installed without waiting for the agent's next sync. Pass
+/// `None` from tests that don't care about the agent-facing side.
 pub fn spawn<P: DnsProvider + 'static>(
     inventory: Arc<Inventory>,
     cert_store: Arc<WildcardCertStore>,
     acme: Arc<AcmeDns01Client<P>>,
     domains: Vec<WildcardGroup>,
+    routing: Option<Arc<crate::routing::RoutingPusher>>,
 ) {
     if domains.is_empty() {
         return;
@@ -121,7 +127,7 @@ pub fn spawn<P: DnsProvider + 'static>(
         // First tick immediately on boot: the operator's expectation is "I
         // configured ACME, so the cert appears on first start", not "wait 6h".
         loop {
-            if let Err(e) = tick(&inventory, &cert_store, &acme, &domains).await {
+            if let Err(e) = tick(&inventory, &cert_store, &acme, &domains, routing.as_ref()).await {
                 warn!(error = %e, "acme: scheduler tick failed");
             }
             sleep(TICK_INTERVAL).await;
@@ -136,6 +142,7 @@ pub async fn tick<P: DnsProvider>(
     cert_store: &Arc<WildcardCertStore>,
     acme: &Arc<AcmeDns01Client<P>>,
     groups: &[WildcardGroup],
+    routing: Option<&Arc<crate::routing::RoutingPusher>>,
 ) -> Result<()> {
     let now = Utc::now();
     for group in groups {
@@ -168,6 +175,15 @@ pub async fn tick<P: DnsProvider>(
                         .await;
                 } else {
                     info!(primary = %primary, "acme: wildcard cert issued/renewed");
+                    // Fan out a fresh ProxyConfig to every connected agent so
+                    // the new wildcard cert lands in their cert_store
+                    // immediately. Without this push the agent only sees the
+                    // cert on its next sync reconnect, which can be minutes.
+                    if let Some(r) = routing {
+                        if let Err(e) = r.push_to_all_hosts().await {
+                            warn!(primary = %primary, error = %e, "acme: post-issuance push_to_all_hosts failed");
+                        }
+                    }
                 }
             }
             Err(e) => {
