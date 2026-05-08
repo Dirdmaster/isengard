@@ -337,7 +337,10 @@ prompt_plain_config() {
 
   local acme_email=""
   local acme_domains=""
-  local acme_directory="https://acme-staging-v02.api.letsencrypt.org/directory"
+  # Default to staging until the operator confirms a cert is issued. The
+  # controller resolves 'staging' / 'production' aliases to LE URLs at
+  # boot (see acme/mod.rs::resolve_directory).
+  local acme_directory="staging"
 
   # Same TTY-or-fallback dance as the secret prompts: prefer /dev/tty so
   # `curl | sudo bash` works, fall back to stdin only when there's a TTY
@@ -354,12 +357,14 @@ prompt_plain_config() {
     IFS= read -r -u "${input_fd}" acme_email || acme_email=""
     printf '  ACME pre-issue domains, comma-separated (e.g. *.example.com,foo.example.com): '
     IFS= read -r -u "${input_fd}" acme_domains || acme_domains=""
-    printf '  ACME directory URL [default: Let'\''s Encrypt staging]: '
+    printf "  ACME environment [staging/production] (default staging): "
     local input=""
     IFS= read -r -u "${input_fd}" input || input=""
-    if [[ -n "${input}" ]]; then
-      acme_directory="${input}"
-    fi
+    case "${input,,}" in
+      "" | staging | stage) acme_directory="staging" ;;
+      production | prod) acme_directory="production" ;;
+      *) acme_directory="${input}" ;;  # treat as raw URL
+    esac
   else
     warn "no controlling terminal; writing env file with empty defaults"
   fi
@@ -386,9 +391,11 @@ ISENGARD_ACME_EMAIL=${acme_email}
 # 'cf_dns_api_token' bootstrapped secret.
 ISENGARD_ACME_DOMAINS=${acme_domains}
 
-# ACME directory URL. Staging by default until you confirm cert issue
-# works; switch to https://acme-v02.api.letsencrypt.org/directory for
-# production.
+# ACME environment. Accepts:
+#   staging | stage              -> LE staging (default; un-trusted by browsers)
+#   production | prod | <empty>  -> LE production (real browser-trusted certs)
+#   <URL>                        -> raw directory URL (custom CA, Pebble, etc.)
+# Resolved by the controller at boot (acme/mod.rs::resolve_directory).
 ISENGARD_ACME_DIRECTORY=${acme_directory}
 EOF
   chmod 0640 "${ISENGARD_ENV_FILE}"
