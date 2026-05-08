@@ -66,13 +66,14 @@ RUN curl -fsSL https://bun.sh/install | bash \
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json \
         --target x86_64-unknown-linux-musl \
-        --bin isengard
+        --bin isengard --bin isd
 
 COPY . .
 RUN cargo build --release \
         --target x86_64-unknown-linux-musl \
-        --bin isengard \
- && strip target/x86_64-unknown-linux-musl/release/isengard
+        --bin isengard --bin isd \
+ && strip target/x86_64-unknown-linux-musl/release/isengard \
+ && strip target/x86_64-unknown-linux-musl/release/isd
 
 # ---------------------------------------------------------------------------
 # Final stage: FROM scratch. Just the binary + CA certs. No /etc/passwd
@@ -87,6 +88,9 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/isengard /usr/local/bin/isengard
+# Bundle the operator CLI alongside the daemon so install.sh can extract it
+# onto the host (avoids a separate release pipeline / download URL).
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/isd /usr/local/bin/isd
 
 WORKDIR /var/lib/isengard
 VOLUME ["/var/lib/isengard"]

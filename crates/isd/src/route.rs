@@ -1,0 +1,285 @@
+//! `isd route list` / `isd route create` / `isd route rm` (operator surface
+//! for the controller's routing rules).
+//!
+//! Talks to the dashboard's `/api/v1/routing/rules[/<id>]` endpoints.
+//! Routing rules are normally created automatically when a stack's
+//! compose.yaml declares `expose.host`; this CLI is for the cases that
+//! aren't a managed stack (e.g., routing the controller dashboard itself
+//! through Pingora) or for operators who prefer the imperative path.
+
+use anyhow::{Context as _, Result, anyhow};
+use clap::{Args, Subcommand};
+use comfy_table::{ContentArrangement, Table, presets::NOTHING};
+use serde::{Deserialize, Serialize};
+
+use crate::credentials::ContextEntry;
+use crate::login::{pinned_session, verify_pinned_response};
+
+#[derive(Debug, Args)]
+pub struct RouteArgs {
+    #[command(subcommand)]
+    pub command: RouteCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RouteCommand {
+    /// List every routing rule across the fleet.
+    List,
+    /// Create a routing rule. Defaults: fleet="default", protocol="http",
+    /// adapter="none", tls-mode="acme". Override via flags.
+    Create(CreateArgs),
+    /// Delete a routing rule by id (the integer printed by `list`).
+    Rm(RmArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Public hostname the rule matches against (Pingora SNI / Host header),
+    /// e.g. `iso.vallee.casa`. Wildcards are not allowed in this field; an
+    /// `*.example.com` cert covers any single-label subdomain when present.
+    pub public_hostname: String,
+    /// Agent ULID serving the upstream. Find via `isd ps` or the dashboard.
+    #[arg(long)]
+    pub host_id: String,
+    /// Upstream container hostname (DNS name resolvable on the agent's
+    /// docker network) or service name. e.g. `iso-controller` to point at
+    /// the controller's dashboard, `nginx` for a stack service named nginx.
+    #[arg(long)]
+    pub service: String,
+    /// Upstream port on the container.
+    #[arg(long)]
+    pub port: u16,
+    /// Fleet scope. Most installs run a single fleet.
+    #[arg(long, default_value = "default")]
+    pub fleet: String,
+    /// Upstream protocol. `http` is correct when the proxy terminates TLS
+    /// and the upstream serves plain HTTP (the common homelab case).
+    #[arg(long, default_value = "http")]
+    pub protocol: String,
+    /// Networking adapter. `none` is direct docker-network routing, no
+    /// tunnel. Other adapters: `tailscale`, `cf-tunnel`.
+    #[arg(long, default_value = "none")]
+    pub adapter: String,
+    /// TLS termination mode at the proxy edge. `acme` uses a Let's Encrypt
+    /// cert (wildcard or per-host). `edge` means TLS is already terminated
+    /// upstream of the proxy. `manual` reads from `tls_certs`.
+    #[arg(long, default_value = "acme")]
+    pub tls_mode: String,
+    /// Optional healthcheck path; the proxy probes this on the upstream.
+    #[arg(long)]
+    pub healthcheck_path: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RmArgs {
+    /// Routing rule id (the integer column from `isd route list`).
+    pub id: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateBody<'a> {
+    fleet: &'a str,
+    host_id: &'a str,
+    service_name: &'a str,
+    container_port: u16,
+    public_hostname: &'a str,
+    protocol: &'a str,
+    adapter: &'a str,
+    tls_mode: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    healthcheck_path: Option<&'a str>,
+    /// "ui" so the rule is operator-tagged in the source column. The
+    /// controller treats this as informational.
+    source: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)] // host_id/protocol/adapter not in default table view, kept for JSON parity
+struct RoutingRuleEntry {
+    id: i64,
+    public_hostname: String,
+    service_name: String,
+    container_port: u16,
+    host_id: String,
+    fleet: String,
+    protocol: String,
+    adapter: String,
+    tls_mode: String,
+    state: String,
+    source: String,
+}
+
+pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
+    match args.command {
+        RouteCommand::List => run_list(context).await,
+        RouteCommand::Create(a) => run_create(a, context).await,
+        RouteCommand::Rm(a) => run_rm(a, context).await,
+    }
+}
+
+async fn run_list(context: Option<&str>) -> Result<()> {
+    let (ctx, client) = pinned_session(context).await?;
+    let entries = list_rules(&ctx, &client).await?;
+    if entries.is_empty() {
+        println!("No routing rules.");
+        return Ok(());
+    }
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Disabled)
+        .set_header(vec![
+            "ID", "HOSTNAME", "UPSTREAM", "PORT", "TLS", "STATE", "SRC", "FLEET",
+        ]);
+    for e in &entries {
+        table.add_row(vec![
+            e.id.to_string(),
+            e.public_hostname.clone(),
+            e.service_name.clone(),
+            e.container_port.to_string(),
+            e.tls_mode.clone(),
+            e.state.clone(),
+            e.source.clone(),
+            e.fleet.clone(),
+        ]);
+    }
+    println!("{table}");
+    Ok(())
+}
+
+async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
+    let (ctx, client) = pinned_session(context).await?;
+    let body = CreateBody {
+        fleet: &args.fleet,
+        host_id: &args.host_id,
+        service_name: &args.service,
+        container_port: args.port,
+        public_hostname: &args.public_hostname,
+        protocol: &args.protocol,
+        adapter: &args.adapter,
+        tls_mode: &args.tls_mode,
+        healthcheck_path: args.healthcheck_path.as_deref(),
+        source: "ui",
+    };
+    let id = create_rule(&ctx, &client, &body).await?;
+    println!("Created routing rule id={id} for {}.", args.public_hostname);
+    Ok(())
+}
+
+async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
+    let (ctx, client) = pinned_session(context).await?;
+    delete_rule(&ctx, &client, args.id).await?;
+    println!("Deleted routing rule id={}.", args.id);
+    Ok(())
+}
+
+async fn list_rules(ctx: &ContextEntry, client: &reqwest::Client) -> Result<Vec<RoutingRuleEntry>> {
+    let url = format!("{}/api/v1/routing/rules", ctx.controller_url);
+    let resp = client
+        .get(&url)
+        .bearer_auth(&ctx.token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
+    let entries: Vec<RoutingRuleEntry> = resp.error_for_status()?.json().await?;
+    Ok(entries)
+}
+
+async fn create_rule(
+    ctx: &ContextEntry,
+    client: &reqwest::Client,
+    body: &CreateBody<'_>,
+) -> Result<i64> {
+    let url = format!("{}/api/v1/routing/rules", ctx.controller_url);
+    let resp = client
+        .post(&url)
+        .bearer_auth(&ctx.token)
+        .json(body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("POST {url} -> {status}: {txt}"));
+    }
+    let entry: RoutingRuleEntry = resp.json().await?;
+    Ok(entry.id)
+}
+
+async fn delete_rule(ctx: &ContextEntry, client: &reqwest::Client, id: i64) -> Result<()> {
+    let url = format!("{}/api/v1/routing/rules/{id}", ctx.controller_url);
+    let resp = client
+        .delete(&url)
+        .bearer_auth(&ctx.token)
+        .send()
+        .await
+        .with_context(|| format!("DELETE {url}"))?;
+    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!("routing rule id={id} not found"));
+    }
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(anyhow!("DELETE {url} -> {status}: {body}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_args_minimum_required() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: RouteCommand,
+        }
+        let w = Wrap::try_parse_from([
+            "x",
+            "create",
+            "iso.vallee.casa",
+            "--host-id",
+            "01H000000000000000000000",
+            "--service",
+            "iso-controller",
+            "--port",
+            "9418",
+        ])
+        .unwrap();
+        match w.c {
+            RouteCommand::Create(a) => {
+                assert_eq!(a.public_hostname, "iso.vallee.casa");
+                assert_eq!(a.host_id, "01H000000000000000000000");
+                assert_eq!(a.service, "iso-controller");
+                assert_eq!(a.port, 9418);
+                assert_eq!(a.fleet, "default");
+                assert_eq!(a.protocol, "http");
+                assert_eq!(a.adapter, "none");
+                assert_eq!(a.tls_mode, "acme");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rm_args_parse() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: RouteCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "rm", "42"]).unwrap();
+        match w.c {
+            RouteCommand::Rm(a) => assert_eq!(a.id, 42),
+            other => panic!("expected Rm, got {other:?}"),
+        }
+    }
+}
