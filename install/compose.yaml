@@ -38,6 +38,12 @@ services:
     # arm64 manifests are healthy.
     platform: linux/amd64
     container_name: iso-controller
+    # Run as root: the distroless image defaults to nonroot, but the
+    # controller bind-mounts /etc/isengard/master.key (mode 0600 root).
+    # A nonroot reader gets EACCES on boot and the secrets store fails
+    # the boot check, crash-looping the controller. Same root threat-
+    # model as the bootstrap one-shot and the agent's docker.sock access.
+    user: "0:0"
     # The controller's self-signed cert is issued for SAN `controller.local`;
     # we expose that as a Compose network alias so the agent can reach the
     # controller over the default Compose network AND the cert verifies.
