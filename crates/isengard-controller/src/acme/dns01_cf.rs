@@ -18,8 +18,7 @@ use crate::acme::cf_api::CloudflareApi;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use instant_acme::{
-    Account, AccountCredentials, ChallengeType, Identifier, KeyAuthorization, NewAccount, NewOrder,
-    OrderStatus,
+    Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
 };
 use isengard_storage::{Inventory, UpsertAcmeAccount};
 use std::sync::Arc;
@@ -169,7 +168,9 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
             {
                 let creds: AccountCredentials = serde_json::from_str(&saved.account_key_pem)
                     .context("decode acme creds JSON")?;
-                return Account::from_credentials(creds)
+                return Account::builder()
+                    .context("acme account builder")?
+                    .from_credentials(creds)
                     .await
                     .context("reconstruct acme account");
             }
@@ -180,17 +181,19 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
             );
         }
 
-        let (account, creds) = Account::create(
-            &NewAccount {
-                contact: &[&format!("mailto:{}", self.contact_email)],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            &self.directory_url,
-            None,
-        )
-        .await
-        .context("creating ACME account")?;
+        let (account, creds) = Account::builder()
+            .context("acme account builder")?
+            .create(
+                &NewAccount {
+                    contact: &[&format!("mailto:{}", self.contact_email)],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                self.directory_url.clone(),
+                None,
+            )
+            .await
+            .context("creating ACME account")?;
 
         let creds_json = serde_json::to_string(&creds).context("serialise creds")?;
         self.inventory
@@ -222,40 +225,46 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
             .map(|s| Identifier::Dns(s.clone()))
             .collect();
         let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &id_objs,
-            })
+            .new_order(&NewOrder::new(&id_objs))
             .await
             .context("placing ACME order")?;
 
-        let authorizations = order
-            .authorizations()
-            .await
-            .context("fetching authorizations")?;
-
         let mut installed: Vec<DnsRecordHandle> = Vec::new();
-        // Track per-authorization base domains so cleanup is symmetric with
-        // installation even if the loop is interrupted partway.
-        for authz in &authorizations {
-            let challenge = match authz
-                .challenges
-                .iter()
-                .find(|c| c.r#type == ChallengeType::Dns01)
-            {
+        // 0.8 returns a lazy iterator: each `.next().await` fetches one authz
+        // from the server, populating its state. We loop until exhausted.
+        let mut authorizations = order.authorizations();
+        loop {
+            let mut authz = match authorizations.next().await {
+                Some(Ok(h)) => h,
+                Some(Err(e)) => {
+                    cleanup_all(&self.dns, installed).await;
+                    return Err(anyhow::Error::new(e).context("fetching authorizations"));
+                }
+                None => break,
+            };
+            // For a wildcard order LE returns the apex (e.g. `vallee.casa`)
+            // as the identifier, with `wildcard: true` on the AuthorizedIdentifier
+            // when the original order included `*.vallee.casa`. We only need the
+            // base domain for `_acme-challenge.<base>` TXT placement, so the
+            // wildcard flag is informational.
+            let base_domain = match authz.identifier().identifier {
+                Identifier::Dns(d) => d.clone(),
+                other => {
+                    cleanup_all(&self.dns, installed).await;
+                    return Err(anyhow!("non-DNS identifier in authz: {other:?}"));
+                }
+            };
+            // `challenge(type)` returns Option<ChallengeHandle>. None means LE
+            // didn't offer DNS-01 for this identifier (shouldn't happen for a
+            // wildcard, but we cleanup and bail rather than panic).
+            let mut challenge = match authz.challenge(ChallengeType::Dns01) {
                 Some(c) => c,
                 None => {
                     cleanup_all(&self.dns, installed).await;
-                    return Err(anyhow!(
-                        "no DNS-01 challenge offered for {:?}",
-                        authz.identifier,
-                    ));
+                    return Err(anyhow!("no DNS-01 challenge offered for {base_domain}"));
                 }
             };
-            let key_auth: KeyAuthorization = order.key_authorization(challenge);
-            let dns_value = key_auth.dns_value();
-            let base_domain = match &authz.identifier {
-                instant_acme::Identifier::Dns(d) => d.clone(),
-            };
+            let dns_value = challenge.key_authorization().dns_value();
             let handle = match self.dns.present(&base_domain, &dns_value).await {
                 Ok(h) => h,
                 Err(e) => {
@@ -271,13 +280,9 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
             // the validator's first lookup hits the new TXT record.
             sleep(DNS_PROPAGATION_WAIT).await;
 
-            if let Err(e) = order
-                .set_challenge_ready(&challenge.url)
-                .await
-                .context("ack challenge ready")
-            {
+            if let Err(e) = challenge.set_ready().await {
                 cleanup_all(&self.dns, installed).await;
-                return Err(e);
+                return Err(anyhow::Error::new(e).context("ack challenge ready"));
             }
         }
 
@@ -312,7 +317,10 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
         let key_pair = rcgen::KeyPair::generate()?;
         let csr = params.serialize_request(&key_pair)?;
 
-        order.finalize(csr.der()).await.context("finalize order")?;
+        order
+            .finalize_csr(csr.der())
+            .await
+            .context("finalize order")?;
 
         // Download cert chain. LE sometimes takes a beat after finalize.
         let download_deadline = Instant::now() + CERT_DOWNLOAD_TIMEOUT;

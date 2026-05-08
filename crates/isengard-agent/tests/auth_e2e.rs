@@ -123,6 +123,12 @@ async fn boot_controller() -> ControllerHarness {
 
 #[tokio::test]
 async fn full_auth_lifecycle_in_process() {
+    // instant-acme 0.8 transitively pulls a newer rustls-platform-verifier
+    // path that demands a process-level CryptoProvider. The bin targets
+    // install one at startup; tests must do the same. Idempotent: a second
+    // install is a no-op once one is set.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let harness = boot_controller().await;
 
     // --- 1. Mint enrollment token (operator side) ---------------------

@@ -101,9 +101,12 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "x509-p
 rand = "0.8"
 
 # ACME client (RFC 8555). Used by the controller's DNS-01 flow for wildcard
-# certificate issuance via Let's Encrypt. Pinned to 0.7 to match the agent's
-# pre-existing direct dep so we have a single source of truth for the version.
-instant-acme = "0.7"
+# certificate issuance via Let's Encrypt. 0.8 is required because LE has begun
+# returning challenge objects for unknown ChallengeType variants without a
+# `token` field; 0.7's strict deserialization rejected the entire authz parse
+# ("missing field `token`"). 0.8 added `#[serde(default)]` on token for
+# forward-compat. Single source of truth for both controller + agent crates.
+instant-acme = "0.8"
 x509-parser = "0.16"
 time = { version = "0.3", default-features = false, features = ["std"] }
 ed25519-dalek = "2.1.1"

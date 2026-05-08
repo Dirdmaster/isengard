@@ -108,6 +108,10 @@ fn cert_serial(cert_pem: &str) -> Vec<u8> {
 
 #[tokio::test]
 async fn renewal_swaps_endpoint_in_holder() {
+    // See auth_e2e.rs note: instant-acme 0.8 requires an explicit rustls
+    // CryptoProvider; install it idempotently before the first TLS session.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let (url, ca, enrollment) = boot_controller().await;
     let token = enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))

@@ -77,22 +77,26 @@ impl AcmeClient {
             // Plan A's spec; the contents are JSON not PEM).
             let creds: AccountCredentials =
                 serde_json::from_str(&saved.account_key_pem).context("decode acme creds JSON")?;
-            return Account::from_credentials(creds)
+            return Account::builder()
+                .context("acme account builder")?
+                .from_credentials(creds)
                 .await
                 .context("reconstruct acme account");
         }
 
-        let (account, creds) = Account::create(
-            &NewAccount {
-                contact: &[&format!("mailto:{}", self.contact_email)],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            &self.directory_url,
-            None,
-        )
-        .await
-        .context("creating ACME account")?;
+        let (account, creds) = Account::builder()
+            .context("acme account builder")?
+            .create(
+                &NewAccount {
+                    contact: &[&format!("mailto:{}", self.contact_email)],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                self.directory_url.clone(),
+                None,
+            )
+            .await
+            .context("creating ACME account")?;
 
         let creds_json = serde_json::to_string(&creds).context("serialise creds")?;
 
@@ -117,47 +121,40 @@ impl AcmeClient {
     pub async fn order(&self, hostname: &str) -> Result<IssuedCert> {
         let account = self.account().await?;
 
-        let identifier = Identifier::Dns(hostname.to_string());
+        let identifiers = vec![Identifier::Dns(hostname.to_string())];
         let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &[identifier],
-            })
+            .new_order(&NewOrder::new(&identifiers))
             .await
             .context("placing ACME order")?;
 
-        let authorizations = order
-            .authorizations()
-            .await
-            .context("fetching authorizations")?;
-
         // Install all HTTP-01 challenges. Track installed tokens so a
-        // mid-loop failure can clean them up — otherwise they'd leak in
+        // mid-loop failure can clean them up: otherwise they'd leak in
         // the in-memory ChallengeState until process restart.
         let mut installed_tokens: Vec<String> = Vec::new();
-        for authz in &authorizations {
-            let challenge = match authz
-                .challenges
-                .iter()
-                .find(|c| c.r#type == ChallengeType::Http01)
-            {
+        let mut authorizations = order.authorizations();
+        loop {
+            let mut authz = match authorizations.next().await {
+                Some(Ok(h)) => h,
+                Some(Err(e)) => {
+                    cleanup_tokens(&self.challenges, &installed_tokens).await;
+                    return Err(anyhow::Error::new(e).context("fetching authorizations"));
+                }
+                None => break,
+            };
+            let mut challenge = match authz.challenge(ChallengeType::Http01) {
                 Some(c) => c,
                 None => {
                     cleanup_tokens(&self.challenges, &installed_tokens).await;
                     return Err(anyhow!("no HTTP-01 challenge for {hostname}"));
                 }
             };
-            let key_auth = order.key_authorization(challenge);
-            self.challenges
-                .install(&challenge.token, key_auth.as_str())
-                .await;
-            installed_tokens.push(challenge.token.clone());
-            if let Err(e) = order
-                .set_challenge_ready(&challenge.url)
-                .await
-                .context("ack challenge ready")
-            {
+            let token = challenge.token.clone();
+            let key_auth = challenge.key_authorization();
+            self.challenges.install(&token, key_auth.as_str()).await;
+            installed_tokens.push(token);
+            if let Err(e) = challenge.set_ready().await {
                 cleanup_tokens(&self.challenges, &installed_tokens).await;
-                return Err(e);
+                return Err(anyhow::Error::new(e).context("ack challenge ready"));
             }
         }
 
@@ -197,7 +194,10 @@ impl AcmeClient {
         let key_pair = rcgen::KeyPair::generate()?;
         let csr = params.serialize_request(&key_pair)?;
 
-        order.finalize(csr.der()).await.context("finalize order")?;
+        order
+            .finalize_csr(csr.der())
+            .await
+            .context("finalize order")?;
 
         // Download cert chain (separate deadline; LE sometimes takes a beat
         // after finalize before the cert chain is retrievable).
