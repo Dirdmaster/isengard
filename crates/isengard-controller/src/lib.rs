@@ -167,11 +167,51 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
 
     let bus = Arc::new(crate::bus::EventBus::new());
 
+    // v0.3.6: managed secrets store. Reads the raw 32-byte master key
+    // from the file at `ISENGARD_MASTER_KEY_FILE` (default
+    // `/run/secrets/master.key`, bind-mounted by the install compose
+    // recipe). Initialised early so the ACME bootstrap can fall back to
+    // the encrypted store for the CF token when the env var is absent.
+    let secrets_store = Arc::new(
+        secrets::SecretsStore::from_env(inventory.clone())
+            .context("loading master key for secrets store (set ISENGARD_MASTER_KEY_FILE or write /run/secrets/master.key)")?,
+    );
+    secrets_store
+        .boot_check()
+        .await
+        .context("secrets store boot check")?;
+    info!("secrets store unlocked (master key loaded)");
+
     // ACME (DNS-01) subsystem. Optional: only initialised when the operator
     // has configured email + token + at least one domain. The wildcard cert
     // store is plumbed into the routing pusher so every push includes the
     // current cert material.
-    let validated_acme = opts.acme.clone().validated();
+    //
+    // CF token resolution: env-provided ISENGARD_CF_DNS_API_TOKEN wins; if
+    // absent, fall back to the encrypted secrets store under the name
+    // `cf_dns_api_token` (set by the installer). This means the install
+    // recipe can keep the token entirely out of env / compose config.
+    let mut acme_with_token = opts.acme.clone();
+    if acme_with_token.cf_api_token.is_none() {
+        match secrets_store.fetch("cf_dns_api_token").await {
+            Ok(value) => match String::from_utf8(value) {
+                Ok(tok) => {
+                    info!("acme: cf_dns_api_token loaded from encrypted secrets store");
+                    acme_with_token.cf_api_token = Some(tok);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "acme: cf_dns_api_token in secrets store is not valid utf-8; ignoring");
+                }
+            },
+            Err(secrets::SecretsError::NotFound(_)) => {
+                tracing::debug!("acme: no cf_dns_api_token in secrets store");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "acme: failed to read cf_dns_api_token from secrets store");
+            }
+        }
+    }
+    let validated_acme = acme_with_token.validated();
     let wildcard_store = validated_acme
         .as_ref()
         .map(|_| Arc::new(acme::WildcardCertStore::new()));
@@ -207,22 +247,6 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // Load + start controller-side plugins (notifier, etc).
     let log_fanout = log_fanout::LogFanout::new();
     let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
-
-    // v0.3.6: managed secrets store. Reads the raw 32-byte master key
-    // from the file at `ISENGARD_MASTER_KEY_FILE` (default
-    // `/run/secrets/master.key`, bind-mounted by the install compose
-    // recipe). Fails loud if the file is missing, unreadable, or the
-    // wrong size: starting without the key would silently break agent
-    // secret fetches.
-    let secrets_store = Arc::new(
-        secrets::SecretsStore::from_env(inventory.clone())
-            .context("loading master key for secrets store (set ISENGARD_MASTER_KEY_FILE or write /run/secrets/master.key)")?,
-    );
-    secrets_store
-        .boot_check()
-        .await
-        .context("secrets store boot check")?;
-    info!("secrets store unlocked (master key loaded)");
 
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
