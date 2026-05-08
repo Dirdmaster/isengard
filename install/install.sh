@@ -194,19 +194,39 @@ bootstrap_secret() {
     if [[ ! -t 0 ]]; then
       die "stdin is not a TTY; re-run install.sh from an interactive shell so secrets can be entered hidden"
     fi
-    if ! IFS= read -rs value; then
-      printf '\n'
-      value=""
-    fi
+    # Read one character at a time so we can echo `*` per input
+    # character (including pastes) and handle backspace. Plain `read -s`
+    # gives no visual confirmation that paste actually landed.
+    value=""
+    local char
+    while IFS= read -rsn1 char; do
+      if [[ -z "${char}" ]]; then
+        # Enter pressed
+        break
+      fi
+      # Backspace / DEL: remove last char + erase one star
+      if [[ "${char}" == $'\x7f' || "${char}" == $'\b' ]]; then
+        if [[ -n "${value}" ]]; then
+          value="${value%?}"
+          printf '\b \b'
+        fi
+        continue
+      fi
+      # Ignore other control characters (Ctrl-* etc.)
+      if [[ "${char}" < ' ' ]]; then
+        continue
+      fi
+      value="${value}${char}"
+      printf '*'
+    done
     printf '\n'
+
     if [[ -z "${value}" && "${allow_empty}" != "yes" ]]; then
       warn "value cannot be empty"
       continue
     fi
-    # Paste-feedback: show character count without revealing the value.
-    # Lets the operator confirm a paste worked vs hit Enter on an empty line.
     if [[ -n "${value}" ]]; then
-      printf '    (received %d characters)\n' "${#value}"
+      printf '    (%d characters captured)\n' "${#value}"
     else
       printf '    (skipped)\n'
     fi
