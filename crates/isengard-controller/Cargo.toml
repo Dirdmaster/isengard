@@ -55,3 +55,7 @@ hickory-proto.workspace = true
 tempfile = "3.14.0"
 hickory-resolver.workspace = true
 wiremock.workspace = true
+# Tests must install a process-level rustls CryptoProvider before any TLS
+# session is built. Required since instant-acme 0.8 transitively pulled in a
+# rustls-platform-verifier path that panics without an explicit provider.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

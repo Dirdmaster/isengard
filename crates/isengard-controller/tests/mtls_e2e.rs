@@ -40,6 +40,11 @@ struct Boot {
 }
 
 async fn boot_controller() -> Boot {
+    // instant-acme 0.8 transitively pulls in a rustls path that demands an
+    // explicit process-level CryptoProvider. Idempotent: install fails (Err)
+    // if a provider is already set, which we ignore.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
     let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
     let enrollment = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
