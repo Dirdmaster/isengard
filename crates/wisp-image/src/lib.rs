@@ -5,4 +5,7 @@
 //! operator overrides. Public registries only; no auth.
 
 pub mod error;
+pub mod reference;
+
 pub use error::WispImageError;
+pub use reference::ImageRef;
