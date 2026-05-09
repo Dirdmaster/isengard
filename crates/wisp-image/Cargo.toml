@@ -41,5 +41,17 @@ fs2 = "0.4"
 # because the store relies on it at runtime.
 tempfile.workspace = true
 
+# HTTP client for registry pulls. Blocking flavour: the wisp-image
+# pull path is synchronous (no calling-side runtime), and the OCI
+# distribution API is request-per-blob with no streaming idioms that
+# benefit from async. rustls-tls keeps us off OpenSSL; json + stream
+# features cover the auth realm response and chunked blob bodies.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json", "stream"] }
+
 [dev-dependencies]
 tempfile.workspace = true
+# wiremock is async-only; the test target spins up a small tokio
+# runtime per test even though the production code path is blocking.
+# rt + macros are the minimum needed for #[tokio::test].
+wiremock.workspace = true
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod reference;
+pub mod registry;
 pub mod store;
 
 pub use error::WispImageError;
