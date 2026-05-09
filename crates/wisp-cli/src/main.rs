@@ -2,7 +2,8 @@
 //!
 //! Subcommands mirror the runtime API one-to-one (`run` is the
 //! single composite that combines `create + start + waitpid +
-//! delete`). The binary is deliberately small:
+//! delete`), plus an `image` subcommand group for managing the
+//! local OCI image cache (Phase 0.2). The binary is deliberately small:
 //!
 //! - no async runtime: `Runtime::start` calls `clone3` and we MUST
 //!   stay single-threaded until that returns. tokio would spawn a
@@ -28,6 +29,7 @@ use clap::{Args, Parser, Subcommand};
 use nix::sys::signal::Signal;
 
 use wisp::{ContainerHandle, ContainerState, Runtime};
+use wisp_image::{BundleBuilder, Client, ConfigOverrides, ImageRef, PulledImage};
 
 /// `wisp` CLI.
 #[derive(Debug, Parser)]
@@ -60,13 +62,21 @@ enum Cmd {
     Kill(KillArgs),
     /// Free a container's state-dir + cgroup.
     Delete(DeleteArgs),
+    /// Manage cached OCI images.
+    Image(ImageArgs),
 }
 
 #[derive(Debug, Args)]
 struct RunArgs {
     /// Path to the OCI bundle directory (`config.json` + `rootfs/`).
-    bundle: PathBuf,
-    /// Container ID. Defaults to the bundle's basename.
+    /// Mutually exclusive with `--image`.
+    bundle: Option<PathBuf>,
+    /// Pull and assemble a bundle from this image ref. Mutually
+    /// exclusive with the positional bundle arg.
+    #[arg(long, conflicts_with = "bundle")]
+    image: Option<String>,
+    /// Container ID. If omitted, derived from the bundle dir basename
+    /// (positional bundle) or from the image ref's repo + tag (--image).
     #[arg(long)]
     id: Option<String>,
     /// Detach: print the container ID and return immediately.
@@ -74,6 +84,10 @@ struct RunArgs {
     /// exit status, and removes the container.
     #[arg(long)]
     detach: bool,
+    /// With `--image`: extra args appended to the image's entrypoint.
+    /// Ignored when running a positional bundle.
+    #[arg(trailing_var_arg = true)]
+    args: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -92,6 +106,34 @@ struct DeleteArgs {
     /// Force delete even if the container is Running.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct ImageArgs {
+    #[command(subcommand)]
+    cmd: ImageCmd,
+}
+
+#[derive(Debug, Subcommand)]
+enum ImageCmd {
+    /// Pull an image from a registry (anonymous; public registries only).
+    Pull {
+        /// Image reference (e.g. `alpine:3.19`, `ghcr.io/foo/bar:tag`,
+        /// or `<repo>@sha256:<hex>`).
+        reference: String,
+    },
+    /// List cached images.
+    List,
+    /// Remove a cached image's tag pointer. Layer blobs are not
+    /// directly deleted; they go away on the next `gc` if no other
+    /// image / bundle still references them.
+    Rm {
+        /// Image reference. Currently must be tag-based; digest-only
+        /// removal is deferred (the registry never wrote a tag pointer).
+        reference: String,
+    },
+    /// Run garbage collection over the layer store.
+    Gc,
 }
 
 fn main() {
@@ -134,17 +176,40 @@ fn run() -> Result<()> {
         Cmd::State { id } => cmd_state(&cli.state_dir, &id),
         Cmd::Kill(args) => cmd_kill(&cli.state_dir, args),
         Cmd::Delete(args) => cmd_delete(&cli.state_dir, args),
+        Cmd::Image(args) => cmd_image(&cli.state_dir, args),
     }
 }
 
 fn cmd_run(state_dir: &Path, args: RunArgs) -> Result<()> {
+    match (&args.bundle, &args.image) {
+        (Some(_), None) => cmd_run_bundle(state_dir, args),
+        (None, Some(_)) => cmd_run_image(state_dir, args),
+        (Some(_), Some(_)) => {
+            // clap's `conflicts_with` should already block this; defensive
+            // guard in case the attribute is ever weakened.
+            Err(anyhow!(
+                "--image and a positional bundle are mutually exclusive"
+            ))
+        }
+        (None, None) => Err(anyhow!(
+            "either a positional bundle path or `--image <ref>` is required"
+        )),
+    }
+}
+
+fn cmd_run_bundle(state_dir: &Path, args: RunArgs) -> Result<()> {
+    let bundle = args
+        .bundle
+        .as_ref()
+        .expect("cmd_run_bundle invariant: bundle is Some");
     let id = args
         .id
-        .unwrap_or_else(|| derive_id_from_bundle(&args.bundle));
+        .clone()
+        .unwrap_or_else(|| derive_id_from_bundle(bundle));
     let rt = Runtime::new(state_dir).context("initialise wisp runtime")?;
 
     let handle = rt
-        .create(&id, &args.bundle)
+        .create(&id, bundle)
         .with_context(|| format!("create container {id:?}"))?;
     rt.start(&handle.id)
         .with_context(|| format!("start container {id:?}"))?;
@@ -154,8 +219,6 @@ fn cmd_run(state_dir: &Path, args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Block until PID 1 exits. We have its pid in `handle.pid` after
-    // `start`: re-read state to be safe (start has just written it).
     let live = rt
         .state(&handle.id)
         .with_context(|| format!("state {id:?}"))?;
@@ -165,9 +228,144 @@ fn cmd_run(state_dir: &Path, args: RunArgs) -> Result<()> {
 
     let exit = wait_for_pid(pid)?;
 
-    // Clean up. `delete(force=true)` removes the cgroup + state-dir.
     rt.delete(&handle.id, true)
         .with_context(|| format!("delete container {id:?}"))?;
+
+    if exit != 0 {
+        std::process::exit(exit);
+    }
+    Ok(())
+}
+
+/// Pull (or reuse the cache for) `args.image`, synthesise a bundle
+/// under `<state-dir>/bundles/<id>/`, and run the resulting container.
+/// Cleans up the bundle dir + drops the layer ref on foreground exit.
+fn cmd_run_image(state_dir: &Path, args: RunArgs) -> Result<()> {
+    let image_str = args
+        .image
+        .as_ref()
+        .expect("cmd_run_image invariant: image is Some");
+    let image_ref: ImageRef = image_str
+        .parse()
+        .with_context(|| format!("parse image ref {image_str:?}"))?;
+    let id = args
+        .id
+        .clone()
+        .unwrap_or_else(|| derive_id_from_image(&image_ref));
+
+    // The image cache lives next to the bundle store under the same
+    // state-dir; this keeps a single path for cleanup and `--state-dir`
+    // overrides naturally affect both.
+    let images_dir = state_dir.join("images");
+    let client = Client::new(&images_dir).context("open image cache")?;
+    let pulled = client
+        .pull(&image_ref)
+        .with_context(|| format!("pull image {image_ref}"))?;
+
+    let bundle_dir = state_dir.join("bundles").join(&id);
+    if bundle_dir.exists() {
+        return Err(anyhow!(
+            "bundle directory already exists: {bundle_dir:?} (delete container {id:?} first)"
+        ));
+    }
+    std::fs::create_dir_all(&bundle_dir).with_context(|| format!("mkdir {bundle_dir:?}"))?;
+
+    let builder = BundleBuilder::new(&pulled, client.store(), &bundle_dir);
+    builder
+        .assemble_rootfs()
+        .with_context(|| format!("assemble rootfs for {id:?}"))?;
+
+    let overrides = ConfigOverrides {
+        args: if args.args.is_empty() {
+            None
+        } else {
+            Some(args.args.clone())
+        },
+        ..Default::default()
+    };
+    builder
+        .write_config(overrides)
+        .with_context(|| format!("write config.json for {id:?}"))?;
+
+    // Pin the layer set so a concurrent `wisp image gc` doesn't
+    // pull blobs out from under the running container.
+    let layer_digests: Vec<String> = pulled.layers.iter().map(|l| l.digest.clone()).collect();
+    client
+        .store()
+        .add_ref(&id, &layer_digests)
+        .with_context(|| format!("add layer ref for bundle {id:?}"))?;
+
+    // Cleanup contract: we own the bundle dir and the layer ref. On
+    // every error path past here we must drop both. Foreground runs
+    // also drop them on a clean exit; detached runs leave them in
+    // place until a future `wisp delete` (currently the operator must
+    // also remove the bundle dir + ref by hand for detached image runs).
+    let cleanup = |client: &Client, builder: &BundleBuilder, id: &str| {
+        if let Err(e) = builder.cleanup() {
+            eprintln!("wisp: warning: bundle cleanup failed: {e}");
+        }
+        if let Err(e) = client.store().drop_ref(id) {
+            eprintln!("wisp: warning: drop_ref failed: {e}");
+        }
+        // Best-effort remove the bundle dir itself (config.json +
+        // anything else write_config touched).
+        if let Err(e) = std::fs::remove_dir_all(&bundle_dir) {
+            // "not found" after rootfs cleanup is fine; warn on others.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("wisp: warning: remove bundle dir failed: {e}");
+            }
+        }
+    };
+
+    let rt = Runtime::new(state_dir).context("initialise wisp runtime")?;
+
+    let handle = match rt.create(&id, &bundle_dir) {
+        Ok(h) => h,
+        Err(e) => {
+            cleanup(&client, &builder, &id);
+            return Err(anyhow::Error::from(e)).with_context(|| format!("create container {id:?}"));
+        }
+    };
+
+    if let Err(e) = rt.start(&handle.id) {
+        let _ = rt.delete(&handle.id, true);
+        cleanup(&client, &builder, &id);
+        return Err(anyhow::Error::from(e)).with_context(|| format!("start container {id:?}"));
+    }
+
+    if args.detach {
+        println!("{}", handle.id);
+        // Detached mode keeps the bundle + ref alive; a later
+        // `wisp delete` removes the runtime state but does NOT drop
+        // the layer ref. Operator must `wisp image gc` after.
+        return Ok(());
+    }
+
+    // Foreground: block until PID 1 exits, surface its status, clean up.
+    let live = match rt.state(&handle.id) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = rt.delete(&handle.id, true);
+            cleanup(&client, &builder, &id);
+            return Err(anyhow::Error::from(e)).with_context(|| format!("state {id:?}"));
+        }
+    };
+    let pid = match live.pid {
+        Some(p) => p,
+        None => {
+            let _ = rt.delete(&handle.id, true);
+            cleanup(&client, &builder, &id);
+            return Err(anyhow!("container {id:?} has no pid after start"));
+        }
+    };
+
+    let exit = wait_for_pid(pid)?;
+
+    if let Err(e) = rt.delete(&handle.id, true) {
+        cleanup(&client, &builder, &id);
+        return Err(anyhow::Error::from(e)).with_context(|| format!("delete container {id:?}"));
+    }
+    cleanup(&client, &builder, &id);
 
     if exit != 0 {
         std::process::exit(exit);
@@ -340,12 +538,143 @@ fn cmd_delete(state_dir: &Path, args: DeleteArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_image(state_dir: &Path, args: ImageArgs) -> Result<()> {
+    let images_dir = state_dir.join("images");
+    let client = Client::new(&images_dir).context("open image cache")?;
+    match args.cmd {
+        ImageCmd::Pull { reference } => {
+            let r: ImageRef = reference
+                .parse()
+                .with_context(|| format!("parse image ref {reference:?}"))?;
+            let pulled = client.pull(&r).with_context(|| format!("pull image {r}"))?;
+            print_pull_summary(&pulled);
+            Ok(())
+        }
+        ImageCmd::List => {
+            let images = client.list().context("list cached images")?;
+            print_image_table(&images);
+            Ok(())
+        }
+        ImageCmd::Rm { reference } => {
+            let r: ImageRef = reference
+                .parse()
+                .with_context(|| format!("parse image ref {reference:?}"))?;
+            remove_image_tag(&client, &r).with_context(|| format!("remove cached image {r}"))?;
+            println!("removed: {r}");
+            Ok(())
+        }
+        ImageCmd::Gc => {
+            let report = client.gc().context("gc layer store")?;
+            println!("gc: removed {}, kept {}", report.removed.len(), report.kept);
+            Ok(())
+        }
+    }
+}
+
+/// Print a pull summary: manifest digest, layer count, total size.
+fn print_pull_summary(pulled: &PulledImage) {
+    let total_size: u64 = pulled.layers.iter().map(|l| l.size).sum();
+    println!("pulled: {}", pulled.r);
+    println!("  manifest: {}", pulled.manifest_digest);
+    println!("  layers:   {}", pulled.layers.len());
+    println!("  size:     {} bytes", total_size);
+}
+
+/// Print a 3-column table (REF / MANIFEST / LAYERS). Best-effort
+/// formatting: when no images are cached, prints nothing.
+fn print_image_table(images: &[PulledImage]) {
+    if images.is_empty() {
+        return;
+    }
+    let ref_w = images
+        .iter()
+        .map(|p| p.r.to_string().len())
+        .max()
+        .unwrap_or(3)
+        .max("REF".len());
+    println!(
+        "{:<ref_w$}  {:<14}  LAYERS",
+        "REF",
+        "MANIFEST",
+        ref_w = ref_w
+    );
+    for p in images {
+        let short = short_digest(&p.manifest_digest);
+        println!(
+            "{:<ref_w$}  {:<14}  {}",
+            p.r.to_string(),
+            short,
+            p.layers.len(),
+            ref_w = ref_w
+        );
+    }
+}
+
+/// Truncate a `sha256:<hex>` digest to the conventional 12-char
+/// short form. Falls back to the input unchanged if it doesn't
+/// match the expected shape.
+fn short_digest(digest: &str) -> String {
+    if let Some(hex) = digest.strip_prefix("sha256:") {
+        let take = hex.chars().take(12).collect::<String>();
+        format!("sha256:{take}")
+    } else {
+        digest.to_string()
+    }
+}
+
+/// Best-effort `image rm`: deletes the on-disk tag pointer at
+/// `<images>/index/<registry>/<repo>/tag/<tag>`. The blob layers stay
+/// in place; subsequent `gc` will reap them if no other ref pins them.
+/// Errors only when the input ref is digest-only (we can't remove
+/// what was never tagged).
+fn remove_image_tag(client: &Client, r: &ImageRef) -> Result<()> {
+    if r.digest.is_some() && r.tag.is_none() {
+        return Err(anyhow!(
+            "digest-only refs are not removable in 0.2 (no tag pointer to delete)"
+        ));
+    }
+    let tag = r
+        .tag
+        .as_deref()
+        .ok_or_else(|| anyhow!("image ref has no tag: {r}"))?;
+    let store_root = client.store().root();
+    // Layout mirrors `store::layout::tag_path`: index/<registry>/<repo>/tag/<tag>
+    let mut tag_path = store_root.join("index").join(&r.registry);
+    for segment in r.repo.split('/') {
+        tag_path = tag_path.join(segment);
+    }
+    tag_path = tag_path.join("tag").join(tag);
+    if !tag_path.exists() {
+        return Err(anyhow!("no cached entry for {r}"));
+    }
+    std::fs::remove_file(&tag_path).with_context(|| format!("remove {tag_path:?}"))?;
+    Ok(())
+}
+
 fn derive_id_from_bundle(bundle: &Path) -> String {
     bundle
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty() && s != "." && s != "..")
         .unwrap_or_else(|| "wisp".to_string())
+}
+
+/// Default container ID for `wisp run --image <ref>`. Strips the
+/// Docker Hub `library/` prefix (so `alpine:3.19` becomes `alpine-3-19`,
+/// not `library-alpine-3-19`), replaces `/` and `.` with `-` so the
+/// id is filesystem-safe, then truncates to 16 chars.
+fn derive_id_from_image(r: &ImageRef) -> String {
+    let repo = r.repo.trim_start_matches("library/");
+    let tag = r.tag.as_deref().unwrap_or("latest");
+    let raw = format!("{repo}-{tag}");
+    let sanitised: String = raw
+        .chars()
+        .map(|c| match c {
+            '/' | '.' | ':' => '-',
+            _ => c,
+        })
+        .collect();
+    sanitised.chars().take(16).collect()
 }
 
 #[cfg(test)]
@@ -397,6 +726,38 @@ mod tests {
         // Either "demo" (Path canonicalises the trailing slash) or
         // the fallback. Both are acceptable.
         assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn derive_id_from_image_strips_library_prefix() {
+        let r: ImageRef = "alpine:3.19".parse().unwrap();
+        let id = derive_id_from_image(&r);
+        assert_eq!(id, "alpine-3-19");
+        assert!(id.len() <= 16);
+    }
+
+    #[test]
+    fn derive_id_from_image_replaces_slash_and_dot() {
+        let r: ImageRef = "ghcr.io/foo/bar:1.2".parse().unwrap();
+        let id = derive_id_from_image(&r);
+        // foo/bar-1.2 -> foo-bar-1-2 (trimmed to 16)
+        assert!(id.starts_with("foo-bar"));
+        assert!(!id.contains('/'));
+        assert!(!id.contains('.'));
+        assert!(id.len() <= 16);
+    }
+
+    #[test]
+    fn short_digest_truncates_sha256() {
+        assert_eq!(
+            short_digest("sha256:abcdef0123456789aaaa"),
+            "sha256:abcdef012345"
+        );
+    }
+
+    #[test]
+    fn short_digest_passthrough_for_non_sha256() {
+        assert_eq!(short_digest("weird-thing"), "weird-thing");
     }
 
     #[test]

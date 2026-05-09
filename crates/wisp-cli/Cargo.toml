@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 wisp = { path = "../wisp" }
+wisp-image = { path = "../wisp-image" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

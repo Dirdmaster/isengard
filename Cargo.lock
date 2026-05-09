@@ -6930,6 +6930,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wisp",
+ "wisp-image",
 ]
 
 [[package]]
