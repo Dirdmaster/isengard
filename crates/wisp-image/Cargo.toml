@@ -1,0 +1,34 @@
+[package]
+name = "wisp-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Wisp image library: pull, store, extract OCI images for wisp-runtime (Phase 0.2)"
+
+[dependencies]
+# Shared types with the runtime crate. Path-only: this crate is internal to
+# the workspace and never published independently of wisp.
+wisp = { path = "../wisp" }
+
+# OCI spec parsing for image manifests + image configuration. Pinned to the
+# same 0.9.x line as `wisp` so the two crates agree on type identity for
+# `oci_spec::runtime::Spec` and friends. We pull the `image` feature
+# explicitly here; `wisp` only needs `runtime`.
+oci-spec = { version = "0.9", default-features = false, features = ["image", "runtime"] }
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+# Reference-string parsing helper. Used by Display + parse to handle
+# registry/repo/tag/digest decomposition without re-rolling RFC-3986 parsing.
+url = "2.5"
+
+[dev-dependencies]
+tempfile.workspace = true
