@@ -24,6 +24,19 @@ bytes = "1.8"
 # crate's ecosystem dependencies tight.
 libc = "0.2"
 
+# Linux syscall wrappers for the mount + pivot_root code paths. The
+# crate compiles cross-platform (the BSD/Apple targets expose a smaller
+# subset). The `mount` feature only emits the linux-specific
+# `MsFlags`/`mount`/`umount2` symbols on linux/android, so the
+# `mount.rs` module wraps `nix::mount::MsFlags` behind a thin
+# `MountFlags` alias with a Mac-only mirror. Features:
+#   mount: mount/umount/MsFlags
+#   fs:    chdir, etc.
+#   process / signal / sched: needed downstream by lifecycle (clone3,
+#                              CLONE_NEW* flags, SIGCHLD).
+#   user:  uid/gid helpers used during user-namespace setup.
+nix = { version = "0.30", features = ["mount", "fs", "process", "signal", "sched", "user"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux capability set manipulation (drop bounding, set permitted /
 # effective / inheritable / ambient). The crate uses `prctl` and
