@@ -1,13 +1,18 @@
-//! `isd apply` / `isd diff` / `isd edit` (v0.3d compose-as-truth).
+//! `isd deploy` / `isd diff` / `isd edit` (v0.3d compose-as-truth).
 //!
-//! All three subcommands talk to the same dashboard REST surface:
+//! Talk to the dashboard REST surface:
 //!
 //!  - `GET  /api/v1/stacks/{id}/compose` (read the current YAML + sha256)
 //!  - `POST /api/v1/stacks/{id}/diff`    (preview a reconcile plan)
 //!  - `PUT  /api/v1/stacks/{id}/compose` (apply with optimistic concurrency)
+//!  - `POST /api/v1/stacks`              (create a fresh stack from compose)
 //!
-//! `isd apply` and `isd edit` chain GET -> POST diff -> show plan ->
-//! prompt y/N -> PUT. `isd diff` stops at the plan render (no PUT).
+//! `isd deploy` is the operator's "ship this" verb: list stacks, find by
+//! name, GET the current YAML for the diff, POST diff for the plan, prompt
+//! y/N, PUT the new YAML — OR, if the stack doesn't exist yet, POST
+//! /stacks to create + write in a single round-trip. `isd diff` stops at
+//! the plan render. `isd edit` is `isd deploy` driven from `$EDITOR`
+//! against the controller's current YAML.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -20,12 +25,18 @@ use similar::TextDiff;
 use crate::session::Session;
 
 #[derive(Debug, Args)]
-pub struct ApplyArgs {
+pub struct DeployArgs {
     /// Path to the local compose.yaml. Use `-` to read from stdin.
     pub path: PathBuf,
     /// Stack name override. Defaults to the file's parent directory.
     #[arg(long)]
     pub stack: Option<String>,
+    /// Target host ULID for first-time deploys. Optional: when omitted
+    /// and exactly one host is enrolled (the homelab single-host case),
+    /// the controller auto-picks. Ignored on subsequent deploys (the
+    /// stack already has a host).
+    #[arg(long)]
+    pub host_id: Option<String>,
     /// Skip the interactive y/N prompt. CI and scripted use.
     #[arg(long)]
     pub yes: bool,
@@ -126,14 +137,36 @@ struct PutConflict {
     current_yaml: String,
 }
 
-pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
+pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     let body = read_compose_path(&args.path)?;
     let stack = match args.stack.as_deref() {
         Some(s) => s.to_string(),
         None => stack_from_path(&args.path)?,
     };
     let session = Session::open(context).await?;
-    let stack_id = resolve_stack_id(&session, &stack).await?;
+
+    // First-time deploy: stack isn't in the controller's inventory yet.
+    // POST /stacks creates the row + ships the YAML to the agent in one
+    // round-trip. We can't show a diff against "nothing" usefully, so
+    // skip the plan-preview step here; the operator's confirmation on
+    // first deploy is implicit in their having run the command.
+    let stack_id = match resolve_stack_id_opt(&session, &stack).await? {
+        Some(id) => id,
+        None => {
+            if !args.yes && !confirm(&format!("Stack {stack:?} doesn't exist; create + deploy?"))? {
+                println!("Aborted.");
+                return Ok(());
+            }
+            let outcome = create_stack(&session, &stack, &body, args.host_id.as_deref()).await?;
+            println!(
+                "Created stack {:?} (id {}, host {}). New sha256: {}",
+                outcome.name, outcome.id, outcome.host_id, outcome.written_sha256,
+            );
+            return Ok(());
+        }
+    };
+
+    // Subsequent deploy: diff vs current, prompt y/N, PUT.
     let current = fetch_compose(&session, &stack_id).await?;
     let plan = preview_diff(&session, &stack_id, &body).await?;
 
@@ -153,11 +186,11 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
         .iter()
         .all(|o| matches!(o, ServiceOp::NoChange { .. }))
     {
-        println!("Nothing to apply.");
+        println!("Nothing to deploy.");
         return Ok(());
     }
 
-    if !args.yes && !confirm("Apply?")? {
+    if !args.yes && !confirm("Deploy?")? {
         println!("Aborted.");
         return Ok(());
     }
@@ -167,7 +200,7 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
         .map(|c| c.sha256.clone())
         .unwrap_or_default();
     let outcome = put_compose(&session, &stack_id, &body, &expected, args.force).await?;
-    println!("Applied. New sha256: {}", outcome.written_sha256);
+    println!("Deployed. New sha256: {}", outcome.written_sha256);
     Ok(())
 }
 
@@ -282,6 +315,16 @@ fn stack_from_path(path: &std::path::Path) -> Result<String> {
 }
 
 async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
+    resolve_stack_id_opt(session, name)
+        .await?
+        .ok_or_else(|| anyhow!("stack {name:?} not found on controller"))
+}
+
+/// Like [`resolve_stack_id`] but returns `Ok(None)` for the not-found
+/// case instead of erroring. Used by `isd deploy` so it can branch into
+/// the create-from-scratch path when the operator deploys a stack that
+/// isn't yet in the controller's inventory.
+async fn resolve_stack_id_opt(session: &Session, name: &str) -> Result<Option<String>> {
     let url = format!("{}/api/v1/stacks", session.controller_url());
     let resp = session
         .client
@@ -290,11 +333,53 @@ async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
         .await
         .with_context(|| format!("GET {url}"))?;
     let stacks: Vec<StackDto> = resp.error_for_status()?.json().await?;
-    let stack = stacks
-        .into_iter()
-        .find(|s| s.name == name)
-        .ok_or_else(|| anyhow!("stack {name:?} not found on controller"))?;
-    Ok(stack.id)
+    Ok(stacks.into_iter().find(|s| s.name == name).map(|s| s.id))
+}
+
+#[derive(Debug, Serialize)]
+struct CreateStackBody<'a> {
+    name: &'a str,
+    compose_yaml: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_id: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateStackOk {
+    id: String,
+    name: String,
+    host_id: String,
+    written_sha256: String,
+}
+
+async fn create_stack(
+    session: &Session,
+    name: &str,
+    compose_yaml: &str,
+    host_id: Option<&str>,
+) -> Result<CreateStackOk> {
+    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let resp = session
+        .client
+        .post(&url)
+        .json(&CreateStackBody {
+            name,
+            compose_yaml,
+            host_id,
+        })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("POST {url} -> {status}: {body}"));
+    }
+    let ok: CreateStackOk = resp
+        .json()
+        .await
+        .context("decoding create-stack response")?;
+    Ok(ok)
 }
 
 async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<ComposeResponse>> {

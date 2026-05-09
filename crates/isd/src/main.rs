@@ -13,7 +13,7 @@
 //!  - `isd ps`: list stacks + services
 //!  - `isd open <stack>`: open the stack's primary host in a browser
 //!  - `isd logs <stack>/<svc> -f`: tail service logs over the WebSocket
-//!  - `isd apply | diff | edit`: stack-level compose-as-truth
+//!  - `isd deploy | diff | edit`: stack-level compose-as-truth
 //!  - `isd gateway`: dev DNS + reverse proxy bridging the operator's Mac
 //!  - `isd secret put | list | rm`: managed-secret CRUD
 //!  - `isd route create | list | rm`: routing-rule CRUD
@@ -71,9 +71,10 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail logs for `<stack>/<service>` over the controller WebSocket.
     Logs(logs::LogsArgs),
-    /// v0.3d: stage a compose.yaml, preview the reconcile plan, then
-    /// (after y/N) write it to the host's `/etc/isengard/stacks/<name>/`.
-    Apply(compose_cmd::ApplyArgs),
+    /// Ship a stack to the controller. On first run for a name, creates
+    /// the stack from the compose.yaml; subsequent runs preview the
+    /// reconcile plan vs the current YAML, prompt y/N, then write.
+    Deploy(compose_cmd::DeployArgs),
     /// v0.3d: show the reconcile plan for a proposed compose.yaml. Read-only.
     Diff(compose_cmd::DiffArgs),
     /// v0.3d: open the stack's compose.yaml in `$EDITOR`, then apply on save.
@@ -102,7 +103,7 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
-        Command::Apply(args) => compose_cmd::run_apply(args, cli.context.as_deref()).await,
+        Command::Deploy(args) => compose_cmd::run_deploy(args, cli.context.as_deref()).await,
         Command::Diff(args) => compose_cmd::run_diff(args, cli.context.as_deref()).await,
         Command::Edit(args) => compose_cmd::run_edit(args, cli.context.as_deref()).await,
         Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
