@@ -48,6 +48,17 @@ tempfile.workspace = true
 # features cover the auth realm response and chunked blob bodies.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json", "stream"] }
 
+# Layer tarball walking. Used by `store::layer` to enumerate entries
+# and resolve symlink / hardlink targets explicitly: `Archive::unpack`
+# cannot be used because OCI whiteouts need per-entry control.
+tar = "0.4"
+
+# Decompressors for OCI / Docker layer mediaTypes. flate2 covers
+# `tar+gzip` (both vendor flavours); zstd covers `tar+zstd`. The raw
+# `application/vnd.oci.image.layer.v1.tar` mediaType needs no decoder.
+flate2 = "1"
+zstd = "0.13"
+
 [dev-dependencies]
 tempfile.workspace = true
 # wiremock is async-only; the test target spins up a small tokio

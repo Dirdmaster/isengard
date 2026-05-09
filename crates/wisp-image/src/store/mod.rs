@@ -7,6 +7,7 @@
 //! atomic-rename invariant (a reader either sees the old file or the
 //! new file, never a torn intermediate).
 
+pub mod layer;
 pub mod layout;
 
 use std::collections::HashSet;
