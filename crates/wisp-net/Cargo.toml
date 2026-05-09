@@ -31,5 +31,10 @@ ipnet = "2.12"
 # crate-graph plan so the dispatch B PR is a pure additive change.
 macaddr = "1.0"
 
+# Atomic file rewrites for the IPAM allocs.json (NamedTempFile + persist).
+# Listed under regular deps (not dev-deps) because StaticBitmapIpam itself
+# uses it at runtime.
+tempfile.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
