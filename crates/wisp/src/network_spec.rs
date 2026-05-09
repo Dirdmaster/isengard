@@ -117,8 +117,13 @@ impl NetworkSpec {
 /// in `state.json` once `start_container` has run, so `Runtime::delete`
 /// can revoke iptables rules / delete the veth / release the IP without
 /// reconstructing them.
+///
+/// `container_id` lets the detach path replan the same iptables
+/// rules (the rule comments are keyed by id) without the caller
+/// having to thread the id through alongside the record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkAttachmentRecord {
+    pub container_id: String,
     pub network_name: String,
     pub bridge: String,
     pub ipv4: Ipv4Addr,
@@ -190,6 +195,7 @@ mod tests {
     #[test]
     fn network_attachment_record_serde_round_trip() {
         let rec = NetworkAttachmentRecord {
+            container_id: "ctr1".into(),
             network_name: "app".into(),
             bridge: "wbr-app".into(),
             ipv4: Ipv4Addr::new(10, 83, 0, 2),

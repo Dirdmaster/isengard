@@ -43,10 +43,12 @@
 
 #[cfg(target_os = "linux")]
 pub mod clone;
+pub mod network_setup;
 pub mod pipe;
 
 #[cfg(target_os = "linux")]
 pub use clone::{CloneArgs, CloneResult};
+pub use network_setup::ensure_global_ip_forward;
 pub use pipe::{ReadyPipe, signal_ready, wait_ready};
 
 use std::path::Path;
@@ -54,6 +56,7 @@ use std::time::SystemTime;
 
 use crate::cgroup::{Cgroup, CgroupFs};
 use crate::error::{Result, WispError};
+use crate::network_attacher::NetworkAttacher;
 use crate::spec;
 use crate::state::{self, ContainerHandle, ContainerState};
 
@@ -207,11 +210,29 @@ pub fn load_for_start(state_dir: &Path, id: &str) -> Result<(ContainerHandle, sp
 /// Linux only. Mac builds return [`WispError::Lifecycle`] so the CLI
 /// compiles and emits a clean error.
 ///
+/// # Networking
+///
+/// If the container's persisted [`ContainerHandle::network_spec`] is
+/// `Some`, the caller MUST pass an `attacher`. The runtime invokes
+/// `attacher.attach(...)` after the cgroup attach but before the
+/// child is told to proceed; the resulting
+/// [`crate::network_spec::NetworkAttachmentRecord`] is persisted into
+/// `state.json`. If the spec is set but `attacher` is `None`, the
+/// call returns a `Lifecycle` error rather than starting a container
+/// that has no network.
+///
+/// If the container has no `network_spec`, `attacher` is ignored.
+///
 /// # Safety / threading
 ///
 /// Caller must be in a single-threaded process. See module docs.
 #[cfg(target_os = "linux")]
-pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &str) -> Result<()> {
+pub fn start_container<F: CgroupFs>(
+    state_dir: &Path,
+    cgroup: &Cgroup<F>,
+    id: &str,
+    attacher: Option<&mut dyn NetworkAttacher>,
+) -> Result<()> {
     use std::ffi::CString;
 
     let (mut handle, validated) = load_for_start(state_dir, id)?;
@@ -386,12 +407,74 @@ pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &s
                 return Err(err);
             }
 
+            // Network attach (parent-side) BEFORE the child's
+            // wait_ready. Sequence rationale:
+            //
+            //   - The child has CLONE_NEWNET so its netns exists
+            //     immediately after clone3; we can move a veth into
+            //     it via `ip link set ... netns <child_pid>`.
+            //   - The child's setup_rootfs / pivot_root only touch
+            //     the mount namespace, so they run concurrently with
+            //     the parent's network setup without conflict.
+            //   - The child blocks on signal_ready until AFTER it
+            //     pivots, so by the time the parent reads
+            //     wait_ready, the entrypoint has not yet exec'd.
+            //     That window is enough for the kernel to plumb
+            //     eth0 into the child's ns before its first network
+            //     syscall.
+            //
+            // If attach fails we kill + reap the child before
+            // returning, same shape as cgroup.add_pid above.
+            let mut attacher = attacher;
+            if let Some(spec) = handle.network_spec.clone() {
+                let att = match attacher.as_deref_mut() {
+                    Some(a) => a,
+                    None => {
+                        unsafe {
+                            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                        }
+                        let mut status: libc::c_int = 0;
+                        unsafe {
+                            libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
+                        }
+                        return Err(WispError::Lifecycle(
+                            "container has network_spec but no NetworkAttacher was provided".into(),
+                        ));
+                    }
+                };
+                match att.attach(&spec, id, child_pid, &rootfs) {
+                    Ok(record) => {
+                        handle.network_attachment = Some(record);
+                    }
+                    Err(err) => {
+                        unsafe {
+                            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                        }
+                        let mut status: libc::c_int = 0;
+                        unsafe {
+                            libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
+                        }
+                        return Err(WispError::Lifecycle(format!(
+                            "network attach failed for {id:?}: {err}"
+                        )));
+                    }
+                }
+            }
+
             // wait for the child's "ready" signal. If the child
             // died before signalling we get a clear EOF error.
             if let Err(err) = pipe::wait_ready(&reader) {
                 let mut status: libc::c_int = 0;
                 unsafe {
                     libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
+                }
+                // If we attached a network and now the child died,
+                // best-effort detach so we don't leak iptables / veth
+                // state on the host.
+                if let (Some(record), Some(att)) =
+                    (handle.network_attachment.as_ref(), attacher.as_deref_mut())
+                {
+                    let _ = att.detach(record);
                 }
                 return Err(WispError::Lifecycle(format!(
                     "child {child_pid} did not signal ready: {err}"
@@ -412,6 +495,7 @@ pub fn start_container<F: CgroupFs>(
     _state_dir: &Path,
     _cgroup: &Cgroup<F>,
     _id: &str,
+    _attacher: Option<&mut dyn NetworkAttacher>,
 ) -> Result<()> {
     Err(WispError::Lifecycle(
         "wisp runtime requires linux".to_string(),
@@ -705,7 +789,7 @@ mod tests {
             root: fs_root.clone(),
         };
         let cgroup: Cgroup<FakeFs> = Cgroup::with_fs(fake, fs_root.clone());
-        let err = start_container(state_dir.path(), &cgroup, "x").unwrap_err();
+        let err = start_container(state_dir.path(), &cgroup, "x", None).unwrap_err();
         match err {
             WispError::Lifecycle(msg) => {
                 assert!(msg.contains("linux"), "msg should mention linux: {msg}")

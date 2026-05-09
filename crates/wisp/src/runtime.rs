@@ -203,14 +203,44 @@ impl Runtime {
     /// heap lock deadlocks the child the moment it touches the
     /// allocator. `wisp-cli` honours this by avoiding tokio and any
     /// background tracing worker. Library users have to as well.
+    ///
+    /// If the container was created via [`Runtime::create_with_network`]
+    /// you must use [`Runtime::start_with_attacher`] instead so the
+    /// runtime has a hook to wire up bridge / veth / iptables.
     pub fn start(&self, id: &str) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
-            lifecycle::start_container(&self.state_dir, &self.cgroup, id)
+            lifecycle::start_container(&self.state_dir, &self.cgroup, id, None)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = id;
+            Err(WispError::Lifecycle(
+                "wisp runtime requires linux".to_string(),
+            ))
+        }
+    }
+
+    /// Run the container's entrypoint as PID 1, wiring the network
+    /// attachment via the supplied [`crate::NetworkAttacher`].
+    ///
+    /// If the container has no `network_spec` persisted, this is
+    /// equivalent to [`Runtime::start`]: the attacher is ignored.
+    ///
+    /// On attach failure the child is killed + reaped before the
+    /// error propagates.
+    pub fn start_with_attacher(
+        &self,
+        id: &str,
+        attacher: &mut dyn crate::NetworkAttacher,
+    ) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            lifecycle::start_container(&self.state_dir, &self.cgroup, id, Some(attacher))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (id, attacher);
             Err(WispError::Lifecycle(
                 "wisp runtime requires linux".to_string(),
             ))
@@ -259,6 +289,11 @@ impl Runtime {
     /// `force` is false. With `force=true`, calls
     /// [`Cgroup::kill_all`] then [`Cgroup::remove`] then
     /// [`state::remove`]. Tolerates an already-cleaned cgroup.
+    ///
+    /// If the container has a `network_attachment` persisted, this
+    /// method does NOT detach it: callers must use
+    /// [`Runtime::delete_with_attacher`] so the iptables rules / host
+    /// veth / IP allocation are reversed cleanly.
     pub fn delete(&self, id: &str, force: bool) -> Result<()> {
         let handle = state::read(&self.state_dir, id)?;
         if handle.state == ContainerState::Running && !force {
@@ -268,6 +303,43 @@ impl Runtime {
         }
         // kill_all is a no-op (or near-no-op) on a cgroup that has no
         // procs; safe to always invoke. remove tolerates ENOENT.
+        self.cgroup.kill_all(id)?;
+        self.cgroup.remove(id)?;
+        state::remove(&self.state_dir, id)?;
+        Ok(())
+    }
+
+    /// Like [`Runtime::delete`] but also detaches the network if the
+    /// container's `state.json` carries a `network_attachment`.
+    ///
+    /// Detach is best-effort: a failure logs via tracing but does not
+    /// stop the cgroup / state-dir cleanup. The wisp-cli uses this
+    /// for the operator-facing `wisp delete` flow; the integration
+    /// test calls it directly.
+    pub fn delete_with_attacher(
+        &self,
+        id: &str,
+        force: bool,
+        attacher: &mut dyn crate::NetworkAttacher,
+    ) -> Result<()> {
+        let handle = state::read(&self.state_dir, id)?;
+        if handle.state == ContainerState::Running && !force {
+            return Err(WispError::Lifecycle(format!(
+                "container {id:?} is Running; pass force=true to delete"
+            )));
+        }
+        // Detach BEFORE killing the cgroup: if the iptables revoke
+        // raises an error we want it surfaced before we lose the
+        // ability to introspect.
+        if let Some(record) = handle.network_attachment.as_ref() {
+            if let Err(err) = attacher.detach(record) {
+                tracing::warn!(
+                    container_id = %id,
+                    error = %err,
+                    "network detach failed during delete; continuing with cgroup + state cleanup"
+                );
+            }
+        }
         self.cgroup.kill_all(id)?;
         self.cgroup.remove(id)?;
         state::remove(&self.state_dir, id)?;
