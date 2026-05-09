@@ -1,0 +1,13 @@
+[package]
+name = "wisp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Wisp: Rust-native daemonless OCI container runtime (Phase 0.1 skeleton)"
+
+[dependencies]
+
+[dev-dependencies]

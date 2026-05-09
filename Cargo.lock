@@ -6791,6 +6791,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wisp"
+version = "0.1.0-alpha"
+
+[[package]]
+name = "wisp-cli"
+version = "0.1.0-alpha"
+dependencies = [
+ "wisp",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

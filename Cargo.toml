@@ -16,6 +16,8 @@ members = [
     "crates/isengard-plugins/networking-none",
     "crates/isengard-plugins/networking-tailscale",
     "crates/isengard-plugins/networking-cf-tunnel",
+    "crates/wisp",
+    "crates/wisp-cli",
 ]
 
 [workspace.package]
