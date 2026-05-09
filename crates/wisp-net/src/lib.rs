@@ -10,14 +10,18 @@
 pub mod bridge;
 pub mod cmd;
 pub mod error;
+pub mod hosts;
 pub mod ipam;
 pub mod iptables;
 pub mod ns;
+pub mod resolv;
 pub mod veth;
 
 pub use bridge::{IpCommand, Network, plan_create, plan_delete};
 pub use error::WispNetError;
+pub use hosts::write_hosts;
 pub use ipam::{Ipam, StaticBitmapIpam};
 pub use iptables::{
     PortProtocol, PortPublish, Rule, RuleSet, Table, plan_for_attachment, plan_for_network,
 };
+pub use resolv::{host_nameservers, write_resolv_conf};

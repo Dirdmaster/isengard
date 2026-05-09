@@ -49,7 +49,7 @@ impl NetworkAttacher for WispNetAttacher {
         spec: &NetworkSpec,
         container_id: &str,
         container_pid: u32,
-        _rootfs: &Path,
+        rootfs: &Path,
     ) -> Result<NetworkAttachmentRecord, WispError> {
         use wisp_net::Ipam as _;
 
@@ -104,6 +104,33 @@ impl NetworkAttacher for WispNetAttacher {
             return Err(WispError::Lifecycle(format!(
                 "iptables::apply (attachment): {e}"
             )));
+        }
+
+        // 6. Render /etc/resolv.conf + /etc/hosts inside the bundle's
+        //    rootfs. The child has not yet pivot_root'd, so writes to
+        //    `<rootfs>/etc/...` show up as `/etc/...` once it has.
+        match &spec.resolv_source {
+            wisp::ResolvSource::HostCopy => {
+                let nameservers = wisp_net::host_nameservers().unwrap_or_default();
+                if let Err(e) = wisp_net::write_resolv_conf(rootfs, &nameservers) {
+                    return Err(WispError::Lifecycle(format!(
+                        "write_resolv_conf (host copy): {e}"
+                    )));
+                }
+            }
+            wisp::ResolvSource::Static(addrs) => {
+                if let Err(e) = wisp_net::write_resolv_conf(rootfs, addrs) {
+                    return Err(WispError::Lifecycle(format!(
+                        "write_resolv_conf (static): {e}"
+                    )));
+                }
+            }
+            wisp::ResolvSource::None => {
+                // Operator opted out; leave whatever the bundle ships.
+            }
+        }
+        if let Err(e) = wisp_net::write_hosts(rootfs, container_id, ip) {
+            return Err(WispError::Lifecycle(format!("write_hosts: {e}")));
         }
 
         Ok(NetworkAttachmentRecord {
@@ -245,6 +272,28 @@ fn busybox_with_network_attaches_and_cleans_up() {
     assert!(
         dev.contains("eth0:"),
         "eth0 missing from {net_dev_path}; got:\n{dev}"
+    );
+
+    // Confirm /etc/resolv.conf + /etc/hosts were rendered into the
+    // bundle's rootfs (commit 3 wired wisp-net::resolv +
+    // wisp-net::hosts into the test's WispNetAttacher). The child
+    // has not pivot_root'd from the host's view, but the underlying
+    // inodes are the same files the post-pivot child reads.
+    let resolv_body =
+        std::fs::read_to_string(bundle.join("rootfs/etc/resolv.conf")).unwrap_or_default();
+    let hosts_body = std::fs::read_to_string(bundle.join("rootfs/etc/hosts")).unwrap_or_default();
+    assert!(
+        resolv_body.contains("# wisp:"),
+        "resolv.conf missing wisp marker: {resolv_body:?}"
+    );
+    assert!(
+        hosts_body.contains("127.0.0.1\tlocalhost\n"),
+        "hosts missing localhost row: {hosts_body:?}"
+    );
+    assert!(
+        hosts_body.contains(&format!("{}\tnetto\n", rec.ipv4)),
+        "hosts missing container row for {}: {hosts_body:?}",
+        rec.ipv4
     );
 
     // Ping the gateway from inside the netns via nsenter. The test
