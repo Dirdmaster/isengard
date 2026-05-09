@@ -6933,12 +6933,14 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "clap",
+ "ipnet",
  "nix 0.30.1",
  "serde_json",
  "tracing",
  "tracing-subscriber",
  "wisp",
  "wisp-image",
+ "wisp-net",
 ]
 
 [[package]]

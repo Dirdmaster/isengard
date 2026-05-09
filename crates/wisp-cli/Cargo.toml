@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 wisp = { path = "../wisp" }
 wisp-image = { path = "../wisp-image" }
+wisp-net = { path = "../wisp-net" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -26,3 +27,7 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
 nix = { version = "0.30", features = ["signal", "process"] }
 serde_json = { workspace = true }
+# Phase 0.3: --port parsing + `wisp net create --subnet` need Ipv4Net.
+# Pinned to the same minor as wisp-net so both crates resolve to one
+# version in Cargo.lock.
+ipnet = "2.12"
