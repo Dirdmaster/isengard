@@ -24,5 +24,15 @@ bytes = "1.8"
 # crate's ecosystem dependencies tight.
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux capability set manipulation (drop bounding, set permitted /
+# effective / inheritable / ambient). The crate uses `prctl` and
+# `capget`/`capset` syscalls that don't exist on macOS, so it lives
+# under target-specific deps. Wisp re-exports `caps::Capability` only
+# on Linux; on macOS the capability module exposes a stub `Capability`
+# enum with the same OCI names so `from_oci` stays portable for unit
+# tests on the Mac dev loop.
+caps = "0.5"
+
 [dev-dependencies]
 tempfile.workspace = true

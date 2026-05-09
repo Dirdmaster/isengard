@@ -10,6 +10,7 @@
 //! This crate has zero `isengard-*` dependencies and is consumed only by the
 //! `wisp-cli` binary and `cargo run --example` flows.
 
+pub mod capability;
 pub mod cgroup;
 pub mod error;
 pub mod spec;
