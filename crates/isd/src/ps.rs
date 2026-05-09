@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use clap::Args;
 use serde::Deserialize;
 
-use crate::login::{pinned_session, verify_pinned_response};
+use crate::session::Session;
 use crate::table::{PsRow, render_json, render_table};
 
 #[derive(Debug, Args)]
@@ -50,18 +50,18 @@ struct ServiceDto {
 }
 
 pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    let mut url = format!("{}/api/v1/stacks", ctx.controller_url);
+    let session = Session::open(context).await?;
+    let mut url = format!("{}/api/v1/stacks", session.controller_url());
     if let Some(f) = args.fleet.as_deref() {
         url.push_str(&format!("?fleet={f}"));
     }
-    let stacks_resp = client
+    let stacks_resp = session
+        .client
         .get(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    verify_pinned_response(&stacks_resp, &ctx.ca_fingerprint_sha256)?;
+
     let stacks: Vec<StackDto> = stacks_resp
         .error_for_status()
         .context("listing stacks")?
@@ -69,14 +69,14 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         .await
         .context("decoding stacks JSON")?;
 
-    let services_url = format!("{}/api/v1/services", ctx.controller_url);
-    let svc_resp = client
+    let services_url = format!("{}/api/v1/services", session.controller_url());
+    let svc_resp = session
+        .client
         .get(&services_url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {services_url}"))?;
-    verify_pinned_response(&svc_resp, &ctx.ca_fingerprint_sha256)?;
+
     let services: Vec<ServiceDto> = svc_resp
         .error_for_status()
         .context("listing services")?

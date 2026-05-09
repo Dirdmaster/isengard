@@ -12,8 +12,7 @@ use clap::{Args, Subcommand};
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
-use crate::credentials::ContextEntry;
-use crate::login::{pinned_session, verify_pinned_response};
+use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct RouteArgs {
@@ -133,8 +132,8 @@ pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
 }
 
 async fn run_list(context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    let entries = list_rules(&ctx, &client).await?;
+    let session = Session::open(context).await?;
+    let entries = list_rules(&session).await?;
     if entries.is_empty() {
         println!("No routing rules.");
         return Ok(());
@@ -163,10 +162,9 @@ async fn run_list(context: Option<&str>) -> Result<()> {
 }
 
 async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
+    let session = Session::open(context).await?;
     let host_id = resolve_host_id(
-        &ctx,
-        &client,
+        &session,
         args.host_id.as_deref(),
         args.host.as_deref(),
         &args.fleet,
@@ -184,7 +182,7 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
         healthcheck_path: args.healthcheck_path.as_deref(),
         source: "ui",
     };
-    let id = create_rule(&ctx, &client, &body).await?;
+    let id = create_rule(&session, &body).await?;
     println!("Created routing rule id={id} for {}.", args.public_hostname);
     Ok(())
 }
@@ -196,8 +194,7 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
 ///      error with a numbered list so the operator can re-invoke with
 ///      `--host` or `--host-id`.
 async fn resolve_host_id(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
+    session: &Session,
     host_id: Option<&str>,
     host: Option<&str>,
     fleet: &str,
@@ -205,7 +202,7 @@ async fn resolve_host_id(
     if let Some(id) = host_id {
         return Ok(id.to_string());
     }
-    let hosts = list_hosts(ctx, client, fleet).await?;
+    let hosts = list_hosts(session, fleet).await?;
     if let Some(name) = host {
         let lc = name.to_lowercase();
         let matches: Vec<&HostEntry> = hosts
@@ -251,57 +248,46 @@ fn hosts_table(hosts: &[HostEntry]) -> String {
     s
 }
 
-async fn list_hosts(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
-    fleet: &str,
-) -> Result<Vec<HostEntry>> {
-    let url = format!("{}/api/v1/hosts?fleet={fleet}", ctx.controller_url);
-    let resp = client
+async fn list_hosts(session: &Session, fleet: &str) -> Result<Vec<HostEntry>> {
+    let url = format!("{}/api/v1/hosts?fleet={fleet}", session.controller_url());
+    let resp = session
+        .client
         .get(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let entries: Vec<HostEntry> = resp.error_for_status()?.json().await?;
     Ok(entries)
 }
 
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    delete_rule(&ctx, &client, args.id).await?;
+    let session = Session::open(context).await?;
+    delete_rule(&session, args.id).await?;
     println!("Deleted routing rule id={}.", args.id);
     Ok(())
 }
 
-async fn list_rules(ctx: &ContextEntry, client: &reqwest::Client) -> Result<Vec<RoutingRuleEntry>> {
-    let url = format!("{}/api/v1/routing/rules", ctx.controller_url);
-    let resp = client
+async fn list_rules(session: &Session) -> Result<Vec<RoutingRuleEntry>> {
+    let url = format!("{}/api/v1/routing/rules", session.controller_url());
+    let resp = session
+        .client
         .get(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let entries: Vec<RoutingRuleEntry> = resp.error_for_status()?.json().await?;
     Ok(entries)
 }
 
-async fn create_rule(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
-    body: &CreateBody<'_>,
-) -> Result<i64> {
-    let url = format!("{}/api/v1/routing/rules", ctx.controller_url);
-    let resp = client
+async fn create_rule(session: &Session, body: &CreateBody<'_>) -> Result<i64> {
+    let url = format!("{}/api/v1/routing/rules", session.controller_url());
+    let resp = session
+        .client
         .post(&url)
-        .bearer_auth(&ctx.token)
         .json(body)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let status = resp.status();
     if !status.is_success() {
         let txt = resp.text().await.unwrap_or_default();
@@ -311,15 +297,14 @@ async fn create_rule(
     Ok(entry.id)
 }
 
-async fn delete_rule(ctx: &ContextEntry, client: &reqwest::Client, id: i64) -> Result<()> {
-    let url = format!("{}/api/v1/routing/rules/{id}", ctx.controller_url);
-    let resp = client
+async fn delete_rule(session: &Session, id: i64) -> Result<()> {
+    let url = format!("{}/api/v1/routing/rules/{id}", session.controller_url());
+    let resp = session
+        .client
         .delete(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("DELETE {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(anyhow!("routing rule id={id} not found"));

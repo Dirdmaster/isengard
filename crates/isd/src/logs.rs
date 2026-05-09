@@ -10,7 +10,7 @@ use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
-use crate::login::pinned_session;
+use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct LogsArgs {
@@ -71,12 +71,12 @@ struct LogLine {
 
 pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
     let (stack, service) = parse_target(&args.target)?;
-    let (ctx, client) = pinned_session(context).await?;
+    let session = Session::open(context).await?;
 
     // Resolve stack name -> stack id.
-    let stacks: Vec<StackDto> = client
-        .get(format!("{}/api/v1/stacks", ctx.controller_url))
-        .bearer_auth(&ctx.token)
+    let stacks: Vec<StackDto> = session
+        .client
+        .get(format!("{}/api/v1/stacks", session.controller_url()))
         .send()
         .await
         .context("GET /api/v1/stacks")?
@@ -91,7 +91,7 @@ pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
         .map(|s| s.id.clone())
         .ok_or_else(|| anyhow!("no stack named {stack:?}"))?;
 
-    let ws_url = controller_to_ws_url(&ctx.controller_url, &stack_id, &service);
+    let ws_url = controller_to_ws_url(session.controller_url(), &stack_id, &service);
     eprintln!("Streaming {} from {} (^C to stop)", args.target, ws_url);
 
     // Build the WS request. We piggyback the bearer token in the
@@ -102,8 +102,8 @@ pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
         .clone()
         .into_client_request()
         .context("building WS request")?;
-    let header_val = HeaderValue::from_str(&format!("Bearer {}", ctx.token))
-        .context("building Authorization header")?;
+    let header_val =
+        HeaderValue::from_str(&String::from("Bearer ")).context("building Authorization header")?;
     req.headers_mut().insert("Authorization", header_val);
 
     // Build a tokio-rustls connector that mirrors the pinned client's

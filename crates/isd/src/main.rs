@@ -1,28 +1,36 @@
 //! `isd`: the Isengard operator CLI. Talks to a controller over the same
 //! REST + WebSocket surface the dashboard uses.
 //!
-//! v0.3a ships four subcommands:
-//!  - `isd login <controller_url>`: trust + token bootstrap
+//! Reach a controller via `isd context create <name> --ssh <target>` (the
+//! canonical homelab path: SSH tunnels the dashboard port per command,
+//! the operator's `~/.ssh/config` handles auth) or
+//! `--http <url>` (local dev, direct-reachable dashboards). `isd context
+//! use <name>` selects the default; `--context <name>` overrides per
+//! invocation.
+//!
+//! Subcommands:
+//!  - `isd context create | use | list | rm | show`
 //!  - `isd ps`: list stacks + services
 //!  - `isd open <stack>`: open the stack's primary host in a browser
 //!  - `isd logs <stack>/<svc> -f`: tail service logs over the WebSocket
-//!
-//! v0.3.5 adds:
-//!  - `isd gateway`: DNS resolver + reverse proxy on the operator's Mac for
-//!    reaching `*.isd` (or any zone) in a browser without fighting
-//!    mDNS-in-Docker-on-Mac.
+//!  - `isd apply | diff | edit`: stack-level compose-as-truth
+//!  - `isd gateway`: dev DNS + reverse proxy bridging the operator's Mac
+//!  - `isd secret put | list | rm`: managed-secret CRUD
+//!  - `isd route create | list | rm`: routing-rule CRUD
 
 use clap::{Parser, Subcommand};
 
 mod compose_cmd;
+mod context;
 mod credentials;
 mod gateway;
-mod login;
 mod logs;
 mod open_cmd;
 mod ps;
 mod route;
 mod secret;
+mod session;
+mod ssh_tunnel;
 mod table;
 
 #[derive(Parser, Debug)]
@@ -31,7 +39,9 @@ mod table;
     version,
     about = "Isengard operator CLI",
     long_about = "Talk to an Isengard controller from your terminal: list \
-                  stacks, open services in a browser, tail logs."
+                  stacks, open services in a browser, tail logs. Configure \
+                  reachability via `isd context create --ssh <target>` (or \
+                  `--http <url>` for local dev)."
 )]
 struct Cli {
     /// Logging filter (e.g. "info", "debug,isd=trace"). Read from
@@ -50,9 +60,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Save controller credentials. Prompts for a token + verifies the
-    /// self-signed CA fingerprint on first connect.
-    Login(login::LoginArgs),
+    /// Manage saved controller contexts. SSH-backed contexts tunnel the
+    /// dashboard port via `~/.ssh/config`; HTTP contexts target a
+    /// directly-reachable URL.
+    #[command(subcommand)]
+    Context(context::ContextCommand),
     /// List stacks + services across all hosts in the saved context.
     Ps(ps::PsArgs),
     /// Open the stack's primary `expose.host` in the OS default browser.
@@ -86,7 +98,7 @@ async fn main() {
     init_tracing(cli.log.as_deref());
 
     let result = match cli.command {
-        Command::Login(args) => login::run(args).await,
+        Command::Context(cmd) => context::run(context::ContextArgs { command: cmd }).await,
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
