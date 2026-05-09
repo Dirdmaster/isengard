@@ -163,6 +163,8 @@ fn create_container_inner<F: CgroupFs>(
         state: ContainerState::Created,
         pid: None,
         created_at: SystemTime::now(),
+        network_spec: None,
+        network_attachment: None,
     };
     state::write(state_dir, &handle)?;
 

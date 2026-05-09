@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cgroup::{Cgroup, HostCgroupFs};
 use crate::error::{Result, WispError};
+use crate::network_spec::NetworkSpec;
 use crate::state::{self, ContainerHandle, ContainerState};
 
 #[cfg(target_os = "linux")]
@@ -143,6 +144,52 @@ impl Runtime {
             Err(WispError::Lifecycle(
                 "wisp runtime requires linux".to_string(),
             ))
+        }
+    }
+
+    /// Create a container with a `NetworkSpec` attached.
+    ///
+    /// Same persistence + cgroup setup as [`Runtime::create`]; the
+    /// resulting `state.json` carries the spec under
+    /// `network_spec`. The actual veth + IP attachment is deferred to
+    /// [`Runtime::start`], which reads the spec, allocates an IP, and
+    /// records a `NetworkAttachmentRecord` once the child PID exists.
+    ///
+    /// Linux only. The Mac stub mirrors [`Runtime::create`].
+    pub fn create_with_network(
+        &self,
+        id: &str,
+        bundle: &Path,
+        network: NetworkSpec,
+    ) -> Result<ContainerHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut handle =
+                lifecycle::create_container(&self.state_dir, &self.cgroup, id, bundle)?;
+            handle.network_spec = Some(network);
+            state::write(&self.state_dir, &handle)?;
+            Ok(handle)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (id, bundle, network);
+            Err(WispError::Lifecycle(
+                "wisp runtime requires linux".to_string(),
+            ))
+        }
+    }
+
+    /// Read the container's PID 1 from `state.json`. Returns `None`
+    /// if the container is not in the `Running` state or if the
+    /// state-dir entry is missing / unreadable.
+    ///
+    /// Used by `wisp-net` (and integration tests) to drive
+    /// `nsenter -t <pid>` / `ip link set <iface> netns <pid>` after
+    /// `Runtime::start` has cloned the entrypoint.
+    pub fn container_pid(&self, id: &str) -> Option<u32> {
+        match state::read(&self.state_dir, id) {
+            Ok(h) => h.pid,
+            Err(_) => None,
         }
     }
 
@@ -286,6 +333,8 @@ mod tests {
             state,
             pid,
             created_at: SystemTime::UNIX_EPOCH,
+            network_spec: None,
+            network_attachment: None,
         }
     }
 
@@ -500,5 +549,29 @@ mod tests {
         // Also ensure the AtomicBool trick we don't actually use is
         // not optimised out (compiler warning hygiene).
         let _ = AtomicBool::new(true).load(Ordering::Relaxed);
+    }
+
+    /// `container_pid` reads the persisted pid out of state.json. Pure
+    /// file IO so it works on Mac.
+    #[test]
+    fn container_pid_returns_persisted_pid_when_running() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("alive", ContainerState::Running, Some(4242));
+        state::write(state.path(), &h).unwrap();
+        assert_eq!(rt.container_pid("alive"), Some(4242));
+    }
+
+    #[test]
+    fn container_pid_returns_none_for_missing_id() {
+        let (_state, _cg, rt) = fixture(always_alive);
+        assert_eq!(rt.container_pid("ghost"), None);
+    }
+
+    #[test]
+    fn container_pid_returns_none_when_state_has_no_pid() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("created", ContainerState::Created, None);
+        state::write(state.path(), &h).unwrap();
+        assert_eq!(rt.container_pid("created"), None);
     }
 }

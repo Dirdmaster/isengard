@@ -23,6 +23,13 @@ use crate::cmd;
 use crate::error::WispNetError;
 use std::net::Ipv4Addr;
 
+// `PortPublish` and `PortProtocol` are owned by the `wisp` crate now
+// (the runtime owns the API; `wisp-net` consumes it). Re-exported
+// here so downstream callers and the dispatch B integration tests
+// keep their `wisp_net::PortPublish` / `wisp_net::PortProtocol`
+// imports intact.
+pub use wisp::network_spec::{PortProtocol, PortPublish};
+
 /// Iptables table: `nat`, `filter`, `mangle`. Phase 0.3 only emits into
 /// `nat` and `filter`; `mangle` is here for future-proofing against
 /// rate-limiting or DSCP-tag rules in a later phase.
@@ -90,38 +97,6 @@ impl RuleSet {
         self.creates.extend(other.creates);
         self.deletes.extend(other.deletes);
     }
-}
-
-/// Layer-4 protocol for a published port. `tcp` and `udp` are the only
-/// values dispatch A emits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PortProtocol {
-    Tcp,
-    Udp,
-}
-
-impl PortProtocol {
-    /// CLI flag value: `iptables -p <name>`.
-    pub fn cli_name(self) -> &'static str {
-        match self {
-            PortProtocol::Tcp => "tcp",
-            PortProtocol::Udp => "udp",
-        }
-    }
-}
-
-/// One published-port directive from `wisp run --port host:container`.
-///
-/// `host_ip` is `0.0.0.0` for the default `--port 18080:80` case.
-/// Dispatch A doesn't currently restrict by host_ip in the PREROUTING
-/// rule (parity with docker's default), but the field is here so a
-/// future bind-to-specific-iface knob is additive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortPublish {
-    pub host_ip: Ipv4Addr,
-    pub host_port: u16,
-    pub container_port: u16,
-    pub protocol: PortProtocol,
 }
 
 /// Sanitize a free-form id for use inside an iptables `--comment` value.
@@ -491,13 +466,13 @@ mod tests {
     fn attachment_rules_include_dnat_for_each_port() {
         let ports = vec![
             PortPublish {
-                host_ip: Ipv4Addr::UNSPECIFIED,
+                host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 host_port: 18080,
                 container_port: 80,
                 protocol: PortProtocol::Tcp,
             },
             PortPublish {
-                host_ip: Ipv4Addr::UNSPECIFIED,
+                host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 host_port: 18443,
                 container_port: 443,
                 protocol: PortProtocol::Tcp,
@@ -530,7 +505,7 @@ mod tests {
     #[test]
     fn loopback_dnat_present_for_localhost_clients() {
         let ports = vec![PortPublish {
-            host_ip: Ipv4Addr::UNSPECIFIED,
+            host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             host_port: 18080,
             container_port: 80,
             protocol: PortProtocol::Tcp,
@@ -556,7 +531,7 @@ mod tests {
         }
 
         let ports = vec![PortPublish {
-            host_ip: Ipv4Addr::UNSPECIFIED,
+            host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             host_port: 18080,
             container_port: 80,
             protocol: PortProtocol::Tcp,
@@ -573,7 +548,7 @@ mod tests {
         // Spaces / quotes / colons inside the raw id should be replaced
         // so the iptables-save grep stays unambiguous.
         let ports = vec![PortPublish {
-            host_ip: Ipv4Addr::UNSPECIFIED,
+            host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             host_port: 18080,
             container_port: 80,
             protocol: PortProtocol::Tcp,
@@ -593,7 +568,7 @@ mod tests {
     #[test]
     fn udp_protocol_emits_p_udp() {
         let ports = vec![PortPublish {
-            host_ip: Ipv4Addr::UNSPECIFIED,
+            host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             host_port: 5353,
             container_port: 53,
             protocol: PortProtocol::Udp,
@@ -609,7 +584,7 @@ mod tests {
     #[test]
     fn attachment_rules_match_in_creates_and_deletes() {
         let ports = vec![PortPublish {
-            host_ip: Ipv4Addr::UNSPECIFIED,
+            host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             host_port: 18080,
             container_port: 80,
             protocol: PortProtocol::Tcp,
@@ -647,7 +622,7 @@ mod tests {
             Ipv4Addr::new(10, 83, 0, 2),
             "web",
             &[PortPublish {
-                host_ip: Ipv4Addr::UNSPECIFIED,
+                host_ip: std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 host_port: 18080,
                 container_port: 80,
                 protocol: PortProtocol::Tcp,

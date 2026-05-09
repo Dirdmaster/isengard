@@ -72,7 +72,7 @@ fn nat_round_trip_curl_to_in_ns_listener() {
         ctr_ip,
         "ctr1",
         &[wisp_net::PortPublish {
-            host_ip: std::net::Ipv4Addr::UNSPECIFIED,
+            host_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             host_port: 22080,
             container_port: 12080,
             protocol: wisp_net::PortProtocol::Tcp,
