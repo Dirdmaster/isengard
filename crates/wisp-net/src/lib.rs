@@ -12,6 +12,8 @@ pub mod cmd;
 pub mod error;
 pub mod ipam;
 pub mod iptables;
+pub mod ns;
+pub mod veth;
 
 pub use bridge::{IpCommand, Network, plan_create, plan_delete};
 pub use error::WispNetError;
