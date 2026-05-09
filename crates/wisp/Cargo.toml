@@ -9,5 +9,14 @@ repository.workspace = true
 description = "Wisp: Rust-native daemonless OCI container runtime (Phase 0.1 skeleton)"
 
 [dependencies]
+# OCI runtime spec parsing. Pinned at 0.9.x; the crate has had API churn
+# historically, so the minor pin keeps us from surprise rewrites.
+oci-spec = { version = "0.9", default-features = false, features = ["runtime"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes = "1.8"
 
 [dev-dependencies]
+tempfile.workspace = true

@@ -10,6 +10,12 @@
 //! This crate has zero `isengard-*` dependencies and is consumed only by the
 //! `wisp-cli` binary and `cargo run --example` flows.
 
+pub mod error;
+pub mod spec;
+
+pub use error::WispError;
+pub use spec::{Spec, load_and_validate};
+
 /// Returns the crate version (from `CARGO_PKG_VERSION`).
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
