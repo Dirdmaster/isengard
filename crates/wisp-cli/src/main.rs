@@ -69,11 +69,14 @@ enum Cmd {
 #[derive(Debug, Args)]
 struct RunArgs {
     /// Path to the OCI bundle directory (`config.json` + `rootfs/`).
-    /// Mutually exclusive with `--image`.
+    /// Used only when `--image` is NOT set; with `--image`, this slot
+    /// folds into the trailing args (so
+    /// `wisp run --image <ref> /bin/echo hi` runs the image with the
+    /// echo command appended to its entrypoint).
     bundle: Option<PathBuf>,
-    /// Pull and assemble a bundle from this image ref. Mutually
-    /// exclusive with the positional bundle arg.
-    #[arg(long, conflicts_with = "bundle")]
+    /// Pull and assemble a bundle from this image ref. Without this,
+    /// the positional `bundle` is required.
+    #[arg(long)]
     image: Option<String>,
     /// Container ID. If omitted, derived from the bundle dir basename
     /// (positional bundle) or from the image ref's repo + tag (--image).
@@ -85,7 +88,8 @@ struct RunArgs {
     #[arg(long)]
     detach: bool,
     /// With `--image`: extra args appended to the image's entrypoint.
-    /// Ignored when running a positional bundle.
+    /// The positional `bundle` slot also folds into this list when
+    /// `--image` is set. Ignored when running a positional bundle.
     #[arg(trailing_var_arg = true)]
     args: Vec<String>,
 }
@@ -180,13 +184,27 @@ fn run() -> Result<()> {
     }
 }
 
-fn cmd_run(state_dir: &Path, args: RunArgs) -> Result<()> {
+fn cmd_run(state_dir: &Path, mut args: RunArgs) -> Result<()> {
+    // When --image is set, the positional `bundle` slot is just the
+    // first piece of the trailing args (clap's positional rules require
+    // the optional `bundle` to bind first, even though semantically we
+    // want it to be part of the args list). Splice it in here so
+    // callers can write `wisp run --image alpine:3.19 /bin/echo hi`.
+    if args.image.is_some()
+        && let Some(b) = args.bundle.take()
+    {
+        let mut prepended = vec![b.to_string_lossy().into_owned()];
+        prepended.append(&mut args.args);
+        args.args = prepended;
+    }
+
     match (&args.bundle, &args.image) {
         (Some(_), None) => cmd_run_bundle(state_dir, args),
         (None, Some(_)) => cmd_run_image(state_dir, args),
         (Some(_), Some(_)) => {
-            // clap's `conflicts_with` should already block this; defensive
-            // guard in case the attribute is ever weakened.
+            // After the splice above this is unreachable in practice;
+            // keep the guard so a future refactor can't drop into the
+            // wrong code path silently.
             Err(anyhow!(
                 "--image and a positional bundle are mutually exclusive"
             ))
