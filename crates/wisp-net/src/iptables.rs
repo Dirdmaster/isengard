@@ -19,6 +19,8 @@
 //! the suite.
 
 use crate::bridge::Network;
+use crate::cmd;
+use crate::error::WispNetError;
 use std::net::Ipv4Addr;
 
 /// Iptables table: `nat`, `filter`, `mangle`. Phase 0.3 only emits into
@@ -223,6 +225,26 @@ pub fn plan_for_network(net: &Network) -> RuleSet {
         comment: Some(comment_for(&net.name, "bridge-in-related")),
     });
 
+    // 5. POSTROUTING masquerade for loopback-sourced traffic that gets
+    //    DNAT'd to the bridge (dispatch B finding: without this, the
+    //    loopback OUTPUT DNAT in plan_for_attachment routes a 127.0.0.1
+    //    -> 10.x packet onto the bridge, but the container can't ARP
+    //    back to 127.0.0.1 and the connection times out). Pairs with
+    //    `bridge::ensure` setting `route_localnet=1` on the bridge.
+    rs.append(Rule {
+        table: Table::Nat,
+        chain: "POSTROUTING".into(),
+        args: vec![
+            "-o".into(),
+            net.bridge.clone(),
+            "-s".into(),
+            "127.0.0.0/8".into(),
+            "-j".into(),
+            "MASQUERADE".into(),
+        ],
+        comment: Some(comment_for(&net.name, "loopback-snat")),
+    });
+
     rs
 }
 
@@ -313,6 +335,88 @@ pub fn plan_for_attachment(
     rs
 }
 
+/// Build the full `iptables` arg list for a single rule.
+///
+/// `verb` is `"-A"` (creates) or `"-D"` (deletes). Output shape:
+///
+/// ```text
+/// -t <table> <verb> <chain> <args...> [-m comment --comment <comment>]
+/// ```
+fn rule_to_args(rule: &Rule, verb: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(rule.args.len() + 8);
+    out.push("-t".into());
+    out.push(rule.table.cli_name().into());
+    out.push(verb.into());
+    out.push(rule.chain.clone());
+    for a in &rule.args {
+        out.push(a.clone());
+    }
+    if let Some(c) = &rule.comment {
+        out.push("-m".into());
+        out.push("comment".into());
+        out.push("--comment".into());
+        out.push(c.clone());
+    }
+    out
+}
+
+/// Apply a [`RuleSet`]: walk `creates` and run each via `iptables -A`.
+///
+/// On any failure, the rules already applied are revoked best-effort
+/// before the original error is returned, so the host doesn't get
+/// stuck with half a rule chain.
+pub fn apply(rs: &RuleSet) -> Result<(), WispNetError> {
+    let mut applied: Vec<&Rule> = Vec::new();
+    for rule in &rs.creates {
+        let args = rule_to_args(rule, "-A");
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        match cmd::run_iptables(&arg_refs) {
+            Ok(_) => applied.push(rule),
+            Err(e) => {
+                // Roll back what we already applied. Best-effort: a
+                // failed delete here gets swallowed in favor of
+                // surfacing the original apply error.
+                for r in applied.iter().rev() {
+                    let d_args = rule_to_args(r, "-D");
+                    let d_refs: Vec<&str> = d_args.iter().map(String::as_str).collect();
+                    let _ = cmd::run_iptables(&d_refs);
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Revoke a [`RuleSet`]: walk `deletes` and run each via `iptables -D`.
+///
+/// Tolerates the kernel's "No chain/target/match by that name" error
+/// (some distros' iptables CLI emits this when the rule is already
+/// gone), so revoke is idempotent on repeat calls.
+pub fn revoke(rs: &RuleSet) -> Result<(), WispNetError> {
+    for rule in &rs.deletes {
+        let args = rule_to_args(rule, "-D");
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        match cmd::run_iptables(&arg_refs) {
+            Ok(_) => {}
+            Err(WispNetError::Cmd { stderr, .. }) if is_missing_rule(&stderr) => {
+                // Already gone; treat as success.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn is_missing_rule(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    // Covers iptables-legacy ("Bad rule (does a matching rule exist...")
+    // and iptables-nft ("No chain/target/match by that name") variants.
+    s.contains("no chain/target/match by that name")
+        || s.contains("does a matching rule exist")
+        || s.contains("no such file or directory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,8 +428,8 @@ mod tests {
     #[test]
     fn network_rules_include_masquerade_and_forward() {
         let rs = plan_for_network(&net());
-        assert_eq!(rs.creates.len(), 4);
-        assert_eq!(rs.deletes.len(), 4);
+        assert_eq!(rs.creates.len(), 5);
+        assert_eq!(rs.deletes.len(), 5);
 
         // 1. POSTROUTING masquerade in nat table.
         let masq = &rs.creates[0];
@@ -353,6 +457,25 @@ mod tests {
         let est = &rs.creates[3];
         assert!(est.args.contains(&"RELATED,ESTABLISHED".to_string()));
         assert!(est.args.contains(&"state".to_string()));
+    }
+
+    #[test]
+    fn network_rules_include_loopback_snat() {
+        // Without this rule, curl 127.0.0.1:<host-port> never reaches
+        // the container (the kernel emits ARPs with src=127.0.0.1 onto
+        // the bridge and the container can't reply). See
+        // bridge::ensure for the matching route_localnet sysctl.
+        let rs = plan_for_network(&net());
+        let snat = rs
+            .creates
+            .iter()
+            .find(|r| r.comment.as_deref() == Some("wisp:app:loopback-snat"))
+            .expect("missing loopback-snat rule");
+        assert_eq!(snat.table, Table::Nat);
+        assert_eq!(snat.chain, "POSTROUTING");
+        assert!(snat.args.contains(&"127.0.0.0/8".to_string()));
+        assert!(snat.args.contains(&"MASQUERADE".to_string()));
+        assert!(snat.args.contains(&"wbr-app".to_string()));
     }
 
     #[test]
@@ -493,6 +616,27 @@ mod tests {
         }];
         let rs = plan_for_attachment(&net(), Ipv4Addr::new(10, 83, 0, 2), "web", &ports);
         assert_eq!(rs.creates, rs.deletes);
+    }
+
+    #[test]
+    fn rule_to_args_includes_table_verb_chain_and_comment() {
+        let rs = plan_for_network(&net());
+        let masq = &rs.creates[0];
+        let args = super::rule_to_args(masq, "-A");
+        assert_eq!(&args[0..4], &["-t", "nat", "-A", "POSTROUTING"]);
+        // Comment is appended at the end as -m comment --comment <c>.
+        assert_eq!(args[args.len() - 4], "-m");
+        assert_eq!(args[args.len() - 3], "comment");
+        assert_eq!(args[args.len() - 2], "--comment");
+        assert!(args[args.len() - 1].starts_with("wisp:app:"));
+    }
+
+    #[test]
+    fn rule_to_args_uses_d_for_delete() {
+        let rs = plan_for_network(&net());
+        let masq = &rs.deletes[0];
+        let args = super::rule_to_args(masq, "-D");
+        assert_eq!(&args[0..4], &["-t", "nat", "-D", "POSTROUTING"]);
     }
 
     #[test]

@@ -148,6 +148,21 @@ pub fn ensure(net: &Network) -> Result<(), WispNetError> {
             )));
         }
     }
+
+    // route_localnet=1: required to make the loopback OUTPUT DNAT in
+    // iptables::plan_for_attachment work. Without it, the kernel
+    // refuses to route a packet whose original src=127.0.0.1 onto the
+    // bridge interface. Pairs with the loopback-snat MASQUERADE rule
+    // in iptables::plan_for_network.
+    //
+    // Best-effort: if the sysctl write fails (e.g. /proc not mounted),
+    // log via tracing but don't fail ensure. The integration test
+    // catches a real misconfiguration.
+    let path = format!("/proc/sys/net/ipv4/conf/{}/route_localnet", net.bridge);
+    if let Err(e) = std::fs::write(&path, "1") {
+        tracing::warn!("could not set {path}=1 (loopback DNAT may not work): {e}");
+    }
+
     Ok(())
 }
 
