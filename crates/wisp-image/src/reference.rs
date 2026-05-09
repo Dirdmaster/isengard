@@ -140,6 +140,17 @@ impl ImageRef {
     }
 }
 
+impl std::str::FromStr for ImageRef {
+    type Err = WispImageError;
+
+    /// `s.parse::<ImageRef>()` is sugar for `ImageRef::parse(s)`. Same
+    /// semantics, just lets call sites stay generic over the `parse`
+    /// trait.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
 /// Round-trippable display form: always emits `<registry>/<repo>` plus
 /// either `:tag` or `@digest`. Inputs that defaulted (bare `alpine`)
 /// re-emit in canonical form (`docker.io/library/alpine:latest`); the
