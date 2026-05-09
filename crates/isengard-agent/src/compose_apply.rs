@@ -293,6 +293,43 @@ async fn ensure_container_started(
         )
         .await
         .map_err(|e| anyhow::anyhow!("create_container {container_name}: {e}"))?;
+
+    // Attach to declared networks. Compose-spec semantics: when a
+    // service declares `networks: [a, b]`, the container should be on
+    // `a` AND `b` (not the docker default bridge). bollard's
+    // create_container only takes one network at create-time via
+    // NetworkingConfig; for multi-network containers the convention is
+    // to connect each one explicitly afterward. Disconnecting from
+    // `bridge` matches `docker compose up` (containers with explicit
+    // `networks:` aren't on the default bridge).
+    if !svc.networks.is_empty() {
+        let _ = docker
+            .disconnect_network(
+                "bridge",
+                bollard::network::DisconnectNetworkOptions {
+                    container: container_name.clone(),
+                    force: false,
+                },
+            )
+            .await; // best-effort: swallow if already off
+        for net in &svc.networks {
+            docker
+                .connect_network(
+                    net,
+                    bollard::network::ConnectNetworkOptions {
+                        container: container_name.clone(),
+                        endpoint_config: Default::default(),
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "connect_network {net} -> {container_name}: {e} (does the network exist? `docker network ls`)"
+                    )
+                })?;
+        }
+    }
+
     docker
         .start_container(&create.id, None::<StartContainerOptions<String>>)
         .await

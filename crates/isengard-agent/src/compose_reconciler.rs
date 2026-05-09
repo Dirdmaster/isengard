@@ -39,6 +39,11 @@ pub struct DesiredService {
     /// Long-form `target:` overrides the default `/run/secrets/<name>`
     /// mount path.
     pub secrets: Vec<ServiceSecretRef>,
+    /// Network names this service should join. Compose accepts both
+    /// list and map forms; both produce the same flat list here. Used
+    /// by `compose_apply` to attach the container to each network at
+    /// create time. Empty = docker default bridge.
+    pub networks: Vec<String>,
 }
 
 /// One entry in a service's `secrets:` list.
@@ -320,12 +325,75 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
             }
         }
     }
-    if let Some(Value::Mapping(labels)) = m.get(Value::String("labels".into())) {
-        for (k, v) in labels {
-            let (Value::String(key), Value::String(val)) = (k, v) else {
-                continue;
-            };
-            svc.labels.insert(key.clone(), val.clone());
+    // Compose spec allows both shapes for `labels:`:
+    //   labels:                                # dict form
+    //     foo.bar: baz
+    //   labels:                                # list form
+    //     - "foo.bar=baz"
+    // Real-world compose files in the wild (and the homelab's
+    // pre-Isengard Swarm/Traefik shape) lean on the list form. Silently
+    // dropping it was the bug behind 'isd route list shows nothing
+    // after deploy' — the labels never made it onto the running
+    // containers, so label-ingest had nothing to discover.
+    if let Some(value) = m.get(Value::String("labels".into())) {
+        match value {
+            Value::Mapping(labels) => {
+                for (k, v) in labels {
+                    let (Value::String(key), Value::String(val)) = (k, v) else {
+                        continue;
+                    };
+                    svc.labels.insert(key.clone(), val.clone());
+                }
+            }
+            Value::Sequence(items) => {
+                for item in items {
+                    let Value::String(s) = item else {
+                        continue;
+                    };
+                    if let Some((key, val)) = s.split_once('=') {
+                        svc.labels
+                            .insert(key.trim().to_string(), val.trim().to_string());
+                    } else {
+                        // Bare "key" with no `=` is valid compose syntax for a
+                        // label with empty value. docker-compose handles it the
+                        // same way; mirror that.
+                        svc.labels.insert(s.trim().to_string(), String::new());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Compose `networks:` per service. Two valid shapes:
+    //   networks: [foo, bar]                   # list of names
+    //   networks:                              # map (per-network opts
+    //     foo:                                 #   like aliases / ipv4)
+    //       aliases: [...]
+    //     bar: null
+    // We flatten both into a Vec<String> of network names. Per-network
+    // options (aliases, ipv4_address, link_local_ips) aren't applied
+    // yet; compose_apply attaches the container to each named network
+    // with default endpoint settings. Common homelab use ('this stack
+    // talks to its own bridge + is exposed via isengard-proxy') doesn't
+    // need the per-network options; richer service-discovery (aliases)
+    // can land later without breaking the field.
+    if let Some(value) = m.get(Value::String("networks".into())) {
+        match value {
+            Value::Sequence(items) => {
+                for item in items {
+                    if let Value::String(s) = item {
+                        svc.networks.push(s.clone());
+                    }
+                }
+            }
+            Value::Mapping(map) => {
+                for (k, _v) in map {
+                    if let Value::String(name) = k {
+                        svc.networks.push(name.clone());
+                    }
+                }
+            }
+            _ => {}
         }
     }
     // v0.3.6: per-service `secrets:` list. Both short and long form
@@ -656,6 +724,81 @@ mod tests {
         let env = &parsed.services["web"].environment;
         assert_eq!(env["FOO"], "bar");
         assert_eq!(env["LONE"], "");
+    }
+
+    #[test]
+    fn parse_compose_with_labels_dict_form() {
+        let yaml = r#"services:
+  web:
+    image: nginx
+    labels:
+      isengard.expose: foo.example.com
+      isengard.expose.port: "8080"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        let labels = &parsed.services["web"].labels;
+        assert_eq!(labels["isengard.expose"], "foo.example.com");
+        assert_eq!(labels["isengard.expose.port"], "8080");
+    }
+
+    #[test]
+    fn parse_compose_with_labels_list_form() {
+        // Real-world compose files (and the homelab repo's pre-Isengard
+        // shape) lean on the list form. Regression test for the parser
+        // silently dropping these.
+        let yaml = r#"services:
+  web:
+    image: nginx
+    labels:
+      - "isengard.expose=foo.example.com"
+      - "isengard.expose.port=8080"
+      - bare-key
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        let labels = &parsed.services["web"].labels;
+        assert_eq!(labels["isengard.expose"], "foo.example.com");
+        assert_eq!(labels["isengard.expose.port"], "8080");
+        assert_eq!(labels["bare-key"], "");
+    }
+
+    #[test]
+    fn parse_compose_with_networks_list_form() {
+        // The homelab `servarr` stack declares `networks: [servarr,
+        // isengard-proxy]` per service. Without this parser, the
+        // reconciler silently dropped them and the agent attached every
+        // container to docker0 only, breaking proxy reachability.
+        let yaml = r#"services:
+  web:
+    image: nginx
+    networks:
+      - servarr
+      - isengard-proxy
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        let nets = &parsed.services["web"].networks;
+        assert_eq!(
+            nets,
+            &vec!["servarr".to_string(), "isengard-proxy".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_compose_with_networks_map_form() {
+        // Map form is standard compose for per-network options
+        // (aliases, ipv4_address). We don't apply those yet; the test
+        // just locks in that the network names round-trip.
+        let yaml = r#"services:
+  web:
+    image: nginx
+    networks:
+      servarr:
+        aliases: [api]
+      isengard-proxy: null
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        let nets = &parsed.services["web"].networks;
+        assert!(nets.contains(&"servarr".to_string()));
+        assert!(nets.contains(&"isengard-proxy".to_string()));
     }
 
     #[test]
