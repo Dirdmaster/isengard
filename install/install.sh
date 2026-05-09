@@ -373,7 +373,12 @@ prompt_plain_config() {
   # Pull the comment/structure from the example file but materialise the
   # operator-supplied values. We write it ourselves rather than `cat >>`
   # so the file always has a known shape.
-  umask 0027
+  #
+  # umask 0022 + chmod 0644: this file holds NO secrets (CF tokens, etc
+  # live encrypted in the SQLite secrets store, keyed by master.key).
+  # World-readable lets the operator's user run `docker compose` without
+  # sudo, since compose reads the env file at parse time.
+  umask 0022
   cat >"${ISENGARD_ENV_FILE}" <<EOF
 # Isengard non-secret config. Written by install/install.sh.
 #
@@ -398,7 +403,7 @@ ISENGARD_ACME_DOMAINS=${acme_domains}
 # Resolved by the controller at boot (acme/mod.rs::resolve_directory).
 ISENGARD_ACME_DIRECTORY=${acme_directory}
 EOF
-  chmod 0640 "${ISENGARD_ENV_FILE}"
+  _apply_editable_config_perms "${ISENGARD_ENV_FILE}"
 }
 
 # ---------------------------------------------------------------------------
@@ -431,7 +436,26 @@ write_compose_to() {
   else
     fetch "${ISENGARD_RAW_BASE}/compose.yaml" "${out}"
   fi
-  chmod 0644 "${out}"
+  _apply_editable_config_perms "${out}"
+}
+
+# Set permissions for an editable, non-secret config file under
+# /etc/isengard. Group-writable to the `docker` group when present so any
+# operator already in that group can `vi /etc/isengard/<file>` without
+# sudo. Falls back to mode 0644 (world-readable, root-only-write) when
+# the docker group is missing — surfaces a warn so the operator knows.
+#
+# Master key, secrets DB, and other genuinely-secret material take a
+# different code path and stay 0600 root.
+_apply_editable_config_perms() {
+  local path="$1"
+  if getent group docker >/dev/null 2>&1; then
+    chgrp docker "${path}" 2>/dev/null || true
+    chmod 0664 "${path}" 2>/dev/null || true
+  else
+    chmod 0644 "${path}" 2>/dev/null || true
+    warn "perms: docker group not found; ${path} is world-readable but only root can edit it. Run as a member of the docker group to enable sudoless config edits."
+  fi
 }
 
 setup_compose_file() {
@@ -684,6 +708,20 @@ secret_count() {
 
 # Returns one of: none | partial | complete
 detect_existing() {
+  # Migration: bring legacy installs up to the current permission model.
+  # Older versions wrote isengard.env at 0640 root and compose.yaml at
+  # 0644 root, forcing operators to `sudo` every config edit. Neither
+  # file holds secrets (those live encrypted in SQLite, gated by
+  # master.key), so we set them group-writable to the docker group.
+  # Operator (already in the docker group to talk to dockerd) gets to
+  # edit + read without sudo. This is idempotent and runs on every
+  # install.sh invocation so a second curl-bash brings legacy installs
+  # current without a reinstall menu trip.
+  for f in "${ISENGARD_ENV_FILE}" "${ISENGARD_COMPOSE_FILE}"; do
+    [[ -f "${f}" ]] || continue
+    _apply_editable_config_perms "${f}" || true
+  done
+
   local key=0 compose=0 env=0 db=0
   [[ -f "${ISENGARD_MASTER_KEY}" ]] && key=1
   [[ -f "${ISENGARD_COMPOSE_FILE}" ]] && compose=1

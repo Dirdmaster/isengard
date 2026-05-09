@@ -95,6 +95,26 @@ ISENGARD_REF=v0.3.5 ISENGARD_IMAGE_TAG=v0.3.5 \
 
 ## Post-install
 
+Day-to-day operations do **not** require `sudo`. The operator's user (in the `docker` group) can run `docker compose` and edit the editable configs directly:
+
+```sh
+docker compose -f /etc/isengard/compose.yaml ps
+docker compose -f /etc/isengard/compose.yaml pull
+docker compose -f /etc/isengard/compose.yaml up -d --force-recreate controller
+$EDITOR /etc/isengard/isengard.env       # flip ACME staging -> production etc.
+```
+
+Permission model (set by `install.sh`):
+
+| File | Mode | Group | Why |
+|---|---|---|---|
+| `/etc/isengard/isengard.env` | `0664` | `docker` | non-secret config; operator edits without sudo |
+| `/etc/isengard/compose.yaml` | `0664` | `docker` | non-secret; same as above |
+| `/etc/isengard/ca.pem` | `0644` | `root` | public CA cert; readable but read-only |
+| `/etc/isengard/master.key` | `0600` | `root` | gates the secrets store; only read by the container as uid 0 via bind-mount |
+
+Secrets (Cloudflare API token, backup passphrase, etc.) live encrypted in the controller's SQLite, gated by `master.key`. Manage them via `isd secret put|list|rm`.
+
 Mint an enrollment token so the agent can talk to the controller:
 
 ```sh
