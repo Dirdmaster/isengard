@@ -66,3 +66,9 @@ tempfile.workspace = true
 # rt + macros are the minimum needed for #[tokio::test].
 wiremock.workspace = true
 tokio = { version = "1", features = ["macros", "rt"] }
+# Example targets surface errors via anyhow and emit logs via tracing.
+anyhow.workspace = true
+tracing-subscriber.workspace = true
+# Network + roundtrip tests early-return when not run as root via
+# geteuid; libc gives us the syscall directly without pulling in nix.
+libc = "0.2"

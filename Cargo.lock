@@ -6937,9 +6937,11 @@ dependencies = [
 name = "wisp-image"
 version = "0.1.0-alpha"
 dependencies = [
+ "anyhow",
  "flate2",
  "fs2",
  "hex",
+ "libc",
  "oci-spec",
  "reqwest",
  "serde",
@@ -6950,6 +6952,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wiremock",
  "wisp",

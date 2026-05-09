@@ -283,15 +283,28 @@ fn extract_symlink<R: Read>(
         .ok_or_else(|| WispImageError::Tar("symlink entry without target".into()))?
         .into_owned();
 
-    // The link target is read by the kernel relative to the link's
-    // parent directory at *resolution time*, not at creation. To check
-    // safety, we lexically resolve the target as if it were resolved
-    // against the link's parent inside target_root.
-    let link_parent = dest
-        .parent()
-        .ok_or_else(|| WispImageError::Tar(format!("symlink dest {dest:?} has no parent")))?;
-    if !verify_symlink_target_safe(&link_target, link_parent, target_root) {
-        return Err(WispImageError::PathTraversal(link_target));
+    // Symlink semantics:
+    //   * If absolute (`/bin/busybox`): the kernel resolves it against
+    //     the *namespace root*, which after `pivot_root` is the
+    //     rootfs we're assembling. So absolute symlinks land where
+    //     the image author intended once the runtime takes over. They
+    //     ARE risky during extraction (a later layer entry writing
+    //     through a symlinked parent directory could escape), but
+    //     `extract_regular` removes existing entries with `unlink`
+    //     (no symlink-follow) before creating, and OCI tar streams
+    //     conventionally lay parent dirs before children. We accept
+    //     absolute symlinks here; openat-relative writes are tracked
+    //     for 0.5.
+    //   * If relative: lexically simulate kernel resolution against
+    //     the link's parent inside `target_root` and reject anything
+    //     that escapes via `..`.
+    if !link_target.is_absolute() {
+        let link_parent = dest
+            .parent()
+            .ok_or_else(|| WispImageError::Tar(format!("symlink dest {dest:?} has no parent")))?;
+        if !verify_symlink_target_safe(&link_target, link_parent, target_root) {
+            return Err(WispImageError::PathTraversal(link_target));
+        }
     }
 
     if let Some(parent) = dest.parent() {
@@ -315,10 +328,13 @@ fn extract_hardlink<R: Read>(
         .ok_or_else(|| WispImageError::Tar("hardlink entry without target".into()))?
         .into_owned();
 
-    // Hardlink targets are always interpreted relative to the rootfs
-    // root (target_root). We require the same lexical purity as entry
-    // paths: no `..`, no absolute paths.
-    let segments = lexical_segments(&link_target)
+    // Hardlink targets in OCI tars are conventionally rootfs-relative,
+    // but real-world images (notably alpine) emit absolute paths like
+    // `/bin/busybox`. Treat a leading `/` as a hint that the target is
+    // relative to the rootfs root and strip it; `..` and other
+    // traversal shapes are still refused via lexical_segments.
+    let normalised = strip_leading_slash(&link_target);
+    let segments = lexical_segments(&normalised)
         .ok_or_else(|| WispImageError::PathTraversal(link_target.clone()))?;
     let source = join_segments(target_root, &segments);
 
@@ -330,6 +346,19 @@ fn extract_hardlink<R: Read>(
     }
     fs::hard_link(&source, dest)?;
     Ok(())
+}
+
+/// If `p` is absolute (`/foo/bar`), return the rootfs-relative form
+/// (`foo/bar`). Otherwise return as-is. Used to coerce absolute hardlink
+/// targets into rootfs-relative form during layer extraction.
+fn strip_leading_slash(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        let s = p.to_string_lossy();
+        let trimmed = s.trim_start_matches('/');
+        PathBuf::from(trimmed)
+    } else {
+        p.to_path_buf()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +668,72 @@ mod tests {
             WispImageError::PathTraversal(_) => {}
             other => panic!("expected PathTraversal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn allows_absolute_symlink_target() {
+        // OCI images (notably alpine) commonly emit symlinks like
+        // `bin/sh -> /bin/busybox`. The kernel resolves them against
+        // the namespace root (the rootfs after pivot_root), so they're
+        // safe; the extractor should preserve them verbatim.
+        let tar_bytes = build_tar(&[
+            (
+                "bin/busybox",
+                Entry::File {
+                    content: b"#!/busybox-stub",
+                    mode: 0o755,
+                },
+            ),
+            (
+                "bin/sh",
+                Entry::Symlink {
+                    link_target: "/bin/busybox",
+                },
+            ),
+        ]);
+        let target = fresh_target();
+        extract_layer(Cursor::new(tar_bytes), MT_OCI_TAR, target.path()).unwrap();
+
+        let link = target.path().join("bin/sh");
+        let resolved = fs::read_link(&link).unwrap();
+        assert_eq!(resolved, std::path::PathBuf::from("/bin/busybox"));
+    }
+
+    #[test]
+    fn coerces_absolute_hardlink_target_to_rootfs_relative() {
+        // A few images emit hardlinks with absolute paths; the extractor
+        // must treat them as rootfs-relative so the link points at the
+        // file we extracted, not the host's `/bin/busybox`.
+        let tar_bytes = build_tar(&[
+            (
+                "bin/busybox",
+                Entry::File {
+                    content: b"bb-content",
+                    mode: 0o755,
+                },
+            ),
+            (
+                "bin/cat",
+                Entry::Hardlink {
+                    link_target: "/bin/busybox",
+                },
+            ),
+        ]);
+        let target = fresh_target();
+        extract_layer(Cursor::new(tar_bytes), MT_OCI_TAR, target.path()).unwrap();
+
+        // The hardlink and target should share content + inode.
+        let link_path = target.path().join("bin/cat");
+        let src_path = target.path().join("bin/busybox");
+        assert_eq!(fs::read(&link_path).unwrap(), b"bb-content");
+        let link_meta = fs::metadata(&link_path).unwrap();
+        let src_meta = fs::metadata(&src_path).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            link_meta.ino(),
+            src_meta.ino(),
+            "hardlink should share inode with target"
+        );
     }
 
     #[test]
