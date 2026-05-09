@@ -6884,6 +6884,12 @@ dependencies = [
 name = "wisp-cli"
 version = "0.1.0-alpha"
 dependencies = [
+ "anyhow",
+ "clap",
+ "nix 0.30.1",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
  "wisp",
 ]
 

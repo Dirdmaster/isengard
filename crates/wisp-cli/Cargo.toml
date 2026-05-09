@@ -14,3 +14,13 @@ path = "src/main.rs"
 
 [dependencies]
 wisp = { path = "../wisp" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# Binary uses synchronous tracing only: no JSON layer, no tokio
+# console. We pull in just `env-filter` + `fmt` so the start-time
+# subscriber init does not spawn helper threads (the `clone3`
+# invariant in `Runtime::start` wants a single-threaded process).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
+nix = { version = "0.30", features = ["signal", "process"] }
+serde_json = { workspace = true }
