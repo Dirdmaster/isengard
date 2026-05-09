@@ -17,6 +17,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 bytes = "1.8"
+# SIGKILL fallback for `Cgroup::kill_all` when the kernel lacks
+# `cgroup.kill` (pre-5.14). Pulled in directly rather than via `nix`:
+# we only need `kill(2)` and `SIGKILL`, and `libc` already lives in the
+# tree as a transitive dep so adding it as a direct dep keeps the
+# crate's ecosystem dependencies tight.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
