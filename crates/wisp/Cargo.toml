@@ -35,7 +35,7 @@ libc = "0.2"
 #   process / signal / sched: needed downstream by lifecycle (clone3,
 #                              CLONE_NEW* flags, SIGCHLD).
 #   user:  uid/gid helpers used during user-namespace setup.
-nix = { version = "0.30", features = ["mount", "fs", "process", "signal", "sched", "user"] }
+nix = { version = "0.30", features = ["mount", "fs", "process", "signal", "sched", "user", "hostname"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Linux capability set manipulation (drop bounding, set permitted /

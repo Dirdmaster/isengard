@@ -13,6 +13,7 @@
 pub mod capability;
 pub mod cgroup;
 pub mod error;
+pub mod lifecycle;
 pub mod mount;
 #[cfg(target_os = "linux")]
 pub mod pivot;
