@@ -514,6 +514,19 @@ fn cmd_run_image(state_dir: &Path, args: RunArgs) -> Result<()> {
         .write_config(overrides)
         .with_context(|| format!("write config.json for {id:?}"))?;
 
+    // Phase 0.3 demo workaround: wisp-image's default capability set
+    // is `KILL` + `NET_BIND_SERVICE` only (the Phase 0.1 busybox demo
+    // is the only thing it formally proves out). Real images like
+    // nginx need `CHOWN` + `SETUID` + `SETGID` + `DAC_OVERRIDE` for
+    // their entrypoint to drop privilege from root to the service
+    // user. Until wisp-image gains a capabilities override (deferred
+    // to a follow-up phase), patch the synthesised config.json in
+    // place so `wisp run --image` runs realistic workloads.
+    let cfg_path = bundle_dir.join("config.json");
+    if let Err(e) = augment_capabilities_in_config(&cfg_path) {
+        tracing::warn!("augment capabilities in {cfg_path:?} (best-effort): {e}");
+    }
+
     // Pin the layer set so a concurrent `wisp image gc` doesn't
     // pull blobs out from under the running container.
     let layer_digests: Vec<String> = pulled.layers.iter().map(|l| l.digest.clone()).collect();
@@ -1087,6 +1100,61 @@ fn derive_id_from_bundle(bundle: &Path) -> String {
         .map(|s| s.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty() && s != "." && s != "..")
         .unwrap_or_else(|| "wisp".to_string())
+}
+
+/// In-place patch the bundle's config.json to grant a fuller
+/// runc-style default capability set to the container's PID 1.
+///
+/// Phase 0.3 needs nginx (and any image whose entrypoint drops privs
+/// from root to a service user) to actually start. wisp-image ships a
+/// pared-down `KILL + NET_BIND_SERVICE` default; this helper folds in
+/// `CHOWN + SETUID + SETGID + DAC_OVERRIDE + FOWNER + SETPCAP` so the
+/// nginx demo works without operator-side spec editing. Idempotent: a
+/// missing `process.capabilities` entry is created; an existing one is
+/// extended, never narrowed.
+fn augment_capabilities_in_config(path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {path:?}"))?;
+
+    let extra = [
+        "CAP_CHOWN",
+        "CAP_SETUID",
+        "CAP_SETGID",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_SETPCAP",
+    ];
+
+    let process = value
+        .get_mut("process")
+        .ok_or_else(|| anyhow!("config.json: no process field"))?;
+    let caps = process
+        .as_object_mut()
+        .and_then(|p| p.get_mut("capabilities"))
+        .ok_or_else(|| anyhow!("config.json: process.capabilities missing"))?;
+    let caps_obj = caps
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("config.json: process.capabilities is not an object"))?;
+
+    for key in ["bounding", "permitted", "effective"] {
+        let arr = caps_obj
+            .entry(key.to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("config.json: process.capabilities.{key} not an array"))?;
+        for cap in extra {
+            let already = arr.iter().any(|v| v.as_str() == Some(cap));
+            if !already {
+                arr.push(serde_json::Value::String(cap.to_string()));
+            }
+        }
+    }
+
+    let new_bytes =
+        serde_json::to_vec_pretty(&value).with_context(|| format!("serialise {path:?}"))?;
+    std::fs::write(path, new_bytes).with_context(|| format!("write {path:?}"))?;
+    Ok(())
 }
 
 /// Default container ID for `wisp run --image <ref>`. Strips the
