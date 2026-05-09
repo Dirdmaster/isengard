@@ -32,6 +32,7 @@ use std::path::{Component, Path, PathBuf};
 use tar::EntryType;
 
 use crate::error::WispImageError;
+use crate::store::ContentStore;
 
 // ---------------------------------------------------------------------------
 // MediaType strings (OCI image-spec + Docker schema 2)
@@ -418,6 +419,69 @@ fn verify_symlink_target_safe(link_target: &Path, link_parent: &Path, target_roo
 }
 
 // ---------------------------------------------------------------------------
+// Multi-layer assembly
+// ---------------------------------------------------------------------------
+
+use crate::registry::LayerRef;
+
+/// Assemble a rootfs by extracting layers in oldest-to-newest order
+/// into `<dest>.partial`, then atomically renaming to `<dest>`.
+///
+/// Layer blobs in the store are read-only; this function never
+/// mutates them. On any error, `<dest>.partial` is removed (best
+/// effort) and the original error is returned. `<dest>` must not
+/// already exist; `<dest>.partial` must not already exist either
+/// (callers should have cleaned a prior failed run before retry).
+pub fn assemble_rootfs(
+    store: &ContentStore,
+    layers: &[LayerRef],
+    dest: &Path,
+) -> Result<(), WispImageError> {
+    if dest.exists() {
+        return Err(WispImageError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("rootfs dest already exists: {dest:?}"),
+        )));
+    }
+    let partial = partial_path(dest);
+    if partial.exists() {
+        return Err(WispImageError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("rootfs partial already exists (clean it first): {partial:?}"),
+        )));
+    }
+
+    fs::create_dir_all(&partial)?;
+
+    let result = (|| -> Result<(), WispImageError> {
+        for layer in layers {
+            let blob = store.open_blob(&layer.digest)?;
+            extract_layer(blob, &layer.media_type, &partial)?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            fs::rename(&partial, dest)?;
+            Ok(())
+        }
+        Err(e) => {
+            // Best-effort cleanup; surface the original error even if
+            // cleanup itself failed.
+            let _ = fs::remove_dir_all(&partial);
+            Err(e)
+        }
+    }
+}
+
+fn partial_path(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_os_string();
+    s.push(".partial");
+    PathBuf::from(s)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -755,5 +819,127 @@ mod tests {
             ),
             other => panic!("expected Tar(_), got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // assemble_rootfs tests
+    // -----------------------------------------------------------------
+
+    fn write_layer_blob(store: &ContentStore, body: &[u8]) -> String {
+        store.write_blob(body).unwrap()
+    }
+
+    #[test]
+    fn assemble_two_layers_overlays_correctly() {
+        let store_dir = fresh_target();
+        let store = ContentStore::new(store_dir.path()).unwrap();
+
+        let layer1 = build_tar(&[(
+            "shared",
+            Entry::File {
+                content: b"layer-1",
+                mode: 0o644,
+            },
+        )]);
+        let layer2 = build_tar(&[(
+            "shared",
+            Entry::File {
+                content: b"layer-2",
+                mode: 0o644,
+            },
+        )]);
+        let d1 = write_layer_blob(&store, &layer1);
+        let d2 = write_layer_blob(&store, &layer2);
+
+        let work = fresh_target();
+        let dest = work.path().join("rootfs");
+        let layers = [
+            LayerRef {
+                digest: d1,
+                size: layer1.len() as u64,
+                media_type: MT_OCI_TAR.to_string(),
+            },
+            LayerRef {
+                digest: d2,
+                size: layer2.len() as u64,
+                media_type: MT_OCI_TAR.to_string(),
+            },
+        ];
+        assemble_rootfs(&store, &layers, &dest).unwrap();
+
+        assert_eq!(fs::read(dest.join("shared")).unwrap(), b"layer-2");
+        assert!(!dest.with_extension("partial").exists());
+    }
+
+    #[test]
+    fn assemble_handles_failure_cleanup() {
+        let store_dir = fresh_target();
+        let store = ContentStore::new(store_dir.path()).unwrap();
+
+        // Corrupt blob: not a valid tar at all.
+        let d = write_layer_blob(&store, b"\x00\x01garbage");
+        let work = fresh_target();
+        let dest = work.path().join("rootfs");
+        let layers = [LayerRef {
+            digest: d,
+            size: 8,
+            media_type: MT_OCI_TAR.to_string(),
+        }];
+        let err = assemble_rootfs(&store, &layers, &dest).unwrap_err();
+        // Either Tar or Io: extraction can fail at either layer of the
+        // stack depending on which corruption the tar crate notices
+        // first. Both are acceptable failure modes here.
+        match err {
+            WispImageError::Tar(_) | WispImageError::Io(_) => {}
+            other => panic!("expected Tar/Io error, got {other:?}"),
+        }
+        assert!(!dest.exists(), "dest must not exist on failure");
+        let partial = partial_path(&dest);
+        assert!(!partial.exists(), "partial must be cleaned up");
+    }
+
+    #[test]
+    fn assemble_handles_whiteout_across_layers() {
+        let store_dir = fresh_target();
+        let store = ContentStore::new(store_dir.path()).unwrap();
+
+        let layer1 = build_tar(&[
+            ("etc/", Entry::Dir { mode: 0o755 }),
+            (
+                "etc/foo",
+                Entry::File {
+                    content: b"foo",
+                    mode: 0o644,
+                },
+            ),
+        ]);
+        let layer2 = build_tar(&[(
+            "etc/.wh.foo",
+            Entry::File {
+                content: b"",
+                mode: 0o644,
+            },
+        )]);
+        let d1 = write_layer_blob(&store, &layer1);
+        let d2 = write_layer_blob(&store, &layer2);
+
+        let work = fresh_target();
+        let dest = work.path().join("rootfs");
+        let layers = [
+            LayerRef {
+                digest: d1,
+                size: layer1.len() as u64,
+                media_type: MT_OCI_TAR.to_string(),
+            },
+            LayerRef {
+                digest: d2,
+                size: layer2.len() as u64,
+                media_type: MT_OCI_TAR.to_string(),
+            },
+        ];
+        assemble_rootfs(&store, &layers, &dest).unwrap();
+
+        assert!(!dest.join("etc/foo").exists());
+        assert!(dest.join("etc").is_dir());
     }
 }
