@@ -17,8 +17,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 
-use crate::credentials::ContextEntry;
-use crate::login::{pinned_session, verify_pinned_response};
+use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct ApplyArgs {
@@ -133,10 +132,10 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
         Some(s) => s.to_string(),
         None => stack_from_path(&args.path)?,
     };
-    let (ctx, client) = pinned_session(context).await?;
-    let stack_id = resolve_stack_id(&ctx, &client, &stack).await?;
-    let current = fetch_compose(&ctx, &client, &stack_id).await?;
-    let plan = preview_diff(&ctx, &client, &stack_id, &body).await?;
+    let session = Session::open(context).await?;
+    let stack_id = resolve_stack_id(&session, &stack).await?;
+    let current = fetch_compose(&session, &stack_id).await?;
+    let plan = preview_diff(&session, &stack_id, &body).await?;
 
     println!("Stack: {} (id {})", stack, stack_id);
     println!();
@@ -167,15 +166,15 @@ pub async fn run_apply(args: ApplyArgs, context: Option<&str>) -> Result<()> {
         .as_ref()
         .map(|c| c.sha256.clone())
         .unwrap_or_default();
-    let outcome = put_compose(&ctx, &client, &stack_id, &body, &expected, args.force).await?;
+    let outcome = put_compose(&session, &stack_id, &body, &expected, args.force).await?;
     println!("Applied. New sha256: {}", outcome.written_sha256);
     Ok(())
 }
 
 pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    let stack_id = resolve_stack_id(&ctx, &client, &args.stack).await?;
-    let current = fetch_compose(&ctx, &client, &stack_id).await?;
+    let session = Session::open(context).await?;
+    let stack_id = resolve_stack_id(&session, &args.stack).await?;
+    let current = fetch_compose(&session, &stack_id).await?;
     let proposed = match args.path.as_ref() {
         Some(p) => read_compose_path(p)?,
         None => String::new(),
@@ -186,16 +185,16 @@ pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
         .unwrap_or("");
 
     print_unified_diff(current_yaml, &proposed);
-    let plan = preview_diff(&ctx, &client, &stack_id, &proposed).await?;
+    let plan = preview_diff(&session, &stack_id, &proposed).await?;
     println!();
     print_plan(&plan);
     Ok(())
 }
 
 pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    let stack_id = resolve_stack_id(&ctx, &client, &args.stack).await?;
-    let current = fetch_compose(&ctx, &client, &stack_id).await?;
+    let session = Session::open(context).await?;
+    let stack_id = resolve_stack_id(&session, &args.stack).await?;
+    let current = fetch_compose(&session, &stack_id).await?;
     let current_yaml = current
         .as_ref()
         .map(|c| c.compose_yaml.clone())
@@ -230,7 +229,7 @@ pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let plan = preview_diff(&ctx, &client, &stack_id, &edited).await?;
+    let plan = preview_diff(&session, &stack_id, &edited).await?;
     print_unified_diff(&current_yaml, &edited);
     println!();
     print_plan(&plan);
@@ -247,7 +246,7 @@ pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
         println!("Aborted.");
         return Ok(());
     }
-    let outcome = put_compose(&ctx, &client, &stack_id, &edited, &expected, false).await?;
+    let outcome = put_compose(&session, &stack_id, &edited, &expected, false).await?;
     println!("Applied. New sha256: {}", outcome.written_sha256);
     Ok(())
 }
@@ -282,19 +281,14 @@ fn stack_from_path(path: &std::path::Path) -> Result<String> {
     })
 }
 
-async fn resolve_stack_id(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
-    name: &str,
-) -> Result<String> {
-    let url = format!("{}/api/v1/stacks", ctx.controller_url);
-    let resp = client
+async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
+    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let resp = session
+        .client
         .get(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let stacks: Vec<StackDto> = resp.error_for_status()?.json().await?;
     let stack = stacks
         .into_iter()
@@ -303,19 +297,17 @@ async fn resolve_stack_id(
     Ok(stack.id)
 }
 
-async fn fetch_compose(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
-    stack_id: &str,
-) -> Result<Option<ComposeResponse>> {
-    let url = format!("{}/api/v1/stacks/{stack_id}/compose", ctx.controller_url);
-    let resp = client
+async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<ComposeResponse>> {
+    let url = format!(
+        "{}/api/v1/stacks/{stack_id}/compose",
+        session.controller_url()
+    );
+    let resp = session
+        .client
         .get(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     if resp.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(None);
     }
@@ -323,48 +315,43 @@ async fn fetch_compose(
     Ok(Some(cr))
 }
 
-async fn preview_diff(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
-    stack_id: &str,
-    proposed: &str,
-) -> Result<ReconcilePlan> {
-    let url = format!("{}/api/v1/stacks/{stack_id}/diff", ctx.controller_url);
-    let resp = client
+async fn preview_diff(session: &Session, stack_id: &str, proposed: &str) -> Result<ReconcilePlan> {
+    let url = format!("{}/api/v1/stacks/{stack_id}/diff", session.controller_url());
+    let resp = session
+        .client
         .post(&url)
-        .bearer_auth(&ctx.token)
         .header("Content-Type", "application/yaml")
         .body(proposed.to_string())
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let plan: ReconcilePlan = resp.error_for_status()?.json().await?;
     Ok(plan)
 }
 
 async fn put_compose(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
+    session: &Session,
     stack_id: &str,
     body: &str,
     expected_sha256: &str,
     force: bool,
 ) -> Result<PutOk> {
-    let mut url = format!("{}/api/v1/stacks/{stack_id}/compose", ctx.controller_url);
+    let mut url = format!(
+        "{}/api/v1/stacks/{stack_id}/compose",
+        session.controller_url()
+    );
     if force {
         url.push_str("?force=true");
     }
-    let mut req = client
+    let mut req = session
+        .client
         .put(&url)
-        .bearer_auth(&ctx.token)
         .header("Content-Type", "application/yaml")
         .body(body.to_string());
     if !expected_sha256.is_empty() {
         req = req.header("If-Match", expected_sha256);
     }
     let resp = req.send().await.with_context(|| format!("PUT {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let status = resp.status();
     if status == reqwest::StatusCode::CONFLICT {
         let conflict: PutConflict = resp.json().await.context("decoding 409 body")?;

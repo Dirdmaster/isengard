@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result, anyhow};
 use clap::Args;
 use serde::Deserialize;
 
-use crate::login::{pinned_session, verify_pinned_response};
+use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct OpenArgs {
@@ -43,15 +43,15 @@ struct RoutingRuleDto {
 }
 
 pub async fn run(args: OpenArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
+    let session = Session::open(context).await?;
 
-    let stacks_resp = client
-        .get(format!("{}/api/v1/stacks", ctx.controller_url))
-        .bearer_auth(&ctx.token)
+    let stacks_resp = session
+        .client
+        .get(format!("{}/api/v1/stacks", session.controller_url()))
         .send()
         .await
         .context("GET /api/v1/stacks")?;
-    verify_pinned_response(&stacks_resp, &ctx.ca_fingerprint_sha256)?;
+
     let stacks: Vec<StackDto> = stacks_resp
         .error_for_status()
         .context("listing stacks")?
@@ -70,13 +70,13 @@ pub async fn run(args: OpenArgs, context: Option<&str>) -> Result<()> {
         )
     })?;
 
-    let rules_resp = client
-        .get(format!("{}/api/v1/routing/rules", ctx.controller_url))
-        .bearer_auth(&ctx.token)
+    let rules_resp = session
+        .client
+        .get(format!("{}/api/v1/routing/rules", session.controller_url()))
         .send()
         .await
         .context("GET /api/v1/routing/rules")?;
-    verify_pinned_response(&rules_resp, &ctx.ca_fingerprint_sha256)?;
+
     let rules: Vec<RoutingRuleDto> = rules_resp
         .error_for_status()
         .context("listing routing rules")?

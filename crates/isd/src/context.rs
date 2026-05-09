@@ -1,0 +1,324 @@
+//! `isd context create | use | list | rm | show`.
+//!
+//! Replaces the old `isd login` command. Each context records a
+//! [`Backend`](crate::credentials::Backend) — either an HTTP URL the
+//! operator can reach directly, or an SSH target whose `~/.ssh/config`
+//! handles authentication and the controller's dashboard port is
+//! tunneled per-command. Modeled on `docker context create`.
+
+use anyhow::{Context as _, Result, anyhow};
+use clap::{Args, Subcommand};
+use comfy_table::{ContentArrangement, Table, presets::NOTHING};
+
+use crate::credentials::{self, Backend, ContextEntry};
+
+#[derive(Debug, Args)]
+pub struct ContextArgs {
+    #[command(subcommand)]
+    pub command: ContextCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContextCommand {
+    /// Save a new context. Choose `--ssh` for remote homelabs (the
+    /// canonical path) or `--http` for local dev / direct-reachable
+    /// dashboards.
+    Create(CreateArgs),
+    /// Set the default context. Subsequent `isd` commands without
+    /// `--context <name>` use this one.
+    Use(UseArgs),
+    /// Show every saved context, with the default one starred.
+    List,
+    /// Delete a context. Idempotent: errors if the name doesn't exist
+    /// (so a typo doesn't silently no-op).
+    Rm(RmArgs),
+    /// Print one context's full backend details. Defaults to the
+    /// current default if no name is given.
+    Show(ShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Context name. Used in `--context <name>` and as the key in the
+    /// credentials file. Allowed chars: `[A-Za-z0-9._-]{1,64}`.
+    pub name: String,
+
+    /// SSH target — anything `ssh` understands. Examples:
+    /// `dirdmaster@10.17.0.125`, `lausanne` (resolved via
+    /// `~/.ssh/config`), `user@host:2222`. Mutually exclusive with
+    /// `--http`.
+    #[arg(long, conflicts_with = "http")]
+    pub ssh: Option<String>,
+
+    /// HTTP/HTTPS URL of the dashboard, including scheme and port.
+    /// Example: `http://127.0.0.1:9418`. Mutually exclusive with
+    /// `--ssh`.
+    #[arg(long, conflicts_with = "ssh")]
+    pub http: Option<String>,
+
+    /// Dashboard port on the remote (SSH backend only). The tunnel
+    /// forwards `127.0.0.1:<dashboard-port>` on the remote to a local
+    /// ephemeral port for each `isd` command.
+    #[arg(long, default_value_t = 9418, requires = "ssh")]
+    pub dashboard_port: u16,
+
+    /// Set this context as the default after creating it. Without this
+    /// flag, the first context created becomes the default; subsequent
+    /// `create` invocations leave the default alone.
+    #[arg(long)]
+    pub r#use: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UseArgs {
+    /// Context name to mark as default.
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RmArgs {
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {
+    /// Context name to print. Defaults to the file's `default_context`.
+    pub name: Option<String>,
+}
+
+pub async fn run(args: ContextArgs) -> Result<()> {
+    match args.command {
+        ContextCommand::Create(a) => run_create(a).await,
+        ContextCommand::Use(a) => run_use(a).await,
+        ContextCommand::List => run_list().await,
+        ContextCommand::Rm(a) => run_rm(a).await,
+        ContextCommand::Show(a) => run_show(a).await,
+    }
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(anyhow!(
+            "name length must be 1..=64 chars (got {})",
+            name.len()
+        ));
+    }
+    for c in name.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+            return Err(anyhow!(
+                "invalid char {c:?} in context name {name:?} (allowed: [A-Za-z0-9._-])"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn run_create(args: CreateArgs) -> Result<()> {
+    validate_name(&args.name)?;
+
+    let backend = match (args.ssh.as_deref(), args.http.as_deref()) {
+        (Some(target), None) => Backend::Ssh {
+            target: target.to_string(),
+            dashboard_port: args.dashboard_port,
+        },
+        (None, Some(url)) => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(anyhow!("--http URL must start with http:// or https://"));
+            }
+            Backend::Http {
+                url: url.trim_end_matches('/').to_string(),
+            }
+        }
+        (Some(_), Some(_)) => {
+            // clap's conflicts_with should have caught this; defensive
+            // belt for the unlikely case.
+            return Err(anyhow!("--ssh and --http are mutually exclusive"));
+        }
+        (None, None) => {
+            return Err(anyhow!(
+                "exactly one of --ssh <target> or --http <url> is required"
+            ));
+        }
+    };
+
+    let path = credentials::default_credentials_path()?;
+    let mut file = credentials::load(&path)?;
+    let ctx = ContextEntry {
+        name: args.name.clone(),
+        backend,
+    };
+    let was_first = file.contexts.is_empty();
+    file.upsert(ctx);
+    if args.r#use {
+        file.set_default(&args.name)?;
+    }
+    credentials::save(&path, &file)?;
+
+    let suffix = if was_first || args.r#use {
+        " (set as default)"
+    } else {
+        ""
+    };
+    println!("Saved context {:?}{suffix}.", args.name);
+    Ok(())
+}
+
+async fn run_use(args: UseArgs) -> Result<()> {
+    let path = credentials::default_credentials_path()?;
+    let mut file = credentials::load(&path)?;
+    file.set_default(&args.name)?;
+    credentials::save(&path, &file)?;
+    println!("Default context is now {:?}.", args.name);
+    Ok(())
+}
+
+async fn run_list() -> Result<()> {
+    let path = credentials::default_credentials_path()?;
+    let file = credentials::load(&path)?;
+    if file.contexts.is_empty() {
+        println!("No contexts saved. Create one with `isd context create <name> --ssh <target>`.");
+        return Ok(());
+    }
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Disabled)
+        .set_header(vec!["", "NAME", "KIND", "TARGET"]);
+    let default = file.default_context.as_deref();
+    for ctx in &file.contexts {
+        let star = if Some(ctx.name.as_str()) == default {
+            "*"
+        } else {
+            ""
+        };
+        let (kind, target) = match &ctx.backend {
+            Backend::Http { url } => ("http", url.clone()),
+            Backend::Ssh {
+                target,
+                dashboard_port,
+            } => ("ssh", format!("{target}  (forward :{dashboard_port})")),
+        };
+        table.add_row(vec![
+            star.to_string(),
+            ctx.name.clone(),
+            kind.into(),
+            target,
+        ]);
+    }
+    println!("{table}");
+    Ok(())
+}
+
+async fn run_rm(args: RmArgs) -> Result<()> {
+    let path = credentials::default_credentials_path()?;
+    let mut file = credentials::load(&path)?;
+    if !file.remove(&args.name) {
+        return Err(anyhow!("no saved context named {:?}", args.name));
+    }
+    credentials::save(&path, &file)?;
+    println!("Removed context {:?}.", args.name);
+    Ok(())
+}
+
+async fn run_show(args: ShowArgs) -> Result<()> {
+    let path = credentials::default_credentials_path()?;
+    let file = credentials::load(&path)?;
+    let ctx = file
+        .default_or_named(args.name.as_deref())
+        .context("resolving context")?;
+    println!("name:    {}", ctx.name);
+    match &ctx.backend {
+        Backend::Http { url } => {
+            println!("kind:    http");
+            println!("url:     {url}");
+        }
+        Backend::Ssh {
+            target,
+            dashboard_port,
+        } => {
+            println!("kind:    ssh");
+            println!("target:  {target}");
+            println!("forward: 127.0.0.1:<ephemeral> -> {target}:{dashboard_port}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn create_with_ssh_parses() {
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: ContextCommand,
+        }
+        let w =
+            Wrap::try_parse_from(["x", "create", "lausanne", "--ssh", "dirdmaster@10.17.0.125"])
+                .unwrap();
+        match w.c {
+            ContextCommand::Create(a) => {
+                assert_eq!(a.name, "lausanne");
+                assert_eq!(a.ssh.as_deref(), Some("dirdmaster@10.17.0.125"));
+                assert_eq!(a.dashboard_port, 9418);
+                assert!(!a.r#use);
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_with_http_parses() {
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: ContextCommand,
+        }
+        let w = Wrap::try_parse_from([
+            "x",
+            "create",
+            "local",
+            "--http",
+            "http://127.0.0.1:9418",
+            "--use",
+        ])
+        .unwrap();
+        match w.c {
+            ContextCommand::Create(a) => {
+                assert_eq!(a.http.as_deref(), Some("http://127.0.0.1:9418"));
+                assert!(a.r#use);
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_rejects_both_backends() {
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: ContextCommand,
+        }
+        let res = Wrap::try_parse_from([
+            "x",
+            "create",
+            "x",
+            "--ssh",
+            "user@host",
+            "--http",
+            "http://x",
+        ]);
+        assert!(res.is_err(), "ssh + http should conflict");
+    }
+
+    #[test]
+    fn validate_name_rejects_bad_chars() {
+        assert!(validate_name("ok-1.name").is_ok());
+        assert!(validate_name("nope/slash").is_err());
+        assert!(validate_name("").is_err());
+        assert!(validate_name(&"x".repeat(65)).is_err());
+    }
+}

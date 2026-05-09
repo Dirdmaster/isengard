@@ -1,35 +1,136 @@
 //! Credentials store at `~/.config/isengard/credentials.toml`.
 //!
-//! TOML shape (multi-context, additive):
+//! Each saved context selects a backend that determines how `isd` reaches
+//! the controller:
+//!
+//! - **`http`**: direct HTTP/HTTPS to a URL the operator can reach. Used
+//!   for local dev (`http://127.0.0.1:9418`).
+//! - **`ssh`**: tunnel to the controller via SSH. The operator's existing
+//!   SSH config (Hosts, IdentityFile, ProxyJump, agent forwarding)
+//!   handles authentication; isd shells out to system `ssh` to set up a
+//!   port forward for each command's lifetime. Modeled on
+//!   `docker context create --docker host=ssh://...`.
+//!
+//! TOML shape:
 //!
 //! ```toml
-//! default_context = "default"
+//! default_context = "lausanne"
 //!
 //! [[contexts]]
-//! name = "default"
-//! controller_url = "https://controller.local:9417"
-//! token = "..."
-//! ca_fingerprint_sha256 = "ab:cd:..."
+//! name = "lausanne"
+//! kind = "ssh"
+//! target = "dirdmaster@10.17.0.125"
+//! dashboard_port = 9418
+//!
+//! [[contexts]]
+//! name = "local"
+//! kind = "http"
+//! url = "http://127.0.0.1:9418"
 //! ```
 //!
-//! v0.3a writes a single context (`default`) on `isd login`. Future
-//! subcommands `isd context add / use` round out multi-controller workflows
-//! without changing the file shape.
+//! Legacy entries (pre-context-redesign) used `controller_url` + `token`
+//!     + `ca_fingerprint_sha256` fields with no `kind`. Those are auto-
+//!     migrated to `kind = "http"` on read; the token + fingerprint
+//!     fields are dropped.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+/// How `isd` reaches the controller for a given context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Backend {
+    /// Direct HTTP/HTTPS to a URL.
+    Http {
+        /// Full URL including scheme + port (e.g. `http://127.0.0.1:9418`).
+        url: String,
+    },
+    /// SSH tunnel. `target` is whatever `ssh` understands (`user@host`,
+    /// `host`, or a `Host` alias from `~/.ssh/config`).
+    Ssh {
+        target: String,
+        /// Port the controller's dashboard listens on inside the SSH
+        /// destination. Tunnel forwards `localhost:<ephemeral>` ->
+        /// `127.0.0.1:<dashboard_port>` on the remote.
+        #[serde(default = "default_dashboard_port")]
+        dashboard_port: u16,
+    },
+}
+
+fn default_dashboard_port() -> u16 {
+    9418
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ContextEntry {
     pub name: String,
-    pub controller_url: String,
-    pub token: String,
-    /// Colon-separated lowercase hex SHA-256 fingerprint (e.g.
-    /// `ab:cd:ef:...`) of the controller's TLS leaf cert. Captured at
-    /// `isd login` and re-verified on every subsequent connect.
-    pub ca_fingerprint_sha256: String,
+    #[serde(flatten)]
+    pub backend: Backend,
+}
+
+/// Custom deserialize so legacy entries (with `controller_url` + `token` +
+/// `ca_fingerprint_sha256` and no `kind`) migrate cleanly to the new
+/// `Http`-backend shape on first read. Operators don't have to re-run
+/// `isd login` (which is gone) just because they upgraded.
+impl<'de> Deserialize<'de> for ContextEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            name: String,
+            #[serde(default)]
+            kind: Option<String>,
+            // new-shape fields
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            target: Option<String>,
+            #[serde(default)]
+            dashboard_port: Option<u16>,
+            // legacy-shape fields (read-only, dropped on next save)
+            #[serde(default)]
+            controller_url: Option<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            token: Option<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            ca_fingerprint_sha256: Option<String>,
+        }
+        let raw = Raw::deserialize(de)?;
+        let backend = match raw.kind.as_deref() {
+            Some("http") => Backend::Http {
+                url: raw
+                    .url
+                    .ok_or_else(|| serde::de::Error::custom("kind=http requires `url`"))?,
+            },
+            Some("ssh") => Backend::Ssh {
+                target: raw
+                    .target
+                    .ok_or_else(|| serde::de::Error::custom("kind=ssh requires `target`"))?,
+                dashboard_port: raw.dashboard_port.unwrap_or_else(default_dashboard_port),
+            },
+            Some(other) => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown context kind {other:?} (expected `http` or `ssh`)"
+                )));
+            }
+            None => {
+                // Legacy: controller_url -> Http migration.
+                let url = raw.controller_url.ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "legacy context missing both `kind` and `controller_url`",
+                    )
+                })?;
+                Backend::Http { url }
+            }
+        };
+        Ok(ContextEntry {
+            name: raw.name,
+            backend,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,14 +150,12 @@ impl CredentialsFile {
     /// look-up fails so subcommands can stop early with a clear message.
     pub fn default_or_named(&self, name: Option<&str>) -> Result<&ContextEntry> {
         match name {
-            Some(n) => self
-                .contexts
-                .iter()
-                .find(|c| c.name == n)
-                .with_context(|| format!("no saved context named {n:?}; run `isd login` first")),
+            Some(n) => self.contexts.iter().find(|c| c.name == n).with_context(|| {
+                format!("no saved context named {n:?}; run `isd context create` first")
+            }),
             None => {
                 let want = self.default_context.as_deref().with_context(
-                    || "no default context set; run `isd login <controller_url>` first",
+                    || "no default context set; run `isd context create <name> --ssh <target>` first",
                 )?;
                 self.contexts
                     .iter()
@@ -68,15 +167,40 @@ impl CredentialsFile {
         }
     }
 
-    /// Insert (or replace) the named context and set it as the default.
-    pub fn upsert_default(&mut self, ctx: ContextEntry) {
+    /// Insert (or replace) the named context. Sets it as default if the file
+    /// has no default yet; otherwise leaves the default untouched.
+    pub fn upsert(&mut self, ctx: ContextEntry) {
         let name = ctx.name.clone();
         if let Some(slot) = self.contexts.iter_mut().find(|c| c.name == name) {
             *slot = ctx;
         } else {
             self.contexts.push(ctx);
         }
-        self.default_context = Some(name);
+        if self.default_context.is_none() {
+            self.default_context = Some(name);
+        }
+    }
+
+    /// Set the default context to `name`. Errors if no such context exists.
+    pub fn set_default(&mut self, name: &str) -> Result<()> {
+        if !self.contexts.iter().any(|c| c.name == name) {
+            anyhow::bail!("no saved context named {name:?}");
+        }
+        self.default_context = Some(name.to_string());
+        Ok(())
+    }
+
+    /// Remove a context. If it was the default, clears the default (caller
+    /// can pick a new one with `set_default`). Returns whether a context was
+    /// removed.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.contexts.len();
+        self.contexts.retain(|c| c.name != name);
+        let removed = before != self.contexts.len();
+        if removed && self.default_context.as_deref() == Some(name) {
+            self.default_context = None;
+        }
+        removed
     }
 }
 
@@ -140,26 +264,59 @@ fn set_owner_only_perms(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn entry(name: &str) -> ContextEntry {
+    fn http_entry(name: &str) -> ContextEntry {
         ContextEntry {
             name: name.into(),
-            controller_url: "https://controller.local:9417".into(),
-            token: "tok-1234".into(),
-            ca_fingerprint_sha256: "ab:cd:ef".into(),
+            backend: Backend::Http {
+                url: "http://127.0.0.1:9418".into(),
+            },
+        }
+    }
+
+    fn ssh_entry(name: &str, target: &str) -> ContextEntry {
+        ContextEntry {
+            name: name.into(),
+            backend: Backend::Ssh {
+                target: target.into(),
+                dashboard_port: 9418,
+            },
         }
     }
 
     #[test]
-    fn round_trip_preserves_defaults_and_contexts() {
+    fn round_trip_preserves_http_and_ssh_contexts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let mut file = CredentialsFile::default();
-        file.upsert_default(entry("home"));
-        file.upsert_default(entry("work"));
+        file.upsert(http_entry("local"));
+        file.upsert(ssh_entry("lausanne", "dirdmaster@10.17.0.125"));
         save(&path, &file).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded, file);
-        assert_eq!(loaded.default_context.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn legacy_controller_url_migrates_to_http_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.toml");
+        // Hand-write the old TOML shape to simulate a pre-redesign file.
+        let legacy = r#"
+default_context = "default"
+
+[[contexts]]
+name = "default"
+controller_url = "http://127.0.0.1:9418"
+token = "abc"
+ca_fingerprint_sha256 = ""
+"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.contexts.len(), 1);
+        assert_eq!(loaded.contexts[0].name, "default");
+        match &loaded.contexts[0].backend {
+            Backend::Http { url } => assert_eq!(url, "http://127.0.0.1:9418"),
+            other => panic!("expected Http backend, got {other:?}"),
+        }
     }
 
     #[test]
@@ -173,7 +330,7 @@ mod tests {
     #[test]
     fn default_or_named_resolves_in_both_modes() {
         let mut file = CredentialsFile::default();
-        file.upsert_default(entry("home"));
+        file.upsert(http_entry("home"));
         let resolved = file.default_or_named(None).unwrap();
         assert_eq!(resolved.name, "home");
         let by_name = file.default_or_named(Some("home")).unwrap();
@@ -182,15 +339,46 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replaces_existing_and_updates_default() {
+    fn upsert_only_promotes_default_when_unset() {
         let mut file = CredentialsFile::default();
-        file.upsert_default(entry("home"));
-        let mut second = entry("home");
-        second.token = "rotated".into();
-        file.upsert_default(second.clone());
-        assert_eq!(file.contexts.len(), 1);
-        assert_eq!(file.contexts[0].token, "rotated");
+        file.upsert(http_entry("home"));
         assert_eq!(file.default_context.as_deref(), Some("home"));
+        file.upsert(ssh_entry("work", "user@work"));
+        // Default stays "home" because it was already set.
+        assert_eq!(file.default_context.as_deref(), Some("home"));
+        file.set_default("work").unwrap();
+        assert_eq!(file.default_context.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn remove_clears_default_when_removing_the_default() {
+        let mut file = CredentialsFile::default();
+        file.upsert(http_entry("home"));
+        file.upsert(ssh_entry("work", "user@work"));
+        file.set_default("work").unwrap();
+        assert!(file.remove("work"));
+        assert_eq!(file.default_context, None);
+        assert!(!file.remove("nonexistent"));
+    }
+
+    #[test]
+    fn ssh_dashboard_port_defaults_to_9418_when_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.toml");
+        let raw = r#"
+default_context = "lausanne"
+
+[[contexts]]
+name = "lausanne"
+kind = "ssh"
+target = "dirdmaster@10.17.0.125"
+"#;
+        std::fs::write(&path, raw).unwrap();
+        let loaded = load(&path).unwrap();
+        match &loaded.contexts[0].backend {
+            Backend::Ssh { dashboard_port, .. } => assert_eq!(*dashboard_port, 9418),
+            other => panic!("expected Ssh backend, got {other:?}"),
+        }
     }
 
     #[test]
@@ -200,7 +388,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let mut file = CredentialsFile::default();
-        file.upsert_default(entry("home"));
+        file.upsert(http_entry("home"));
         save(&path, &file).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

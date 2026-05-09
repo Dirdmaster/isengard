@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
-use crate::credentials::ContextEntry;
-use crate::login::{pinned_session, verify_pinned_response};
+use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct SecretArgs {
@@ -91,16 +90,16 @@ async fn run_put(args: PutArgs, context: Option<&str>) -> Result<()> {
             "value is empty; refusing to store an empty secret. Pipe data on stdin or pass --from-file <path>."
         ));
     }
-    let (ctx, client) = pinned_session(context).await?;
-    put_secret(&ctx, &client, &args.name, value).await?;
+    let session = Session::open(context).await?;
+    put_secret(&session, &args.name, value).await?;
     // Echo nothing about the value. Confirmation by name only.
     println!("Stored secret {:?}.", args.name);
     Ok(())
 }
 
 async fn run_list(context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    let entries = list_secrets(&ctx, &client).await?;
+    let session = Session::open(context).await?;
+    let entries = list_secrets(&session).await?;
     if entries.is_empty() {
         println!("No secrets stored.");
         return Ok(());
@@ -122,8 +121,8 @@ async fn run_list(context: Option<&str>) -> Result<()> {
 }
 
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
-    let (ctx, client) = pinned_session(context).await?;
-    delete_secret(&ctx, &client, &args.name).await?;
+    let session = Session::open(context).await?;
+    delete_secret(&session, &args.name).await?;
     println!("Removed secret {:?}.", args.name);
     Ok(())
 }
@@ -151,21 +150,15 @@ fn read_value(from_file: Option<&std::path::Path>) -> Result<String> {
     }
 }
 
-async fn put_secret(
-    ctx: &ContextEntry,
-    client: &reqwest::Client,
-    name: &str,
-    value: String,
-) -> Result<()> {
-    let url = format!("{}/api/v1/secrets/{name}", ctx.controller_url);
-    let resp = client
+async fn put_secret(session: &Session, name: &str, value: String) -> Result<()> {
+    let url = format!("{}/api/v1/secrets/{name}", session.controller_url());
+    let resp = session
+        .client
         .put(&url)
-        .bearer_auth(&ctx.token)
         .json(&PutBody { value })
         .send()
         .await
         .with_context(|| format!("PUT {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let status = resp.status();
     if status.is_success() {
         return Ok(());
@@ -174,28 +167,26 @@ async fn put_secret(
     Err(anyhow!("PUT {url} -> {status}: {body}"))
 }
 
-async fn list_secrets(ctx: &ContextEntry, client: &reqwest::Client) -> Result<Vec<SecretEntry>> {
-    let url = format!("{}/api/v1/secrets", ctx.controller_url);
-    let resp = client
+async fn list_secrets(session: &Session) -> Result<Vec<SecretEntry>> {
+    let url = format!("{}/api/v1/secrets", session.controller_url());
+    let resp = session
+        .client
         .get(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let entries: Vec<SecretEntry> = resp.error_for_status()?.json().await?;
     Ok(entries)
 }
 
-async fn delete_secret(ctx: &ContextEntry, client: &reqwest::Client, name: &str) -> Result<()> {
-    let url = format!("{}/api/v1/secrets/{name}", ctx.controller_url);
-    let resp = client
+async fn delete_secret(session: &Session, name: &str) -> Result<()> {
+    let url = format!("{}/api/v1/secrets/{name}", session.controller_url());
+    let resp = session
+        .client
         .delete(&url)
-        .bearer_auth(&ctx.token)
         .send()
         .await
         .with_context(|| format!("DELETE {url}"))?;
-    verify_pinned_response(&resp, &ctx.ca_fingerprint_sha256)?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(anyhow!("secret {name:?} not found"));
