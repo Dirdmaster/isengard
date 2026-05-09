@@ -9,8 +9,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use isengard_controller::ControllerHandles;
 use isengard_core::policy::{PolicyContext, resolve_policy};
-use isengard_storage::{HostId, StackId};
-use serde::Deserialize;
+use isengard_storage::{HostId, InsertStack, StackId, StackSource};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, warn};
 
@@ -27,7 +27,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/hosts/{id}/events", get(host_events))
         .route("/hosts/{id}/sparkline", get(get_host_sparkline))
         .route("/hosts/{id}/actions/force-update", post(force_update_host))
-        .route("/stacks", get(list_stacks))
+        .route("/stacks", get(list_stacks).post(create_stack))
         .route("/stacks/{id}", get(get_stack))
         .route(
             "/stacks/{id}/compose",
@@ -688,6 +688,188 @@ async fn put_stack_compose(
 struct PutComposeQuery {
     /// Skip the optimistic concurrency check. False / absent by default.
     force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateStackBody {
+    /// Stack name. Must be unique per host (the storage layer enforces).
+    name: String,
+    /// Compose YAML for the new stack. Sent to the agent via WriteCompose
+    /// so it lands at `/etc/isengard/stacks/<name>/compose.yml` on the
+    /// host. Same wire path as `PUT /stacks/:id/compose`.
+    compose_yaml: String,
+    /// Target host. Optional: when omitted and exactly one host is
+    /// enrolled in the fleet (the homelab single-host case), it's
+    /// auto-selected. With multiple hosts, the operator must specify.
+    #[serde(default)]
+    host_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateStackResponse {
+    id: String,
+    name: String,
+    host_id: String,
+    written_sha256: String,
+}
+
+/// `POST /api/v1/stacks`.
+///
+/// Create a new stack from a compose.yaml. Behaves like `PUT
+/// /stacks/:id/compose` but for the case where the stack doesn't exist
+/// yet: inserts the row, then forwards the YAML to the agent via the
+/// existing WriteCompose path. The CLI uses this for `isd deploy <path>`
+/// when the stack name isn't yet in the controller's inventory; the
+/// dashboard will use it for the future "new stack" button.
+///
+/// Status codes:
+/// - 201: stack created; body has `{ id, name, host_id, written_sha256 }`.
+/// - 400: bad host_id (not a ULID, no enrolled hosts, or ambiguous).
+/// - 409: stack name already exists on this host.
+/// - 503: agent for the chosen host isn't connected.
+/// - 504: agent didn't ack the WriteCompose within the timeout.
+async fn create_stack(
+    State(handles): State<Arc<ControllerHandles>>,
+    Json(body): Json<CreateStackBody>,
+) -> Response {
+    if body.name.trim().is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "stack name is empty");
+    }
+    if body.compose_yaml.trim().is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "compose_yaml is empty");
+    }
+
+    // Resolve the target host. Operator-supplied host_id wins; otherwise
+    // we auto-pick when exactly one host is enrolled (homelab single-host
+    // pattern). Multi-host without explicit host_id is rejected with a
+    // helpful error so the operator can rerun with --host-id.
+    let host_id = match body.host_id.as_deref() {
+        Some(s) => match parse_host_id(s) {
+            Ok(h) => h,
+            Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
+        },
+        None => {
+            let hosts = match handles.inventory.list_hosts().await {
+                Ok(h) => h,
+                Err(e) => {
+                    return json_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("list_hosts: {e}"),
+                    );
+                }
+            };
+            match hosts.len() {
+                0 => {
+                    return json_err(
+                        StatusCode::BAD_REQUEST,
+                        "no hosts enrolled; enroll an agent before creating a stack",
+                    );
+                }
+                1 => hosts[0].id,
+                _ => {
+                    return json_err(
+                        StatusCode::BAD_REQUEST,
+                        "multiple hosts enrolled; specify `host_id` in the body",
+                    );
+                }
+            }
+        }
+    };
+
+    let stack_id = match handles
+        .inventory
+        .insert_stack(InsertStack {
+            host_id,
+            name: body.name.clone(),
+            source: StackSource::Compose,
+        })
+        .await
+    {
+        Ok(id) => id,
+        Err(e) if e.to_string().to_lowercase().contains("unique") => {
+            return json_err(
+                StatusCode::CONFLICT,
+                format!("stack {:?} already exists on this host", body.name),
+            );
+        }
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("insert_stack: {e}"),
+            );
+        }
+    };
+
+    // Same WriteCompose path as `put_stack_compose`. force=true because
+    // there's nothing on disk to optimistic-conflict against on a fresh
+    // stack; expected_sha256="" for the same reason.
+    let request_id = ulid::Ulid::new().to_string();
+    let rx = handles.compose_broker.register(request_id.clone()).await;
+
+    let msg = isengard_proto::pb::ControllerMessage {
+        payload: Some(
+            isengard_proto::pb::controller_message::Payload::WriteCompose(
+                isengard_proto::pb::WriteCompose {
+                    request_id: request_id.clone(),
+                    stack_name: body.name.clone(),
+                    compose_yaml: body.compose_yaml,
+                    expected_sha256: String::new(),
+                    force: true,
+                },
+            ),
+        ),
+    };
+    if let Err(e) = handles.routing.send_message_to_host(host_id, msg).await {
+        handles.compose_broker.cancel(&request_id).await;
+        return json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("agent not connected: {e}"),
+        );
+    }
+
+    let ack = match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        Ok(Ok(ack)) => ack,
+        Ok(Err(_)) => {
+            handles.compose_broker.cancel(&request_id).await;
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "broker dropped sender");
+        }
+        Err(_) => {
+            handles.compose_broker.cancel(&request_id).await;
+            return json_err(StatusCode::GATEWAY_TIMEOUT, "agent timed out responding");
+        }
+    };
+
+    use isengard_proto::pb::write_compose_ack::Kind;
+    match Kind::try_from(ack.kind).unwrap_or(Kind::Unspecified) {
+        Kind::Ok => (
+            StatusCode::CREATED,
+            Json(CreateStackResponse {
+                id: stack_id.0.to_string(),
+                name: body.name,
+                host_id: host_id.to_string(),
+                written_sha256: ack.written_sha256,
+            }),
+        )
+            .into_response(),
+        // The fresh-stack path uses force=true so a hash conflict here
+        // would be surprising; surface it as a 500 with the agent's
+        // current state so the operator can debug.
+        Kind::Conflict => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "agent reported a hash conflict on a brand-new stack (current_sha256={}); this should be impossible — open an issue",
+                ack.current_sha256
+            ),
+        ),
+        Kind::Error => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("agent error writing compose: {}", ack.error),
+        ),
+        Kind::Unspecified => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "agent ack kind unspecified",
+        ),
+    }
 }
 
 /// `POST /api/v1/stacks/:id/diff` (v0.3d).
