@@ -6,6 +6,7 @@
 //! split mirrors `wisp::mount::plan_mounts` from phase 0.1 and keeps the
 //! Mac dev loop unit-testable.
 
+use crate::cmd;
 use crate::error::WispNetError;
 use std::net::Ipv4Addr;
 
@@ -117,6 +118,118 @@ pub fn plan_delete(net: &Network) -> Vec<IpCommand> {
         "type",
         "bridge",
     ])]
+}
+
+/// Idempotent bridge create.
+///
+/// 1. If `<bridge>` already exists, verify its assigned address matches
+///    `<gateway>/<prefix>`. Mismatch -> [`WispNetError::Conflict`]. Match
+///    -> no-op.
+/// 2. Otherwise walk [`plan_create`] in order, calling `ip` for each
+///    step. On any failure mid-way, run [`plan_delete`] best-effort to
+///    avoid leaving a half-configured bridge.
+pub fn ensure(net: &Network) -> Result<(), WispNetError> {
+    if bridge_exists(&net.bridge)? {
+        verify_bridge_addr_matches(net)?;
+        return Ok(());
+    }
+
+    let plan = plan_create(net);
+    for (idx, step) in plan.iter().enumerate() {
+        let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+        if let Err(e) = cmd::run_ip(&args) {
+            // Best-effort cleanup: if any step has executed (idx > 0)
+            // the bridge may now exist partially; tear it down so a
+            // retry starts from a clean slate.
+            best_effort_delete(net);
+            return Err(WispNetError::Bridge(format!(
+                "ensure failed at step {idx} ({:?}): {e}",
+                step.args
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Idempotent bridge delete.
+///
+/// Walks [`plan_delete`] and tolerates the kernel's "Cannot find device"
+/// error so repeated `delete` calls (e.g. retry-on-create-failure) are
+/// safe.
+pub fn delete(net: &Network) -> Result<(), WispNetError> {
+    let plan = plan_delete(net);
+    for step in &plan {
+        let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+        match cmd::run_ip(&args) {
+            Ok(_) => {}
+            Err(WispNetError::Cmd { stderr, .. }) if is_missing_device(&stderr) => {
+                // Already gone; no-op.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// List bridge interfaces managed by wisp.
+///
+/// Reads `/sys/class/net/` and filters entries whose name starts with
+/// `wbr-` (the prefix [`Network::new`] applies). Used by `wisp net ls`
+/// + the integration tests.
+pub fn list_wisp_bridges() -> Result<Vec<String>, WispNetError> {
+    let mut out = Vec::new();
+    let dir = match std::fs::read_dir("/sys/class/net") {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(WispNetError::Io(e)),
+    };
+    for entry in dir {
+        let entry = entry.map_err(WispNetError::Io)?;
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("wbr-") {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn bridge_exists(name: &str) -> Result<bool, WispNetError> {
+    match cmd::run_ip(&["link", "show", name]) {
+        Ok(_) => Ok(true),
+        Err(WispNetError::Cmd { stderr, .. }) if is_missing_device(&stderr) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn is_missing_device(stderr: &str) -> bool {
+    // iproute2 prints "Cannot find device" for missing links and
+    // "Device does not exist" on some older versions. Match either.
+    let s = stderr.to_ascii_lowercase();
+    s.contains("cannot find device") || s.contains("does not exist")
+}
+
+fn verify_bridge_addr_matches(net: &Network) -> Result<(), WispNetError> {
+    let want = format!("{}/{}", net.gateway, net.subnet.prefix_len());
+    let stdout = cmd::run_ip(&["addr", "show", &net.bridge])?;
+    if stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with("inet ") && line.contains(&want))
+    {
+        Ok(())
+    } else {
+        Err(WispNetError::Conflict(format!(
+            "bridge {} exists but does not have address {} (got: {})",
+            net.bridge,
+            want,
+            stdout.trim()
+        )))
+    }
+}
+
+fn best_effort_delete(net: &Network) {
+    let _ = delete(net);
 }
 
 #[cfg(test)]

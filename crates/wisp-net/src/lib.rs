@@ -8,6 +8,7 @@
 //! dispatch B alongside Linux-only integration tests.
 
 pub mod bridge;
+pub mod cmd;
 pub mod error;
 pub mod ipam;
 pub mod iptables;

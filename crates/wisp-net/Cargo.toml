@@ -38,3 +38,6 @@ tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Integration tests gate themselves on euid==0; libc::geteuid is the
+# minimal way to do that without pulling in nix.
+libc = "0.2"
