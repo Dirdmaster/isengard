@@ -17,11 +17,13 @@ pub mod lifecycle;
 pub mod mount;
 #[cfg(target_os = "linux")]
 pub mod pivot;
+pub mod runtime;
 pub mod spec;
 pub mod state;
 
 pub use cgroup::{Cgroup, CgroupFs, HostCgroupFs};
 pub use error::WispError;
+pub use runtime::Runtime;
 pub use spec::{Spec, load_and_validate};
 pub use state::{ContainerHandle, ContainerState};
 
