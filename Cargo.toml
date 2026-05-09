@@ -19,6 +19,7 @@ members = [
     "crates/wisp",
     "crates/wisp-cli",
     "crates/wisp-image",
+    "crates/wisp-net",
 ]
 
 [workspace.package]
