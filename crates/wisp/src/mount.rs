@@ -132,6 +132,12 @@ pub mod flags {
     pub const MS_RELATIME: MountFlags = nix::mount::MsFlags::MS_RELATIME;
     #[cfg(target_os = "linux")]
     pub const MS_REMOUNT: MountFlags = nix::mount::MsFlags::MS_REMOUNT;
+    #[cfg(target_os = "linux")]
+    pub const MS_NOATIME: MountFlags = nix::mount::MsFlags::MS_NOATIME;
+    #[cfg(target_os = "linux")]
+    pub const MS_NODIRATIME: MountFlags = nix::mount::MsFlags::MS_NODIRATIME;
+    #[cfg(target_os = "linux")]
+    pub const MS_STRICTATIME: MountFlags = nix::mount::MsFlags::MS_STRICTATIME;
 
     #[cfg(not(target_os = "linux"))]
     pub const MS_RDONLY: MountFlags = MountFlags::MS_RDONLY;
@@ -151,6 +157,12 @@ pub mod flags {
     pub const MS_RELATIME: MountFlags = MountFlags::MS_RELATIME;
     #[cfg(not(target_os = "linux"))]
     pub const MS_REMOUNT: MountFlags = MountFlags::MS_REMOUNT;
+    #[cfg(not(target_os = "linux"))]
+    pub const MS_NOATIME: MountFlags = MountFlags::MS_NOATIME;
+    #[cfg(not(target_os = "linux"))]
+    pub const MS_NODIRATIME: MountFlags = MountFlags::MS_NODIRATIME;
+    #[cfg(not(target_os = "linux"))]
+    pub const MS_STRICTATIME: MountFlags = MountFlags::MS_STRICTATIME;
 }
 
 /// One step in the rootfs setup plan. Holds borrowed `&str` slices
@@ -189,6 +201,12 @@ fn flag_for_option(opt: &str) -> Option<MountFlags> {
         "bind" => Some(flags::MS_BIND),
         "rbind" => Some(flags::MS_BIND | flags::MS_REC),
         "relatime" => Some(flags::MS_RELATIME),
+        // atime modifiers: tmpfs / devpts options frequently include
+        // these. They're flags, not data options: leaving them in
+        // `data` makes the kernel return EINVAL.
+        "noatime" => Some(flags::MS_NOATIME),
+        "nodiratime" => Some(flags::MS_NODIRATIME),
+        "strictatime" => Some(flags::MS_STRICTATIME),
         _ => None,
     }
 }
@@ -337,8 +355,64 @@ pub fn setup_rootfs(
 /// Linux: invoke `nix::mount::mount` for one `PendingMount`. Errors
 /// are wrapped in `WispError::Mount` with the target path so the log
 /// pinpoints the failing entry.
+///
+/// Before mounting we ensure the target directory exists. This is
+/// necessary for layered mounts: e.g. mounting `tmpfs` on
+/// `<rootfs>/dev` discards our pre-created `dev/pts`, `dev/shm`,
+/// `dev/mqueue` subdirs (the new tmpfs is empty), so the subsequent
+/// devpts / tmpfs / mqueue mounts on those paths fail with ENOENT.
+/// runc / crun do the same dance.
 #[cfg(target_os = "linux")]
 fn execute_mount(entry: &PendingMount<'_>) -> Result<()> {
+    // Ensure the target exists. Bind-mounts onto file paths (like the
+    // standard device nodes /dev/null etc.) need a regular file, not
+    // a directory; for those entries we touch a zero-byte file at
+    // the target. The heuristic: if the source is an existing file
+    // on the host, the bind-mount target should be a file too.
+    if let Some(parent) = entry.target.parent() {
+        if !parent.exists() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    // "Is the host source something other than a directory?" covers
+    // regular files (rare) and character / block / socket / fifo
+    // device nodes (the standard /dev/* bind sources). We use
+    // `metadata` so `is_file()` reports correctly, and explicitly
+    // treat character devices as non-directories. `is_dir` returns
+    // false for both files and devices.
+    let host_source_is_file = entry
+        .source
+        .map(Path::new)
+        .filter(|p| p.is_absolute())
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| !m.is_dir())
+        .unwrap_or(false);
+    if host_source_is_file {
+        if !entry.target.exists() {
+            // Create a zero-byte target file for the bind to land on.
+            if let Err(err) = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&entry.target)
+            {
+                return Err(WispError::Mount(format!(
+                    "create bind target file {}: {}",
+                    entry.target.display(),
+                    err
+                )));
+            }
+        }
+    } else if !entry.target.exists() {
+        if let Err(err) = std::fs::create_dir_all(&entry.target) {
+            return Err(WispError::Mount(format!(
+                "create mount target {}: {}",
+                entry.target.display(),
+                err
+            )));
+        }
+    }
+
     nix::mount::mount(
         entry.source.map(Path::new),
         &entry.target,
@@ -358,10 +432,15 @@ fn execute_mount(entry: &PendingMount<'_>) -> Result<()> {
     })
 }
 
-/// Bind-mount `/dev/null` over each masked path inside the rootfs.
-/// The OCI spec resolves these inside the container; we resolve them
-/// against the bundle rootfs so the runtime can apply them before
-/// pivot_root.
+/// Mask each path inside the rootfs. The OCI spec resolves these
+/// inside the container; we resolve them against the bundle rootfs so
+/// the runtime can apply them before pivot_root.
+///
+/// File-typed targets get bind-mounted from `/dev/null` (read returns
+/// EOF). Directory-typed targets get a fresh empty `tmpfs` mounted
+/// over them (read sees an empty dir): bind-mounting a file over a
+/// directory fails with ENOTDIR. Paths that don't exist on this
+/// kernel are skipped silently: a missing path is already unreadable.
 #[cfg(target_os = "linux")]
 fn apply_masked_paths(rootfs: &Path, paths: &[String]) -> Result<()> {
     for raw in paths {
@@ -369,27 +448,57 @@ fn apply_masked_paths(rootfs: &Path, paths: &[String]) -> Result<()> {
             Some(rel) => rootfs.join(rel),
             None => rootfs.join(raw),
         };
-        nix::mount::mount(
-            Some("/dev/null"),
-            &target,
-            None::<&Path>,
-            flags::MS_BIND,
-            None::<&[u8]>,
-        )
-        .map_err(|err| {
-            WispError::Mount(format!(
-                "mask {} via /dev/null bind: {}",
-                target.display(),
-                err
-            ))
-        })?;
+        let meta = match std::fs::metadata(&target) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            nix::mount::mount(
+                Some("tmpfs"),
+                &target,
+                Some(Path::new("tmpfs")),
+                flags::MS_RDONLY,
+                Some(b"size=0,mode=755".as_slice()),
+            )
+            .map_err(|err| {
+                WispError::Mount(format!(
+                    "mask {} via tmpfs overlay: {}",
+                    target.display(),
+                    err
+                ))
+            })?;
+        } else {
+            nix::mount::mount(
+                Some("/dev/null"),
+                &target,
+                None::<&Path>,
+                flags::MS_BIND,
+                None::<&[u8]>,
+            )
+            .map_err(|err| {
+                WispError::Mount(format!(
+                    "mask {} via /dev/null bind: {}",
+                    target.display(),
+                    err
+                ))
+            })?;
+        }
     }
     Ok(())
 }
 
-/// Remount each readonly path with `MS_REMOUNT | MS_BIND | MS_RDONLY`.
-/// `MS_BIND` is required when remounting a sub-path; the kernel
-/// rejects bare `MS_REMOUNT | MS_RDONLY` in that case.
+/// Make each spec'd path read-only inside the rootfs.
+///
+/// Kernel quirk: `MS_REMOUNT | MS_RDONLY` on a sub-path of a
+/// non-bind-mounted filesystem (like `/proc/bus`, where the parent
+/// mount is procfs) returns EINVAL. The runc/crun trick is to
+/// FIRST bind-mount the path onto itself (creating a separate mount
+/// entry the kernel can remount), THEN remount that bind as
+/// readonly. We do the same.
+///
+/// Paths that don't exist are skipped silently: per OCI semantics
+/// the spec is "guarantee this path is read-only", which a missing
+/// path satisfies vacuously.
 #[cfg(target_os = "linux")]
 fn apply_readonly_paths(rootfs: &Path, paths: &[String]) -> Result<()> {
     for raw in paths {
@@ -397,6 +506,28 @@ fn apply_readonly_paths(rootfs: &Path, paths: &[String]) -> Result<()> {
             Some(rel) => rootfs.join(rel),
             None => rootfs.join(raw),
         };
+        if !target.exists() {
+            continue;
+        }
+        // Step 1: bind-mount the target onto itself. MS_REC matters
+        // when the target is a directory tree (e.g. /proc/sys); we
+        // need every nested mount to also be a bind, otherwise the
+        // remount-readonly only catches the top-level dentry.
+        nix::mount::mount(
+            Some(&target),
+            &target,
+            None::<&Path>,
+            flags::MS_BIND | flags::MS_REC,
+            None::<&[u8]>,
+        )
+        .map_err(|err| {
+            WispError::Mount(format!(
+                "bind {} onto self for ro remount: {}",
+                target.display(),
+                err
+            ))
+        })?;
+        // Step 2: remount the new bind as readonly.
         nix::mount::mount(
             None::<&Path>,
             &target,

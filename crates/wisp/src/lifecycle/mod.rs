@@ -473,10 +473,23 @@ fn run_child(
     //    5's "Runtime API + CLI + demo" dispatch threads the actual
     //    rlimit slice through once the demo exercises it.
 
-    // 7. Capability sequence: permitted, effective, inheritable. We
-    //    set them post-pivot so any caps the OCI spec enables on the
-    //    new root (rare but legal) take effect against the right
-    //    mount tree.
+    // 7. Capability sequence: shrink effective FIRST to a subset of
+    //    the target permitted, THEN shrink permitted, THEN set
+    //    effective to its target, THEN inheritable. The kernel's
+    //    capset enforces "new effective ⊆ new permitted" atomically;
+    //    setting permitted to a strict subset before effective
+    //    catches up returns EPERM. Doing the shrink in two steps is
+    //    what runc / crun do.
+    //
+    //    The intermediate effective is `effective ∩ permitted`,
+    //    which is always a valid subset of both the current and
+    //    target permitted sets.
+    let intermediate_effective: Vec<crate::capability::Capability> = effective
+        .iter()
+        .copied()
+        .filter(|c| permitted.contains(c))
+        .collect();
+    crate::capability::set_effective(&intermediate_effective)?;
     crate::capability::set_permitted(permitted)?;
     crate::capability::set_effective(effective)?;
     crate::capability::set_inheritable(inheritable)?;

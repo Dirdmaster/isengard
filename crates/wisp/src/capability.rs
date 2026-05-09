@@ -238,8 +238,13 @@ const ALL_VARIANTS: &[Capability] = &[
     Capability::CAP_CHECKPOINT_RESTORE,
 ];
 
-/// Translate OCI capability strings (e.g. "CAP_NET_BIND_SERVICE") into
-/// the matching [`Capability`] values.
+/// Translate OCI capability strings into the matching [`Capability`]
+/// values. Accepts both the canonical OCI form (`CAP_KILL`) and the
+/// prefix-stripped variant (`KILL`) that `oci_spec`'s
+/// `Capability::Display` emits since 0.7.x: the runtime spec stores
+/// caps as e.g. `CAP_KILL` on the wire but the Rust enum's
+/// `to_string` returns `KILL` for some variants. Both forms map to
+/// the same underlying capability.
 ///
 /// Garbage names are rejected with a [`WispError::Capability`] that
 /// names the offending entry. Empty input produces an empty `Vec`.
@@ -248,7 +253,12 @@ const ALL_VARIANTS: &[Capability] = &[
 pub fn from_oci(set: &[String]) -> Result<Vec<Capability>> {
     let mut out = Vec::with_capacity(set.len());
     for raw in set {
-        let parsed = raw.parse::<Capability>().map_err(|_| {
+        let canonical = if raw.starts_with("CAP_") {
+            raw.clone()
+        } else {
+            format!("CAP_{raw}")
+        };
+        let parsed = canonical.parse::<Capability>().map_err(|_| {
             WispError::Capability(format!(
                 "unknown OCI capability name: {raw:?}; expected something like CAP_NET_BIND_SERVICE"
             ))
@@ -369,6 +379,20 @@ mod tests {
                 Capability::CAP_KILL,
                 Capability::CAP_SYS_ADMIN,
             ]
+        );
+    }
+
+    #[test]
+    fn from_oci_accepts_prefixless_names() {
+        // oci_spec 0.7+ emits the prefix-stripped form ("KILL") from
+        // its Capability::Display, so the lifecycle code that maps
+        // spec.capabilities -> from_oci passes us names without
+        // CAP_. Both shapes must parse to the same value.
+        let mixed = vec!["KILL".to_string(), "CAP_NET_BIND_SERVICE".to_string()];
+        let parsed = from_oci(&mixed).unwrap();
+        assert_eq!(
+            parsed,
+            vec![Capability::CAP_KILL, Capability::CAP_NET_BIND_SERVICE]
         );
     }
 

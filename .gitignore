@@ -21,3 +21,8 @@ www/bun.lock
 
 # Worktrees
 .worktrees/
+
+# wisp demo bundle. The rootfs is materialised by
+# crates/wisp/examples/prepare-busybox.sh; it's arch-specific and not
+# worth committing.
+crates/wisp/examples/busybox/

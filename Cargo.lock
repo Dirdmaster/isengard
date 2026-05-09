@@ -6868,6 +6868,7 @@ dependencies = [
 name = "wisp"
 version = "0.1.0-alpha"
 dependencies = [
+ "anyhow",
  "bytes",
  "caps",
  "libc",

@@ -49,3 +49,11 @@ caps = "0.5"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Used by the busybox demo example (`cargo run --example
+# run-busybox`). Dev-dep only: production callers handle errors via
+# `WispError`.
+anyhow.workspace = true
+
+[[example]]
+name = "run-busybox"
+path = "examples/run-busybox.rs"
