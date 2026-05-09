@@ -95,11 +95,24 @@ impl Runtime {
     /// still error out as "requires linux" before reaching the
     /// cgroup.
     pub fn new(state_dir: &Path) -> Result<Self> {
+        Self::with_cgroup_root(state_dir, Path::new(Self::DEFAULT_CGROUP_ROOT))
+    }
+
+    /// Build a runtime against `state_dir` with a non-default cgroup
+    /// slice path. Used by integration tests so each test target gets
+    /// its own per-test cgroup root under
+    /// `/sys/fs/cgroup/wisp-test/<uniq>/`, avoiding state collisions
+    /// between parallel tests.
+    ///
+    /// Behaves identically to [`Runtime::new`] otherwise: creates the
+    /// state-dir, calls [`Cgroup::ensure_root`] on Linux, skips the
+    /// cgroup step on Mac.
+    pub fn with_cgroup_root(state_dir: &Path, cgroup_root: &Path) -> Result<Self> {
         std::fs::create_dir_all(state_dir).map_err(|err| {
             WispError::State(format!("create state dir {}: {}", state_dir.display(), err))
         })?;
 
-        let cgroup = Cgroup::new(Self::DEFAULT_CGROUP_ROOT);
+        let cgroup = Cgroup::new(cgroup_root);
 
         #[cfg(target_os = "linux")]
         {
