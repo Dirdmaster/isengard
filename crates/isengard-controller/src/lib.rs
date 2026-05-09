@@ -33,7 +33,7 @@ use isengard_proto::pb::controller_server::ControllerServer;
 use isengard_storage::{InsertEvent, Inventory, Journal, host::HostId};
 use tokio::signal;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 pub use service::ControllerService;
 
@@ -212,17 +212,30 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         }
     }
     let validated_acme = acme_with_token.validated();
-    let wildcard_store = validated_acme
-        .as_ref()
-        .map(|_| Arc::new(acme::WildcardCertStore::new()));
 
-    let routing = Arc::new({
-        let base = routing::RoutingPusher::new(inventory.clone());
-        match wildcard_store.clone() {
-            Some(store) => base.with_wildcard_certs(store),
-            None => base,
+    // Wildcard cert store always exists, regardless of ACME config. Certs
+    // can come from ACME (via the scheduler), manual upload (future), or
+    // be hydrated from SQLite at boot (migration 0026). The agent-facing
+    // push side reads from this store independent of how the certs got
+    // there. A controller restart loses the HashMap; the hydrate below
+    // refills it from persistent storage so the agent receives the same
+    // cert material via the next ProxyConfig push.
+    let wildcard_store = Arc::new(acme::WildcardCertStore::new());
+    match wildcard_store.hydrate_from(&inventory).await {
+        Ok(0) => {
+            info!("tls: no persisted wildcard certs to hydrate");
         }
-    });
+        Ok(n) => {
+            info!(count = n, "tls: hydrated wildcard certs from storage");
+        }
+        Err(e) => {
+            warn!("tls: hydrate from storage failed; starting with empty cache: {e:#}");
+        }
+    }
+
+    let routing = Arc::new(
+        routing::RoutingPusher::new(inventory.clone()).with_wildcard_certs(wildcard_store.clone()),
+    );
     let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
     // Phase 12b: lifecycle-hook label ingest runs in parallel with policy_ingest.
     let hook_ingest = Arc::new(hook_ingest::HookLabelIngest::new(inventory.clone()));
@@ -313,13 +326,13 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // config has email + token + domains. Misconfigured deployments fail
     // closed: token verification at boot prints an explicit warning so the
     // operator notices before the scheduler tries (and rate-limits) LE.
-    if let (Some(cfg), Some(store)) = (validated_acme.clone(), wildcard_store.clone()) {
+    if let Some(cfg) = validated_acme.clone() {
         let token = cfg.cf_api_token.clone();
         let email = cfg.email.clone();
         let directory = cfg.directory_url.clone();
         let groups = cfg.groups.clone();
         let inv_for_acme = inventory.clone();
-        let store_for_routing = store.clone();
+        let store_for_routing = wildcard_store.clone();
         // Verify the CF token at boot in a separate task so a slow CF API
         // doesn't delay gRPC bind. The scheduler still spawns; if the token
         // is bad it'll fail in `present` with a clear error.

@@ -43,6 +43,42 @@ impl CertStore {
         }
     }
 
+    /// Pre-populate the in-memory cache from disk. Called at agent boot so
+    /// the very first SNI handshake after startup has the cert ready
+    /// without waiting for the controller to push a `ProxyConfig`. Crucial
+    /// for wildcard certs: the hostname-keyed cache miss + literal-only
+    /// disk fallback in `lookup` would otherwise leave a freshly-booted
+    /// agent unable to serve `*.foo.com` even though the file is on disk.
+    ///
+    /// Returns the number of certs hydrated. Never errors on missing
+    /// storage dir; a malformed cert file logs a warn and is skipped so
+    /// one bad file doesn't take the whole boot down.
+    pub async fn hydrate(&self) -> Result<usize> {
+        let hostnames = self
+            .storage
+            .list_hostnames()
+            .await
+            .context("listing tls storage hostnames")?;
+        let mut loaded = 0;
+        for hostname in hostnames {
+            match self.load_from_disk(&hostname).await {
+                Ok(entry) => {
+                    self.cache.write().await.insert(hostname.clone(), entry);
+                    loaded += 1;
+                    tracing::info!(hostname = %hostname, "tls: cert hydrated from disk");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        hostname = %hostname,
+                        error = %e,
+                        "tls: cert hydrate failed; skipping (file may be corrupt or partially written)",
+                    );
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
     /// Look up a `CertEntry` by SNI hostname. Cache-first, then disk; finally
     /// a wildcard match against any cached entry whose key starts with `*.`.
     ///
