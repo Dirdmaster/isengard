@@ -130,8 +130,11 @@ setup_dirs() {
   mkdir -p "${ISENGARD_PREFIX}/controller"
   mkdir -p "${ISENGARD_PREFIX}/agent"
   mkdir -p "${ISENGARD_PREFIX}/stacks"
-  # Tighten the etc dir: it's about to hold the master key file.
-  chmod 0750 "${ISENGARD_ETC}" 2>/dev/null || true
+  # World-traversable so non-sudo `docker compose -f /etc/isengard/...`
+  # works for any operator in the docker group. The directory itself
+  # leaks no secrets — the master key inside is mode 0600 root, only
+  # ever read by the controller container as uid 0 via bind-mount.
+  chmod 0755 "${ISENGARD_ETC}" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -517,13 +520,50 @@ bring_up_stack() {
 
   bootstrap_ca_export
 
+  # Mint a one-shot enrollment token and pass it to the agent via env var
+  # at compose-up time. Without this the agent boots with
+  # ISENGARD_ENROLL_TOKEN="" (compose default), tries to enroll, gets
+  # `Unauthenticated`, and crashloops until the operator manually mints
+  # a token and recreates. Idempotent in spirit: if the agent is already
+  # enrolled (its agent.json + cert bundle exist in the volume), the
+  # token is ignored and no harm done.
+  local enroll_token
+  enroll_token="$(mint_agent_enroll_token)" || enroll_token=""
+
   if [[ "${force_recreate}" -eq 1 ]]; then
     log "stack: bringing up agent via docker compose up -d --force-recreate"
-    docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d --force-recreate agent
+    ISENGARD_ENROLL_TOKEN="${enroll_token}" \
+      docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d --force-recreate agent
   else
     log "stack: bringing up agent via docker compose up -d"
-    docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d agent
+    ISENGARD_ENROLL_TOKEN="${enroll_token}" \
+      docker compose --env-file "${ISENGARD_ENV_FILE}" -f "${ISENGARD_COMPOSE_FILE}" up -d agent
   fi
+}
+
+# Mint a fresh agent enrollment token via the controller's `token mint`
+# subcommand and echo the raw token to stdout. Falls back to empty
+# string on failure (logs a warn) so the caller can still bring the
+# agent up; the agent will simply crashloop on enroll and the operator
+# can mint+restart by hand.
+#
+# `--format token` returns the bare token on stdout (one line); the
+# default human-readable format prints "Token expires at ..." as the
+# last line, which would be the wrong thing to bind.
+mint_agent_enroll_token() {
+  local out
+  if ! out="$(docker exec iso-controller \
+        isengard controller token mint --role agent --format token 2>/dev/null \
+        | tail -1)"; then
+    warn "enroll: failed to mint agent token; agent will need a manual mint"
+    return 0
+  fi
+  if [[ -z "${out}" ]]; then
+    warn "enroll: token mint returned empty; agent will need a manual mint"
+    return 0
+  fi
+  log "enroll: minted one-shot agent enrollment token (${#out} chars)"
+  printf '%s' "${out}"
 }
 
 # Place a 0-byte ca.pem at the host path the agent's compose entry
@@ -709,14 +749,18 @@ secret_count() {
 # Returns one of: none | partial | complete
 detect_existing() {
   # Migration: bring legacy installs up to the current permission model.
-  # Older versions wrote isengard.env at 0640 root and compose.yaml at
-  # 0644 root, forcing operators to `sudo` every config edit. Neither
-  # file holds secrets (those live encrypted in SQLite, gated by
-  # master.key), so we set them group-writable to the docker group.
-  # Operator (already in the docker group to talk to dockerd) gets to
-  # edit + read without sudo. This is idempotent and runs on every
-  # install.sh invocation so a second curl-bash brings legacy installs
-  # current without a reinstall menu trip.
+  # Older versions wrote /etc/isengard at 0750 root + isengard.env at
+  # 0640 root + compose.yaml at 0644 root, forcing operators to `sudo`
+  # every `docker compose` invocation and config edit. None of those
+  # paths hold secrets (those live encrypted in SQLite, gated by
+  # master.key, which keeps its 0600 root file mode regardless of the
+  # parent dir's mode). We set the dir world-traversable and the
+  # editable configs group-writable to the docker group. Idempotent and
+  # runs on every install.sh invocation so a second curl-bash brings
+  # legacy installs current without a reinstall menu trip.
+  if [[ -d "${ISENGARD_ETC}" ]]; then
+    chmod 0755 "${ISENGARD_ETC}" 2>/dev/null || true
+  fi
   for f in "${ISENGARD_ENV_FILE}" "${ISENGARD_COMPOSE_FILE}"; do
     [[ -f "${f}" ]] || continue
     _apply_editable_config_perms "${f}" || true
