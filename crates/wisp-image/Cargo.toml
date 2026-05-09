@@ -30,5 +30,16 @@ hex.workspace = true
 # registry/repo/tag/digest decomposition without re-rolling RFC-3986 parsing.
 url = "2.5"
 
+# File locking for the content store. The store is on-disk and must
+# survive concurrent `wisp run --image` invocations. fs2 wraps flock
+# (Unix) / LockFileEx (Windows) over an open File handle.
+fs2 = "0.4"
+
+# Atomic write helper. `NamedTempFile::persist` does the rename(2) so
+# readers never observe partial blob writes. Already a workspace dev-dep
+# (used by Phase 12 backup tests); promoted to a regular dep here
+# because the store relies on it at runtime.
+tempfile.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

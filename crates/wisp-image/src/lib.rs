@@ -6,6 +6,8 @@
 
 pub mod error;
 pub mod reference;
+pub mod store;
 
 pub use error::WispImageError;
 pub use reference::ImageRef;
+pub use store::{ContentStore, GcReport};
