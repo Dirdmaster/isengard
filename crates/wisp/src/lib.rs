@@ -12,9 +12,11 @@
 
 pub mod error;
 pub mod spec;
+pub mod state;
 
 pub use error::WispError;
 pub use spec::{Spec, load_and_validate};
+pub use state::{ContainerHandle, ContainerState};
 
 /// Returns the crate version (from `CARGO_PKG_VERSION`).
 pub fn version() -> &'static str {
