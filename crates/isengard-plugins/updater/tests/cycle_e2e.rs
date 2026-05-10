@@ -15,10 +15,17 @@ use bollard::image::{CreateImageOptions, TagImageOptions};
 use futures_util::StreamExt;
 use isengard_core::{AgentPlugin, HostMode, Plugin, PluginContext};
 use isengard_plugin_updater::Updater;
+use ulid::Ulid;
 
 const OLD_VERSION: &str = "nginx:1.24-alpine";
 const NEW_TAG: &str = "nginx:1.25-alpine";
-const TEST_CONTAINER: &str = "isengard-3e-cycle";
+
+/// Generate a unique container name per test invocation so that parallel
+/// test runs (e.g. multiple worktrees) and stale containers from crashed
+/// prior runs do not collide on `409 Conflict` from the Docker daemon.
+fn unique_name(prefix: &str) -> String {
+    format!("{}-{}", prefix, Ulid::new())
+}
 
 async fn docker_available() -> Option<Docker> {
     let docker = Docker::connect_with_local_defaults().ok()?;
@@ -42,10 +49,10 @@ async fn pull(docker: &Docker, image: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cleanup(docker: &Docker) {
+async fn cleanup(docker: &Docker, name: &str) {
     let _ = docker
         .remove_container(
-            TEST_CONTAINER,
+            name,
             Some(RemoveContainerOptions {
                 force: true,
                 ..Default::default()
@@ -61,7 +68,9 @@ async fn cycle_recreates_stale_container_against_real_registry() {
         return;
     };
 
-    cleanup(&docker).await;
+    let test_container = unique_name("isengard-3e-cycle");
+
+    cleanup(&docker, &test_container).await;
 
     // 1. Pull both versions.
     pull(&docker, OLD_VERSION).await.expect("pull 1.24-alpine");
@@ -95,7 +104,7 @@ async fn cycle_recreates_stale_container_against_real_registry() {
     let create = docker
         .create_container(
             Some(CreateContainerOptions::<String> {
-                name: TEST_CONTAINER.to_string(),
+                name: test_container.clone(),
                 platform: None,
             }),
             Config {
@@ -129,9 +138,9 @@ async fn cycle_recreates_stale_container_against_real_registry() {
     // on inspect can lag.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // 6. Inspect the test container — its image should now be the REAL 1.25.
+    // 6. Inspect the test container: its image should now be the REAL 1.25.
     let updated_inspect = docker
-        .inspect_container(TEST_CONTAINER, None)
+        .inspect_container(&test_container, None)
         .await
         .expect("inspect after update");
     let new_image_id = updated_inspect.image.expect("container has image");
@@ -143,7 +152,7 @@ async fn cycle_recreates_stale_container_against_real_registry() {
 
     // 7. Cleanup
     plugin.stop().await.expect("plugin stop");
-    cleanup(&docker).await;
+    cleanup(&docker, &test_container).await;
     // Re-tag pull to restore real 1.25 (defensive; the local repo is shared
     // with the host's docker engine).
     let _ = pull(&docker, NEW_TAG).await;

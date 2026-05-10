@@ -18,9 +18,16 @@ use bollard::Docker;
 use bollard::container::{Config, CreateContainerOptions, RemoveContainerOptions};
 use isengard_plugin_updater::image_ref::ImageRef;
 use isengard_plugin_updater::recreate::{pull_image, update_container};
+use ulid::Ulid;
 
 const TEST_IMAGE: &str = "hello-world:latest";
-const TEST_CONTAINER: &str = "isengard-3c-test";
+
+/// Generate a unique container name per test invocation so that parallel
+/// test runs and stale containers from crashed prior runs do not collide
+/// on `409 Conflict` from the Docker daemon.
+fn unique_name(prefix: &str) -> String {
+    format!("{}-{}", prefix, Ulid::new())
+}
 
 async fn docker_available() -> Option<Docker> {
     let docker = Docker::connect_with_local_defaults().ok()?;
@@ -28,10 +35,10 @@ async fn docker_available() -> Option<Docker> {
     Some(docker)
 }
 
-async fn cleanup(docker: &Docker) {
+async fn cleanup(docker: &Docker, name: &str) {
     let _ = docker
         .remove_container(
-            TEST_CONTAINER,
+            name,
             Some(RemoveContainerOptions {
                 force: true,
                 ..Default::default()
@@ -47,7 +54,9 @@ async fn pull_then_recreate_round_trip() {
         return;
     };
 
-    cleanup(&docker).await;
+    let test_container = unique_name("isengard-3c-test");
+
+    cleanup(&docker, &test_container).await;
 
     let image = ImageRef::parse(TEST_IMAGE).unwrap();
 
@@ -62,7 +71,7 @@ async fn pull_then_recreate_round_trip() {
     let create = docker
         .create_container(
             Some(CreateContainerOptions {
-                name: TEST_CONTAINER.to_string(),
+                name: test_container.clone(),
                 platform: None,
             }),
             Config {
@@ -83,7 +92,7 @@ async fn pull_then_recreate_round_trip() {
     // the (exited) container and recreate it.
     let result = update_container(&docker, &create.id, &image).await;
 
-    cleanup(&docker).await;
+    cleanup(&docker, &test_container).await;
 
     // The orchestration should not error on a hello-world recreate.
     if let Err(e) = result {
