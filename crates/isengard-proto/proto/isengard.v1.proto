@@ -300,6 +300,38 @@ message WriteCompose {
   string compose_yaml    = 3;
   string expected_sha256 = 4;
   bool   force           = 5;
+  // Phase 0.13: verbatim stack.toml. Empty when the operator deploys a
+  // compose-only stack (legacy path). Persisted on the agent at
+  // /etc/isengard/stacks/<name>/stack.toml alongside compose.yml. The
+  // agent does NOT parse it; behavior is driven by the explicit
+  // `secrets` and `hooks` fields below.
+  string manifest_toml   = 6;
+  // Phase 0.13: per-fleet secret names to mount into every service in
+  // the stack. Values arrive via the v0.3.6 FetchSecret RPC.
+  repeated string secrets = 7;
+  // Phase 0.13: lifecycle hooks (pre-deploy, post-deploy, failure)
+  // executed on the host (NOT inside any container).
+  repeated LifecycleHook hooks = 8;
+  // Phase 0.13: controller-minted ULID per deploy. Threaded into hook
+  // env as ISENGARD_DEPLOYMENT_ID; written to the audit row for this
+  // deploy. Pre-0.13 controllers leave this empty; pre-0.13 agents
+  // ignore it.
+  string deployment_id   = 9;
+}
+
+// Phase 0.13: single lifecycle hook entry. cmd[0] is the program;
+// cmd[1..] the args. Agent spawns with cwd =
+// /etc/isengard/stacks/<stack>/, layered env per spec
+// (ISENGARD_STACK, ISENGARD_HOST_ID, ISENGARD_DEPLOYMENT_ID,
+// ISENGARD_HOOK_EVENT, ISENGARD_MANIFEST_PATH; failure hook also
+// receives ISENGARD_FAILURE_REASON and ISENGARD_FAILURE_DETAIL).
+// timeout_ms enforced via tokio::time::timeout; SIGTERM, then SIGKILL
+// after 5s on expiry. on_error is abort (default) or continue.
+message LifecycleHook {
+  string on          = 1;
+  repeated string cmd = 2;
+  uint64 timeout_ms  = 3;
+  string on_error    = 4;
 }
 
 // Agent -> controller (v0.3d): outcome of a `WriteCompose`. The controller
