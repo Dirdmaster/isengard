@@ -398,6 +398,24 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "touch_host failed");
                         }
 
+                        // Phase 0.5 wisp: agent gossips its active
+                        // runtime backend on every heartbeat so the
+                        // dashboard / isd ps can show a backend
+                        // column. The setter is idempotent + skips
+                        // the UPDATE when the value already matches.
+                        if !hb.runtime_backend.is_empty() {
+                            if let Err(e) = inventory
+                                .set_host_runtime_backend(host_id, &hb.runtime_backend)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    agent = %agent_hostname,
+                                    "set_host_runtime_backend failed"
+                                );
+                            }
+                        }
+
                         if let Err(e) = crate::sync_stacks::process_heartbeat_stacks(
                             &inventory, host_id, &hb.stacks,
                         )

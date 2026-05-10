@@ -30,6 +30,7 @@ use crate::deployment::DeploymentSupervisor;
 use crate::logs::LogSource;
 use crate::mdns::MdnsResponder;
 use crate::proxy::ProxyState;
+use crate::runtime::RuntimeBackend;
 
 /// Shared handle to the agent's mDNS responder. Optional: tests + docker-less
 /// environments boot the agent without one, in which case the sync loop just
@@ -69,7 +70,7 @@ type LogSubs =
         log_source,
         mdns,
         compose_ctx,
-        docker
+        backend
     ),
     fields(agent_id = %agent_id)
 )]
@@ -86,7 +87,7 @@ pub async fn run_sync_loop<S: LogSource>(
     log_source: Option<Arc<S>>,
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
-    docker: Option<Arc<bollard::Docker>>,
+    backend: Option<Arc<dyn RuntimeBackend>>,
 ) -> Result<()> {
     // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
@@ -129,6 +130,19 @@ pub async fn run_sync_loop<S: LogSource>(
     let hb_tx = tx.clone();
     let interval = Duration::from_secs(u64::from(interval_secs.max(1)));
     let cancel_hb = cancel.clone();
+    // Phase 0.5: gossip the active runtime backend so `isd ps` can show
+    // a per-host backend column. Empty string when the agent doesn't
+    // know yet (no backend selected): the controller treats empty as
+    // `docker` for back-compat with pre-0.5 agents.
+    let runtime_backend = backend
+        .as_ref()
+        .map(|b| b.name().to_string())
+        .unwrap_or_default();
+    // Phase 0.6: heartbeat reads the container snapshot via the live
+    // backend when one was selected (so wisp hosts stop dialling
+    // docker.sock once per heartbeat). Falls back to the legacy
+    // bollard probe when backend selection failed at boot.
+    let heartbeat_backend = backend.clone();
     let mut heartbeat_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Skip the first immediate tick; we want the first heartbeat one
@@ -145,12 +159,20 @@ pub async fn run_sync_loop<S: LogSource>(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    let snapshots = crate::container_snapshot::list_container_snapshots().await;
+                    let snapshots = crate::container_snapshot::snapshots_via_backend_or_legacy(
+                        heartbeat_backend.as_ref(),
+                    )
+                    .await;
                     let stacks = crate::container_snapshot::derive_stacks(&snapshots);
                     let services = crate::container_snapshot::derive_services(&snapshots);
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
-                            Heartbeat { ts_ms, stacks, services },
+                            Heartbeat {
+                                ts_ms,
+                                stacks,
+                                services,
+                                runtime_backend: runtime_backend.clone(),
+                            },
                         )),
                     };
                     if hb_tx.send(msg).await.is_err() {
@@ -177,7 +199,7 @@ pub async fn run_sync_loop<S: LogSource>(
     let read_log_tx = tx.clone();
     let read_mdns = mdns.clone();
     let read_compose_ctx = compose_ctx.clone();
-    let read_docker = docker.clone();
+    let read_backend = backend.clone();
     let log_subs: LogSubs = Arc::new(tokio::sync::Mutex::new(Default::default()));
     let read_log_subs = log_subs.clone();
     let mut read_task = tokio::spawn(async move {
@@ -204,11 +226,11 @@ pub async fn run_sync_loop<S: LogSource>(
                     // the upstream registry so a router request that lands
                     // first sees an upstream, not just a DNS record.
                     let rules_for_mdns = cfg.rules.clone();
-                    let docker_for_apply = read_docker.as_deref();
-                    if let Err(e) = crate::proxy::apply_config_with_docker(
+                    let backend_for_apply = read_backend.as_deref();
+                    if let Err(e) = crate::proxy::apply_config_with_backend(
                         &read_proxy_state,
                         cfg,
-                        docker_for_apply,
+                        backend_for_apply,
                     )
                     .await
                     {
@@ -468,7 +490,7 @@ pub async fn run_sync_loop<S: LogSource>(
         log_source,
         mdns,
         compose_ctx,
-        docker
+        backend
     ),
     fields(agent_id = %agent_id)
 )]
@@ -485,7 +507,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
     log_source: Option<Arc<S>>,
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
-    docker: Option<Arc<bollard::Docker>>,
+    backend: Option<Arc<dyn RuntimeBackend>>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -524,7 +546,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
             log_source.clone(),
             mdns.clone(),
             compose_ctx.clone(),
-            docker.clone(),
+            backend.clone(),
         )
         .await;
 

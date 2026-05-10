@@ -178,6 +178,59 @@ If you didn't keep the install/ directory around, fetch the script the same way 
 curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/uninstall.sh | sudo bash
 ```
 
+## Wisp runtime backend (Phase 0.4, opt-in)
+
+Set `ISENGARD_RUNTIME=wisp` in the environment BEFORE running `install.sh` to make the agent manage workload containers via [wisp](../crates/wisp/) (clone3 + cgroup v2 + iptables) instead of the host's docker daemon. The controller stays on docker either way; only the agent's workload backend changes.
+
+```sh
+export ISENGARD_RUNTIME=wisp
+sudo -E bash install.sh
+```
+
+What changes when `ISENGARD_RUNTIME=wisp`:
+
+| Concern | Default (docker) | Wisp |
+|---|---|---|
+| Compose source | `install/compose.yaml` | `install/compose.wisp.yaml` |
+| Agent docker.sock mount | yes | NO |
+| Agent capabilities | none extra | `--privileged` (Phase 0.4; cap-set tighten in 0.5) |
+| Agent extra mounts | none | `/sys/fs/cgroup:rw`, `/var/lib/wisp:rw` |
+| Agent env | (default) | `ISENGARD_RUNTIME=wisp` |
+| Workload runtime | bollard -> dockerd | wisp directly |
+
+Required kernel capabilities (held under `--privileged` for 0.4):
+
+| Cap | Why |
+|---|---|
+| `SYS_ADMIN` | mount(2), pivot_root, namespace ops for clone3 |
+| `NET_ADMIN` | iptables, bridge, veth, sysctl `net.ipv4.*` |
+| `SYS_PTRACE` | `/proc/<pid>/ns/*` access for nsenter healthchecks |
+| `SYS_RESOURCE` | cgroup v2 writes outside the agent's own slice |
+
+Verify the rendered compose has the right shape:
+
+```sh
+grep -E 'docker.sock|privileged|/sys/fs/cgroup|ISENGARD_RUNTIME' /etc/isengard/compose.yaml
+```
+
+The wisp variant should NOT include any `docker.sock` line.
+
+The agent logs its backend on startup:
+
+```text
+runtime backend: wisp
+```
+
+(Default install logs `runtime backend: docker (bollard)`.)
+
+Migration from dockerd to wisp on an existing host (lossy: wisp doesn't see bollard-managed containers):
+
+1. `isd stack down <stack>` for every stack you don't want orphaned.
+2. `export ISENGARD_RUNTIME=wisp` and re-run `sudo -E bash install.sh`. Pick the `Refresh compose.yaml` reinstall menu option to swap the recipe without losing secrets / master.key.
+3. `isd stack up <stack>` for each stack. wisp pulls the images and creates the bundles fresh.
+
+Going back to docker is the same flow with `ISENGARD_RUNTIME=docker` (or unset).
+
 ## Differences from the dev recipe
 
 `docker/compose.yaml` is the development recipe. It's still the right thing for contributors iterating on the codebase. The production recipe at `install/compose.yaml` differs:

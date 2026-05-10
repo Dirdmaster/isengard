@@ -16,6 +16,16 @@ pub struct PsRow {
     pub state: String,
     pub image: String,
     pub last_seen: String,
+    /// Phase 0.5 wisp: the runtime backend driving this host
+    /// (`docker`, `wisp`, ...). Defaults to `docker` for hosts whose
+    /// agents are pre-0.5 and didn't gossip the field. Serde-default
+    /// keeps older clients that decode this row shape happy.
+    #[serde(default = "default_backend")]
+    pub backend: String,
+}
+
+fn default_backend() -> String {
+    "docker".to_string()
 }
 
 /// Render the rows as a kubectl-style ASCII table. Empty input prints just
@@ -28,6 +38,7 @@ pub fn render_table(rows: &[PsRow]) -> String {
             "STACK",
             "SERVICE",
             "HOST",
+            "BACKEND",
             "STATE",
             "IMAGE",
             "LAST SEEN",
@@ -37,6 +48,7 @@ pub fn render_table(rows: &[PsRow]) -> String {
             row.stack.as_str(),
             row.service.as_str(),
             row.host.as_str(),
+            row.backend.as_str(),
             row.state.as_str(),
             row.image.as_str(),
             row.last_seen.as_str(),
@@ -64,6 +76,7 @@ mod tests {
                 state: "running".into(),
                 image: "wordpress:6".into(),
                 last_seen: "10s ago".into(),
+                backend: "docker".into(),
             },
             PsRow {
                 stack: "blog".into(),
@@ -72,6 +85,7 @@ mod tests {
                 state: "running".into(),
                 image: "mariadb:11".into(),
                 last_seen: "10s ago".into(),
+                backend: "docker".into(),
             },
         ]
     }
@@ -101,5 +115,36 @@ mod tests {
         let table = render_table(&[]);
         assert!(table.contains("STACK"));
         assert!(table.contains("LAST SEEN"));
+    }
+
+    /// Phase 0.5 wisp: the BACKEND column appears in the header and
+    /// each rendered row carries its backend value.
+    #[test]
+    fn isd_ps_renders_backend_column() {
+        let mut rows = fixture();
+        // Mix backends so the column has real content.
+        rows[0].backend = "wisp".into();
+        rows[1].backend = "docker".into();
+        let table = render_table(&rows);
+        assert!(table.contains("BACKEND"), "header has BACKEND column");
+        assert!(table.contains("wisp"), "wisp value rendered");
+        assert!(table.contains("docker"), "docker value rendered");
+    }
+
+    /// Phase 0.5 wisp: an older JSON row shape (no `backend` field)
+    /// decodes cleanly thanks to the serde default. Old clients
+    /// emitting the pre-0.5 shape don't break the new isd binary.
+    #[test]
+    fn ps_row_decodes_without_backend_field() {
+        let json = r#"{
+            "stack": "blog",
+            "service": "x",
+            "host": "h",
+            "state": "running",
+            "image": "i:1",
+            "last_seen": "5s ago"
+        }"#;
+        let row: PsRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.backend, "docker");
     }
 }

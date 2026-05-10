@@ -64,11 +64,20 @@ async fn label_on_real_container_creates_routing_rule() {
         .unwrap();
     let pusher = isengard_controller::routing::RoutingPusher::new(inv.clone());
 
-    // 3. Spawn the labels watcher; it forwards into our channel.
+    // 3. Spawn the labels watcher; it forwards into our channel. Phase 0.5
+    //    moved the watcher onto `RuntimeBackend`; build a BollardBackend
+    //    against a tempdir state_dir to drive it.
     let (tx, mut rx) = mpsc::channel::<AgentMessage>(16);
-    let docker_for_watcher = docker.clone();
+    let backend_state_dir = tempdir().unwrap();
+    let backend: Arc<dyn isengard_agent::runtime::RuntimeBackend> = Arc::new(
+        isengard_agent::runtime::bollard_backend::BollardBackend::from_env(
+            backend_state_dir.path(),
+        )
+        .await
+        .expect("BollardBackend::from_env"),
+    );
     let watcher = tokio::spawn(async move {
-        let _ = isengard_agent::labels::watch(docker_for_watcher, tx).await;
+        let _ = isengard_agent::labels::watch(backend, tx).await;
     });
 
     // 4. Pull busybox if needed (often local already; ignore stream errors).

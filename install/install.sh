@@ -64,6 +64,20 @@ ISENGARD_PROXY_NETWORK="${ISENGARD_PROXY_NETWORK:-isengard-proxy}"
 # the running controller will read it.
 ISENGARD_CONTROLLER_IMAGE="${ISENGARD_CONTROLLER_IMAGE:-ghcr.io/weavers-engineering/isengard-controller:${ISENGARD_IMAGE_TAG:-next}}"
 
+# Runtime backend selection. When set to `wisp` BEFORE running install.sh, the
+# script renders the wisp-flavored compose recipe (no docker.sock mount;
+# privileged + cgroup + /var/lib/wisp bind-mounts) and exports the same env
+# var into the agent container so its runtime::select_backend constructs
+# WispBackend. Default / unset / `docker` keeps the existing dockerd flow.
+# Phase 0.4. See install/README.md for capability + threat-model notes.
+ISENGARD_RUNTIME="${ISENGARD_RUNTIME:-docker}"
+
+# Host-side wisp-cli state dir, bind-mounted into the agent at /var/lib/wisp
+# in wisp mode. Reserved for operator debugging (`wisp ls` against the running
+# agent's state). Not the agent's primary state-dir : that's still under
+# ${ISENGARD_PREFIX}/agent.
+ISENGARD_WISP_HOST_DIR="${ISENGARD_WISP_HOST_DIR:-/var/lib/wisp}"
+
 # ---------------------------------------------------------------------------
 # Logging helpers. Plain text, no colors (broken on some piped CI logs).
 # ---------------------------------------------------------------------------
@@ -132,6 +146,14 @@ setup_dirs() {
   mkdir -p "${ISENGARD_PREFIX}/stacks"
   # Tighten the etc dir: it's about to hold the master key file.
   chmod 0750 "${ISENGARD_ETC}" 2>/dev/null || true
+
+  # Wisp mode also needs the host-side wisp state dir to exist before
+  # docker compose tries to bind-mount it (docker would otherwise create
+  # it as a directory owned by root with the wrong perms).
+  if [[ "${ISENGARD_RUNTIME}" == "wisp" ]]; then
+    log "setup: ISENGARD_RUNTIME=wisp; ensuring ${ISENGARD_WISP_HOST_DIR} exists"
+    mkdir -p "${ISENGARD_WISP_HOST_DIR}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -425,16 +447,27 @@ fetch() {
 # Write compose.yaml to ${out}. Prefers a sibling install/compose.yaml when
 # the script is run from a checkout (smoke tests, dev installs); falls back
 # to a raw GitHub fetch keyed on ISENGARD_REF / ISENGARD_RAW_BASE.
+#
+# Picks compose.wisp.yaml when ISENGARD_RUNTIME=wisp; defaults to compose.yaml
+# (dockerd backend) otherwise. The selected file is always written to the
+# operator-visible /etc/isengard/compose.yaml so day-to-day `docker compose
+# -f /etc/isengard/compose.yaml ...` keeps working without flag gymnastics.
 write_compose_to() {
   local out="$1"
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
-  local local_compose="${script_dir}/compose.yaml"
 
+  local source_name="compose.yaml"
+  if [[ "${ISENGARD_RUNTIME}" == "wisp" ]]; then
+    source_name="compose.wisp.yaml"
+    log "compose: ISENGARD_RUNTIME=wisp; using ${source_name} as source"
+  fi
+
+  local local_compose="${script_dir}/${source_name}"
   if [[ -f "${local_compose}" ]]; then
     cp "${local_compose}" "${out}"
   else
-    fetch "${ISENGARD_RAW_BASE}/compose.yaml" "${out}"
+    fetch "${ISENGARD_RAW_BASE}/${source_name}" "${out}"
   fi
   _apply_editable_config_perms "${out}"
 }
@@ -499,6 +532,11 @@ bring_up_stack() {
   export ISENGARD_ENV_FILE
   export ISENGARD_COMPOSE_FILE
   export ISENGARD_MASTER_KEY
+  # ISENGARD_RUNTIME is captured into the rendered compose at write_compose_to
+  # time (we pick compose.yaml vs compose.wisp.yaml), so docker compose itself
+  # doesn't need it. Export ISENGARD_WISP_HOST_DIR so `${...:-/var/lib/wisp}`
+  # in compose.wisp.yaml resolves to the operator's override when set.
+  export ISENGARD_WISP_HOST_DIR
 
   # Phase 14 mTLS: agent needs the controller's CA cert to verify the
   # bootstrap TLS handshake on first enroll. Make sure the file exists
@@ -1069,7 +1107,11 @@ EOF
 # ---------------------------------------------------------------------------
 
 main() {
-  log "Isengard install starting (ref=${ISENGARD_REF}, prefix=${ISENGARD_PREFIX})"
+  log "Isengard install starting (ref=${ISENGARD_REF}, prefix=${ISENGARD_PREFIX}, runtime=${ISENGARD_RUNTIME})"
+  if [[ "${ISENGARD_RUNTIME}" == "wisp" ]]; then
+    log "runtime: wisp mode active. Agent will use clone3+cgroup v2 (no docker.sock mount)."
+    log "runtime: required caps: SYS_ADMIN, NET_ADMIN, SYS_PTRACE, SYS_RESOURCE (Phase 0.4 uses --privileged)."
+  fi
   preflight
 
   local state

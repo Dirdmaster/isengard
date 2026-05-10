@@ -20,10 +20,24 @@ pub struct HostDto {
     pub fleet: String,
     pub enrolled_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// Phase 0.5 wisp: which runtime backend this host's agent is
+    /// driving (`docker`, `wisp`, ...). `"docker"` for pre-0.5
+    /// agents that never gossiped the field. Read from
+    /// `metadata.runtime_backend` on the host row.
+    pub runtime_backend: String,
 }
 
 impl From<Host> for HostDto {
     fn from(h: Host) -> Self {
+        // Pre-0.5 agents never set this; default to `docker` so the
+        // dashboard / isd never renders an empty cell for hosts
+        // running the legacy backend.
+        let runtime_backend = h
+            .metadata
+            .get("runtime_backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or("docker")
+            .to_string();
         Self {
             id: ulid::Ulid::from(h.id).to_string(),
             fingerprint: h.fingerprint,
@@ -37,6 +51,7 @@ impl From<Host> for HostDto {
             last_seen_at: h
                 .last_seen_at
                 .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
+            runtime_backend,
         }
     }
 }
@@ -341,5 +356,49 @@ mod tests {
 
         let dto: HostDto = h.into();
         assert_eq!(dto.fleet, "prod");
+    }
+
+    /// Phase 0.5 wisp: host metadata's `runtime_backend` key
+    /// surfaces on the DTO so the dashboard / isd ps can render the
+    /// column. Hosts whose agents never gossiped a backend (pre-0.5)
+    /// default to `"docker"`.
+    #[test]
+    fn host_dto_exposes_runtime_backend_from_metadata() {
+        use isengard_storage::{Host, HostId};
+        let h = Host {
+            id: HostId::new(),
+            fingerprint: "fp".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            agent_version: "0.1.0".into(),
+            docker_version: "27.0".into(),
+            enrolled_at: 0,
+            last_seen_at: None,
+            metadata: serde_json::json!({"runtime_backend": "wisp"}),
+            fleet: "prod".into(),
+        };
+        let dto: HostDto = h.into();
+        assert_eq!(dto.runtime_backend, "wisp");
+    }
+
+    #[test]
+    fn host_dto_runtime_backend_defaults_to_docker_for_legacy_metadata() {
+        use isengard_storage::{Host, HostId};
+        let h = Host {
+            id: HostId::new(),
+            fingerprint: "fp".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            agent_version: "0.1.0".into(),
+            docker_version: "27.0".into(),
+            enrolled_at: 0,
+            last_seen_at: None,
+            metadata: serde_json::json!({}),
+            fleet: "prod".into(),
+        };
+        let dto: HostDto = h.into();
+        assert_eq!(dto.runtime_backend, "docker");
     }
 }

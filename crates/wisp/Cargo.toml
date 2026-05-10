@@ -54,6 +54,14 @@ tempfile.workspace = true
 # run-busybox`). Dev-dep only: production callers handle errors via
 # `WispError`.
 anyhow.workspace = true
+# Phase 0.3 dispatch C: the runtime-side integration test
+# (`tests/runtime_with_network.rs`) drives bridge + veth + iptables
+# via wisp-net's public APIs and wires them into a NetworkAttacher
+# implementation. Wisp itself does not depend on wisp-net (the
+# runtime owns the data shape; wisp-net consumes it via the
+# `NetworkAttacher` trait), so this stays in dev-dependencies only.
+wisp-net = { path = "../wisp-net" }
+ipnet = "2.12"
 
 [[example]]
 name = "run-busybox"

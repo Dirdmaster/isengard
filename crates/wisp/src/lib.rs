@@ -15,6 +15,8 @@ pub mod cgroup;
 pub mod error;
 pub mod lifecycle;
 pub mod mount;
+pub mod network_attacher;
+pub mod network_spec;
 #[cfg(target_os = "linux")]
 pub mod pivot;
 pub mod runtime;
@@ -23,6 +25,10 @@ pub mod state;
 
 pub use cgroup::{Cgroup, CgroupFs, HostCgroupFs};
 pub use error::WispError;
+pub use network_attacher::NetworkAttacher;
+pub use network_spec::{
+    NetworkAttachmentRecord, NetworkSpec, PortProtocol, PortPublish, ResolvSource,
+};
 pub use runtime::Runtime;
 pub use spec::{Spec, load_and_validate};
 pub use state::{ContainerHandle, ContainerState};

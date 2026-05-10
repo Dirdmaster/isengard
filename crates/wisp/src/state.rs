@@ -26,6 +26,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, WispError};
+use crate::network_spec::{NetworkAttachmentRecord, NetworkSpec};
 
 /// State a container is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +45,24 @@ pub enum ContainerState {
 /// to `Runtime::create`. We keep it on disk because the operator may invoke
 /// `wisp` from a different cwd later (e.g. via `wisp ps`), and the bundle
 /// path needs to round-trip.
+///
+/// `network_spec` is the operator-supplied input (set by
+/// `Runtime::create_with_network`); `network_attachment` is what the
+/// runtime actually attached at start time. Both default to `None` for
+/// the no-network path so existing `state.json` files (Phase 0.1)
+/// deserialize unchanged.
+///
+/// `stdout_log_path` / `stderr_log_path` point at the per-container
+/// log files written by [`crate::lifecycle::start_container`] (the
+/// child's stdout / stderr are dup2'd onto these files before exec).
+/// Both default to `None` for back-compat with Phase 0.1 / 0.3 state
+/// files; `start_container` populates them on every new run.
+///
+/// `exit_code` is set once the per-container reaper has reaped PID 1.
+/// Encoding mirrors shell convention: positive `0..=255` for a clean
+/// `_exit(N)`; negative `-N` when PID 1 was killed by signal `N` (so
+/// `Some(-9)` is SIGKILL, `Some(-15)` is SIGTERM). `None` until reap
+/// lands on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerHandle {
     pub id: String,
@@ -51,6 +70,16 @@ pub struct ContainerHandle {
     pub state: ContainerState,
     pub pid: Option<u32>,
     pub created_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_spec: Option<NetworkSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_attachment: Option<NetworkAttachmentRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_log_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_log_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// Compute the per-container directory: `<state_dir>/containers/<id>/`.
@@ -162,6 +191,11 @@ mod tests {
             // SystemTime serialised as a (sec, nsec) pair; pin to a known
             // offset so round-trip equality is deterministic.
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            network_spec: None,
+            network_attachment: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            exit_code: None,
         }
     }
 
@@ -258,5 +292,45 @@ mod tests {
         remove(dir.path(), "ghost").unwrap();
         // Second remove on a non-existent id must also succeed.
         remove(dir.path(), "ghost").unwrap();
+    }
+
+    #[test]
+    fn handle_with_network_spec_round_trips() {
+        use crate::network_spec::{NetworkSpec, PortProtocol, PortPublish, ResolvSource};
+        let dir = TempDir::new().unwrap();
+        let mut h = make_handle("net");
+        h.network_spec = Some(NetworkSpec {
+            network_name: "app".into(),
+            ports: vec![PortPublish::v4_any(18080, 80, PortProtocol::Tcp)],
+            resolv_source: ResolvSource::HostCopy,
+        });
+        write(dir.path(), &h).unwrap();
+        let back = read(dir.path(), "net").unwrap();
+        assert_eq!(back.network_spec, h.network_spec);
+        assert!(back.network_attachment.is_none());
+    }
+
+    #[test]
+    fn legacy_state_json_without_network_fields_round_trips() {
+        // Phase 0.1 wrote handles without network_spec / network_attachment.
+        // Reading such a file must succeed (serde(default) on the new
+        // optional fields). We hand-craft a JSON blob that omits both.
+        let dir = TempDir::new().unwrap();
+        let cdir = dir.path().join("containers/legacy");
+        std::fs::create_dir_all(&cdir).unwrap();
+        // Pin the SystemTime fields to the same shape serde emits.
+        let json = r#"{
+  "id": "legacy",
+  "bundle": "/tmp/bundle-legacy",
+  "state": "Created",
+  "pid": null,
+  "created_at": { "secs_since_epoch": 1700000000, "nanos_since_epoch": 0 }
+}"#;
+        std::fs::write(cdir.join("state.json"), json).unwrap();
+
+        let h = read(dir.path(), "legacy").unwrap();
+        assert_eq!(h.id, "legacy");
+        assert!(h.network_spec.is_none());
+        assert!(h.network_attachment.is_none());
     }
 }
