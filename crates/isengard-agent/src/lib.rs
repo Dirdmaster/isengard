@@ -225,17 +225,34 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let proxy_state = proxy::ProxyState::new();
     proxy_state.set_event_sink(proxy_event_tx);
 
-    // -- shared Docker handle. Used by the DeploymentSupervisor's blue-green
-    //    driver and by the labels watcher below. Best-effort: if Docker is
-    //    unreachable the supervisor is not built and the updater falls back
-    //    to its in-place behavior. The labels watcher is also skipped.
-    let docker = match bollard::Docker::connect_with_local_defaults() {
-        Ok(d) => Some(Arc::new(d)),
+    // -- shared runtime backend (Phase 0.4 dispatch A). ISENGARD_RUNTIME
+    //    selects bollard (default) vs wisp (dispatch B). The trait is the
+    //    public seam; deeply-bollard helpers (compose_apply,
+    //    deployment/driver, labels, proxy/discovery) reach for the
+    //    underlying bollard handle via [`runtime::RuntimeBackend::as_bollard`]
+    //    until dispatch B replaces them with trait-driven equivalents.
+    //    Best-effort: if backend construction fails the supervisor + labels
+    //    watcher are disabled (matches pre-0.4 behavior when docker.sock
+    //    was unreachable).
+    let backend: Option<Arc<dyn runtime::RuntimeBackend>> = match runtime::select_backend(
+        &opts.state_dir,
+    )
+    .await
+    {
+        Ok(b) => Some(b),
         Err(e) => {
-            warn!(error = %e, "docker: connect failed, deployment supervisor + labels watcher disabled");
+            warn!(
+                error = %e,
+                "runtime: backend selection failed, deployment supervisor + labels watcher disabled",
+            );
             None
         }
     };
+    // Legacy bollard-typed handle for callers that haven't moved to the
+    // trait yet (compose_apply, deployment/driver::RealDriverDeps, the
+    // labels watcher, the bollard log source, proxy/discovery). Dispatch B
+    // replaces these callers and removes the accessor.
+    let docker = backend.as_ref().and_then(|b| b.as_bollard());
 
     // -- DeploymentSupervisor (Phase 10 Task 7). Build it BEFORE plugins so
     //    its dispatcher can be threaded through PluginContext into the
@@ -584,7 +601,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_supervisor = supervisor_for_sync.clone();
     let sync_log_source = log_source.clone();
     let sync_mdns = mdns_handle.clone();
-    let sync_docker = docker.clone();
+    let sync_backend = backend.clone();
     // v0.3d: surface the compose root + host id to the sync loop so it
     // can service `WriteCompose` ControllerMessages from the dashboard.
     let sync_compose_ctx = Some(sync::ComposeContext {
@@ -607,7 +624,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_log_source,
             sync_mdns,
             sync_compose_ctx,
-            sync_docker,
+            sync_backend,
         )
         .await
     };

@@ -30,6 +30,7 @@ use crate::deployment::DeploymentSupervisor;
 use crate::logs::LogSource;
 use crate::mdns::MdnsResponder;
 use crate::proxy::ProxyState;
+use crate::runtime::RuntimeBackend;
 
 /// Shared handle to the agent's mDNS responder. Optional: tests + docker-less
 /// environments boot the agent without one, in which case the sync loop just
@@ -69,7 +70,7 @@ type LogSubs =
         log_source,
         mdns,
         compose_ctx,
-        docker
+        backend
     ),
     fields(agent_id = %agent_id)
 )]
@@ -86,7 +87,7 @@ pub async fn run_sync_loop<S: LogSource>(
     log_source: Option<Arc<S>>,
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
-    docker: Option<Arc<bollard::Docker>>,
+    backend: Option<Arc<dyn RuntimeBackend>>,
 ) -> Result<()> {
     // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
@@ -177,7 +178,7 @@ pub async fn run_sync_loop<S: LogSource>(
     let read_log_tx = tx.clone();
     let read_mdns = mdns.clone();
     let read_compose_ctx = compose_ctx.clone();
-    let read_docker = docker.clone();
+    let read_backend = backend.clone();
     let log_subs: LogSubs = Arc::new(tokio::sync::Mutex::new(Default::default()));
     let read_log_subs = log_subs.clone();
     let mut read_task = tokio::spawn(async move {
@@ -204,11 +205,11 @@ pub async fn run_sync_loop<S: LogSource>(
                     // the upstream registry so a router request that lands
                     // first sees an upstream, not just a DNS record.
                     let rules_for_mdns = cfg.rules.clone();
-                    let docker_for_apply = read_docker.as_deref();
-                    if let Err(e) = crate::proxy::apply_config_with_docker(
+                    let backend_for_apply = read_backend.as_deref();
+                    if let Err(e) = crate::proxy::apply_config_with_backend(
                         &read_proxy_state,
                         cfg,
-                        docker_for_apply,
+                        backend_for_apply,
                     )
                     .await
                     {
@@ -468,7 +469,7 @@ pub async fn run_sync_loop<S: LogSource>(
         log_source,
         mdns,
         compose_ctx,
-        docker
+        backend
     ),
     fields(agent_id = %agent_id)
 )]
@@ -485,7 +486,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
     log_source: Option<Arc<S>>,
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
-    docker: Option<Arc<bollard::Docker>>,
+    backend: Option<Arc<dyn RuntimeBackend>>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -524,7 +525,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
             log_source.clone(),
             mdns.clone(),
             compose_ctx.clone(),
-            docker.clone(),
+            backend.clone(),
         )
         .await;
 

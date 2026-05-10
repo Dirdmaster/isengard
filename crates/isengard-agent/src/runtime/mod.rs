@@ -91,6 +91,18 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
 
     /// Backend identity for diagnostics (`"docker"` or `"wisp"`).
     fn name(&self) -> &'static str;
+
+    /// Borrow the underlying bollard handle when this backend is the
+    /// bollard one. Returns `None` for non-bollard backends (today: wisp,
+    /// once dispatch B lands). Phase 0.4 dispatch A keeps a handful of
+    /// internal helpers (compose_apply, deployment/driver, labels, the
+    /// log decoder, proxy IP discovery) calling bollard directly; this
+    /// escape hatch lets them keep working without poisoning the public
+    /// surface. Dispatch B replaces those callers with trait-driven
+    /// equivalents and removes the accessor.
+    fn as_bollard(&self) -> Option<std::sync::Arc<bollard::Docker>> {
+        None
+    }
 }
 
 #[cfg(test)]

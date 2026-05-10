@@ -697,6 +697,10 @@ impl RuntimeBackend for BollardBackend {
     fn name(&self) -> &'static str {
         "docker"
     }
+
+    fn as_bollard(&self) -> Option<std::sync::Arc<bollard::Docker>> {
+        Some(self.docker.clone())
+    }
 }
 
 fn map_log_output(out: bollard::container::LogOutput) -> LogChunk {
