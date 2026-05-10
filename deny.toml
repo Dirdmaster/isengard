@@ -60,13 +60,12 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2024-0384
     "RUSTSEC-2024-0384",
 
-    # fxhash 0.2.1 is unmaintained (upstream archived; recommends rustc-hash).
-    # Pulled in transitively via inquire 0.7 (Phase 0.10 init/join TUI). The
-    # crate is a tiny non-cryptographic hash; runtime risk is zero. Will drop
-    # when inquire's next major picks rustc-hash, or sooner if we swap the
-    # prompt library.
-    # https://rustsec.org/advisories/RUSTSEC-2025-0057
-    "RUSTSEC-2025-0057",
+    # paste 1.0.15: upstream archived, no safe upgrade. Pulled in transitively
+    # via ratatui 0.29 (and through tui-input/tui-big-text -> ratatui). The
+    # crate is a compile-time macro for token pasting; no runtime risk. Drops
+    # when ratatui swaps to pastey or with_builtin_macros upstream.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

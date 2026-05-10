@@ -34,8 +34,15 @@ clap.workspace = true
 hex = "0.4"
 humantime = "2.1"
 if-addrs = { workspace = true }
-inquire = { workspace = true }
 inventory.workspace = true
+# Interactive install wizard (replaces inquire). ratatui drives the TUI;
+# crossterm is the terminal backend; tui-input provides text/password
+# field state; tui-big-text renders the welcome and done banners.
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-input = "0.11"
+tui-big-text = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rand = { workspace = true }
 sha2 = { workspace = true }
 which = { workspace = true }
