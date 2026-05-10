@@ -23,7 +23,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/isengard controller --state-dir /var/lib/isengard
+ExecStart=/usr/local/bin/isengard controller --state-dir /var/lib/isengard/controller
 Restart=on-failure
 RestartSec=5
 
