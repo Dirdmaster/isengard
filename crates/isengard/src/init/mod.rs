@@ -367,7 +367,17 @@ async fn run_interactive(args: InitArgs, host_ip: String) -> Result<()> {
     cliclack::intro(format!("isengard init  v{}", env!("CARGO_PKG_VERSION")))?;
 
     let host = probe_host();
-    cliclack::note("Detected host", format_host_info(&host))?;
+    // `cliclack::note` would render the body inside a rounded ASCII box;
+    // the mockup is just a `◇  Detected host` header followed by free
+    // rows under the connector. `log::step` prints the header line; the
+    // rows below go through `eprintln!` so they stay on stderr in the
+    // same buffer cliclack is using (mixing stdout `println!` here would
+    // interleave on slow terminals).
+    cliclack::log::step("Detected host")?;
+    for line in format_host_info(&host).lines() {
+        eprintln!("\x1b[38;5;8m│\x1b[0m  {line}");
+    }
+    eprintln!("\x1b[38;5;8m│\x1b[0m");
 
     let plan = Plan::gather_interactive(&args, host_ip)?;
 
@@ -1039,7 +1049,12 @@ pub async fn run_join(args: JoinArgs) -> Result<()> {
 async fn run_join_interactive(args: JoinArgs) -> Result<()> {
     cliclack::intro(format!("isengard join  v{}", env!("CARGO_PKG_VERSION")))?;
     let host = probe_host();
-    cliclack::note("Detected host", format_host_info(&host))?;
+    // Same free-rows treatment as `init` (see comment there).
+    cliclack::log::step("Detected host")?;
+    for line in format_host_info(&host).lines() {
+        eprintln!("\x1b[38;5;8m│\x1b[0m  {line}");
+    }
+    eprintln!("\x1b[38;5;8m│\x1b[0m");
     // `◆  Joining controller` — same active-step glyph as `init` uses
     // for `Bootstrapping`. The completed step lines below go through
     // `log::step` so they render `◇`.
