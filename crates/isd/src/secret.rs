@@ -810,4 +810,101 @@ mod tests {
         let v = read_value(Some(&f)).unwrap();
         assert_eq!(v, "hello");
     }
+
+    // ===================================================================
+    // Phase 0.15 integration test: spin up two stub controllers (one
+    // wiremock instance per "fleet"), point a temp credentials file at
+    // them, run `secret put --scope global` through the dispatch path,
+    // and verify both controllers received the PUT.
+    //
+    // Ignored by default because:
+    //   - wiremock binds an OS-chosen TCP port; environments with no
+    //     loopback access (some sandboxes) will fail.
+    //   - The test sets ISD_CREDENTIALS_FILE which is process-global; if
+    //     test runners share env between tests this can collide. Running
+    //     it under `--ignored` keeps it opt-in for local + CI smoke.
+    //
+    // Run with: `cargo test -p isd -- --ignored --include-ignored
+    //           secret::tests::global_put_fans_out_to_every_context`
+    // ===================================================================
+    #[tokio::test]
+    #[ignore]
+    async fn global_put_fans_out_to_every_context() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server_a = MockServer::start().await;
+        let server_b = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/secrets/cf_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json_name("cf_token")))
+            .expect(1)
+            .mount(&server_a)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/secrets/cf_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json_name("cf_token")))
+            .expect(1)
+            .mount(&server_b)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds_path = dir.path().join("credentials.toml");
+        std::fs::write(
+            &creds_path,
+            format!(
+                r#"default_context = "alice"
+
+[[contexts]]
+name = "alice"
+kind = "http"
+url = "{}"
+
+[[contexts]]
+name = "bob"
+kind = "http"
+url = "{}"
+"#,
+                server_a.uri(),
+                server_b.uri()
+            ),
+        )
+        .unwrap();
+
+        // SAFETY: the surrounding test is `#[ignore]`d and runs in
+        // isolation when invoked explicitly. Other tests in this module
+        // do not touch ISD_CREDENTIALS_FILE so concurrent reads are
+        // safe in practice. set_var is unsafe in 2024 edition because
+        // it can race with getenv from other threads; the cost is
+        // acceptable for an ignored integration test.
+        unsafe {
+            std::env::set_var("ISD_CREDENTIALS_FILE", &creds_path);
+        }
+
+        let val_path = dir.path().join("value");
+        std::fs::write(&val_path, "supersecret\n").unwrap();
+        let result = run_put(
+            PutArgs {
+                name: "cf_token".to_string(),
+                from_file: Some(val_path),
+                scope: Scope::Global,
+            },
+            None,
+        )
+        .await;
+
+        unsafe {
+            std::env::remove_var("ISD_CREDENTIALS_FILE");
+        }
+
+        result.expect("put --scope global should succeed when every stub returns 200");
+        // wiremock's `.expect(1)` above panics on drop if the count was
+        // wrong, so reaching this line means both controllers got the
+        // PUT exactly once.
+    }
+
+    fn json_name(name: &str) -> serde_json::Value {
+        serde_json::json!({ "name": name })
+    }
 }

@@ -49,3 +49,7 @@ time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Phase 0.15: integration test for `secret --scope global` spins up two
+# stub controllers (one wiremock instance per "fleet") and verifies the
+# CLI fans the put/rm out across both.
+wiremock.workspace = true
