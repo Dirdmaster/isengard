@@ -302,8 +302,7 @@ pub fn apply_controller_write(
 
 /// Atomic write of `dir/stack.toml`. Phase 0.13.
 fn write_manifest_atomic(dir: &Path, manifest_toml: &str) -> Result<(), anyhow::Error> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| anyhow::anyhow!("mkdir {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("mkdir {}: {e}", dir.display()))?;
     let path = dir.join("stack.toml");
     let tmp = path.with_extension("toml.tmp");
     {
