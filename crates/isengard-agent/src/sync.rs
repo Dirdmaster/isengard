@@ -339,6 +339,11 @@ pub async fn run_sync_loop<S: LogSource>(
                         &req.expected_sha256,
                         &ctx.host_id,
                         req.force,
+                        // Phase 0.13: persist verbatim stack.toml beside
+                        // compose.yml. Hook execution + secret threading
+                        // are deferred to a follow-up; the manifest body
+                        // is preserved so operators can inspect it.
+                        &req.manifest_toml,
                     );
                     let ack = match outcome {
                         crate::compose_writer::ApplyWriteOutcome::Ok { written_sha256 } => {
