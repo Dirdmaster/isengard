@@ -25,6 +25,10 @@ use crate::compose_reconciler::{
     DesiredCompose, DesiredService, ReconcilePlan, RunningService, ServiceOp, build_plan,
     parse_compose,
 };
+use crate::runtime::{
+    ContainerCreateSpec, MountKind, MountSpec, PortProtocol, PortSpec,
+    RestartPolicy as SpecRestartPolicy, SecretMount,
+};
 use crate::secret_fetch;
 
 /// Outcome of applying a [`ReconcilePlan`]. Each entry mirrors the
@@ -232,6 +236,152 @@ fn container_name_for(stack_name: &str, service: &str, svc: &DesiredService) -> 
     svc.container_name
         .clone()
         .unwrap_or_else(|| format!("{stack_name}-{service}"))
+}
+
+/// Translate a parsed compose [`DesiredService`] into the
+/// backend-agnostic [`ContainerCreateSpec`] every [`crate::runtime::RuntimeBackend`]
+/// understands.
+///
+/// Phase 0.6 wisp arc: this is the inverse of
+/// [`crate::runtime::bollard_backend::spec_to_config`]. The compose
+/// pipeline historically built `bollard::Config<String>` directly from a
+/// `DesiredService`; threading the trait through reconcile_stack means
+/// emitting a [`ContainerCreateSpec`] here and letting each backend's
+/// `create_container` produce its own native shape (bollard's
+/// `Config<String>` or wisp's `BundleBuilder` overrides).
+///
+/// Mapping rules:
+/// - `binds` (already `host:container[:options]` strings the secret /
+///   compose layer produced) are split back into [`MountSpec`] entries
+///   so the backend translation is uniform. The `:ro` / `:rw` suffix is
+///   honoured.
+/// - `secrets` are passed through as [`SecretMount`] entries with their
+///   target paths; the backend turns each into a bind-mount of the
+///   agent-materialised tmpfs path.
+/// - Compose port strings are parsed into [`PortSpec`] entries via
+///   [`parse_port_mapping`]; protocol defaults to TCP, host_ip is set
+///   when the operator wrote `127.0.0.1:8080:80`.
+/// - `restart:` strings translate to [`SpecRestartPolicy`] (default `No`).
+/// - Labels gain the compose project + isengard.stack pair so a later
+///   reconcile can match the container back to its service.
+pub fn desired_service_to_create_spec(
+    stack_name: &str,
+    svc: &DesiredService,
+    binds: &[String],
+    secrets: Vec<SecretMount>,
+) -> ContainerCreateSpec {
+    let container_name = container_name_for(stack_name, &svc.name, svc);
+
+    // Labels: ensure compose project + service labels are present so the
+    // next reconcile can match the container back to the service.
+    let mut labels = svc.labels.clone();
+    labels.insert(
+        "com.docker.compose.project".to_string(),
+        stack_name.to_string(),
+    );
+    labels.insert("com.docker.compose.service".to_string(), svc.name.clone());
+    labels.insert("isengard.stack".to_string(), stack_name.to_string());
+
+    // Port mappings.
+    let mut ports: Vec<PortSpec> = Vec::new();
+    for spec in &svc.ports {
+        if let Some(p) = compose_port_to_spec(spec) {
+            ports.push(p);
+        }
+    }
+
+    // Bind strings -> MountSpec entries.
+    let mut mounts: Vec<MountSpec> = Vec::new();
+    for bind in binds {
+        if let Some(m) = parse_bind_string(bind) {
+            mounts.push(m);
+        }
+    }
+
+    // restart: translate to typed RestartPolicy.
+    let restart = match svc.restart.as_deref() {
+        Some("always") => SpecRestartPolicy::Always,
+        Some("on-failure") => SpecRestartPolicy::OnFailure { max_retries: None },
+        Some("unless-stopped") => SpecRestartPolicy::UnlessStopped,
+        _ => SpecRestartPolicy::No,
+    };
+
+    ContainerCreateSpec {
+        container_name,
+        image: svc.image.clone().unwrap_or_default(),
+        stack: stack_name.to_string(),
+        service: svc.name.clone(),
+        command: svc.command.clone(),
+        entrypoint: svc.entrypoint.clone(),
+        env: svc.environment.clone(),
+        labels,
+        mounts,
+        ports,
+        networks: svc.networks.clone(),
+        restart,
+        healthcheck: None,
+        user: None,
+        working_dir: None,
+        hostname: None,
+        linux_resources: None,
+        secrets,
+    }
+}
+
+/// Parse a compose port string into a [`PortSpec`]. Accepts `"80"`,
+/// `"8080:80"`, `"8080:80/udp"`, `"127.0.0.1:8080:80"`, or full
+/// `"127.0.0.1:8080:80/tcp"`. Returns `None` for bare container ports
+/// (compose expose, no mapping) since reconcile only cares about
+/// published ports.
+fn compose_port_to_spec(spec: &str) -> Option<PortSpec> {
+    let (host_port_str, container_part) = parse_port_mapping(spec)?;
+    let host_port: u16 = host_port_str.parse().ok()?;
+    // Optional /proto suffix.
+    let (cport_str, protocol) = match container_part.split_once('/') {
+        Some((p, "udp")) => (p.to_string(), PortProtocol::Udp),
+        Some((p, _)) => (p.to_string(), PortProtocol::Tcp),
+        None => (container_part, PortProtocol::Tcp),
+    };
+    let container_port: u16 = cport_str.parse().ok()?;
+    let host_ip = parse_host_ip_prefix(spec);
+    Some(PortSpec {
+        host_ip,
+        host_port,
+        container_port,
+        protocol,
+    })
+}
+
+/// Pull the optional `host_ip:` prefix out of a compose port string.
+/// Returns `None` when the spec is `host:container[/proto]` (two colons
+/// or fewer) or unparsable.
+fn parse_host_ip_prefix(spec: &str) -> Option<std::net::IpAddr> {
+    if spec.matches(':').count() < 2 {
+        return None;
+    }
+    let (ip_str, _rest) = spec.split_once(':')?;
+    ip_str.parse().ok()
+}
+
+/// Split a docker-style bind string into a [`MountSpec`]. Accepts the
+/// `host:container` and `host:container:ro` / `:rw` forms produced by
+/// the secret_fetch / compose path.
+fn parse_bind_string(bind: &str) -> Option<MountSpec> {
+    let parts: Vec<&str> = bind.split(':').collect();
+    let (source, target, read_only) = match parts.as_slice() {
+        [src, dst] => ((*src).to_string(), (*dst).to_string(), false),
+        [src, dst, opts] => {
+            let read_only = opts.split(',').any(|t| t.trim() == "ro");
+            ((*src).to_string(), (*dst).to_string(), read_only)
+        }
+        _ => return None,
+    };
+    Some(MountSpec {
+        source,
+        target,
+        kind: MountKind::Bind,
+        read_only,
+    })
 }
 
 async fn ensure_container_started(
@@ -609,5 +759,192 @@ mod tests {
             rp.name,
             Some(RestartPolicyNameEnum::UNLESS_STOPPED)
         ));
+    }
+
+    // ----- Phase 0.6: desired_service_to_create_spec golden tests -----
+
+    #[test]
+    fn desired_service_to_create_spec_minimal_image_only() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx:1.27".into()),
+            ..Default::default()
+        };
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(spec.container_name, "hello-web");
+        assert_eq!(spec.image, "nginx:1.27");
+        assert_eq!(spec.stack, "hello");
+        assert_eq!(spec.service, "web");
+        assert!(matches!(spec.restart, SpecRestartPolicy::No));
+        assert!(spec.command.is_none());
+        assert!(spec.entrypoint.is_none());
+        assert!(spec.ports.is_empty());
+        assert!(spec.mounts.is_empty());
+        assert!(spec.secrets.is_empty());
+        // Compose / isengard labels are auto-injected.
+        assert_eq!(spec.labels["com.docker.compose.project"], "hello");
+        assert_eq!(spec.labels["com.docker.compose.service"], "web");
+        assert_eq!(spec.labels["isengard.stack"], "hello");
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_honours_container_name_override() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            container_name: Some("my-web".into()),
+            ..Default::default()
+        };
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(spec.container_name, "my-web");
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_passes_environment_through() {
+        let mut svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        svc.environment.insert("FOO".into(), "bar".into());
+        svc.environment.insert("TZ".into(), "UTC".into());
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(spec.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(spec.env.get("TZ").map(String::as_str), Some("UTC"));
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_translates_restart_strings() {
+        for (input, expect_always) in [
+            ("always", true),
+            ("unless-stopped", false),
+            ("on-failure", false),
+            ("no", false),
+        ] {
+            let svc = DesiredService {
+                name: "web".into(),
+                image: Some("nginx".into()),
+                restart: Some(input.into()),
+                ..Default::default()
+            };
+            let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+            match (input, &spec.restart) {
+                ("always", SpecRestartPolicy::Always) => assert!(expect_always),
+                ("unless-stopped", SpecRestartPolicy::UnlessStopped) => {}
+                ("on-failure", SpecRestartPolicy::OnFailure { max_retries: None }) => {}
+                ("no", SpecRestartPolicy::No) => {}
+                (i, p) => panic!("unexpected restart mapping: {i} -> {p:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_parses_port_strings() {
+        let mut svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        svc.ports.push("8080:80".into());
+        svc.ports.push("127.0.0.1:9090:90/udp".into());
+        // Bare ports (compose expose-only) are skipped.
+        svc.ports.push("100".into());
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(spec.ports.len(), 2);
+        assert_eq!(spec.ports[0].host_port, 8080);
+        assert_eq!(spec.ports[0].container_port, 80);
+        assert!(matches!(spec.ports[0].protocol, PortProtocol::Tcp));
+        assert!(spec.ports[0].host_ip.is_none());
+        assert_eq!(spec.ports[1].host_port, 9090);
+        assert_eq!(spec.ports[1].container_port, 90);
+        assert!(matches!(spec.ports[1].protocol, PortProtocol::Udp));
+        assert_eq!(
+            spec.ports[1].host_ip.unwrap().to_string(),
+            "127.0.0.1".to_string()
+        );
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_splits_bind_strings_into_mounts() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        let binds = vec![
+            "/srv/data:/data".to_string(),
+            "/run/isengard-secrets/hello-web/cf:/run/secrets/cf:ro".to_string(),
+        ];
+        let spec = desired_service_to_create_spec("hello", &svc, &binds, Vec::new());
+        assert_eq!(spec.mounts.len(), 2);
+        assert_eq!(spec.mounts[0].source, "/srv/data");
+        assert_eq!(spec.mounts[0].target, "/data");
+        assert!(!spec.mounts[0].read_only);
+        assert!(matches!(spec.mounts[0].kind, MountKind::Bind));
+        assert!(spec.mounts[1].read_only);
+        assert_eq!(spec.mounts[1].target, "/run/secrets/cf");
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_threads_secret_mounts() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        let secrets = vec![SecretMount {
+            source: "/run/isengard-secrets/hello-web/cf".into(),
+            target: std::path::PathBuf::from("/run/secrets/cf"),
+            mode: 0o400,
+        }];
+        let spec = desired_service_to_create_spec("hello", &svc, &[], secrets.clone());
+        assert_eq!(spec.secrets.len(), 1);
+        assert_eq!(spec.secrets[0].source, secrets[0].source);
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_preserves_user_labels_then_adds_managed_ones() {
+        let mut svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        svc.labels.insert("traefik.enable".into(), "true".into());
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(spec.labels["traefik.enable"], "true");
+        assert_eq!(spec.labels["isengard.stack"], "hello");
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_passes_through_networks() {
+        let mut svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        svc.networks.push("isengard-proxy".into());
+        svc.networks.push("hello_default".into());
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(spec.networks, svc.networks);
+    }
+
+    #[test]
+    fn parse_bind_string_two_components_no_options() {
+        let m = parse_bind_string("/srv:/data").unwrap();
+        assert_eq!(m.source, "/srv");
+        assert_eq!(m.target, "/data");
+        assert!(!m.read_only);
+    }
+
+    #[test]
+    fn parse_bind_string_three_components_ro() {
+        let m = parse_bind_string("/srv:/data:ro").unwrap();
+        assert!(m.read_only);
+    }
+
+    #[test]
+    fn parse_bind_string_invalid_returns_none() {
+        assert!(parse_bind_string("/srv").is_none());
+        assert!(parse_bind_string("a:b:c:d").is_none());
     }
 }
