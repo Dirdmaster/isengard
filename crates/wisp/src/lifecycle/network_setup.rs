@@ -30,14 +30,13 @@ pub fn ensure_global_ip_forward() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// On Mac `/proc` does not exist: the helper should return an
     /// error rather than panicking. Linux call-sites can choose to
     /// ignore the result.
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn errors_cleanly_on_non_linux() {
+        use super::*;
         let res = ensure_global_ip_forward();
         assert!(res.is_err(), "expected error on Mac, got {res:?}");
     }
