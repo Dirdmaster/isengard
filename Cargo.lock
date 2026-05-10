@@ -2686,6 +2686,7 @@ dependencies = [
  "hostname",
  "if-addrs",
  "instant-acme",
+ "ipnet",
  "isengard-controller",
  "isengard-core",
  "isengard-proto",
@@ -5759,6 +5760,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

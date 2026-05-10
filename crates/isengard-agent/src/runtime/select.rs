@@ -42,11 +42,9 @@ impl BackendChoice {
 pub async fn select_backend(state_dir: &Path) -> Result<Arc<dyn RuntimeBackend>, RuntimeError> {
     match BackendChoice::from_env() {
         BackendChoice::Wisp => {
-            // Dispatch A leaves WispBackend as a placeholder that errors at
-            // construction. Dispatch B fills it in.
-            Err(RuntimeError::UnknownBackend(
-                "wisp backend not yet implemented (Phase 0.4 dispatch B)".into(),
-            ))
+            tracing::info!("runtime backend: wisp");
+            let backend = super::wisp_backend::WispBackend::from_env(state_dir).await?;
+            Ok(Arc::new(backend))
         }
         BackendChoice::Docker => {
             tracing::info!("runtime backend: docker (bollard)");

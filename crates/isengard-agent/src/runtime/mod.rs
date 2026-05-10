@@ -21,6 +21,8 @@ mod error;
 pub mod select;
 mod spec;
 pub mod wisp_backend;
+#[cfg(target_os = "linux")]
+pub(crate) mod wisp_backend_attacher;
 
 pub use error::RuntimeError;
 pub use select::{BackendChoice, select_backend};
