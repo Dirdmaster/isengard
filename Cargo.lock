@@ -2729,6 +2729,7 @@ dependencies = [
  "rand 0.8.6",
  "rustls",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -63,6 +63,11 @@ enum Command {
     /// `install/install.sh` bash flow. Interactive when stdin is a TTY,
     /// flag-driven (`--non-interactive`) for scripted installs.
     Init(init::InitArgs),
+    /// Phase 0.10: enrol THIS host as an agent against an existing
+    /// controller running elsewhere. Smaller than `init`: no controller
+    /// boot, no master key, just installs the agent unit and starts it
+    /// with the operator-supplied token + CA.
+    Join(init::JoinArgs),
     /// Run in controller mode: aggregates agent state, hosts the dashboard
     /// and notifier plugins, distributes config. With no subcommand the
     /// controller boots and serves; subcommands provide operator tooling
@@ -303,6 +308,7 @@ async fn main() {
         Command::Secret { .. } => "secret",
         Command::SelfUpdate { .. } => "self-update",
         Command::Init(_) => "init",
+        Command::Join(_) => "join",
     };
     tracing_init::init(mode, cli.log.as_deref());
 
@@ -391,6 +397,7 @@ async fn dispatch(command: Command) -> Result<()> {
             no_restart,
         } => run_self_update(url, sha256, unit, no_restart).await,
         Command::Init(args) => init::run(args).await,
+        Command::Join(args) => init::run_join(args).await,
     }
 }
 

@@ -827,3 +827,196 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
+// =====================================================================
+// `isengard join`: enrol this host as an agent against a remote
+// controller. Strict subset of `init`: no master key, no controller
+// boot, no secrets bootstrap. Just the agent.
+// =====================================================================
+
+/// Flags for `isengard join`. Required values: token + CA pin (path or
+/// base64) + controller URL. Everything else falls back to the same
+/// defaults `init` uses so a join host has the same on-disk layout.
+#[derive(Debug, Args, Clone)]
+pub struct JoinArgs {
+    /// Controller URL, e.g. `https://controller.example.com:9417`.
+    /// Positional so the join command reads naturally:
+    /// `isengard join --token X --ca-pem-path Y https://...`.
+    pub controller: String,
+    /// One-time enrollment token minted on the controller via
+    /// `isengard controller token mint --role agent`. Consumed on
+    /// first agent start; subsequent restarts ignore it.
+    #[arg(long)]
+    pub token: String,
+    /// Path to a PEM file holding the controller's CA root. Pinned for
+    /// the bootstrap channel handshake. One of `--ca-pem-path` or
+    /// `--ca-pem-base64` is required (they're mutually exclusive).
+    #[arg(long, conflicts_with = "ca_pem_base64")]
+    pub ca_pem_path: Option<PathBuf>,
+    /// Base64-encoded controller CA PEM (single-line, shell-safe). The
+    /// `controller token mint` join block emits this form. Decoded into
+    /// `<etc>/ca.pem` at install time.
+    #[arg(long)]
+    pub ca_pem_base64: Option<String>,
+    /// Optional sha256 fingerprint of the controller CA cert in
+    /// `sha256:HEX` form. When set, the join flow verifies the supplied
+    /// CA matches before writing it. Defense-in-depth pin.
+    #[arg(long)]
+    pub ca_fingerprint: Option<String>,
+    /// State dir layout matches `init`. The agent state lives at
+    /// `<state-dir>/agent`.
+    #[arg(long, default_value = "/var/lib/isengard")]
+    pub state_dir: PathBuf,
+    #[arg(long, default_value = "/etc/isengard")]
+    pub etc_dir: PathBuf,
+    #[arg(long, default_value = "wisp")]
+    pub runtime: String,
+    #[arg(long, alias = "yes")]
+    pub non_interactive: bool,
+}
+
+pub async fn run_join(args: JoinArgs) -> Result<()> {
+    preflight()?;
+    if args.ca_pem_path.is_none() && args.ca_pem_base64.is_none() {
+        bail!(
+            "missing CA pin: pass either --ca-pem-path <file> or --ca-pem-base64 <b64> (the controller's `token mint` output prints both)"
+        );
+    }
+
+    println!("[1/8] preflight ok");
+
+    // Layout
+    std::fs::create_dir_all(&args.etc_dir).with_context(|| format!("create {:?}", args.etc_dir))?;
+    let agent_state_dir = args.state_dir.join("agent");
+    std::fs::create_dir_all(&agent_state_dir)
+        .with_context(|| format!("create {agent_state_dir:?}"))?;
+    std::fs::create_dir_all("/var/lib/wisp").context("create /var/lib/wisp")?;
+    let _ = chmod(&args.etc_dir, 0o750);
+    println!("[2/8] state + etc dirs ready");
+
+    // Resolve + write CA pem
+    let ca_pem = if let Some(path) = &args.ca_pem_path {
+        std::fs::read_to_string(path).with_context(|| format!("read CA pem {path:?}"))?
+    } else if let Some(b64) = &args.ca_pem_base64 {
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .context("base64-decode --ca-pem-base64")?;
+        String::from_utf8(decoded).context("--ca-pem-base64 not utf-8")?
+    } else {
+        unreachable!("checked above")
+    };
+    if !ca_pem.contains("BEGIN CERTIFICATE") {
+        bail!("supplied CA does not contain a PEM certificate block");
+    }
+
+    if let Some(want) = &args.ca_fingerprint {
+        let want = want.trim();
+        let want = want
+            .strip_prefix("sha256:")
+            .or_else(|| want.strip_prefix("SHA256:"))
+            .unwrap_or(want);
+        let got = ca_sha256_fingerprint(&ca_pem)?;
+        if !got.eq_ignore_ascii_case(want) {
+            bail!(
+                "CA fingerprint mismatch: supplied --ca-fingerprint={want} but computed sha256={got}"
+            );
+        }
+    }
+
+    let ca_path = args.etc_dir.join("ca.pem");
+    write_secret(&ca_path, ca_pem.as_bytes(), 0o644)?;
+    println!("[3/8] ca pinned at {ca_path:?}");
+
+    // Token file
+    let token_path = args.etc_dir.join("agent-token.env");
+    let token_body = format!(
+        "ISENGARD_ENROLL_TOKEN={}\n\
+         ISENGARD_CONTROLLER_CA_PEM_PATH={}\n",
+        args.token,
+        ca_path.display()
+    );
+    write_secret(&token_path, token_body.as_bytes(), 0o600)?;
+    println!("[4/8] enrollment token persisted");
+
+    // Env file (controller URL, runtime). Written even on join so the
+    // unit's EnvironmentFile picks up RUST_LOG and runtime backend.
+    let env_path = args.etc_dir.join("isengard.env");
+    let env_body = format!(
+        "# Isengard agent-only join (Phase 0.10). Sourced by iso-agent.service.\n\
+         ISENGARD_CONTROLLER={controller}\n\
+         ISENGARD_RUNTIME={runtime}\n\
+         RUST_LOG=info\n",
+        controller = args.controller,
+        runtime = args.runtime,
+    );
+    write_secret(&env_path, env_body.as_bytes(), 0o644)?;
+    println!("[5/8] env file at {env_path:?}");
+
+    // Install only the agent unit + target. The agent unit on disk
+    // hardcodes `--controller https://controller.local:9417`; rewrite
+    // ExecStart to use the operator-supplied URL. Drop PartOf= since
+    // there's no controller on this host.
+    let dir = std::path::Path::new("/etc/systemd/system");
+    std::fs::create_dir_all(dir).context("create /etc/systemd/system")?;
+    let agent_unit = ISO_AGENT_UNIT
+        .replace(
+            "--controller https://controller.local:9417",
+            &format!("--controller {}", args.controller),
+        )
+        .replace("PartOf=iso-controller.service\n", "")
+        .replace(
+            "After=network-online.target iso-controller.service",
+            "After=network-online.target",
+        );
+    write_secret(&dir.join("iso-agent.service"), agent_unit.as_bytes(), 0o644)?;
+    run_systemctl(&["daemon-reload"])?;
+    println!("[6/8] iso-agent.service installed");
+
+    run_systemctl(&["enable", "iso-agent.service"]).ok();
+    run_systemctl(&["start", "iso-agent.service"])?;
+    println!("[7/8] iso-agent.service started");
+
+    println!();
+    println!("=================================================================");
+    println!("Joined controller {}.", args.controller);
+    println!();
+    println!("Verify:  systemctl status iso-agent");
+    println!("Logs:    journalctl -u iso-agent -f");
+    println!("On the controller host, confirm enrollment:");
+    println!(
+        "  isengard controller --state-dir {} agent list",
+        args.state_dir.join("controller").display()
+    );
+    println!("=================================================================");
+    println!("[8/8] done");
+    let _ = args.non_interactive; // reserved for future prompts
+    Ok(())
+}
+
+/// Compute the lowercase-hex sha256 of the first PEM CERTIFICATE block in
+/// `pem`. Used by `isengard join --ca-fingerprint` to defense-in-depth
+/// pin the controller's CA against tampering between mint + paste.
+fn ca_sha256_fingerprint(pem: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let der = pem_to_der(pem)?;
+    let mut h = Sha256::new();
+    h.update(&der);
+    Ok(hex::encode(h.finalize()))
+}
+
+fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
+    let begin = pem
+        .find("-----BEGIN CERTIFICATE-----")
+        .ok_or_else(|| anyhow!("no BEGIN CERTIFICATE in CA pem"))?;
+    let after_begin = begin + "-----BEGIN CERTIFICATE-----".len();
+    let end = pem
+        .find("-----END CERTIFICATE-----")
+        .ok_or_else(|| anyhow!("no END CERTIFICATE in CA pem"))?;
+    let body = &pem[after_begin..end];
+    let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(cleaned.as_bytes())
+        .context("base64-decode CA cert body")
+}
