@@ -523,9 +523,7 @@ pub fn start_container<F: CgroupFs>(
                 // If we attached a network and now the child died,
                 // best-effort detach so we don't leak iptables / veth
                 // state on the host.
-                if let (Some(record), Some(att)) =
-                    (handle.network_attachment.as_ref(), attacher.as_deref_mut())
-                {
+                if let (Some(record), Some(att)) = (handle.network_attachment.as_ref(), attacher) {
                     let _ = att.detach(record);
                 }
                 return Err(WispError::Lifecycle(format!(
