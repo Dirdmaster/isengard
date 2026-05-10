@@ -130,6 +130,14 @@ pub async fn run_sync_loop<S: LogSource>(
     let hb_tx = tx.clone();
     let interval = Duration::from_secs(u64::from(interval_secs.max(1)));
     let cancel_hb = cancel.clone();
+    // Phase 0.5: gossip the active runtime backend so `isd ps` can show
+    // a per-host backend column. Empty string when the agent doesn't
+    // know yet (no backend selected): the controller treats empty as
+    // `docker` for back-compat with pre-0.5 agents.
+    let runtime_backend = backend
+        .as_ref()
+        .map(|b| b.name().to_string())
+        .unwrap_or_default();
     let mut heartbeat_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Skip the first immediate tick; we want the first heartbeat one
@@ -151,7 +159,12 @@ pub async fn run_sync_loop<S: LogSource>(
                     let services = crate::container_snapshot::derive_services(&snapshots);
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
-                            Heartbeat { ts_ms, stacks, services },
+                            Heartbeat {
+                                ts_ms,
+                                stacks,
+                                services,
+                                runtime_backend: runtime_backend.clone(),
+                            },
                         )),
                     };
                     if hb_tx.send(msg).await.is_err() {
