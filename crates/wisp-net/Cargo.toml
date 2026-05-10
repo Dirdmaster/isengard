@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish = false
 description = "Wisp networking: bridge + veth + IPAM + iptables for wisp-runtime containers (Phase 0.3)"
 
 [dependencies]
