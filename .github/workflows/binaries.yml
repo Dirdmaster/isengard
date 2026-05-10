@@ -45,14 +45,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # arm64 isengard intentionally OMITTED: BoringSSL bindgen
+          # can't find `bits/libc-header-start.h` inside the
+          # `messense/rust-musl-cross:aarch64-musl` container because
+          # libclang picks up the host's stdint.h instead of the
+          # cross-toolchain's. The Phase 7 docker image has the same
+          # constraint (amd64-only). Apple Silicon hosts run the amd64
+          # binary under user-space emulation. Restore arm64 here when
+          # we have a working BINDGEN_EXTRA_CLANG_ARGS recipe.
           - target: x86_64-unknown-linux-musl
             musl-cross-tag: x86_64-musl
-          - target: aarch64-unknown-linux-musl
-            musl-cross-tag: aarch64-musl
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.version || github.ref }}
+
+      - name: Mark workspace safe for git (container ownership)
+        # gh release upload calls git internally to detect the repo;
+        # the container's file ownership doesn't match the runner's
+        # uid, which trips git's "dubious ownership" check. Adding the
+        # workspace as a safe directory unblocks the upload step.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install protoc 27.x
         run: |
