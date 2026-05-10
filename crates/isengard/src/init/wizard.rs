@@ -752,13 +752,18 @@ fn handle_network_key(wiz: &mut Wizard, key: KeyEvent) {
                 }
                 NetworkFocus::AcmeRadio => {
                     // Number-key shortcuts: 1=staging, 2=prod, 3=custom.
-                    match key.code {
-                        KeyCode::Char('1') => wiz.network.acme = AcmeChoice::Staging,
-                        KeyCode::Char('2') => wiz.network.acme = AcmeChoice::Production,
-                        KeyCode::Char('3') if !custom_acme => {
-                            wiz.network.acme = AcmeChoice::Custom(Input::new(String::new()));
+                    if let KeyCode::Char(c) = key.code {
+                        match c {
+                            '1' => wiz.network.acme = AcmeChoice::Staging,
+                            '2' => wiz.network.acme = AcmeChoice::Production,
+                            '3' => {
+                                if !custom_acme {
+                                    wiz.network.acme =
+                                        AcmeChoice::Custom(Input::new(String::new()));
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
                 NetworkFocus::AcmeCustomUrl => {
