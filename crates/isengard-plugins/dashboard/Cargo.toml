@@ -19,6 +19,7 @@ isengard-controller.workspace = true
 isengard-core.workspace = true
 isengard-plugin-backup.workspace = true
 isengard-plugin-notifier.workspace = true
+isengard-manifest.workspace = true
 isengard-proto.workspace = true
 isengard-storage.workspace = true
 mime_guess.workspace = true

@@ -59,7 +59,9 @@ pub use routing_rule_override::RoutingRuleOverride;
 pub use secret::{SecretMeta, validate_secret_name};
 pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::Setting;
-pub use stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};
+pub use stack::{
+    InsertStack, Stack, StackComposeRow, StackHook, StackId, StackManifestBundle, StackSource,
+};
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
 pub use tls_wildcard_cert::{UpsertWildcardCert, WildcardCertRow};
 pub use webhook::{

@@ -535,11 +535,60 @@ async fn list_stacks(
 }
 
 async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path<i64>) -> Response {
-    match handles.inventory.get_stack(StackId(id)).await {
-        Ok(Some(s)) => Json(StackDto::from(s)).into_response(),
-        Ok(None) => json_err(StatusCode::NOT_FOUND, "stack not found"),
-        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}")),
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
+        }
+    };
+    // Phase 0.13: include the manifest bundle inline. Legacy compose-only
+    // stacks get null / empty fields back; the dashboard JS ignores them.
+    let bundle = handles
+        .inventory
+        .get_stack_manifest_bundle(StackId(id))
+        .await
+        .unwrap_or_else(|_| isengard_storage::StackManifestBundle {
+            manifest_toml: None,
+            manifest_sha256: None,
+            manifest_imported_at: None,
+            deploy_strategy: None,
+            manifest_fleet: None,
+            secrets: Vec::new(),
+            hooks: Vec::new(),
+        });
+    let mut json = serde_json::to_value(StackDto::from(stack)).unwrap_or_default();
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "manifest_toml".into(),
+            serde_json::to_value(&bundle.manifest_toml).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "manifest_sha256".into(),
+            serde_json::to_value(&bundle.manifest_sha256).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "manifest_imported_at".into(),
+            serde_json::to_value(&bundle.manifest_imported_at).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "deploy_strategy".into(),
+            serde_json::to_value(&bundle.deploy_strategy).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "manifest_fleet".into(),
+            serde_json::to_value(&bundle.manifest_fleet).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "secrets".into(),
+            serde_json::to_value(&bundle.secrets).unwrap_or(serde_json::Value::Null),
+        );
+        obj.insert(
+            "hooks".into(),
+            serde_json::to_value(&bundle.hooks).unwrap_or(serde_json::Value::Null),
+        );
     }
+    Json(json).into_response()
 }
 
 /// `GET /api/v1/stacks/:id/compose` (v0.3c).
@@ -630,6 +679,13 @@ async fn put_stack_compose(
                     compose_yaml: body,
                     expected_sha256: expected,
                     force: q.force.unwrap_or(false),
+                    // Phase 0.13: compose-only PUT (YAML content-type)
+                    // preserves manifest state unchanged. Empty fields
+                    // signal "don't touch" to the agent.
+                    manifest_toml: String::new(),
+                    secrets: Vec::new(),
+                    hooks: Vec::new(),
+                    deployment_id: ulid::Ulid::new().to_string(),
                 },
             ),
         ),
@@ -703,6 +759,36 @@ struct CreateStackBody {
     /// auto-selected. With multiple hosts, the operator must specify.
     #[serde(default)]
     host_id: Option<String>,
+    /// Phase 0.13: verbatim `stack.toml` body. When present, the
+    /// controller asserts manifest.name == body.name and stores it
+    /// alongside the compose.
+    #[serde(default)]
+    manifest_toml: Option<String>,
+    /// Phase 0.13: per-fleet secret names to bind to this stack. Unknown
+    /// names yield 422 with the missing list.
+    #[serde(default)]
+    secrets: Option<Vec<String>>,
+    /// Phase 0.13: lifecycle hooks shaped like the manifest.
+    #[serde(default)]
+    hooks: Option<Vec<HookBody>>,
+}
+
+/// Phase 0.13: hook shape on POST /stacks. Mirrors the TOML manifest.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct HookBody {
+    on: String,
+    cmd: Vec<String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_hook_on_error")]
+    on_error: String,
+}
+
+fn default_hook_timeout_ms() -> u64 {
+    60_000
+}
+fn default_hook_on_error() -> String {
+    "abort".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -711,6 +797,157 @@ struct CreateStackResponse {
     name: String,
     host_id: String,
     written_sha256: String,
+}
+
+/// Phase 0.13: validate + persist a manifest bundle for `stack_id`.
+/// Returns the verbatim manifest_toml the controller should ship to the
+/// agent in the WriteCompose payload (empty when no manifest was sent).
+/// Errors return a fully-formed HTTP response (400 / 422 / 500) the
+/// caller can return verbatim.
+async fn phase_0_13_persist_manifest_bundle(
+    handles: &Arc<ControllerHandles>,
+    stack_id: StackId,
+    expected_name: &str,
+    manifest_toml: Option<&str>,
+    secrets: Option<&[String]>,
+    hooks: Option<&[HookBody]>,
+) -> std::result::Result<String, Response> {
+    let manifest_toml_for_agent = manifest_toml.unwrap_or("").to_string();
+
+    if let Some(toml_body) = manifest_toml.filter(|s| !s.is_empty()) {
+        // Parse defensively to surface a 400 with the parse error verbatim.
+        let parsed = match isengard_manifest::StackManifest::from_str(
+            toml_body,
+            std::path::PathBuf::from("/"),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(json_err(
+                    StatusCode::BAD_REQUEST,
+                    format!("manifest parse error: {e}"),
+                ));
+            }
+        };
+        if parsed.name != expected_name {
+            return Err(json_err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "manifest name {:?} does not match body name {:?}",
+                    parsed.name, expected_name
+                ),
+            ));
+        }
+        let sha = sha256_hex_of(toml_body);
+        let strategy_str = if matches!(parsed.strategy, isengard_manifest::Strategy::Auto) {
+            None
+        } else {
+            Some(parsed.strategy.as_str())
+        };
+        if let Err(e) = handles
+            .inventory
+            .update_stack_manifest(
+                stack_id,
+                toml_body,
+                &sha,
+                strategy_str,
+                parsed.fleet.as_deref(),
+            )
+            .await
+        {
+            return Err(json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("update_stack_manifest: {e}"),
+            ));
+        }
+    }
+
+    if let Some(names) = secrets
+        && !names.is_empty()
+    {
+        let names_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        match handles
+            .inventory
+            .set_stack_secrets(stack_id, &names_refs)
+            .await
+        {
+            Ok(()) => {}
+            Err(isengard_storage::Error::UnknownSecrets(missing)) => {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "unknown secrets",
+                        "missing": missing,
+                    })),
+                )
+                    .into_response());
+            }
+            Err(e) => {
+                return Err(json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("set_stack_secrets: {e}"),
+                ));
+            }
+        }
+    }
+
+    if let Some(hs) = hooks
+        && !hs.is_empty()
+    {
+        for h in hs {
+            if !matches!(h.on.as_str(), "pre-deploy" | "post-deploy" | "failure") {
+                return Err(json_err(
+                    StatusCode::BAD_REQUEST,
+                    format!("hook on={:?} is not a valid hook event", h.on),
+                ));
+            }
+            if !matches!(h.on_error.as_str(), "abort" | "continue") {
+                return Err(json_err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "hook on_error={:?} must be `abort` or `continue`",
+                        h.on_error
+                    ),
+                ));
+            }
+            if h.cmd.is_empty() {
+                return Err(json_err(
+                    StatusCode::BAD_REQUEST,
+                    "hook cmd cannot be empty",
+                ));
+            }
+        }
+        let stored: Vec<isengard_storage::StackHook> = hs
+            .iter()
+            .map(|h| isengard_storage::StackHook {
+                on_event: h.on.clone(),
+                cmd: h.cmd.clone(),
+                timeout_ms: h.timeout_ms as i64,
+                on_error: h.on_error.clone(),
+            })
+            .collect();
+        if let Err(e) = handles.inventory.set_stack_hooks(stack_id, &stored).await {
+            return Err(json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("set_stack_hooks: {e}"),
+            ));
+        }
+    }
+
+    Ok(manifest_toml_for_agent)
+}
+
+fn sha256_hex_of(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let bytes = hasher.finalize();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// `POST /api/v1/stacks`.
@@ -722,10 +959,17 @@ struct CreateStackResponse {
 /// when the stack name isn't yet in the controller's inventory; the
 /// dashboard will use it for the future "new stack" button.
 ///
+/// Phase 0.13: optional `manifest_toml`, `secrets`, `hooks` body fields
+/// persist orchestration metadata at the same time. Unknown secret
+/// names yield 422 with `{ missing: [...] }`; manifest-name mismatch
+/// yields 400.
+///
 /// Status codes:
 /// - 201: stack created; body has `{ id, name, host_id, written_sha256 }`.
-/// - 400: bad host_id (not a ULID, no enrolled hosts, or ambiguous).
+/// - 400: bad host_id (not a ULID, no enrolled hosts, or ambiguous);
+///   manifest parse error; hook validation failure.
 /// - 409: stack name already exists on this host.
+/// - 422: one or more secrets in `secrets` are unknown.
 /// - 503: agent for the chosen host isn't connected.
 /// - 504: agent didn't ack the WriteCompose within the timeout.
 async fn create_stack(
@@ -800,12 +1044,46 @@ async fn create_stack(
         }
     };
 
+    // Phase 0.13: persist manifest body + secrets + hooks BEFORE the
+    // WriteCompose goes out. This keeps the controller's view consistent
+    // with what we're about to ship: if the manifest persist fails the
+    // operator gets the error and no WriteCompose is dispatched.
+    let manifest_toml_for_agent = match phase_0_13_persist_manifest_bundle(
+        &handles,
+        stack_id,
+        &body.name,
+        body.manifest_toml.as_deref(),
+        body.secrets.as_deref(),
+        body.hooks.as_deref(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
     // Same WriteCompose path as `put_stack_compose`. force=true because
     // there's nothing on disk to optimistic-conflict against on a fresh
     // stack; expected_sha256="" for the same reason.
     let request_id = ulid::Ulid::new().to_string();
     let rx = handles.compose_broker.register(request_id.clone()).await;
 
+    let proto_hooks = body
+        .hooks
+        .as_deref()
+        .map(|hs| {
+            hs.iter()
+                .map(|h| isengard_proto::pb::LifecycleHook {
+                    on: h.on.clone(),
+                    cmd: h.cmd.clone(),
+                    timeout_ms: h.timeout_ms,
+                    on_error: h.on_error.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let deployment_id = ulid::Ulid::new().to_string();
     let msg = isengard_proto::pb::ControllerMessage {
         payload: Some(
             isengard_proto::pb::controller_message::Payload::WriteCompose(
@@ -815,6 +1093,10 @@ async fn create_stack(
                     compose_yaml: body.compose_yaml,
                     expected_sha256: String::new(),
                     force: true,
+                    manifest_toml: manifest_toml_for_agent,
+                    secrets: body.secrets.clone().unwrap_or_default(),
+                    hooks: proto_hooks,
+                    deployment_id,
                 },
             ),
         ),
