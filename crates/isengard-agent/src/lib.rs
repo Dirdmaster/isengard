@@ -550,6 +550,20 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                                         "compose_watcher: reconcile applied",
                                     );
                                 }
+                                // Emit per-op errors so operators can see WHY
+                                // a reconcile failed without bumping the
+                                // whole agent to debug. The summary's
+                                // `failed=N` is a counter, not actionable.
+                                for outcome in &outcomes {
+                                    if let Some(err) = outcome.error.as_ref() {
+                                        tracing::warn!(
+                                            stack = %evt.stack_name,
+                                            service = %outcome.op.service(),
+                                            error = %err,
+                                            "compose_watcher: op failed",
+                                        );
+                                    }
+                                }
                                 if failed == 0 {
                                     if let Err(e) =
                                         compose_writer::record_last_applied(&stack_dir, &new_sha)

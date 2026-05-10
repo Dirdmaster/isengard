@@ -182,19 +182,15 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 # read passwords / tokens without echoing to the terminal (v0.3a: `isd login`)
 rpassword = "7"
 
-# Phase 0.10: interactive TUI prompts for `isengard init` / `isengard join`.
-# Replaces the bash `read -s` / `read -r` plumbing in the legacy install.sh.
-# 0.7 is the current major; pinned tight so a transitive bump doesn't quietly
-# change the prompt UX.
-inquire = "0.7"
-
-# Phase 0.11: linear install transcript polish for `isengard init`. `console`
-# provides ANSI styling + terminal width detection; `indicatif` powers the
-# in-place spinners that get replaced by static "done" lines so the full
-# install transcript stays in scrollback. Pin tight so a transitive bump
+# Phase 0.12: `cliclack` is the Rust port of the `@clack/prompts` library that
+# every modern JS installer (`nuxi init`, `create-astro`, `create-svelte`,
+# `pnpm create vite`, `npx shadcn init`, `create-t3-app`) uses. It owns the
+# whole transcript shape (`┌`/`│`/`└` connector, `◇`/`◆` step glyphs, spinner
+# rendering) so the installer reads as one connected pipe instead of a soup
+# of independent widgets. `cliclack` vendors `console` + `indicatif` internally,
+# so we no longer pull those as direct deps. Pinned tight so a transitive bump
 # can't quietly change the look.
-console = "0.16"
-indicatif = "0.18"
+cliclack = "0.5"
 
 # v0.3b: embedded DNS server hosted by the controller for a configurable zone
 # (e.g. `*.iso`). Pinned to 0.25; 0.26+ requires Rust 1.88, the workspace

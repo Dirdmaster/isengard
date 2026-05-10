@@ -1,370 +1,214 @@
-//! Visual chrome for `isengard init`. Pure print helpers + an `inquire`
-//! theme. Linear, ANSI-colored, scrollback-friendly: every line stays in
-//! the terminal after the install completes so the operator can review
-//! exactly what was configured.
+//! Probes + format helpers for `isengard init`. All visual chrome (intro,
+//! outro, prompts, spinners, step glyphs, connector bar) is rendered by
+//! `cliclack`; this module only contributes the data that goes inside its
+//! widgets.
 //!
-//! No state machine, no event channel: each helper is `&self`-free and
-//! prints synchronously. The async install steps in [`super::Plan`] call
-//! these helpers between awaits.
+//! Two responsibilities live here:
 //!
-//! The mockup (see Phase 0.11 spec) is the source of truth for layout.
-//! When the mockup and this module disagree, the mockup wins.
+//!   1. [`probe_host`] inspects /proc, uname, systemctl, and /sys/fs/cgroup
+//!      so [`format_host_info`] can render a 5-line two-column block that
+//!      sits under the intro as a `cliclack::note("Detected host", ...)`.
+//!   2. [`format_ready_block`] builds the multi-line body for the outro
+//!      note. Same shape as the mockup: labeled rows, then a `join`
+//!      block with shell-continuation backslashes, then `Next:`.
 
-use console::{Term, style};
-use inquire::set_global_render_config;
-use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
+use anyhow::{Context, Result, anyhow};
+use sha2::Digest;
 
-/// Hand-rolled ASCII art for the `ISENGARD` banner. Six rows of block
-/// characters; the leading newline keeps the banner from butting up
-/// against the previous shell prompt.
-///
-/// Width: 56 columns of art plus a 2-space left indent. Falls back to
-/// the small banner when the terminal is narrower than 60 columns.
-const BANNER_LARGE: &str = r"
-  ███████ ███████ ███████ ███    ██  ██████   █████  ██████  ██████
-     ██   ██      ██      ████   ██ ██       ██   ██ ██   ██ ██   ██
-     ██   ███████ █████   ██ ██  ██ ██   ███ ███████ ██████  ██   ██
-     ██        ██ ██      ██  ██ ██ ██    ██ ██   ██ ██   ██ ██   ██
-     ██   ███████ ███████ ██   ████  ██████  ██   ██ ██   ██ ██████
-";
+use super::Plan;
 
-/// Single-line fallback banner for narrow terminals (under 60 cols).
-const BANNER_SMALL: &str = "  ISENGARD";
-
-/// Print the banner, tagline, and version line. Called once at the top
-/// of the install.
-pub fn banner() {
-    let cols = term_width();
-    if cols < 60 {
-        println!();
-        println!("{}", style(BANNER_SMALL).cyan().bold());
-    } else {
-        println!("{}", style(BANNER_LARGE).cyan().bold());
-    }
-    println!(
-        "  {}",
-        style("Daemonless container engine for the homelab.").white()
-    );
-    println!(
-        "  {}",
-        style(format!(
-            "v{} . controller + agent . wisp runtime",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .dim()
-    );
-    println!();
+/// Information about the host we're installing on. Best-effort: any
+/// missing piece falls back to a sensible string so the rendered note
+/// never has a dangling column.
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    pub host_label: String,
+    pub kernel: String,
+    pub init: String,
+    pub cgroup: String,
+    pub memory: String,
 }
 
-/// One row in the [`detected`] box. Label is dimmed, value is white.
-pub struct DetectedRow {
-    pub label: &'static str,
-    pub value: String,
-}
-
-/// Render the detected-host block. Two-column layout, 11-col label gutter,
-/// indented 2 spaces. Caller passes already-collected rows so the helper
-/// can stay platform-agnostic; the Linux probe lives in [`probe_host`].
-pub fn detected(rows: &[DetectedRow]) {
-    if rows.is_empty() {
-        return;
-    }
-    println!("  {}", style("Detected").cyan().bold());
-    for r in rows {
-        println!(
-            "    {:<10} {}",
-            style(r.label).dim(),
-            style(&r.value).white()
-        );
-    }
-    println!();
-}
-
-/// Print a section divider:
-///
-/// ```text
-///   --- Network identity ---------------------------------------
-/// ```
-///
-/// Total visual width tracks the terminal width, capped at 70 columns
-/// so the divider doesn't sprawl on wide windows. The horizontal line is
-/// box-drawing `─` (U+2500), not an em or en dash.
-pub fn section(title: &str) {
-    let cols = term_width().clamp(40, 70);
-    let visible_title = title.chars().count();
-    // visible width consumed before the trailing fill: 2 indent + 4 box
-    // chars + space + title + space.
-    let consumed = 2 + 4 + 1 + visible_title + 1;
-    let fill = cols.saturating_sub(consumed);
-    println!();
-    println!(
-        "  {}{} {}",
-        style("─── ").cyan().bold(),
-        style(title).cyan().bold(),
-        style("─".repeat(fill)).cyan().bold()
-    );
-    println!();
-}
-
-/// Print a styled prompt header (label + optional help text) before
-/// invoking the underlying `inquire` widget. The widget renders its own
-/// prompt line via the global theme; this helper paints the human label
-/// + dim help on the lines above so the prompt reads:
-///
-/// ```text
-///   > ACME contact email
-///     Used for Let's Encrypt expiry notifications.
-/// ```
-///
-/// The widget's own prompt (`> <input cursor>`) shows up immediately
-/// below.
-pub fn prompt_header(title: &str, help: Option<&str>) {
-    println!("  {} {}", style("❯").cyan().bold(), style(title).bold());
-    if let Some(h) = help {
-        println!("    {}", style(h).dim());
+/// Detected-host probe (Linux). Best-effort: missing values render as
+/// `unknown` rather than disappearing entirely so the column stays even.
+#[cfg(target_os = "linux")]
+pub fn probe_host() -> HostInfo {
+    HostInfo {
+        host_label: host_label().unwrap_or_else(|| "unknown".to_string()),
+        kernel: kernel_release().unwrap_or_else(|| "unknown".to_string()),
+        init: systemd_label().unwrap_or_else(|| "unknown".to_string()),
+        cgroup: cgroup_label().unwrap_or_else(|| "unknown".to_string()),
+        memory: memory_label().unwrap_or_else(|| "unknown".to_string()),
     }
 }
 
-/// Apply the global inquire theme. Idempotent: safe to call multiple
-/// times (the second call wins, but the values are identical).
-///
-/// Notes / inquire 0.7 gaps:
-/// - The prompt prefix glyph is global. We use `>` (a styled chevron)
-///   for the active prefix and the same glyph for the answered prefix
-///   so the transcript stays consistent.
-/// - inquire's `Select` does not support per-option help text in its
-///   public API; we work around it by including the description in the
-///   `Display` impl of the option struct (see [`super::SelectOption`]).
-/// - inquire styles the chosen answer with the `answer` stylesheet but
-///   prints it on the same line as the prompt: `> ACME directory  Let's...`.
-///   That's the ›-after-Enter behavior the spec calls for.
-pub fn install_inquire_theme() {
-    let cyan_bold: StyleSheet = StyleSheet::new()
-        .with_fg(Color::LightCyan)
-        .with_attr(Attributes::BOLD);
-    let dim: StyleSheet = StyleSheet::new().with_fg(Color::DarkGrey);
-    let white: StyleSheet = StyleSheet::new().with_fg(Color::White);
-    let green_bold: StyleSheet = StyleSheet::new()
-        .with_fg(Color::LightGreen)
-        .with_attr(Attributes::BOLD);
-    let red: StyleSheet = StyleSheet::new().with_fg(Color::LightRed);
-
-    let cfg = RenderConfig::default_colored()
-        .with_prompt_prefix(Styled::new(">").with_style_sheet(cyan_bold))
-        .with_answered_prompt_prefix(Styled::new(">").with_style_sheet(green_bold))
-        .with_highlighted_option_prefix(Styled::new("●").with_style_sheet(green_bold))
-        .with_help_message(dim)
-        .with_default_value(dim)
-        .with_answer(cyan_bold)
-        .with_text_input(white)
-        .with_canceled_prompt_indicator(Styled::new("(canceled)").with_style_sheet(red))
-        .with_error_message(
-            inquire::ui::ErrorMessageRenderConfig::default_colored()
-                .with_prefix(Styled::new("✗").with_style_sheet(red))
-                .with_message(red),
-        );
-    set_global_render_config(cfg);
-}
-
-/// Print a one-line note, indented 2 spaces, in dim white. Used by the
-/// non-interactive path to announce "Using flag-driven config".
-pub fn note(msg: &str) {
-    println!("  {}", style(msg).dim());
-}
-
-/// Heading for the bootstrap step list. Same shape as [`section`] but
-/// kept in a tiny helper for symmetry with the mockup.
-pub fn bootstrap_header() {
-    section("Bootstrap");
-}
-
-/// Print the final "Ready" summary box. Rounded corners, centered title
-/// in green/bold, body wrapped to fit the box. The box stays in
-/// scrollback so the operator can scroll up after install completes.
-///
-/// `lines` is rendered verbatim inside the box, one row per entry. Lines
-/// longer than the inner width get hard-wrapped at the box edge.
-pub fn summary_box(title: &str, lines: &[String]) {
-    // 78-col cap stays under a typical 80-col terminal while leaving
-    // enough inner width for a `--token <52-char-base32>` shell line
-    // (which has no whitespace and would otherwise hard-wrap mid-token).
-    let total = term_width().clamp(60, 78);
-    let inner = total.saturating_sub(2); // leave one col for each border
-    let inner_pad = inner.saturating_sub(2); // 2-col left/right padding inside borders
-
-    // Top border with title.
-    let title_visible = title.chars().count();
-    // total inner width minus "─ " before title and trailing "─"
-    let bar_after = inner.saturating_sub(4 + title_visible);
-    let top = format!(
-        "{}{}{} {} {}{}",
-        style("╭").green().bold(),
-        style("─").green().bold(),
-        style("─").green().bold(),
-        style(title).green().bold(),
-        style("─".repeat(bar_after)).green().bold(),
-        style("╮").green().bold(),
-    );
-    println!();
-    println!("{top}");
-    println!("{}", border_line(inner));
-
-    for line in lines {
-        // Caller pre-formats every line to fit; we only fall back to
-        // [`wrap`] for over-long lines (wrap preserves the original
-        // formatting only on a word boundary, so a line that's already
-        // shaped right passes through unchanged).
-        let chunks = if visible_width(line) <= inner_pad {
-            vec![line.clone()]
-        } else {
-            wrap(line, inner_pad)
-        };
-        for chunk in chunks {
-            // Pad chunk to inner_pad so the right border lines up.
-            let pad = inner_pad.saturating_sub(visible_width(&chunk));
-            println!(
-                "{} {}{} {}",
-                style("│").green().bold(),
-                chunk,
-                " ".repeat(pad),
-                style("│").green().bold()
-            );
-        }
+/// Stub for non-Linux. `preflight` bails earlier so this is only here
+/// to keep callers free of cfg gates.
+#[cfg(not(target_os = "linux"))]
+pub fn probe_host() -> HostInfo {
+    HostInfo {
+        host_label: "unknown".to_string(),
+        kernel: "unknown".to_string(),
+        init: "unknown".to_string(),
+        cgroup: "unknown".to_string(),
+        memory: "unknown".to_string(),
     }
-
-    println!("{}", border_line(inner));
-    println!(
-        "{}{}{}",
-        style("╰").green().bold(),
-        style("─".repeat(inner)).green().bold(),
-        style("╯").green().bold()
-    );
-    println!();
 }
 
-/// Empty padding row inside the summary box (top + bottom whitespace).
-fn border_line(inner: usize) -> String {
+/// Render the detected-host info as a 5-line two-column block. Used as
+/// the body of `cliclack::note("Detected host", ...)`. The column gutter
+/// matches the `done` step label padding (10 chars + 1 space) so the
+/// two blocks visually align under the connector bar.
+pub fn format_host_info(h: &HostInfo) -> String {
     format!(
-        "{}{}{}",
-        style("│").green().bold(),
-        " ".repeat(inner),
-        style("│").green().bold()
+        "{:<10} {}\n{:<10} {}\n{:<10} {}\n{:<10} {}\n{:<10} {}",
+        "Host",
+        h.host_label,
+        "Kernel",
+        h.kernel,
+        "Init",
+        h.init,
+        "CGroup",
+        h.cgroup,
+        "Memory",
+        h.memory,
     )
 }
 
-/// Best-effort wrap at `width` columns, breaking on whitespace. Falls
-/// back to a hard cut for words longer than the inner box.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![text.to_string()];
+/// Build the multi-line outro body the installer prints at the bottom
+/// of a successful run. Mirrors the mockup: labeled URLs / paths, a
+/// dim journalctl hint, then a `join` block + `Next:` deploy hint.
+pub fn format_ready_block(plan: &Plan, token: &str) -> String {
+    let host_ip = if plan.host_ip.is_empty() {
+        "<your-host-ip>".to_string()
+    } else {
+        plan.host_ip.clone()
+    };
+
+    let ca_pem_path = plan.etc_dir.join("ca.pem");
+
+    // CA fingerprint is best-effort: if it fails (file missing, malformed)
+    // we still emit the join block, just without the optional pin hint.
+    let ca_fingerprint = std::fs::read_to_string(&ca_pem_path)
+        .ok()
+        .and_then(|pem| ca_sha256_fingerprint(&pem).ok());
+
+    let mut out = String::new();
+    out.push_str(&format!("{:<13}https://{}:9417\n", "Controller", host_ip));
+    out.push_str(&format!("{:<13}http://localhost:9418\n", "Dashboard"));
+    out.push_str(&format!("{:<13}{}\n", "State", plan.state_dir.display()));
+    out.push_str(&format!(
+        "{:<13}journalctl -fu iso-controller -u iso-agent\n",
+        "Logs"
+    ));
+    out.push('\n');
+    out.push_str("Add another host:\n");
+    out.push_str("  isengard join \\\n");
+    out.push_str(&format!("    --token {token} \\\n"));
+    out.push_str(&format!("    --ca-pem-path {} \\\n", ca_pem_path.display()));
+    out.push_str(&format!("    https://{host_ip}:9417"));
+    if let Some(fp) = &ca_fingerprint {
+        out.push('\n');
+        let short: String = fp.chars().take(12).collect();
+        out.push_str(&format!("  CA fingerprint: sha256:{short}..."));
     }
-    if visible_width(text) <= width {
-        return vec![text.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for word in text.split(' ') {
-        if current.is_empty() {
-            if visible_width(word) > width {
-                // hard cut: split by chars
-                let mut acc = String::new();
-                for ch in word.chars() {
-                    if visible_width(&acc) + 1 > width {
-                        out.push(acc.clone());
-                        acc.clear();
-                    }
-                    acc.push(ch);
-                }
-                if !acc.is_empty() {
-                    current = acc;
-                }
-            } else {
-                current.push_str(word);
-            }
-        } else if visible_width(&current) + 1 + visible_width(word) <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            out.push(current.clone());
-            current.clear();
-            current.push_str(word);
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
+    out.push_str("\n\nNext:\n  isd deploy --file ./compose.toml --stack hello");
+
     out
 }
 
-/// Approximate visible width of `s`: counts chars and skips ANSI escape
-/// sequences (`ESC [ ... m`). Good enough for our use, since the summary
-/// box receives mostly plain ASCII strings.
-fn visible_width(s: &str) -> usize {
-    let mut count = 0;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // skip until 'm'
-            for nc in chars.by_ref() {
-                if nc == 'm' {
-                    break;
-                }
-            }
-        } else {
-            count += 1;
+/// Helper used by `execute` to format every step's stop line so the
+/// label column lines up. 26-col left-pad chosen to fit `Installed systemd units`
+/// + two spaces + the detail.
+pub fn done(label: &str, detail: &str) -> String {
+    format!("{label:<26}{detail}")
+}
+
+// ---------- validators ----------
+
+/// Validate a comma-separated list of hostnames / wildcards. Returns
+/// `Ok(())` even on an empty input so operators running an internal-only
+/// deploy can skip the field entirely. The check is intentionally lax:
+/// anything matching `^[A-Za-z0-9._*-]+$` per item is accepted.
+///
+/// Signature is `&String` (not `&str`) because cliclack's `validate` is
+/// generic over the prompt's value type and `Input` defaults to `String`.
+#[allow(clippy::ptr_arg)]
+pub fn validate_hostnames(input: &String) -> Result<(), &'static str> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Ok(());
+    }
+    for raw in s.split(',') {
+        let h = raw.trim();
+        if h.is_empty() {
+            continue;
+        }
+        if !h
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '*'))
+        {
+            return Err("hostnames may only contain letters, digits, '.', '-', '_', '*'");
         }
     }
-    count
+    Ok(())
 }
 
-/// Detected-host probe (Linux). Returns a small ordered list of rows;
-/// best-effort: missing values are skipped silently. Non-Linux callers
-/// should not invoke this.
-#[cfg(target_os = "linux")]
-pub fn probe_host() -> Vec<DetectedRow> {
-    let mut rows = Vec::new();
-
-    if let Some(host) = host_label() {
-        rows.push(DetectedRow {
-            label: "Host",
-            value: host,
-        });
+/// Validate an ACME contact email. Permissive: requires an '@' and a '.'
+/// in the domain part, nothing more. Empty is allowed (internal-only
+/// deploys don't need a contact).
+///
+/// `&String` for the same reason as [`validate_hostnames`]: cliclack's
+/// validate signature takes the inferred value type by reference.
+#[allow(clippy::ptr_arg)]
+pub fn validate_email(input: &String) -> Result<(), &'static str> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Ok(());
     }
-    if let Some(k) = kernel_release() {
-        rows.push(DetectedRow {
-            label: "Kernel",
-            value: k,
-        });
+    let (local, domain) = match s.split_once('@') {
+        Some(pair) => pair,
+        None => return Err("email must contain '@'"),
+    };
+    if local.is_empty() || domain.is_empty() {
+        return Err("email must have a local part and a domain");
     }
-    if let Some(i) = systemd_label() {
-        rows.push(DetectedRow {
-            label: "Init",
-            value: i,
-        });
+    if !domain.contains('.') {
+        return Err("domain part must contain a '.'");
     }
-    if let Some(c) = cgroup_label() {
-        rows.push(DetectedRow {
-            label: "CGroup",
-            value: c,
-        });
-    }
-    if let Some(m) = memory_label() {
-        rows.push(DetectedRow {
-            label: "Memory",
-            value: m,
-        });
-    }
-
-    rows
+    Ok(())
 }
 
-/// Stub for non-Linux platforms. The interactive path bails earlier in
-/// `preflight` so this is unreachable in practice; defining it keeps the
-/// caller free of `cfg` gates.
-#[cfg(not(target_os = "linux"))]
-pub fn probe_host() -> Vec<DetectedRow> {
-    Vec::new()
+// ---------- helpers ----------
+
+/// Compute the lowercase-hex sha256 of the first PEM CERTIFICATE block.
+/// Duplicated from `mod.rs` because the join flow there is the only other
+/// caller; keeping it local here means `format_ready_block` doesn't need
+/// to reach into `super`.
+fn ca_sha256_fingerprint(pem: &str) -> Result<String> {
+    let der = pem_to_der(pem)?;
+    let mut h = sha2::Sha256::new();
+    h.update(&der);
+    Ok(hex::encode(h.finalize()))
 }
+
+fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
+    let begin = pem
+        .find("-----BEGIN CERTIFICATE-----")
+        .ok_or_else(|| anyhow!("no BEGIN CERTIFICATE in CA pem"))?;
+    let after_begin = begin + "-----BEGIN CERTIFICATE-----".len();
+    let end = pem
+        .find("-----END CERTIFICATE-----")
+        .ok_or_else(|| anyhow!("no END CERTIFICATE in CA pem"))?;
+    let body = &pem[after_begin..end];
+    let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(cleaned.as_bytes())
+        .context("base64-decode CA cert body")
+}
+
+// ---------- /proc / uname / systemctl probes ----------
 
 #[cfg(target_os = "linux")]
 fn host_label() -> Option<String> {
@@ -388,12 +232,12 @@ fn kernel_release() -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let release = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Some(format!("Linux {release}"))
 }
 
 #[cfg(target_os = "linux")]
 fn systemd_label() -> Option<String> {
-    // `systemctl --version` first line: "systemd 255 (255.4-1ubuntu8)".
     let out = std::process::Command::new("systemctl")
         .arg("--version")
         .output()
@@ -402,8 +246,14 @@ fn systemd_label() -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    let first = s.lines().next()?.trim().to_string();
-    Some(first)
+    let first = s.lines().next()?.trim();
+    // First line is e.g. "systemd 255 (255.4-1ubuntu8)"; collapse the
+    // parenthetical so the row reads "systemd 255".
+    let trimmed = match first.find(" (") {
+        Some(i) => &first[..i],
+        None => first,
+    };
+    Some(trimmed.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -423,20 +273,9 @@ fn memory_label() -> Option<String> {
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             let n: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            // /proc/meminfo reports MemTotal in kB.
             let gib = n as f64 / (1024.0 * 1024.0);
-            return Some(format!("{gib:.1} GiB"));
+            return Some(format!("{gib:.0} GiB"));
         }
     }
     None
-}
-
-/// Terminal width in columns, fallback 80 when not on a TTY.
-fn term_width() -> usize {
-    // `console::Term::size()` returns `(rows, cols)`. The fallback is
-    // `(24, 80)` when stderr is not a terminal, which is the case for
-    // piped sessions (e.g. `orb run` capturing stdout). We always want
-    // the column count.
-    let (_, cols) = Term::stderr().size();
-    if cols == 0 { 80 } else { cols as usize }
 }

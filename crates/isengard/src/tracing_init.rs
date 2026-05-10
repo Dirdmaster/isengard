@@ -77,8 +77,19 @@ impl FormatTime for ShortTime {
 /// the runtime role string emitted in the ready banner ("controller" or
 /// "agent").
 pub fn init(mode: &str, cli_filter: Option<&str>) {
+    // `init` and `join` drive an interactive cliclack transcript on
+    // stderr (intro, prompts, spinners, outro). An `info` line from
+    // the in-process controller code (e.g. `SecretsStore::put`) would
+    // splice itself into the connector bar and break the layout, so
+    // we silence the default subscriber unless the operator explicitly
+    // overrode it via --log / RUST_LOG.
+    let default_filter = if matches!(mode, "init" | "join") {
+        "warn"
+    } else {
+        "info"
+    };
     let filter = cli_filter.map(EnvFilter::new).unwrap_or_else(|| {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter))
     });
 
     let format = LogFormat::from_env();
