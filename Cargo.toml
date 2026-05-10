@@ -6,6 +6,7 @@ members = [
     "crates/isengard-core",
     "crates/isengard-controller",
     "crates/isengard-agent",
+    "crates/isengard-manifest",
     "crates/isengard-proto",
     "crates/isengard-storage",
     "crates/isengard-plugins/updater",
@@ -150,6 +151,7 @@ wiremock = "0.6.2"
 isengard-core = { path = "crates/isengard-core", version = "0.1.0-alpha" }
 isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-alpha" }
 isengard-agent = { path = "crates/isengard-agent", version = "0.1.0-alpha" }
+isengard-manifest = { path = "crates/isengard-manifest", version = "0.1.0-alpha" }
 isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
 isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
 isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }

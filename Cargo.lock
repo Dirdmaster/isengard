@@ -2832,6 +2832,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "isengard-manifest"
+version = "0.1.0-alpha"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "isengard-plugin-backup"
 version = "0.1.0-alpha"
 dependencies = [
