@@ -289,10 +289,57 @@ fn read_compose_path(path: &std::path::Path) -> Result<String> {
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
-            .context("reading compose YAML from stdin")?;
+            .context("reading compose from stdin")?;
         Ok(buf)
     } else {
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        // TOML compose: convert to YAML on the operator side so the
+        // wire and on-agent persistence stay YAML-only. Agent never
+        // sees TOML. Lossy for comments (already true after any
+        // parser round-trip).
+        if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            return toml_compose_to_yaml(&content)
+                .with_context(|| format!("converting {} to yaml", path.display()));
+        }
+        Ok(content)
+    }
+}
+
+fn toml_compose_to_yaml(toml_content: &str) -> Result<String> {
+    let value: toml::Value = toml::from_str(toml_content).context("parsing toml")?;
+    let toml::Value::Table(tbl) = value else {
+        return Err(anyhow!("compose.toml root must be a table"));
+    };
+    // Flat-shape rule: every top-level table is a service. Top-level
+    // scalars are dropped (reserved for future stack-level metadata).
+    let mut services = serde_json::Map::new();
+    for (name, entry) in tbl {
+        if let toml::Value::Table(_) = entry {
+            services.insert(name, toml_value_to_json(entry));
+        }
+    }
+    let mut root = serde_json::Map::new();
+    root.insert("services".into(), serde_json::Value::Object(services));
+    serde_yaml::to_string(&serde_json::Value::Object(root)).context("serializing yaml")
+}
+
+fn toml_value_to_json(v: toml::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        toml::Value::String(s) => Value::String(s),
+        toml::Value::Integer(i) => Value::Number(i.into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        toml::Value::Boolean(b) => Value::Bool(b),
+        toml::Value::Datetime(dt) => Value::String(dt.to_string()),
+        toml::Value::Array(arr) => Value::Array(arr.into_iter().map(toml_value_to_json).collect()),
+        toml::Value::Table(tbl) => Value::Object(
+            tbl.into_iter()
+                .map(|(k, v)| (k, toml_value_to_json(v)))
+                .collect(),
+        ),
     }
 }
 
