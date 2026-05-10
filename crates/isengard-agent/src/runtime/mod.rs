@@ -16,10 +16,13 @@
 //! abstraction (bollard runs healthchecks in-container; wisp will run them
 //! externally via nsenter / HTTP probes).
 
+pub mod bollard_backend;
 mod error;
+pub mod select;
 mod spec;
 
 pub use error::RuntimeError;
+pub use select::{BackendChoice, select_backend};
 pub use spec::{
     ContainerCreateSpec, ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec, HostPort,
     LinuxResources, ListFilter, LogChunk, LogOptions, LogSource, MountKind, MountSpec,
