@@ -105,6 +105,14 @@ require_cmd() {
 
 # Resolve the release-asset target triple for this host's CPU.
 # Echoes the triple to stdout; dies on unsupported arch.
+#
+# Special case: aarch64 hosts with x86_64 user-mode emulation registered
+# (qemu-x86_64 binfmt) fall back to the x86_64 binary. This covers OrbStack
+# Linux VMs on Apple Silicon, where Rosetta-style binfmt is enabled by
+# default. The Phase 7 musl build pipeline (binaries.yml) ships only
+# x86_64-unknown-linux-musl for the isengard binary today: BoringSSL bindgen
+# can't find aarch64 cross headers inside the messense container. Restore
+# native arm64 isengard once that's fixed.
 detect_target() {
   local arch
   arch="$(uname -m)"
@@ -113,12 +121,32 @@ detect_target() {
       printf 'x86_64-unknown-linux-musl'
       ;;
     aarch64|arm64)
-      printf 'aarch64-unknown-linux-musl'
+      if [[ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ]] \
+        && grep -q '^enabled' /proc/sys/fs/binfmt_misc/qemu-x86_64 2>/dev/null; then
+        printf 'x86_64-unknown-linux-musl'
+      else
+        die "no aarch64-unknown-linux-musl release artifact today; install qemu-user-static (apt install qemu-user-static) to enable x86_64 emulation, or set ISENGARD_TARGET=x86_64-unknown-linux-musl manually after registering binfmt"
+      fi
       ;;
     *)
-      die "unsupported arch: ${arch} (only x86_64 and aarch64 are released)"
+      die "unsupported arch: ${arch} (only x86_64 and aarch64 with qemu-x86_64 binfmt are released)"
       ;;
   esac
+}
+
+# Compose the download URL for the requested binary. GitHub Releases
+# resolves "latest" via the /releases/latest/download/<file> path
+# (auto-redirects to the latest tag's asset); explicit tags use the
+# /releases/download/<tag>/<file> shape. Operators can override via
+# ISENGARD_TARGET to force a specific arch.
+release_url() {
+  local target="${ISENGARD_TARGET:-$(detect_target)}"
+  local file="$1"
+  if [[ "${ISENGARD_VERSION}" == "latest" ]]; then
+    printf '%s/releases/latest/download/%s' "${ISENGARD_RELEASE_BASE_REPO:-https://github.com/Weavers-Engineering/Isengard}" "${file}"
+  else
+    printf '%s/%s/%s' "${ISENGARD_RELEASE_BASE}" "${ISENGARD_VERSION}" "${file}"
+  fi
 }
 
 preflight() {
@@ -190,9 +218,9 @@ setup_dirs() {
 # at the requested release tag (refresh-binary action calls this directly).
 install_binary() {
   local target url sha_url tmp tmp_sha
-  target="$(detect_target)"
-  url="${ISENGARD_RELEASE_BASE}/${ISENGARD_VERSION}/isengard-${target}"
-  sha_url="${url}.sha256"
+  target="${ISENGARD_TARGET:-$(detect_target)}"
+  url="$(release_url "isengard-${target}")"
+  sha_url="$(release_url "isengard-${target}.sha256")"
 
   # When the operator is testing against an unreleased build, ISENGARD_LOCAL_BIN
   # short-circuits the download. Same shape as the legacy install-docker flow.
