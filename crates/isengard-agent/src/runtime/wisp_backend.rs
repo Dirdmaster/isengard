@@ -249,6 +249,39 @@ pub fn spec_to_network_spec(spec: &ContainerCreateSpec) -> Option<wisp::NetworkS
 #[cfg(target_os = "linux")]
 const DEFAULT_NETWORK_SUBNET: &str = "10.83.0.0/24";
 
+/// Default network name when an agent container declares ports without
+/// specifying a network. Matches `wisp run --port 8080:80`'s default.
+#[cfg(target_os = "linux")]
+const DEFAULT_NETWORK_NAME: &str = "wisp-default";
+
+/// On-disk shape of a persisted network entry. Lives at
+/// `<state_dir>/networks/<name>/network.json` and is read on every
+/// create-time bridge ensure so subsequent containers reuse the same
+/// subnet / gateway / bridge name. The shape is stable: a future field
+/// should be optional so prior agent versions keep parsing.
+///
+/// `dead_code` allow: the registry helpers are exercised by the
+/// Linux-only `ensure_bridge` and the cross-platform tests. On Mac
+/// `cargo build --lib` doesn't see a non-test caller of the registry
+/// path so `dead_code` would fire without this attribute.
+#[allow(dead_code)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct NetworkRegistryEntry {
+    /// Network name as the operator (or the agent's default-naming
+    /// rule) chose. Distinct from the bridge name (`wbr-<truncated>`).
+    name: String,
+    /// IPv4 subnet in CIDR form. Round-trips as a string so older agent
+    /// versions that don't yet know this field can still parse the JSON.
+    subnet: String,
+    /// First usable host address in `subnet`. Stored separately so the
+    /// gateway isn't recomputed on every read.
+    gateway: std::net::Ipv4Addr,
+    /// Bridge interface name (`wbr-<truncated>`). Cached so detach
+    /// flows can match `ip link show wbr-...` without recomputing the
+    /// truncation.
+    bridge: String,
+}
+
 /// Default cgroup root for wisp containers. Mirrors
 /// `wisp::Runtime::DEFAULT_CGROUP_ROOT`. Tests override via
 /// `WISP_CGROUP_ROOT`.
@@ -384,14 +417,14 @@ impl WispBackend {
                 return None;
             }
         };
-        let network = match wisp_net::Network::new("default", subnet) {
+        let network = match wisp_net::Network::new(DEFAULT_NETWORK_NAME, subnet) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(error = %e, "wisp Network::new failed, networking disabled");
                 return None;
             }
         };
-        let ipam_dir = state_dir.join("networks").join("default");
+        let ipam_dir = state_dir.join("networks").join(DEFAULT_NETWORK_NAME);
         if let Err(e) = std::fs::create_dir_all(&ipam_dir) {
             tracing::warn!(error = %e, "ipam dir create failed, networking disabled");
             return None;
@@ -399,6 +432,92 @@ impl WispBackend {
         Some(Box::new(
             crate::runtime::wisp_backend_attacher::WispNetAttacher::new(network, &ipam_dir),
         ))
+    }
+
+    /// Auto-create the bridge + iptables rules for `network_name` when
+    /// a container needs networking and the bridge isn't already
+    /// provisioned. Honours an on-disk registry: subsequent ensures
+    /// reuse the persisted subnet so the operator can call this
+    /// idempotently across many containers.
+    ///
+    /// Subnet source on first ensure: explicit `subnet_hint` (the
+    /// caller's preferred subnet) -> `WISP_DEFAULT_SUBNET` env ->
+    /// hard-coded `10.83.0.0/24`. Conflict detection: if the registry
+    /// already records a different subnet under the same name, return
+    /// a `Network` error rather than silently rebinding.
+    ///
+    /// Linux only. Returns the freshly-built [`wisp_net::Network`]
+    /// the caller can hand to `wisp_net::veth::attach_to_ns`.
+    #[cfg(target_os = "linux")]
+    fn ensure_bridge(
+        &self,
+        network_name: &str,
+        subnet_hint: Option<&str>,
+    ) -> Result<wisp_net::Network, RuntimeError> {
+        let registry_path = self
+            .state_dir
+            .join("networks")
+            .join(network_name)
+            .join("network.json");
+
+        // 1. Look up the on-disk entry so subsequent ensures reuse the
+        //    existing subnet. Treat ENOENT / parse failure as "first
+        //    ensure"; surface real IO errors to the caller.
+        let existing = read_network_registry(&registry_path)?;
+
+        // 2. Derive the subnet for this ensure: registry > caller hint
+        //    > env > hard-coded default.
+        let want_subnet_str = match (existing.as_ref(), subnet_hint) {
+            (Some(entry), _) => entry.subnet.clone(),
+            (None, Some(hint)) => hint.to_string(),
+            (None, None) => std::env::var("WISP_DEFAULT_SUBNET")
+                .unwrap_or_else(|_| DEFAULT_NETWORK_SUBNET.to_string()),
+        };
+        let want_subnet: ipnet::Ipv4Net = want_subnet_str
+            .parse()
+            .map_err(|e| RuntimeError::Network(format!("parse subnet {want_subnet_str:?}: {e}")))?;
+
+        // 3. Conflict: registry says X, caller passed Y.
+        if let (Some(entry), Some(hint)) = (existing.as_ref(), subnet_hint) {
+            if entry.subnet != hint {
+                return Err(RuntimeError::Network(format!(
+                    "network {network_name:?} already exists with subnet {} but caller asked for {hint}",
+                    entry.subnet,
+                )));
+            }
+        }
+
+        let network = wisp_net::Network::new(network_name, want_subnet)
+            .map_err(|e| RuntimeError::Network(format!("build network {network_name:?}: {e}")))?;
+
+        // 4. Best-effort host-global ip_forward toggle. Without this
+        //    the FORWARD rules accept the packet but the kernel still
+        //    drops it; curl hangs. The helper is itself idempotent.
+        if let Err(e) = wisp::lifecycle::ensure_global_ip_forward() {
+            tracing::warn!(error = %e, "ensure_global_ip_forward (best-effort)");
+        }
+
+        // 5. Bridge + iptables (idempotent: pre-existing matches succeed).
+        wisp_net::bridge::ensure(&network)
+            .map_err(|e| RuntimeError::Network(format!("bridge::ensure: {e}")))?;
+        let net_rs = wisp_net::iptables::plan_for_network(&network);
+        let _ = wisp_net::iptables::revoke(&net_rs);
+        wisp_net::iptables::apply(&net_rs)
+            .map_err(|e| RuntimeError::Network(format!("iptables::apply (net): {e}")))?;
+
+        // 6. Persist on first ensure. Re-writes are no-ops if the
+        //    contents match.
+        if existing.is_none() {
+            let entry = NetworkRegistryEntry {
+                name: network.name.clone(),
+                subnet: network.subnet.to_string(),
+                gateway: network.gateway,
+                bridge: network.bridge.clone(),
+            };
+            write_network_registry(&registry_path, &entry)?;
+        }
+
+        Ok(network)
     }
 
     /// Persist the [`ContainerCreateSpec`] under
@@ -572,9 +691,22 @@ impl RuntimeBackend for WispBackend {
         let id = spec.container_name.clone();
         let bundle_clone = bundle_dir.clone();
         match network_spec {
-            Some(net) => runtime
-                .create_with_network(&id, &bundle_clone, net)
-                .map_err(|e| RuntimeError::Container(format!("{e}")))?,
+            Some(net) => {
+                // Phase 0.5: pre-flight ensure the bridge + iptables for
+                // this network exist on the host before clone3 fires.
+                // The persisted registry under
+                // `<state_dir>/networks/<name>/network.json` lets later
+                // ensures reuse the same subnet, and detects an
+                // operator picking a conflicting subnet for the same
+                // network name.
+                #[cfg(target_os = "linux")]
+                {
+                    self.ensure_bridge(&net.network_name, None)?;
+                }
+                runtime
+                    .create_with_network(&id, &bundle_clone, net)
+                    .map_err(|e| RuntimeError::Container(format!("{e}")))?
+            }
             None => runtime
                 .create(&id, &bundle_clone)
                 .map_err(|e| RuntimeError::Container(format!("{e}")))?,
@@ -1306,6 +1438,38 @@ fn inotify_tail_logs(
     })
 }
 
+/// Read a [`NetworkRegistryEntry`] from `path`. Returns `Ok(None)`
+/// when the file is missing OR when its bytes fail to parse (treat
+/// corrupt files as "first ensure" so the caller can rewrite). Real
+/// IO errors (permission denied, etc.) propagate as
+/// [`RuntimeError::Io`].
+#[allow(dead_code)]
+fn read_network_registry(path: &Path) -> Result<Option<NetworkRegistryEntry>, RuntimeError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice::<NetworkRegistryEntry>(&bytes).ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(RuntimeError::Io(e)),
+    }
+}
+
+/// Atomic write of a [`NetworkRegistryEntry`] to `path`. Creates the
+/// parent directory chain if it doesn't already exist. Uses the
+/// write-then-rename idiom so a concurrent reader either sees the
+/// pre-existing contents or the fully-written new entry, never a
+/// torn file.
+#[allow(dead_code)]
+fn write_network_registry(path: &Path, entry: &NetworkRegistryEntry) -> Result<(), RuntimeError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(entry)
+        .map_err(|e| RuntimeError::Network(format!("serialize network registry: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1481,6 +1645,104 @@ mod tests {
         s.labels.insert("isengard.cap.add".into(), " , ,".into());
         let o = spec_to_config_overrides(&s);
         assert!(o.capabilities.is_none());
+    }
+
+    /// Phase 0.5: ports declared with no `--network` selection should
+    /// still imply attachment to `wisp-default`, matching the wisp-cli
+    /// `--port` semantics.
+    #[test]
+    fn auto_create_default_network_when_port_without_network() {
+        let mut s = empty_spec("c", "alpine:3.19");
+        s.ports = vec![PortSpec {
+            host_ip: None,
+            host_port: 18080,
+            container_port: 80,
+            protocol: SpecPortProtocol::Tcp,
+        }];
+        // Networks vec is empty: only ports declared.
+        assert!(s.networks.is_empty());
+        let n = spec_to_network_spec(&s).expect("ports imply a network");
+        assert_eq!(n.network_name, "wisp-default");
+        assert_eq!(n.ports.len(), 1);
+    }
+
+    /// Phase 0.5: the on-disk registry round-trips a full
+    /// [`NetworkRegistryEntry`] across read / write so subsequent
+    /// `ensure_bridge` calls pick up the same subnet without
+    /// recomputing from environment.
+    #[test]
+    fn network_registry_persists_subnet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nets/wisp-default/network.json");
+        // First read: missing -> Ok(None).
+        assert!(read_network_registry(&path).unwrap().is_none());
+
+        let entry = NetworkRegistryEntry {
+            name: "wisp-default".into(),
+            subnet: "10.83.0.0/24".into(),
+            gateway: "10.83.0.1".parse().unwrap(),
+            bridge: "wbr-wisp-default".into(),
+        };
+        write_network_registry(&path, &entry).unwrap();
+        let back = read_network_registry(&path).unwrap().expect("persisted");
+        assert_eq!(back, entry);
+        // Re-write with the same contents is a no-op (idempotent).
+        write_network_registry(&path, &entry).unwrap();
+        let back = read_network_registry(&path).unwrap().expect("persisted");
+        assert_eq!(back, entry);
+    }
+
+    /// Phase 0.5: a corrupt registry file is treated as "first
+    /// ensure" so the caller can rewrite it. This keeps the agent
+    /// from getting wedged after a partial-write crash; real IO
+    /// errors (permission denied, ...) still propagate.
+    #[test]
+    fn network_registry_corrupt_file_treated_as_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("network.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let res = read_network_registry(&path).unwrap();
+        assert!(res.is_none(), "corrupt file should be skipped");
+    }
+
+    /// Phase 0.5: the `ensure_bridge` helper rejects a subnet hint
+    /// that conflicts with an already-persisted entry. Linux only
+    /// because the helper itself touches `wisp_net::bridge::ensure`;
+    /// we exercise the conflict path on Mac by writing a registry
+    /// entry by hand and asserting the helper short-circuits before
+    /// the syscall.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn network_registry_conflict_on_subnet_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = WispBackend::from_env(tmp.path()).await.unwrap();
+
+        // Pre-seed the registry with one subnet.
+        let path = tmp.path().join("networks/wisp-default/network.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let entry = NetworkRegistryEntry {
+            name: "wisp-default".into(),
+            subnet: "10.83.0.0/24".into(),
+            gateway: "10.83.0.1".parse().unwrap(),
+            bridge: "wbr-wisp-default".into(),
+        };
+        write_network_registry(&path, &entry).unwrap();
+
+        // Caller passes a different subnet: surface a Network error.
+        let err = backend
+            .ensure_bridge("wisp-default", Some("10.99.0.0/24"))
+            .unwrap_err();
+        match err {
+            RuntimeError::Network(msg) => {
+                assert!(msg.contains("already exists"), "got: {msg}");
+                assert!(msg.contains("10.83.0.0/24"), "got: {msg}");
+            }
+            other => panic!("expected Network error, got {other:?}"),
+        }
+
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .unwrap();
     }
 
     #[test]
