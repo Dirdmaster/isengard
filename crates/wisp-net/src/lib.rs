@@ -14,6 +14,7 @@ pub mod hosts;
 pub mod ipam;
 pub mod iptables;
 pub mod ns;
+pub mod reconcile;
 pub mod resolv;
 pub mod veth;
 
@@ -23,5 +24,9 @@ pub use hosts::write_hosts;
 pub use ipam::{Ipam, StaticBitmapIpam};
 pub use iptables::{
     PortProtocol, PortPublish, Rule, RuleSet, Table, plan_for_attachment, plan_for_network,
+};
+pub use reconcile::{
+    BridgeDiff, PersistedNetwork, ReconcileInputs, ReconcileReport, VethEntry, diff_bridges,
+    diff_iptables, diff_veths, reconcile,
 };
 pub use resolv::{host_nameservers, write_resolv_conf};
