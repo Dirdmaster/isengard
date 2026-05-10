@@ -750,15 +750,134 @@ impl RuntimeBackend for WispBackend {
 
     async fn run_healthcheck(
         &self,
-        _id: &str,
-        _hc: &HealthcheckSpec,
+        id: &str,
+        hc: &HealthcheckSpec,
     ) -> Result<HealthState, RuntimeError> {
-        // Dispatch B3 fills this in (HTTP probe + nsenter exec).
-        Ok(HealthState::Starting)
+        run_healthcheck_impl(self, id, hc).await
     }
 
     fn name(&self) -> &'static str {
         "wisp"
+    }
+}
+
+/// External-process healthcheck for wisp containers.
+///
+/// Wisp does not run healthchecks in-container the way docker does;
+/// the wisp container has no init that would cycle a probe between
+/// `interval` ticks. Instead the agent's deployment driver calls
+/// [`RuntimeBackend::run_healthcheck`] on its own cadence, and this
+/// function shells out to `nsenter` to execute the test inside the
+/// container's namespaces.
+///
+/// Recognised test shapes (matching docker's HealthConfig.test):
+/// - `["NONE"]` -> always Healthy. Matches docker's "skip the check".
+/// - `["CMD", arg0, arg1, ...]` -> exec arg0 + args inside the
+///   container's mount + uts + ipc + pid + network namespaces. Exit 0
+///   = Healthy, anything else = Unhealthy.
+/// - `["CMD-SHELL", "<cmd line>"]` -> exec /bin/sh -c "<cmd line>"
+///   inside those same namespaces.
+/// - Anything else (bare list) is treated as `CMD` + the list.
+///
+/// The empty-test case returns Healthy (matches docker: "no test
+/// configured" is reported as healthy by `docker inspect`).
+async fn run_healthcheck_impl(
+    backend: &WispBackend,
+    id: &str,
+    hc: &HealthcheckSpec,
+) -> Result<HealthState, RuntimeError> {
+    if hc.test.is_empty() {
+        return Ok(HealthState::Healthy);
+    }
+    if hc.test[0] == "NONE" {
+        return Ok(HealthState::Healthy);
+    }
+    // Validate test shape BEFORE looking up the pid: a malformed
+    // CMD / CMD-SHELL spec is a configuration bug, not a runtime
+    // failure, and a clear error is more useful than "no pid".
+    let mode = hc.test[0].as_str();
+    if mode == "CMD" && hc.test.len() < 2 {
+        return Err(RuntimeError::Healthcheck(
+            "CMD requires at least one arg".into(),
+        ));
+    }
+    if mode == "CMD-SHELL" && hc.test.len() < 2 {
+        return Err(RuntimeError::Healthcheck(
+            "CMD-SHELL requires a command string".into(),
+        ));
+    }
+
+    let pid = backend
+        .runtime
+        .container_pid(id)
+        .ok_or_else(|| RuntimeError::Container(format!("no pid for {id}")))?;
+    let timeout = hc.timeout;
+
+    match mode {
+        "CMD-SHELL" => {
+            let cmdline = hc.test[1..].join(" ");
+            run_nsenter_shell(pid, timeout, &cmdline).await
+        }
+        "CMD" => run_nsenter_exec(pid, timeout, &hc.test[1], &hc.test[2..]).await,
+        _ => {
+            // Bare list: treat first element as the binary, remainder as
+            // args. Matches docker's "test is just argv" fallback.
+            run_nsenter_exec(pid, timeout, &hc.test[0], &hc.test[1..]).await
+        }
+    }
+}
+
+/// Spawn `nsenter -t <pid> -m -u -i -n -p -- <prog> <args...>` and
+/// translate exit code into [`HealthState`]. Times out per `hc.timeout`.
+async fn run_nsenter_exec(
+    pid: u32,
+    timeout: std::time::Duration,
+    prog: &str,
+    args: &[String],
+) -> Result<HealthState, RuntimeError> {
+    let mut cmd = tokio::process::Command::new("nsenter");
+    cmd.arg("-t")
+        .arg(pid.to_string())
+        .args(["-m", "-u", "-i", "-n", "-p"])
+        .arg("--")
+        .arg(prog)
+        .args(args);
+    let fut = cmd.output();
+    let output = match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(RuntimeError::Healthcheck(format!("nsenter spawn: {e}"))),
+        Err(_) => return Err(RuntimeError::Healthcheck("timeout".into())),
+    };
+    if output.status.success() {
+        Ok(HealthState::Healthy)
+    } else {
+        Ok(HealthState::Unhealthy)
+    }
+}
+
+/// `nsenter ... -- /bin/sh -c "<command>"` flavour. Same five-namespace
+/// entry as [`run_nsenter_exec`].
+async fn run_nsenter_shell(
+    pid: u32,
+    timeout: std::time::Duration,
+    command: &str,
+) -> Result<HealthState, RuntimeError> {
+    let mut cmd = tokio::process::Command::new("nsenter");
+    cmd.arg("-t")
+        .arg(pid.to_string())
+        .args(["-m", "-u", "-i", "-n", "-p"])
+        .args(["--", "/bin/sh", "-c"])
+        .arg(command);
+    let fut = cmd.output();
+    let output = match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(RuntimeError::Healthcheck(format!("nsenter spawn: {e}"))),
+        Err(_) => return Err(RuntimeError::Healthcheck("timeout".into())),
+    };
+    if output.status.success() {
+        Ok(HealthState::Healthy)
+    } else {
+        Ok(HealthState::Unhealthy)
     }
 }
 
@@ -1038,5 +1157,84 @@ mod tests {
             args.iter().any(|a| a == "/bin/echo"),
             "override args present: {args:?}"
         );
+    }
+
+    fn hc(test: Vec<&str>) -> super::HealthcheckSpec {
+        super::HealthcheckSpec {
+            test: test.into_iter().map(String::from).collect(),
+            interval: std::time::Duration::from_secs(5),
+            timeout: std::time::Duration::from_millis(500),
+            retries: 3,
+            start_period: std::time::Duration::from_secs(0),
+        }
+    }
+
+    /// `["NONE"]` short-circuits to Healthy without touching nsenter.
+    /// Verifies the docker-compatible "skip the check" semantics.
+    #[tokio::test]
+    async fn healthcheck_test_none_returns_healthy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = WispBackend::from_env(tmp.path()).await.unwrap();
+        let res = backend
+            .run_healthcheck("any-id", &hc(vec!["NONE"]))
+            .await
+            .unwrap();
+        assert_eq!(res, HealthState::Healthy);
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .unwrap();
+    }
+
+    /// Empty `test` is treated as "no healthcheck configured" -> Healthy.
+    /// Matches docker's `inspect` output for containers without a
+    /// HealthConfig.
+    #[tokio::test]
+    async fn healthcheck_test_empty_returns_healthy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = WispBackend::from_env(tmp.path()).await.unwrap();
+        let res = backend
+            .run_healthcheck("any-id", &hc(Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(res, HealthState::Healthy);
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .unwrap();
+    }
+
+    /// `CMD-SHELL` with no command string errors with a clear
+    /// healthcheck-flavored error. Same for `CMD` with no argv.
+    #[tokio::test]
+    async fn healthcheck_invalid_test_shape_errors_clearly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = WispBackend::from_env(tmp.path()).await.unwrap();
+        // CMD-SHELL with only the keyword: no command string.
+        let err = backend
+            .run_healthcheck("any-id", &hc(vec!["CMD-SHELL"]))
+            .await
+            .unwrap_err();
+        match err {
+            RuntimeError::Healthcheck(msg) => {
+                assert!(
+                    msg.contains("CMD-SHELL"),
+                    "msg should mention CMD-SHELL: {msg}"
+                );
+            }
+            other => panic!("expected Healthcheck error, got {other:?}"),
+        }
+        // CMD with only the keyword: no argv.
+        let err = backend
+            .run_healthcheck("any-id", &hc(vec!["CMD"]))
+            .await
+            .unwrap_err();
+        match err {
+            RuntimeError::Healthcheck(msg) => {
+                assert!(msg.contains("CMD"), "msg should mention CMD: {msg}");
+            }
+            other => panic!("expected Healthcheck error, got {other:?}"),
+        }
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .unwrap();
     }
 }
