@@ -9,6 +9,7 @@ State-dir defaults to `/var/lib/wisp`. Override with `--state-dir <PATH>` or the
 | Command | Description |
 |---------|-------------|
 | `wisp run <BUNDLE> [--id <ID>] [--detach]` | Create + start the bundle and (without `--detach`) wait for PID 1 to exit, then clean up. ID defaults to the bundle's basename. |
+| `wisp run --image <REF> [--cap-add CAP_NAME] ...` | Pull the image (cached after first call), assemble a bundle, and run it. `--cap-add` is repeatable: each value is added to all five OCI capability sets (bounding, effective, permitted, inheritable, ambient), matching docker `--cap-add` semantics. Default cap set is `CAP_KILL` + `CAP_NET_BIND_SERVICE`. Real images that drop privilege from root (nginx, postgres, ...) typically need `--cap-add CAP_CHOWN --cap-add CAP_SETUID --cap-add CAP_SETGID --cap-add CAP_DAC_OVERRIDE --cap-add CAP_FOWNER --cap-add CAP_SETPCAP`. |
 | `wisp ps` | List containers in the state-dir as a small table (ID, STATE, PID, AGE). |
 | `wisp state <ID>` | Print one container's handle as JSON (state, pid, bundle, created_at). Refreshes `Running -> Stopped` from `/proc`. |
 | `wisp kill <ID> [--signal <SIG>]` | Send a signal to PID 1. `--signal` accepts `SIGTERM`, `TERM`, `KILL`, `INT`, etc. Default `SIGTERM`. |

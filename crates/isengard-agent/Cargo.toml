@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish = false
 description = "Agent-mode runtime"
 
 [dependencies]
@@ -36,12 +37,32 @@ sha2.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio = { workspace = true }
-tokio-stream.workspace = true
+# Phase 0.4 dispatch B2: WispBackend wraps a tokio broadcast channel
+# in a Stream for `stream_events`. The `sync` feature gates the
+# BroadcastStream wrapper. Existing call sites use only the default
+# `time` feature, so adding `sync` here is purely additive.
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-util = { workspace = true }
 tonic.workspace = true
 tracing.workspace = true
 ulid = { workspace = true }
 x509-parser.workspace = true
+
+# Phase 0.4 dispatch B: WispBackend reaches into the wisp runtime,
+# image client, and (Linux only) network attacher. wisp + wisp-image
+# build cleanly on Mac so the dev loop covers the translation paths;
+# wisp-net is Linux-only (it links against iptables / netlink crates
+# that don't compile on Mac), so we gate that one behind cfg(target_os
+# = "linux") at the dependency level.
+wisp = { path = "../wisp" }
+wisp-image = { path = "../wisp-image" }
+nix = { version = "0.30", default-features = false, features = ["signal"] }
+oci-spec = { version = "0.9", default-features = false, features = ["runtime"] }
+futures = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wisp-net = { path = "../wisp-net" }
+ipnet = "2.12"
 
 [dev-dependencies]
 tempfile = { workspace = true }

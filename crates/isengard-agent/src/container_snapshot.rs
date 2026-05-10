@@ -1,13 +1,21 @@
-//! Reads the local Docker container list, groups containers into stacks
+//! Reads the local container list, groups containers into stacks
 //! based on the `com.docker.compose.project` label (or `isengard.stack=` override),
 //! and converts to the wire-format `StackInfo`.
+//!
+//! Phase 0.6: drives off the [`crate::runtime::RuntimeBackend`] trait
+//! so heartbeats from a wisp host stop dialling docker.sock every
+//! interval. The legacy `list_container_snapshots()` function (no
+//! backend arg) is kept for back-compat but routes through a
+//! best-effort BollardBackend factory; new callers pass the live
+//! backend Arc via [`list_container_snapshots_via`].
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
-use bollard::Docker;
-use bollard::container::ListContainersOptions;
 use isengard_proto::pb::{ServiceInfo, StackInfo};
 use tracing::warn;
+
+use crate::runtime::{ContainerState, ListFilter, RuntimeBackend};
 
 /// Lightweight snapshot of one container — only the bits we need to derive stacks + services.
 #[derive(Debug, Clone)]
@@ -18,9 +26,44 @@ pub struct ContainerSnapshot {
     pub labels: HashMap<String, String>,
 }
 
-/// Query Docker for all containers (running + stopped) and return ContainerSnapshots.
-/// Returns an empty Vec on Docker error (logged at warn level — heartbeat should still send).
+/// Phase 0.6: query the [`RuntimeBackend`] for all containers
+/// (running + stopped) and project to the heartbeat-oriented
+/// [`ContainerSnapshot`] shape. Returns an empty Vec on backend error
+/// (logged at warn level so the heartbeat still sends).
+pub async fn list_container_snapshots_via(backend: &dyn RuntimeBackend) -> Vec<ContainerSnapshot> {
+    let snaps = match backend
+        .list_containers(ListFilter {
+            all: true,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, backend = %backend.name(), "container_snapshot: list_containers failed");
+            return Vec::new();
+        }
+    };
+    snaps
+        .into_iter()
+        .map(|s| ContainerSnapshot {
+            name: s.name,
+            image: s.image,
+            state: state_to_str(s.state).to_string(),
+            labels: s.labels.into_iter().collect(),
+        })
+        .collect()
+}
+
+/// Back-compat wrapper for callers that don't have a backend handle.
+/// Equivalent to the pre-0.6 behavior: dial docker.sock every call,
+/// return empty on connection failure. Heartbeat code paths now pass
+/// the live backend via [`list_container_snapshots_via`]; this remains
+/// for the few legacy / test paths that haven't been threaded through.
 pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
+    use bollard::Docker;
+    use bollard::container::ListContainersOptions;
+
     let docker = match Docker::connect_with_local_defaults() {
         Ok(d) => d,
         Err(e) => {
@@ -28,12 +71,10 @@ pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
             return Vec::new();
         }
     };
-
     let opts = ListContainersOptions::<String> {
         all: true,
         ..Default::default()
     };
-
     let containers = match docker.list_containers(Some(opts)).await {
         Ok(c) => c,
         Err(e) => {
@@ -41,11 +82,9 @@ pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
             return Vec::new();
         }
     };
-
     containers
         .into_iter()
         .map(|c| {
-            // bollard returns names with leading slash, take the first and strip it.
             let name = c
                 .names
                 .as_ref()
@@ -63,6 +102,32 @@ pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
             }
         })
         .collect()
+}
+
+/// Map the trait's typed state enum to the docker-compatible state
+/// string the controller's stacks/services projection expects.
+fn state_to_str(state: ContainerState) -> &'static str {
+    match state {
+        ContainerState::Created => "created",
+        ContainerState::Running => "running",
+        ContainerState::Restarting => "restarting",
+        ContainerState::Paused => "paused",
+        ContainerState::Exited => "exited",
+        ContainerState::Dead => "dead",
+    }
+}
+
+/// Phase 0.6: heartbeat hook that prefers the live backend when one is
+/// available; falls back to the legacy bollard probe otherwise.
+/// Callers pass the same `Option<Arc<dyn RuntimeBackend>>` they already
+/// hold for the rest of the agent.
+pub async fn snapshots_via_backend_or_legacy(
+    backend: Option<&Arc<dyn RuntimeBackend>>,
+) -> Vec<ContainerSnapshot> {
+    match backend {
+        Some(b) => list_container_snapshots_via(b.as_ref()).await,
+        None => list_container_snapshots().await,
+    }
 }
 
 /// Build per-container ServiceInfo entries with stack association.

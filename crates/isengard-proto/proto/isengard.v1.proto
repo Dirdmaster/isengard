@@ -156,6 +156,11 @@ message Heartbeat {
   uint64 ts_ms = 1; // agent's local clock at send time
   repeated StackInfo stacks = 2;
   repeated ServiceInfo services = 3;
+  // Phase 0.5 wisp: which runtime backend the agent is talking to
+  // (`docker`, `wisp`, ...). Additive: empty string from older
+  // agents is treated by the controller as `docker` (the only
+  // backend prior to 0.5).
+  string runtime_backend = 4;
 }
 
 message ControllerMessage {

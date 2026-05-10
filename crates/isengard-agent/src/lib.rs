@@ -20,6 +20,7 @@ pub mod labels;
 pub mod logs;
 pub mod mdns;
 pub mod proxy;
+pub mod runtime;
 pub mod secret_fetch;
 pub mod sync;
 pub mod tls;
@@ -224,17 +225,34 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let proxy_state = proxy::ProxyState::new();
     proxy_state.set_event_sink(proxy_event_tx);
 
-    // -- shared Docker handle. Used by the DeploymentSupervisor's blue-green
-    //    driver and by the labels watcher below. Best-effort: if Docker is
-    //    unreachable the supervisor is not built and the updater falls back
-    //    to its in-place behavior. The labels watcher is also skipped.
-    let docker = match bollard::Docker::connect_with_local_defaults() {
-        Ok(d) => Some(Arc::new(d)),
+    // -- shared runtime backend (Phase 0.4 dispatch A). ISENGARD_RUNTIME
+    //    selects bollard (default) vs wisp (dispatch B). The trait is the
+    //    public seam; deeply-bollard helpers (compose_apply,
+    //    deployment/driver, labels, proxy/discovery) reach for the
+    //    underlying bollard handle via [`runtime::RuntimeBackend::as_bollard`]
+    //    until dispatch B replaces them with trait-driven equivalents.
+    //    Best-effort: if backend construction fails the supervisor + labels
+    //    watcher are disabled (matches pre-0.4 behavior when docker.sock
+    //    was unreachable).
+    let backend: Option<Arc<dyn runtime::RuntimeBackend>> = match runtime::select_backend(
+        &opts.state_dir,
+    )
+    .await
+    {
+        Ok(b) => Some(b),
         Err(e) => {
-            warn!(error = %e, "docker: connect failed, deployment supervisor + labels watcher disabled");
+            warn!(
+                error = %e,
+                "runtime: backend selection failed, deployment supervisor + labels watcher disabled",
+            );
             None
         }
     };
+    // Legacy bollard-typed handle for callers that haven't moved to the
+    // trait yet (compose_apply, deployment/driver::RealDriverDeps, the
+    // labels watcher, the bollard log source, proxy/discovery). Dispatch B
+    // replaces these callers and removes the accessor.
+    let docker = backend.as_ref().and_then(|b| b.as_bollard());
 
     // -- DeploymentSupervisor (Phase 10 Task 7). Build it BEFORE plugins so
     //    its dispatcher can be threaded through PluginContext into the
@@ -407,18 +425,21 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
-    // -- spawn the Docker label watcher (Phase 8b Task 16).
+    // -- spawn the runtime label watcher (Phase 8b Task 16, trait-ified
+    //    in Phase 0.5).
     //    Pushes ContainerLabelsReport / ContainerLabelsRemoved up the sync
     //    stream as containers come and go. Messages queue in `agent_msg_rx`
     //    while the stream is down; the sync loop drains them on reconnect.
-    //    Reuses the shared `docker` handle opened earlier.
+    //    Drives off `RuntimeBackend::stream_events` + `inspect_container`
+    //    so wisp can supply Pingora label discovery on the same path as
+    //    bollard.
     let (agent_msg_tx, mut agent_msg_rx) =
         tokio::sync::mpsc::channel::<isengard_proto::pb::AgentMessage>(64);
-    if let Some(docker) = docker.as_ref() {
-        let labels_docker = (**docker).clone();
+    if let Some(backend) = backend.as_ref() {
+        let labels_backend = backend.clone();
         let labels_out = agent_msg_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = labels::watch(labels_docker, labels_out).await {
+            if let Err(e) = labels::watch(labels_backend, labels_out).await {
                 tracing::error!(error = %e, "labels: watcher exited");
             }
         });
@@ -428,22 +449,35 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         // to the controller. Mounted at /etc/isengard/stacks via the
         // bind in docker/compose.yaml so the file persists across
         // container restarts.
+        //
+        // Phase 0.5: still bollard-coupled (reverse-engineering compose.yaml
+        // from running containers reaches into bollard inspect details the
+        // trait doesn't surface yet). Gated on the bollard escape hatch;
+        // fresh wisp installs skip compose-import: the use case is
+        // migrating dockerd-installed homelabs and isn't applicable there.
         let import_root = std::path::PathBuf::from(
             std::env::var("ISENGARD_COMPOSE_IMPORT_ROOT")
                 .unwrap_or_else(|_| compose_import::DEFAULT_IMPORT_ROOT.to_string()),
         );
-        compose_import::spawn(
-            docker.clone(),
-            agent_msg_tx.clone(),
-            agent_id.clone(),
-            import_root.clone(),
-            compose_import::DEFAULT_IMPORT_INTERVAL,
-        );
+        if let Some(docker) = docker.as_ref() {
+            compose_import::spawn(
+                docker.clone(),
+                agent_msg_tx.clone(),
+                agent_id.clone(),
+                import_root.clone(),
+                compose_import::DEFAULT_IMPORT_INTERVAL,
+            );
+        }
 
         // v0.3d compose-as-truth: watch the same root for operator
         // edits (vim, git pull, dashboard PUT). Each debounced change
         // drives a reconcile sweep against the running containers.
-        let watcher_docker = docker.clone();
+        //
+        // Phase 0.6: lifted out of the if-let-Some-docker gate so wisp
+        // deploys also see the watcher. reconcile_stack_with_secrets
+        // drives the RuntimeBackend trait directly; the watcher only
+        // captures an Arc<dyn RuntimeBackend>, no bollard borrow.
+        let watcher_backend = backend.clone();
         let watcher_root = import_root.clone();
         let watcher_endpoint = endpoint.clone();
         match compose_watcher::spawn(watcher_root.clone()) {
@@ -493,7 +527,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                         // controller when at least one service has
                         // `secrets:` set.
                         match compose_apply::reconcile_stack_with_secrets(
-                            watcher_docker.as_ref(),
+                            watcher_backend.as_ref(),
                             &evt.stack_name,
                             &yaml,
                             watcher_endpoint.clone(),
@@ -536,7 +570,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                     }
                 });
             }
-            Err(e) => warn!(error = %e, "compose_watcher: failed to spawn (continuing without)"),
+            Err(e) => {
+                warn!(error = %e, "compose_watcher: failed to spawn (continuing without)")
+            }
         }
     }
 
@@ -583,7 +619,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_supervisor = supervisor_for_sync.clone();
     let sync_log_source = log_source.clone();
     let sync_mdns = mdns_handle.clone();
-    let sync_docker = docker.clone();
+    let sync_backend = backend.clone();
     // v0.3d: surface the compose root + host id to the sync loop so it
     // can service `WriteCompose` ControllerMessages from the dashboard.
     let sync_compose_ctx = Some(sync::ComposeContext {
@@ -606,7 +642,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_log_source,
             sync_mdns,
             sync_compose_ctx,
-            sync_docker,
+            sync_backend,
         )
         .await
     };

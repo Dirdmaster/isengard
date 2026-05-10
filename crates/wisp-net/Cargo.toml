@@ -1,0 +1,49 @@
+[package]
+name = "wisp-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "Wisp networking: bridge + veth + IPAM + iptables for wisp-runtime containers (Phase 0.3)"
+
+[dependencies]
+# Sibling runtime crate. Dispatch A doesn't reach into wisp's API yet, but
+# dispatch B/C will (Runtime::container_pid, NetworkSpec plumbing). Listing
+# the path dep up front keeps the crate graph honest.
+wisp = { path = "../wisp" }
+
+# Shared workspace deps.
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# IPv4 / IPv6 subnet math (Ipv4Net::hosts(), prefix_len, network_bits...).
+# Pinned to the workspace lock entry (2.12.x) implicitly via the registry
+# resolver. We don't add a workspace.dependencies entry here because the
+# crate is wisp-net-private for now.
+ipnet = "2.12"
+
+# MAC address typing for NetworkAttachment.mac. Dispatch B+C use this; the
+# planner code in dispatch A doesn't, but we keep the dep declared per the
+# crate-graph plan so the dispatch B PR is a pure additive change.
+macaddr = "1.0"
+
+# Atomic file rewrites for the IPAM allocs.json (NamedTempFile + persist).
+# Listed under regular deps (not dev-deps) because StaticBitmapIpam itself
+# uses it at runtime.
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# Integration tests + the attach-busybox example gate themselves on
+# euid==0; libc::geteuid is the minimal way to do that without pulling
+# in nix.
+libc = "0.2"
+
+[[example]]
+name = "attach-busybox"
+path = "examples/attach-busybox.rs"

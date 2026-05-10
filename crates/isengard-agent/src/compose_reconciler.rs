@@ -18,6 +18,8 @@ use bollard::secret::ContainerInspectResponse;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
+use crate::runtime::ContainerSnapshot;
+
 /// One service entry in `services:` after parsing. We keep the raw
 /// `Value` for fields we don't model so apply can faithfully forward
 /// labels / extra config to bollard. Only the fields used by the diff
@@ -469,6 +471,38 @@ pub struct RunningService {
 }
 
 impl RunningService {
+    /// Phase 0.6: build a [`RunningService`] from a backend-agnostic
+    /// [`ContainerSnapshot`]. The snapshot already filters managed env
+    /// keys and projects ports / restart strings, so this is a flat
+    /// field copy.
+    pub fn from_snapshot(snapshot: &ContainerSnapshot) -> Option<Self> {
+        // Service name precedence matches the legacy bollard mapper:
+        // compose label first, then the agent's `isengard.service`
+        // override.
+        let svc = snapshot
+            .labels
+            .get("com.docker.compose.service")
+            .or_else(|| snapshot.labels.get("isengard.service"))
+            .cloned()?;
+        // Drop compose-internal labels from the diff surface; they are
+        // injected by the agent and otherwise look like operator drift.
+        let labels_map: BTreeMap<String, String> = snapshot
+            .labels
+            .iter()
+            .filter(|(k, _)| !k.starts_with("com.docker.compose."))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Some(Self {
+            service_name: svc,
+            container_id: snapshot.id.clone(),
+            image: snapshot.image.clone(),
+            environment: snapshot.env.clone(),
+            labels: labels_map,
+            port_bindings: snapshot.port_bindings.clone(),
+            restart: snapshot.restart.clone(),
+        })
+    }
+
     /// Build a [`RunningService`] from a bollard `inspect_container`
     /// response. Returns `None` when the container has no service-name
     /// label / is otherwise unmappable.
@@ -1029,5 +1063,116 @@ mod tests {
         let plan = build_plan("hello", &desired, &[]);
         assert_eq!(plan.ops[0].service(), "alpha");
         assert_eq!(plan.ops[1].service(), "zeta");
+    }
+
+    // ----- Phase 0.6: RunningService::from_snapshot -----
+
+    fn snap_with(
+        id: &str,
+        image: &str,
+        labels: &[(&str, &str)],
+        env: &[(&str, &str)],
+        ports: &[&str],
+        restart: Option<&str>,
+    ) -> crate::runtime::ContainerSnapshot {
+        crate::runtime::ContainerSnapshot {
+            id: id.into(),
+            name: id.into(),
+            image: image.into(),
+            state: crate::runtime::ContainerState::Running,
+            stack: None,
+            service: None,
+            labels: labels
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            created_at: std::time::SystemTime::UNIX_EPOCH,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            restart_count: 0,
+            network_settings: crate::runtime::NetworkSettings::default(),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            port_bindings: ports.iter().map(|p| (*p).to_string()).collect(),
+            restart: restart.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn from_snapshot_extracts_service_name_and_image() {
+        let snap = snap_with(
+            "abc",
+            "nginx:1.27",
+            &[("com.docker.compose.service", "web")],
+            &[],
+            &[],
+            None,
+        );
+        let rs = RunningService::from_snapshot(&snap).expect("Some");
+        assert_eq!(rs.service_name, "web");
+        assert_eq!(rs.image, "nginx:1.27");
+        assert_eq!(rs.container_id, "abc");
+    }
+
+    #[test]
+    fn from_snapshot_drops_compose_internal_labels() {
+        let snap = snap_with(
+            "abc",
+            "nginx",
+            &[
+                ("com.docker.compose.service", "web"),
+                ("com.docker.compose.project", "hello"),
+                ("traefik.enable", "true"),
+            ],
+            &[],
+            &[],
+            None,
+        );
+        let rs = RunningService::from_snapshot(&snap).expect("Some");
+        assert_eq!(
+            rs.labels.get("traefik.enable").map(String::as_str),
+            Some("true")
+        );
+        assert!(!rs.labels.contains_key("com.docker.compose.service"));
+        assert!(!rs.labels.contains_key("com.docker.compose.project"));
+    }
+
+    #[test]
+    fn from_snapshot_returns_none_without_service_label() {
+        let snap = snap_with("abc", "nginx", &[], &[], &[], None);
+        assert!(RunningService::from_snapshot(&snap).is_none());
+    }
+
+    #[test]
+    fn from_snapshot_falls_back_to_isengard_service_label() {
+        let snap = snap_with(
+            "abc",
+            "nginx",
+            &[("isengard.service", "web")],
+            &[],
+            &[],
+            None,
+        );
+        let rs = RunningService::from_snapshot(&snap).expect("Some");
+        assert_eq!(rs.service_name, "web");
+    }
+
+    #[test]
+    fn from_snapshot_carries_env_ports_restart() {
+        let snap = snap_with(
+            "abc",
+            "nginx",
+            &[("com.docker.compose.service", "web")],
+            &[("TZ", "UTC")],
+            &["8080:80"],
+            Some("always"),
+        );
+        let rs = RunningService::from_snapshot(&snap).expect("Some");
+        assert_eq!(rs.environment.get("TZ").map(String::as_str), Some("UTC"));
+        assert_eq!(rs.port_bindings, vec!["8080:80".to_string()]);
+        assert_eq!(rs.restart.as_deref(), Some("always"));
     }
 }

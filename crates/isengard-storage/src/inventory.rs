@@ -148,6 +148,75 @@ impl Inventory {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Phase 0.5 (wisp): stash the agent's active runtime backend
+    /// name (`docker`, `wisp`, ...) under `metadata.runtime_backend`.
+    /// Read via [`Self::host_runtime_backend`] for the dashboard's
+    /// HostDto + `isd ps`. Like `set_host_lan_ip`, lives in metadata
+    /// (rather than as a dedicated column) to avoid a schema
+    /// migration for what is fundamentally observational state.
+    ///
+    /// Empty `backend` is treated as a no-op so a buggy agent that
+    /// hasn't selected a backend yet doesn't clobber a previously
+    /// reported value.
+    pub async fn set_host_runtime_backend(&self, id: HostId, backend: &str) -> Result<bool> {
+        if backend.is_empty() {
+            return Ok(false);
+        }
+        let id_bytes: &[u8] = &id.to_bytes();
+        let row: Option<(String,)> = sqlx::query_as("SELECT metadata FROM hosts WHERE id = ?")
+            .bind(id_bytes)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some((meta_str,)) = row else {
+            return Ok(false);
+        };
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({}));
+        if !meta.is_object() {
+            meta = serde_json::json!({});
+        }
+        if let Some(obj) = meta.as_object_mut() {
+            // Skip the write when the value is already in place: avoids
+            // an UPDATE per heartbeat once the backend stops changing.
+            if obj.get("runtime_backend").and_then(|v| v.as_str()) == Some(backend) {
+                return Ok(false);
+            }
+            obj.insert(
+                "runtime_backend".into(),
+                serde_json::Value::String(backend.to_string()),
+            );
+        }
+        let new_meta = meta.to_string();
+        let result = sqlx::query("UPDATE hosts SET metadata = ? WHERE id = ?")
+            .bind(&new_meta)
+            .bind(id_bytes)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Phase 0.5 (wisp): read the persisted runtime backend name for
+    /// a host. Returns `None` when the host doesn't exist or its
+    /// metadata has no `runtime_backend` key (pre-0.5 agents that
+    /// never gossiped a backend). Callers (HostDto, isd ps) treat
+    /// `None` as `"docker"` for back-compat.
+    pub async fn host_runtime_backend(&self, id: HostId) -> Result<Option<String>> {
+        let id_bytes: &[u8] = &id.to_bytes();
+        let row: Option<(String,)> = sqlx::query_as("SELECT metadata FROM hosts WHERE id = ?")
+            .bind(id_bytes)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some((meta_str,)) = row else {
+            return Ok(None);
+        };
+        let meta: serde_json::Value =
+            serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({}));
+        Ok(meta
+            .get("runtime_backend")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
+    }
+
     /// v0.3b: read the cached LAN IP for a host (set via `set_host_lan_ip`).
     /// Returns `None` if the host doesn't exist or the metadata has no
     /// `lan_ip` key yet (no agent connection has landed since boot).
@@ -811,6 +880,47 @@ mod tests {
         assert_eq!(
             host.metadata.get("lan_ip").and_then(|v| v.as_str()),
             Some("10.0.0.7")
+        );
+    }
+
+    /// Phase 0.5 wisp: round-trip the runtime backend through
+    /// metadata. The setter is idempotent + skips writes when the
+    /// value already matches; the getter returns `None` for hosts
+    /// whose agent never gossiped a backend.
+    #[tokio::test]
+    async fn controller_persists_backend_in_host_record() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let id = inv.enroll_host(sample_enrollment()).await.unwrap();
+
+        // No backend set yet.
+        assert_eq!(inv.host_runtime_backend(id).await.unwrap(), None);
+
+        let changed = inv.set_host_runtime_backend(id, "wisp").await.unwrap();
+        assert!(changed, "first write should land");
+        assert_eq!(
+            inv.host_runtime_backend(id).await.unwrap(),
+            Some("wisp".into())
+        );
+
+        // Setting the same value is a no-op (skips the UPDATE).
+        let changed = inv.set_host_runtime_backend(id, "wisp").await.unwrap();
+        assert!(!changed, "same value should skip write");
+
+        // Overwrite to a different backend.
+        let changed = inv.set_host_runtime_backend(id, "docker").await.unwrap();
+        assert!(changed);
+        assert_eq!(
+            inv.host_runtime_backend(id).await.unwrap(),
+            Some("docker".into())
+        );
+
+        // Empty input is a no-op so a buggy agent can't clobber a
+        // previously reported value.
+        let changed = inv.set_host_runtime_backend(id, "").await.unwrap();
+        assert!(!changed);
+        assert_eq!(
+            inv.host_runtime_backend(id).await.unwrap(),
+            Some("docker".into())
         );
     }
 

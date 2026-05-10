@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cgroup::{Cgroup, HostCgroupFs};
 use crate::error::{Result, WispError};
+use crate::network_spec::NetworkSpec;
 use crate::state::{self, ContainerHandle, ContainerState};
 
 #[cfg(target_os = "linux")]
@@ -43,6 +44,24 @@ use crate::lifecycle;
 /// [`Runtime::state`] so unit tests can simulate a dead PID without
 /// having to spawn / reap a real process.
 type AliveCheck = fn(u32) -> bool;
+
+/// Read `<state_dir>/containers/<id>/exit_status`. Returns `None`
+/// when the file is missing (reaper hasn't run yet) or when the
+/// contents don't parse as an integer (treat corruption as "no
+/// captured exit code"; the operator can `wisp state` again later if
+/// the reaper rewrites the file).
+///
+/// Encoding: the reaper writes a single line containing the integer
+/// exit status. Positive `0..=255` for a clean `_exit(N)`; negative
+/// `-N` when PID 1 was killed by signal `N` (e.g. `-9` is SIGKILL,
+/// `-15` is SIGTERM). Mirrors what
+/// [`Runtime::state`] surfaces back to callers.
+fn read_exit_status(state_dir: &Path, id: &str) -> Option<i32> {
+    let path = state_dir.join("containers").join(id).join("exit_status");
+    let bytes = std::fs::read(&path).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?.trim();
+    text.parse::<i32>().ok()
+}
 
 /// Production probe: a PID is alive if `/proc/<pid>` exists and
 /// `/proc/<pid>/status` does not report state `Z` (zombie). Zombies
@@ -146,6 +165,52 @@ impl Runtime {
         }
     }
 
+    /// Create a container with a `NetworkSpec` attached.
+    ///
+    /// Same persistence + cgroup setup as [`Runtime::create`]; the
+    /// resulting `state.json` carries the spec under
+    /// `network_spec`. The actual veth + IP attachment is deferred to
+    /// [`Runtime::start`], which reads the spec, allocates an IP, and
+    /// records a `NetworkAttachmentRecord` once the child PID exists.
+    ///
+    /// Linux only. The Mac stub mirrors [`Runtime::create`].
+    pub fn create_with_network(
+        &self,
+        id: &str,
+        bundle: &Path,
+        network: NetworkSpec,
+    ) -> Result<ContainerHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut handle =
+                lifecycle::create_container(&self.state_dir, &self.cgroup, id, bundle)?;
+            handle.network_spec = Some(network);
+            state::write(&self.state_dir, &handle)?;
+            Ok(handle)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (id, bundle, network);
+            Err(WispError::Lifecycle(
+                "wisp runtime requires linux".to_string(),
+            ))
+        }
+    }
+
+    /// Read the container's PID 1 from `state.json`. Returns `None`
+    /// if the container is not in the `Running` state or if the
+    /// state-dir entry is missing / unreadable.
+    ///
+    /// Used by `wisp-net` (and integration tests) to drive
+    /// `nsenter -t <pid>` / `ip link set <iface> netns <pid>` after
+    /// `Runtime::start` has cloned the entrypoint.
+    pub fn container_pid(&self, id: &str) -> Option<u32> {
+        match state::read(&self.state_dir, id) {
+            Ok(h) => h.pid,
+            Err(_) => None,
+        }
+    }
+
     /// Run the container's entrypoint as PID 1. Mirrors `runc start`.
     ///
     /// # Single-threaded invariant
@@ -156,14 +221,44 @@ impl Runtime {
     /// heap lock deadlocks the child the moment it touches the
     /// allocator. `wisp-cli` honours this by avoiding tokio and any
     /// background tracing worker. Library users have to as well.
+    ///
+    /// If the container was created via [`Runtime::create_with_network`]
+    /// you must use [`Runtime::start_with_attacher`] instead so the
+    /// runtime has a hook to wire up bridge / veth / iptables.
     pub fn start(&self, id: &str) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
-            lifecycle::start_container(&self.state_dir, &self.cgroup, id)
+            lifecycle::start_container(&self.state_dir, &self.cgroup, id, None)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = id;
+            Err(WispError::Lifecycle(
+                "wisp runtime requires linux".to_string(),
+            ))
+        }
+    }
+
+    /// Run the container's entrypoint as PID 1, wiring the network
+    /// attachment via the supplied [`crate::NetworkAttacher`].
+    ///
+    /// If the container has no `network_spec` persisted, this is
+    /// equivalent to [`Runtime::start`]: the attacher is ignored.
+    ///
+    /// On attach failure the child is killed + reaped before the
+    /// error propagates.
+    pub fn start_with_attacher(
+        &self,
+        id: &str,
+        attacher: &mut dyn crate::NetworkAttacher,
+    ) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            lifecycle::start_container(&self.state_dir, &self.cgroup, id, Some(attacher))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (id, attacher);
             Err(WispError::Lifecycle(
                 "wisp runtime requires linux".to_string(),
             ))
@@ -212,6 +307,11 @@ impl Runtime {
     /// `force` is false. With `force=true`, calls
     /// [`Cgroup::kill_all`] then [`Cgroup::remove`] then
     /// [`state::remove`]. Tolerates an already-cleaned cgroup.
+    ///
+    /// If the container has a `network_attachment` persisted, this
+    /// method does NOT detach it: callers must use
+    /// [`Runtime::delete_with_attacher`] so the iptables rules / host
+    /// veth / IP allocation are reversed cleanly.
     pub fn delete(&self, id: &str, force: bool) -> Result<()> {
         let handle = state::read(&self.state_dir, id)?;
         if handle.state == ContainerState::Running && !force {
@@ -227,10 +327,55 @@ impl Runtime {
         Ok(())
     }
 
+    /// Like [`Runtime::delete`] but also detaches the network if the
+    /// container's `state.json` carries a `network_attachment`.
+    ///
+    /// Detach is best-effort: a failure logs via tracing but does not
+    /// stop the cgroup / state-dir cleanup. The wisp-cli uses this
+    /// for the operator-facing `wisp delete` flow; the integration
+    /// test calls it directly.
+    pub fn delete_with_attacher(
+        &self,
+        id: &str,
+        force: bool,
+        attacher: &mut dyn crate::NetworkAttacher,
+    ) -> Result<()> {
+        let handle = state::read(&self.state_dir, id)?;
+        if handle.state == ContainerState::Running && !force {
+            return Err(WispError::Lifecycle(format!(
+                "container {id:?} is Running; pass force=true to delete"
+            )));
+        }
+        // Detach BEFORE killing the cgroup: if the iptables revoke
+        // raises an error we want it surfaced before we lose the
+        // ability to introspect.
+        if let Some(record) = handle.network_attachment.as_ref() {
+            if let Err(err) = attacher.detach(record) {
+                tracing::warn!(
+                    container_id = %id,
+                    error = %err,
+                    "network detach failed during delete; continuing with cgroup + state cleanup"
+                );
+            }
+        }
+        self.cgroup.kill_all(id)?;
+        self.cgroup.remove(id)?;
+        state::remove(&self.state_dir, id)?;
+        Ok(())
+    }
+
     /// Read state from disk + a `/proc/<pid>` check. Mirrors
     /// `runc state`. If the on-disk state is `Running` but the
     /// process is gone (or zombie), persist `Stopped` before
     /// returning.
+    ///
+    /// Phase 0.5: when the container is in (or transitions into)
+    /// `Stopped`, read the per-container `exit_status` file written
+    /// by the reaper thread (see `crate::lifecycle::spawn_reaper`)
+    /// and attach it to the returned handle as `exit_code`. The file
+    /// may legitimately be absent if the reaper hasn't reaped yet
+    /// (race window between `/proc/<pid>` going away and the reaper's
+    /// next 500ms tick), in which case `exit_code` stays `None`.
     pub fn state(&self, id: &str) -> Result<ContainerHandle> {
         let mut handle = state::read(&self.state_dir, id)?;
         if handle.state == ContainerState::Running {
@@ -242,6 +387,9 @@ impl Runtime {
                 handle.state = ContainerState::Stopped;
                 state::write(&self.state_dir, &handle)?;
             }
+        }
+        if handle.state == ContainerState::Stopped && handle.exit_code.is_none() {
+            handle.exit_code = read_exit_status(&self.state_dir, id);
         }
         Ok(handle)
     }
@@ -286,6 +434,11 @@ mod tests {
             state,
             pid,
             created_at: SystemTime::UNIX_EPOCH,
+            network_spec: None,
+            network_attachment: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
+            exit_code: None,
         }
     }
 
@@ -500,5 +653,91 @@ mod tests {
         // Also ensure the AtomicBool trick we don't actually use is
         // not optimised out (compiler warning hygiene).
         let _ = AtomicBool::new(true).load(Ordering::Relaxed);
+    }
+
+    /// `container_pid` reads the persisted pid out of state.json. Pure
+    /// file IO so it works on Mac.
+    #[test]
+    fn container_pid_returns_persisted_pid_when_running() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("alive", ContainerState::Running, Some(4242));
+        state::write(state.path(), &h).unwrap();
+        assert_eq!(rt.container_pid("alive"), Some(4242));
+    }
+
+    #[test]
+    fn container_pid_returns_none_for_missing_id() {
+        let (_state, _cg, rt) = fixture(always_alive);
+        assert_eq!(rt.container_pid("ghost"), None);
+    }
+
+    #[test]
+    fn container_pid_returns_none_when_state_has_no_pid() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("created", ContainerState::Created, None);
+        state::write(state.path(), &h).unwrap();
+        assert_eq!(rt.container_pid("created"), None);
+    }
+
+    /// Phase 0.5: when a container is `Stopped` and the per-container
+    /// reaper has written the `exit_status` file, `Runtime::state`
+    /// reads it back into the returned handle.
+    #[test]
+    fn runtime_state_reports_exit_code_after_stop() {
+        let (state, _cg, rt) = fixture(always_dead);
+        // Pre-populate Running + a faked exit_status file: when state()
+        // sees the pid is gone it transitions to Stopped and reads the
+        // file in the same call.
+        let h = make_handle("clean", ContainerState::Running, Some(7777));
+        state::write(state.path(), &h).unwrap();
+        let cdir = state.path().join("containers/clean");
+        std::fs::write(cdir.join("exit_status"), b"0\n").unwrap();
+
+        let got = rt.state("clean").unwrap();
+        assert_eq!(got.state, ContainerState::Stopped);
+        assert_eq!(got.exit_code, Some(0));
+    }
+
+    /// Phase 0.5: signal-killed containers encode the signal as a
+    /// negative integer in `exit_status`. `Runtime::state` round-trips
+    /// the negative form so callers can distinguish exit(0) from
+    /// SIGKILL.
+    #[test]
+    fn runtime_state_reports_signal_kill_as_negative() {
+        let (state, _cg, rt) = fixture(always_dead);
+        let h = make_handle("killed", ContainerState::Running, Some(7778));
+        state::write(state.path(), &h).unwrap();
+        let cdir = state.path().join("containers/killed");
+        std::fs::write(cdir.join("exit_status"), b"-9\n").unwrap();
+
+        let got = rt.state("killed").unwrap();
+        assert_eq!(got.state, ContainerState::Stopped);
+        assert_eq!(got.exit_code, Some(-9));
+    }
+
+    /// Phase 0.5: a container in Stopped without an `exit_status`
+    /// file (reaper hasn't reaped yet, or container was deleted out
+    /// from under us) reports `exit_code: None`.
+    #[test]
+    fn runtime_state_no_exit_status_reports_none() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("nofile", ContainerState::Stopped, Some(1));
+        state::write(state.path(), &h).unwrap();
+        let got = rt.state("nofile").unwrap();
+        assert!(got.exit_code.is_none());
+    }
+
+    /// Phase 0.5: corrupt `exit_status` file (non-numeric contents)
+    /// is tolerated as `None` rather than failing the state read.
+    #[test]
+    fn runtime_state_corrupt_exit_status_treated_as_none() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("corrupt", ContainerState::Stopped, Some(1));
+        state::write(state.path(), &h).unwrap();
+        let cdir = state.path().join("containers/corrupt");
+        std::fs::create_dir_all(&cdir).unwrap();
+        std::fs::write(cdir.join("exit_status"), b"not-a-number\n").unwrap();
+        let got = rt.state("corrupt").unwrap();
+        assert!(got.exit_code.is_none());
     }
 }

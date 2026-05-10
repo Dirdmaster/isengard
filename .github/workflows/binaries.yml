@@ -1,0 +1,285 @@
+name: Binaries
+
+# Builds static (musl) Linux binaries + native Mac binaries for `isengard` and
+# `isd` and uploads them to the GitHub Release. Phase 0.8 (drop docker on host)
+# will use these artifacts so install.sh can fetch a single static file from
+# Releases instead of pulling a docker image.
+#
+# Why two Linux build paths:
+#   - `isengard` depends on Pingora (BoringSSL via boring-sys), which needs a
+#     real musl cross-toolchain. Debian's `musl-tools` is a gcc wrapper that
+#     rejects `-m64` and the asm path zstd-sys uses. We build inside the
+#     `messense/rust-musl-cross` container, the same image the Dockerfile uses.
+#   - `isd` is rustls-only (no BoringSSL, no Pingora). Plain apt + musl-tools
+#     handles it cleanly, including the aarch64 cross via gcc-aarch64-linux-gnu.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version tag (e.g. v0.2.0)
+        required: true
+        type: string
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag (e.g. v0.2.0) for manual builds
+        required: true
+        type: string
+
+permissions:
+  contents: write   # needed to upload to release
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # `isengard` Linux musl builds (BoringSSL path: container).
+  # ---------------------------------------------------------------------------
+  build-isengard-linux:
+    name: Build isengard-${{ matrix.target }}
+    runs-on: ubuntu-latest
+    container:
+      image: messense/rust-musl-cross:${{ matrix.musl-cross-tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            musl-cross-tag: x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            musl-cross-tag: aarch64-musl
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.version || github.ref }}
+
+      - name: Install protoc 27.x
+        run: |
+          # Pingora itself doesn't need protoc, but isengard pulls in
+          # isengard-proto via the controller crate. The container's distro
+          # protoc is too old for proto3 optional, so install upstream 27.x.
+          PROTOC_VERSION=27.3
+          curl -fsSL -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -q /tmp/protoc.zip -d /usr/local
+          rm /tmp/protoc.zip
+          protoc --version
+
+      - name: Install bun (dashboard build script)
+        run: |
+          # The dashboard plugin's build.rs runs `bun install` + `bun run build`
+          # to generate the embedded Nuxt bundle.
+          curl -fsSL https://bun.sh/install | bash
+          ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+          bun --version
+
+      - name: Build isengard
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin isengard
+
+      - name: Strip binary
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isengard"
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            aarch64-linux-musl-strip "$BINARY" || strip "$BINARY" || true
+          else
+            x86_64-linux-musl-strip "$BINARY" || strip "$BINARY" || true
+          fi
+
+      - name: Verify static linking
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isengard"
+          file "$BINARY" || true
+          if ldd "$BINARY" 2>&1 | grep -q "not a dynamic executable"; then
+            echo "OK: statically linked"
+          elif ldd "$BINARY" 2>&1 | grep -q "statically linked"; then
+            echo "OK: statically linked"
+          else
+            echo "WARNING: binary may not be fully static"
+            ldd "$BINARY" 2>&1 || true
+          fi
+
+      - name: Package binary
+        id: package
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isengard"
+          ARTIFACT_NAME="isengard-${{ matrix.target }}"
+          mkdir -p dist
+          cp "$BINARY" "dist/$ARTIFACT_NAME"
+          sha256sum "dist/$ARTIFACT_NAME" > "dist/$ARTIFACT_NAME.sha256"
+          echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        if: github.event_name == 'push' || github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # gh is not in the messense container; install it from GitHub releases.
+          if ! command -v gh >/dev/null 2>&1; then
+            GH_VERSION=2.62.0
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz
+            tar -xzf /tmp/gh.tar.gz -C /tmp
+            cp "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
+            rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64"
+          fi
+          VERSION="${{ inputs.version || github.ref_name }}"
+          gh release upload "$VERSION" \
+            "dist/${{ steps.package.outputs.name }}" \
+            "dist/${{ steps.package.outputs.name }}.sha256" \
+            --clobber
+
+      - name: Upload as workflow artifact (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/${{ steps.package.outputs.name }}*
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # `isd` Linux musl builds (rustls-only; plain apt + musl-tools is enough).
+  # ---------------------------------------------------------------------------
+  build-isd-linux:
+    name: Build isd-${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.version || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl cross-compile dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools cmake clang libclang-dev perl protobuf-compiler
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            mkdir -p ~/.cargo
+            cat >> ~/.cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+          fi
+
+      - name: Build isd
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin isd
+
+      - name: Strip binary
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isd"
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            aarch64-linux-gnu-strip "$BINARY" || true
+          else
+            strip "$BINARY" || true
+          fi
+
+      - name: Verify static linking
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isd"
+          file "$BINARY"
+          if ldd "$BINARY" 2>&1 | grep -q "not a dynamic executable"; then
+            echo "OK: statically linked"
+          elif ldd "$BINARY" 2>&1 | grep -q "statically linked"; then
+            echo "OK: statically linked"
+          else
+            echo "WARNING: binary may not be fully static"
+            ldd "$BINARY" 2>&1 || true
+          fi
+
+      - name: Package binary
+        id: package
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isd"
+          ARTIFACT_NAME="isd-${{ matrix.target }}"
+          mkdir -p dist
+          cp "$BINARY" "dist/$ARTIFACT_NAME"
+          sha256sum "dist/$ARTIFACT_NAME" > "dist/$ARTIFACT_NAME.sha256"
+          echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        if: github.event_name == 'push' || github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version || github.ref_name }}"
+          gh release upload "$VERSION" \
+            "dist/${{ steps.package.outputs.name }}" \
+            "dist/${{ steps.package.outputs.name }}.sha256" \
+            --clobber
+
+      - name: Upload as workflow artifact (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/${{ steps.package.outputs.name }}*
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # `isd` Mac builds (operator client; no Linux-syscall deps).
+  # ---------------------------------------------------------------------------
+  build-isd-mac:
+    name: Build isd-${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.version || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build isd
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin isd
+
+      # Skip strip on Mac: it can break code-signed binaries.
+
+      - name: Package binary
+        id: package
+        run: |
+          BINARY="target/${{ matrix.target }}/release/isd"
+          ARTIFACT_NAME="isd-${{ matrix.target }}"
+          mkdir -p dist
+          cp "$BINARY" "dist/$ARTIFACT_NAME"
+          shasum -a 256 "dist/$ARTIFACT_NAME" > "dist/$ARTIFACT_NAME.sha256"
+          echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        if: github.event_name == 'push' || github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.version || github.ref_name }}"
+          gh release upload "$VERSION" \
+            "dist/${{ steps.package.outputs.name }}" \
+            "dist/${{ steps.package.outputs.name }}.sha256" \
+            --clobber
+
+      - name: Upload as workflow artifact (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/${{ steps.package.outputs.name }}*
+          retention-days: 30

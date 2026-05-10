@@ -16,6 +16,7 @@ use isengard_core::Event;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
+use crate::runtime::RuntimeBackend;
 use crate::tls::{CertStore, ChallengeState};
 
 pub mod cert_callback;
@@ -115,16 +116,22 @@ pub async fn apply_config(
     state: &ProxyState,
     cfg: isengard_proto::pb::ProxyConfig,
 ) -> anyhow::Result<()> {
-    apply_config_with_docker(state, cfg, None).await
+    apply_config_with_backend(state, cfg, None).await
 }
 
-/// Like [`apply_config`] but with an explicit Docker handle for IP
+/// Like [`apply_config`] but with an explicit runtime backend for IP
 /// discovery. The sync loop uses this entrypoint; tests stick with the
-/// no-Docker [`apply_config`] form so they don't need a daemon.
-pub async fn apply_config_with_docker(
+/// no-backend [`apply_config`] form so they don't need a daemon.
+///
+/// Phase 0.5: discovery is now trait-driven. Both bollard and wisp
+/// backends resolve IPs via [`discovery::resolve_container_ip`] using
+/// `inspect_container` + `network_settings.ip_addresses` from
+/// `ContainerSnapshot`; the bollard-specific accessor is no longer used
+/// here.
+pub async fn apply_config_with_backend(
     state: &ProxyState,
     cfg: isengard_proto::pb::ProxyConfig,
-    docker: Option<&bollard::Docker>,
+    backend: Option<&dyn RuntimeBackend>,
 ) -> anyhow::Result<()> {
     // Lock-free pre-check to skip the build for obviously-stale configs.
     let last = state.last_generation.load(Ordering::Acquire);
@@ -144,12 +151,12 @@ pub async fn apply_config_with_docker(
         };
 
         // Discovery: prefer an IP shipped by the controller (test fixtures,
-        // future controller-side discovery), then ask Docker if we have a
-        // handle, then fall back to 127.0.0.1.
+        // future controller-side discovery), then ask the runtime backend
+        // (any backend: bollard or wisp), then fall back to 127.0.0.1.
         let resolved_ip: Option<String> = if !up.container_ip.is_empty() {
             Some(up.container_ip.clone())
-        } else if let Some(d) = docker {
-            discovery::resolve_container_ip(d, &up.container_id).await
+        } else if let Some(b) = backend {
+            discovery::resolve_container_ip(b, &up.container_id).await
         } else {
             None
         };

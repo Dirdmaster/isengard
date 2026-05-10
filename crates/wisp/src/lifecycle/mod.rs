@@ -43,10 +43,12 @@
 
 #[cfg(target_os = "linux")]
 pub mod clone;
+pub mod network_setup;
 pub mod pipe;
 
 #[cfg(target_os = "linux")]
 pub use clone::{CloneArgs, CloneResult};
+pub use network_setup::ensure_global_ip_forward;
 pub use pipe::{ReadyPipe, signal_ready, wait_ready};
 
 use std::path::Path;
@@ -54,6 +56,7 @@ use std::time::SystemTime;
 
 use crate::cgroup::{Cgroup, CgroupFs};
 use crate::error::{Result, WispError};
+use crate::network_attacher::NetworkAttacher;
 use crate::spec;
 use crate::state::{self, ContainerHandle, ContainerState};
 
@@ -163,6 +166,11 @@ fn create_container_inner<F: CgroupFs>(
         state: ContainerState::Created,
         pid: None,
         created_at: SystemTime::now(),
+        network_spec: None,
+        network_attachment: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        exit_code: None,
     };
     state::write(state_dir, &handle)?;
 
@@ -205,11 +213,29 @@ pub fn load_for_start(state_dir: &Path, id: &str) -> Result<(ContainerHandle, sp
 /// Linux only. Mac builds return [`WispError::Lifecycle`] so the CLI
 /// compiles and emits a clean error.
 ///
+/// # Networking
+///
+/// If the container's persisted [`ContainerHandle::network_spec`] is
+/// `Some`, the caller MUST pass an `attacher`. The runtime invokes
+/// `attacher.attach(...)` after the cgroup attach but before the
+/// child is told to proceed; the resulting
+/// [`crate::network_spec::NetworkAttachmentRecord`] is persisted into
+/// `state.json`. If the spec is set but `attacher` is `None`, the
+/// call returns a `Lifecycle` error rather than starting a container
+/// that has no network.
+///
+/// If the container has no `network_spec`, `attacher` is ignored.
+///
 /// # Safety / threading
 ///
 /// Caller must be in a single-threaded process. See module docs.
 #[cfg(target_os = "linux")]
-pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &str) -> Result<()> {
+pub fn start_container<F: CgroupFs>(
+    state_dir: &Path,
+    cgroup: &Cgroup<F>,
+    id: &str,
+    attacher: Option<&mut dyn NetworkAttacher>,
+) -> Result<()> {
     use std::ffi::CString;
 
     let (mut handle, validated) = load_for_start(state_dir, id)?;
@@ -304,6 +330,47 @@ pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &s
         .and_then(|l| l.readonly_paths().clone())
         .unwrap_or_default();
 
+    // Step: open per-container stdout / stderr log files in append
+    // mode. The child dup2's these onto fd 1 / 2 BEFORE execvpe so
+    // the entrypoint's stdout / stderr land on disk for `wisp logs`
+    // / agent `stream_logs` to tail. Files are opened in the parent
+    // (where allocation + open errors can be surfaced cleanly) and
+    // their raw fds are handed to `run_child` via positional args.
+    //
+    // We do NOT pass O_CLOEXEC here: the whole point is for the fds
+    // to survive into the child's exec'd entrypoint via dup2 onto
+    // 1 / 2. Once dup2 runs, the originals are closed in the child
+    // anyway; the parent drops its copies via OwnedFd's Drop right
+    // after clone3 returns.
+    let container_dir = state_dir.join("containers").join(id);
+    let stdout_log_path = container_dir.join("stdout.log");
+    let stderr_log_path = container_dir.join("stderr.log");
+    let stdout_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_log_path)
+        .map_err(|err| {
+            WispError::Lifecycle(format!(
+                "open stdout.log {}: {}",
+                stdout_log_path.display(),
+                err
+            ))
+        })?;
+    let stderr_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log_path)
+        .map_err(|err| {
+            WispError::Lifecycle(format!(
+                "open stderr.log {}: {}",
+                stderr_log_path.display(),
+                err
+            ))
+        })?;
+    use std::os::fd::AsRawFd;
+    let stdout_fd = stdout_log.as_raw_fd();
+    let stderr_fd = stderr_log.as_raw_fd();
+
     // Step: open the parent/child sync pipe. O_CLOEXEC keeps the
     // ends from leaking past `execvpe`.
     let ReadyPipe { reader, writer } = pipe::pair()?;
@@ -343,6 +410,8 @@ pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &s
                 &writer,
                 &argv,
                 &envp,
+                stdout_fd,
+                stderr_fd,
             );
             // run_child only returns on error; on success it execs.
             // Whatever message we have, dump to stderr (the parent
@@ -365,6 +434,12 @@ pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &s
             // Parent: close the writer eagerly so EOF reaches the
             // reader if the child dies before signalling.
             drop(writer);
+            // Parent's copies of the log files are no longer needed
+            // (the child's dup2 already ran in its own fd table). Drop
+            // them so the parent doesn't pin extra fds for the lifetime
+            // of the runtime.
+            drop(stdout_log);
+            drop(stderr_log);
 
             // cgroup.add_pid BEFORE wait_ready: by the time the
             // child's first significant syscall lands (mount,
@@ -384,12 +459,74 @@ pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &s
                 return Err(err);
             }
 
+            // Network attach (parent-side) BEFORE the child's
+            // wait_ready. Sequence rationale:
+            //
+            //   - The child has CLONE_NEWNET so its netns exists
+            //     immediately after clone3; we can move a veth into
+            //     it via `ip link set ... netns <child_pid>`.
+            //   - The child's setup_rootfs / pivot_root only touch
+            //     the mount namespace, so they run concurrently with
+            //     the parent's network setup without conflict.
+            //   - The child blocks on signal_ready until AFTER it
+            //     pivots, so by the time the parent reads
+            //     wait_ready, the entrypoint has not yet exec'd.
+            //     That window is enough for the kernel to plumb
+            //     eth0 into the child's ns before its first network
+            //     syscall.
+            //
+            // If attach fails we kill + reap the child before
+            // returning, same shape as cgroup.add_pid above.
+            let mut attacher = attacher;
+            if let Some(spec) = handle.network_spec.clone() {
+                let att = match attacher.as_deref_mut() {
+                    Some(a) => a,
+                    None => {
+                        unsafe {
+                            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                        }
+                        let mut status: libc::c_int = 0;
+                        unsafe {
+                            libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
+                        }
+                        return Err(WispError::Lifecycle(
+                            "container has network_spec but no NetworkAttacher was provided".into(),
+                        ));
+                    }
+                };
+                match att.attach(&spec, id, child_pid, &rootfs) {
+                    Ok(record) => {
+                        handle.network_attachment = Some(record);
+                    }
+                    Err(err) => {
+                        unsafe {
+                            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                        }
+                        let mut status: libc::c_int = 0;
+                        unsafe {
+                            libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
+                        }
+                        return Err(WispError::Lifecycle(format!(
+                            "network attach failed for {id:?}: {err}"
+                        )));
+                    }
+                }
+            }
+
             // wait for the child's "ready" signal. If the child
             // died before signalling we get a clear EOF error.
             if let Err(err) = pipe::wait_ready(&reader) {
                 let mut status: libc::c_int = 0;
                 unsafe {
                     libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
+                }
+                // If we attached a network and now the child died,
+                // best-effort detach so we don't leak iptables / veth
+                // state on the host.
+                if let (Some(record), Some(att)) =
+                    (handle.network_attachment.as_ref(), attacher.as_deref_mut())
+                {
+                    let _ = att.detach(record);
                 }
                 return Err(WispError::Lifecycle(format!(
                     "child {child_pid} did not signal ready: {err}"
@@ -399,8 +536,167 @@ pub fn start_container<F: CgroupFs>(state_dir: &Path, cgroup: &Cgroup<F>, id: &s
             // Persist the running state.
             handle.state = ContainerState::Running;
             handle.pid = Some(child_pid);
+            handle.stdout_log_path = Some(stdout_log_path.clone());
+            handle.stderr_log_path = Some(stderr_log_path.clone());
             state::write(state_dir, &handle)?;
+
+            // Phase 0.5: spawn a per-container reaper thread.
+            //
+            // Without the reaper, PID 1 of the container becomes a
+            // zombie when it exits and stays in /proc until the
+            // parent process exits. The agent (a long-lived parent)
+            // would accumulate zombies for every container it ever
+            // ran, exhausting the kernel's pid limit.
+            //
+            // Wisp-cli's foreground path used to call waitpid itself.
+            // Phase 0.5 switches it to polling the on-disk
+            // `exit_status` file the reaper writes, so the same
+            // reaper handles both the agent and the cli.
+            //
+            // Caveat: an external process / thread that races the
+            // reaper for waitpid will see ECHILD; the reaper will
+            // miss the reap and `exit_status` stays absent. The wisp
+            // crate's public API does not expose any external waitpid
+            // path, so this is purely an internal invariant.
+            spawn_reaper(state_dir.to_path_buf(), id.to_string(), child_pid);
+
             Ok(())
+        }
+    }
+}
+
+/// Phase 0.5: per-container reaper thread.
+///
+/// Polls `waitpid(child_pid, WNOHANG)` every 500ms until the child is
+/// reaped, then writes the exit status to
+/// `<state_dir>/containers/<id>/exit_status` and updates `state.json`
+/// from `Running` to `Stopped`. The thread is detached: on success it
+/// exits naturally; on a panic the JoinHandle drop is harmless because
+/// the reaper has no shared mutable state outside disk.
+///
+/// Linux only. The non-Linux build has no clone3 / waitpid story so
+/// the reaper is a no-op there.
+#[cfg(target_os = "linux")]
+fn spawn_reaper(state_dir: std::path::PathBuf, id: String, child_pid: u32) {
+    std::thread::spawn(move || {
+        // Poll cadence: 500ms is short enough that a `wisp run`
+        // foreground exit feels snappy, and long enough that the
+        // reaper doesn't measurably contend with other agent threads.
+        let tick = std::time::Duration::from_millis(500);
+        loop {
+            match reap_once(child_pid) {
+                ReapOutcome::Exited(code) => {
+                    record_exit(&state_dir, &id, code);
+                    return;
+                }
+                ReapOutcome::Signaled(signo) => {
+                    // Encode signal kills as a negative integer so the
+                    // operator can distinguish a clean exit(N) from a
+                    // SIGKILL: `Some(-9)` vs `Some(0..=255)`.
+                    record_exit(&state_dir, &id, -(signo as i32));
+                    return;
+                }
+                ReapOutcome::StillRunning => {}
+                ReapOutcome::Lost => {
+                    // ECHILD: someone else reaped (the wisp-cli shouldn't,
+                    // but a buggy embedder might). Persist the state-
+                    // transition so callers don't see the container as
+                    // perpetually Running, but with no exit code.
+                    transition_to_stopped(&state_dir, &id);
+                    return;
+                }
+            }
+            std::thread::sleep(tick);
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+fn spawn_reaper(_state_dir: std::path::PathBuf, _id: String, _child_pid: u32) {}
+
+/// One non-blocking reap attempt. Linux only.
+#[cfg(target_os = "linux")]
+enum ReapOutcome {
+    /// Child exited cleanly with the given status.
+    Exited(i32),
+    /// Child was killed by signal `signo`.
+    Signaled(u32),
+    /// Child still alive: try again next tick.
+    StillRunning,
+    /// `waitpid` returned `ECHILD` (no such child / already reaped).
+    Lost,
+}
+
+#[cfg(target_os = "linux")]
+fn reap_once(child_pid: u32) -> ReapOutcome {
+    let mut status: libc::c_int = 0;
+    // SAFETY: waitpid is async-signal-safe and well-behaved on a child
+    // pid we own. WNOHANG returns 0 when the child is still running.
+    let rc = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if rc == 0 {
+        return ReapOutcome::StillRunning;
+    }
+    if rc == -1 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ECHILD) {
+            return ReapOutcome::Lost;
+        }
+        // Treat other errors as "still running"; we'll retry. EINTR is
+        // the most common cause; the next tick handles it.
+        return ReapOutcome::StillRunning;
+    }
+    if libc::WIFEXITED(status) {
+        ReapOutcome::Exited(libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        ReapOutcome::Signaled(libc::WTERMSIG(status) as u32)
+    } else {
+        // Stopped / continued (we didn't pass WUNTRACED, so this is
+        // unexpected). Treat as "keep polling" and let the next tick
+        // pick it up.
+        ReapOutcome::StillRunning
+    }
+}
+
+/// Persist the captured exit status + transition state.json to
+/// `Stopped`. Best-effort; tracing on failure but never panic in the
+/// reaper thread.
+#[cfg(target_os = "linux")]
+fn record_exit(state_dir: &std::path::Path, id: &str, code: i32) {
+    let dir = state_dir.join("containers").join(id);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, container_id = id, "reaper: create_dir_all");
+        return;
+    }
+    let path = dir.join("exit_status");
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, format!("{code}\n").as_bytes()) {
+        tracing::warn!(error = %e, container_id = id, "reaper: write exit_status");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        tracing::warn!(error = %e, container_id = id, "reaper: rename exit_status");
+        return;
+    }
+    transition_to_stopped(state_dir, id);
+}
+
+/// Update `state.json` from `Running` to `Stopped`. Tolerates the
+/// state file already being `Stopped` (idempotent) or missing
+/// (container deleted before reaper noticed).
+#[cfg(target_os = "linux")]
+fn transition_to_stopped(state_dir: &std::path::Path, id: &str) {
+    match state::read(state_dir, id) {
+        Ok(mut h) => {
+            if h.state != ContainerState::Stopped {
+                h.state = ContainerState::Stopped;
+                if let Err(e) = state::write(state_dir, &h) {
+                    tracing::warn!(error = %e, container_id = id, "reaper: state write");
+                }
+            }
+        }
+        Err(_) => {
+            // State file gone (delete raced the reaper). Nothing to do.
         }
     }
 }
@@ -410,6 +706,7 @@ pub fn start_container<F: CgroupFs>(
     _state_dir: &Path,
     _cgroup: &Cgroup<F>,
     _id: &str,
+    _attacher: Option<&mut dyn NetworkAttacher>,
 ) -> Result<()> {
     Err(WispError::Lifecycle(
         "wisp runtime requires linux".to_string(),
@@ -437,8 +734,49 @@ fn run_child(
     writer: &std::os::fd::OwnedFd,
     argv: &[std::ffi::CString],
     envp: &[std::ffi::CString],
+    stdout_fd: std::os::fd::RawFd,
+    stderr_fd: std::os::fd::RawFd,
 ) -> Result<()> {
     use std::ffi::CString;
+
+    // 0. Redirect stdout / stderr onto the per-container log files
+    //    the parent opened. dup2 keeps fd 1 / 2 pointing at the
+    //    files even after we close the original log fds, so the
+    //    entrypoint's writes flow into stdout.log / stderr.log.
+    //
+    //    We call libc::dup2 directly: nix 0.30's wrapper takes a
+    //    `&mut OwnedFd` for newfd, and synthesising one for fd 1 / 2
+    //    is more lifetime gymnastics than the bare syscall warrants.
+    // SAFETY: dup2 is async-signal-safe and we are running pre-exec
+    // in the cloned child; touching libc directly is fine here.
+    let dup_stdout = unsafe { libc::dup2(stdout_fd, 1) };
+    if dup_stdout < 0 {
+        return Err(WispError::Lifecycle(format!(
+            "dup2(stdout_fd={stdout_fd}, 1): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let dup_stderr = unsafe { libc::dup2(stderr_fd, 2) };
+    if dup_stderr < 0 {
+        return Err(WispError::Lifecycle(format!(
+            "dup2(stderr_fd={stderr_fd}, 2): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Close the originals: dup2 already gave us fd 1 / 2 pointing at
+    // the files, so the original numbered fds are surplus. Best-effort
+    // close (the kernel will reject EBADF if we somehow got the same
+    // number back; that's harmless).
+    if stdout_fd != 1 {
+        unsafe {
+            libc::close(stdout_fd);
+        }
+    }
+    if stderr_fd != 2 {
+        unsafe {
+            libc::close(stderr_fd);
+        }
+    }
 
     // 1. Drop bounding BEFORE pivot_root: post-pivot processes can
     //    never re-acquire what we removed, even via an SUID binary
@@ -703,7 +1041,7 @@ mod tests {
             root: fs_root.clone(),
         };
         let cgroup: Cgroup<FakeFs> = Cgroup::with_fs(fake, fs_root.clone());
-        let err = start_container(state_dir.path(), &cgroup, "x").unwrap_err();
+        let err = start_container(state_dir.path(), &cgroup, "x", None).unwrap_err();
         match err {
             WispError::Lifecycle(msg) => {
                 assert!(msg.contains("linux"), "msg should mention linux: {msg}")

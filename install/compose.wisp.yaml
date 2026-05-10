@@ -1,0 +1,125 @@
+# Isengard production compose, wisp-runtime variant.
+#
+# Used when ISENGARD_RUNTIME=wisp is set before install.sh runs. The agent
+# manages workload containers via wisp (clone3 + cgroup v2 + iptables) instead
+# of dockerd, so it does NOT bind-mount /var/run/docker.sock. The agent itself
+# still runs under the host's docker (this compose file); only its workloads
+# live under wisp.
+#
+# Differences from compose.yaml:
+#   - agent: no docker.sock mount
+#   - agent: privileged + cap_add for SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYS_RESOURCE
+#   - agent: bind-mounts /sys/fs/cgroup (rw) and /var/lib/wisp (rw) into the container
+#   - agent: ISENGARD_RUNTIME=wisp in environment
+#
+# Bring up via `install/install.sh` with ISENGARD_RUNTIME=wisp set in the
+# environment. install.sh copies this file (instead of compose.yaml) to
+# /etc/isengard/compose.yaml so all subsequent compose commands work normally.
+#
+# Phase 0.4 grants --privileged for simplicity; the cap-set route is documented
+# below for the 0.5 tighten-down. Keep both shapes in sync.
+#
+# Capabilities required for wisp:
+#   SYS_ADMIN: mount(2), pivot_root, namespace ops
+#   NET_ADMIN: iptables, bridge, veth, sysctl net.ipv4.*
+#   SYS_PTRACE: /proc/<pid>/ns/ access for nsenter healthchecks
+#   SYS_RESOURCE: cgroup v2 writes outside the container's own slice
+
+name: isengard
+
+networks:
+  isengard-proxy:
+    external: true
+    name: isengard-proxy
+
+services:
+  controller:
+    image: ghcr.io/weavers-engineering/isengard-controller:${ISENGARD_IMAGE_TAG:-next}
+    platform: linux/amd64
+    container_name: iso-controller
+    user: "0:0"
+    hostname: controller.local
+    networks:
+      default:
+        aliases:
+          - controller.local
+    ports:
+      - "${ISENGARD_CONTROLLER_GRPC_BIND:-127.0.0.1}:9417:9417"
+      - "${ISENGARD_CONTROLLER_HTTP_BIND:-127.0.0.1}:9418:9418"
+      - "${ISENGARD_CONTROLLER_DNS_BIND:-127.0.0.1}:5300:5300/udp"
+    volumes:
+      - ${ISENGARD_PREFIX:-/var/lib/isengard}/controller:/var/lib/isengard
+      - ${ISENGARD_MASTER_KEY:-/etc/isengard/master.key}:/run/secrets/master.key:ro
+    env_file:
+      - ${ISENGARD_ENV_FILE:-/etc/isengard/isengard.env}
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      ISENGARD_DNS_ZONE: ${ISENGARD_DNS_ZONE:-}
+      ISENGARD_DNS_LISTEN: 0.0.0.0:5300
+      ISENGARD_MASTER_KEY_FILE: /run/secrets/master.key
+    command:
+      - controller
+      - --listen
+      - 0.0.0.0:9417
+      - --state-dir
+      - /var/lib/isengard
+    restart: unless-stopped
+
+  agent:
+    image: ghcr.io/weavers-engineering/isengard-agent:${ISENGARD_IMAGE_TAG:-next}
+    platform: linux/amd64
+    container_name: iso-agent
+    user: "0:0"
+    depends_on:
+      - controller
+    networks:
+      - default
+      - isengard-proxy
+    ports:
+      - "${ISENGARD_PROXY_BIND:-0.0.0.0}:80:8080"
+      - "${ISENGARD_PROXY_BIND:-0.0.0.0}:443:8443"
+    # wisp needs broad kernel privileges. Phase 0.4 uses --privileged for
+    # simplicity. TODO 0.5: drop to a tight cap set:
+    #   cap_drop: [ALL]
+    #   cap_add: [SYS_ADMIN, NET_ADMIN, SYS_PTRACE, SYS_RESOURCE]
+    #   security_opt: [apparmor:unconfined]  # if the host runs apparmor
+    privileged: true
+    volumes:
+      # Agent state. Wisp lives nested under here:
+      #   /var/lib/isengard/wisp/      runtime state.json + cgroups handles
+      #   /var/lib/isengard/bundles/   per-container OCI bundles
+      #   /var/lib/isengard/images/    pulled-image content store
+      #   /var/lib/isengard/spec/      persisted ContainerCreateSpecs
+      #   /var/lib/isengard/networks/  IPAM allocations per network
+      # See spec open-question "State-dir for wisp": nested wins for cleaner
+      # uninstall.
+      - ${ISENGARD_PREFIX:-/var/lib/isengard}/agent:/var/lib/isengard
+      # Per-stack compose.yaml stays the same as docker mode.
+      - ${ISENGARD_PREFIX:-/var/lib/isengard}/stacks:/etc/isengard/stacks:rw
+      # Controller CA for mTLS bootstrap (Phase 14).
+      - ${ISENGARD_CA_FILE:-/etc/isengard/ca.pem}:/run/secrets/ca.pem:ro
+      # Optional `/var/lib/wisp` host path. Reserved for direct host-side
+      # `wisp` CLI inspection alongside the agent (debugging, not the data
+      # path). Bind-mounted rw so the operator can `wisp ls` from the host
+      # and see what the agent created. Default path matches wisp-cli's
+      # default state dir.
+      - ${ISENGARD_WISP_HOST_DIR:-/var/lib/wisp}:/var/lib/wisp:rw
+      # Cgroup v2 root. wisp writes container slices under
+      # /sys/fs/cgroup/wisp/<id>/. Mount the full hierarchy rw so the
+      # agent can mkdir + chown inside.
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    env_file:
+      - ${ISENGARD_ENV_FILE:-/etc/isengard/isengard.env}
+    environment:
+      ISENGARD_ENROLL_TOKEN: ${ISENGARD_ENROLL_TOKEN:-}
+      ISENGARD_CONTROLLER_CA_PEM_PATH: /run/secrets/ca.pem
+      # Forces the agent's runtime/select.rs to construct WispBackend.
+      ISENGARD_RUNTIME: wisp
+      RUST_LOG: ${RUST_LOG:-info}
+    command:
+      - agent
+      - --controller
+      - https://controller.local:9417
+      - --state-dir
+      - /var/lib/isengard
+    restart: unless-stopped
