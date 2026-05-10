@@ -20,6 +20,7 @@ pub mod labels;
 pub mod logs;
 pub mod mdns;
 pub mod proxy;
+pub mod runtime;
 pub mod secret_fetch;
 pub mod sync;
 pub mod tls;
