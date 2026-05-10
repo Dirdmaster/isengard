@@ -70,8 +70,18 @@ jobs:
         run: |
           # The dashboard plugin's build.rs runs `bun install` + `bun run build`
           # to generate the embedded Nuxt bundle.
+          #
+          # bun's installer drops the binary at $HOME/.bun/bin/bun. Inside
+          # the messense container HOME is /github/home (the runner's
+          # mounted home), not /root, so the previous `ln -sf /root/...`
+          # silently created a broken symlink and the next step failed
+          # with `bun: not found` (exit 127). Resolve via $HOME and also
+          # export the bun bin dir to $GITHUB_PATH so subsequent steps
+          # (including the cargo build that triggers the dashboard
+          # build.rs) pick it up without further plumbing.
           curl -fsSL https://bun.sh/install | bash
-          ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+          ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
           bun --version
 
       - name: Build isengard
