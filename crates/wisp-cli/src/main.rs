@@ -454,14 +454,7 @@ fn cmd_run_bundle(state_dir: &Path, args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let live = rt
-        .state(&handle.id)
-        .with_context(|| format!("state {id:?}"))?;
-    let pid = live
-        .pid
-        .ok_or_else(|| anyhow!("container {id:?} has no pid after start"))?;
-
-    let exit = wait_for_pid(pid)?;
+    let exit = wait_for_exit(&rt, &handle.id)?;
 
     if let Some(attacher) = attacher_opt.as_mut() {
         rt.delete_with_attacher(&handle.id, true, attacher)
@@ -621,10 +614,12 @@ fn cmd_run_image(state_dir: &Path, args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Foreground: block until PID 1 exits, surface its status, clean up.
-    let live = match rt.state(&handle.id) {
-        Ok(s) => s,
-        Err(e) => {
+    // Foreground: poll the runtime until PID 1 has been reaped (the
+    // wisp lifecycle reaper writes the exit_status file we then read
+    // back), surface its status, clean up.
+    let exit = match wait_for_exit(&rt, &handle.id) {
+        Ok(e) => e,
+        Err(err) => {
             // Best-effort delete on the failure path. If we have an
             // attacher use it so the network detach happens too.
             if let Some(a) = attacher_opt.as_mut() {
@@ -633,23 +628,9 @@ fn cmd_run_image(state_dir: &Path, args: RunArgs) -> Result<()> {
                 let _ = rt.delete(&handle.id, true);
             }
             cleanup(&client, &builder, &id);
-            return Err(anyhow::Error::from(e)).with_context(|| format!("state {id:?}"));
+            return Err(err);
         }
     };
-    let pid = match live.pid {
-        Some(p) => p,
-        None => {
-            if let Some(a) = attacher_opt.as_mut() {
-                let _ = rt.delete_with_attacher(&handle.id, true, a);
-            } else {
-                let _ = rt.delete(&handle.id, true);
-            }
-            cleanup(&client, &builder, &id);
-            return Err(anyhow!("container {id:?} has no pid after start"));
-        }
-    };
-
-    let exit = wait_for_pid(pid)?;
 
     let delete_result = if let Some(a) = attacher_opt.as_mut() {
         rt.delete_with_attacher(&handle.id, true, a)
@@ -668,22 +649,39 @@ fn cmd_run_image(state_dir: &Path, args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-/// `waitpid` PID 1 of the container and return the exit code we'd
-/// surface to the shell (0..=255 for normal exits, 128+signo for
-/// signal-terminated, mirroring shell semantics).
-fn wait_for_pid(pid: u32) -> Result<i32> {
-    use nix::sys::wait::{WaitStatus, waitpid};
-    use nix::unistd::Pid;
+/// Phase 0.5: poll the runtime's state until the container reaches
+/// `Stopped`, then return the captured `exit_code` translated into a
+/// shell-style status (0..=255 for clean exits, 128+signo for
+/// signal-terminated). The wisp runtime spawns a per-container
+/// reaper at start time that writes the exit status to disk; this
+/// helper waits for that file to materialise rather than calling
+/// `waitpid` directly (the reaper would race with us).
+///
+/// The poll cadence is 100ms; the reaper checks every 500ms, so the
+/// upper bound on stale "still running" reads is one tick of each
+/// (worst case ~600ms after PID 1 exits).
+fn wait_for_exit(rt: &Runtime, id: &str) -> Result<i32> {
+    use std::time::Duration;
+    loop {
+        let handle = rt.state(id).with_context(|| format!("state {id:?}"))?;
+        if handle.state == ContainerState::Stopped {
+            return Ok(translate_exit_code(handle.exit_code));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
 
-    let status =
-        waitpid(Pid::from_raw(pid as i32), None).with_context(|| format!("waitpid({pid})"))?;
-
-    match status {
-        WaitStatus::Exited(_, code) => Ok(code),
-        WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
-        // Stopped/Continued aren't expected without WUNTRACED; treat
-        // them as "still running" surprises and surface the status.
-        other => Err(anyhow!("unexpected wait status: {other:?}")),
+/// Translate the runtime's encoded exit code into a shell-style
+/// status. The runtime stores `Some(0..=255)` for a clean
+/// `_exit(N)`, `Some(-N)` for a signal kill (`-9` is SIGKILL); shell
+/// convention is `128 + signo`. `None` (reaper didn't capture)
+/// surfaces as `0` so the cli doesn't fail spuriously when the
+/// container exited cleanly but the reap raced with `wisp delete`.
+fn translate_exit_code(code: Option<i32>) -> i32 {
+    match code {
+        Some(c) if c >= 0 => c,
+        Some(c) => 128 + (-c),
+        None => 0,
     }
 }
 

@@ -45,6 +45,24 @@ use crate::lifecycle;
 /// having to spawn / reap a real process.
 type AliveCheck = fn(u32) -> bool;
 
+/// Read `<state_dir>/containers/<id>/exit_status`. Returns `None`
+/// when the file is missing (reaper hasn't run yet) or when the
+/// contents don't parse as an integer (treat corruption as "no
+/// captured exit code"; the operator can `wisp state` again later if
+/// the reaper rewrites the file).
+///
+/// Encoding: the reaper writes a single line containing the integer
+/// exit status. Positive `0..=255` for a clean `_exit(N)`; negative
+/// `-N` when PID 1 was killed by signal `N` (e.g. `-9` is SIGKILL,
+/// `-15` is SIGTERM). Mirrors what
+/// [`Runtime::state`] surfaces back to callers.
+fn read_exit_status(state_dir: &Path, id: &str) -> Option<i32> {
+    let path = state_dir.join("containers").join(id).join("exit_status");
+    let bytes = std::fs::read(&path).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?.trim();
+    text.parse::<i32>().ok()
+}
+
 /// Production probe: a PID is alive if `/proc/<pid>` exists and
 /// `/proc/<pid>/status` does not report state `Z` (zombie). Zombies
 /// linger in `/proc` until reaped, so the dir-existence check alone
@@ -350,6 +368,14 @@ impl Runtime {
     /// `runc state`. If the on-disk state is `Running` but the
     /// process is gone (or zombie), persist `Stopped` before
     /// returning.
+    ///
+    /// Phase 0.5: when the container is in (or transitions into)
+    /// `Stopped`, read the per-container `exit_status` file written
+    /// by the reaper thread (see `crate::lifecycle::spawn_reaper`)
+    /// and attach it to the returned handle as `exit_code`. The file
+    /// may legitimately be absent if the reaper hasn't reaped yet
+    /// (race window between `/proc/<pid>` going away and the reaper's
+    /// next 500ms tick), in which case `exit_code` stays `None`.
     pub fn state(&self, id: &str) -> Result<ContainerHandle> {
         let mut handle = state::read(&self.state_dir, id)?;
         if handle.state == ContainerState::Running {
@@ -361,6 +387,9 @@ impl Runtime {
                 handle.state = ContainerState::Stopped;
                 state::write(&self.state_dir, &handle)?;
             }
+        }
+        if handle.state == ContainerState::Stopped && handle.exit_code.is_none() {
+            handle.exit_code = read_exit_status(&self.state_dir, id);
         }
         Ok(handle)
     }
@@ -409,6 +438,7 @@ mod tests {
             network_attachment: None,
             stdout_log_path: None,
             stderr_log_path: None,
+            exit_code: None,
         }
     }
 
@@ -647,5 +677,67 @@ mod tests {
         let h = make_handle("created", ContainerState::Created, None);
         state::write(state.path(), &h).unwrap();
         assert_eq!(rt.container_pid("created"), None);
+    }
+
+    /// Phase 0.5: when a container is `Stopped` and the per-container
+    /// reaper has written the `exit_status` file, `Runtime::state`
+    /// reads it back into the returned handle.
+    #[test]
+    fn runtime_state_reports_exit_code_after_stop() {
+        let (state, _cg, rt) = fixture(always_dead);
+        // Pre-populate Running + a faked exit_status file: when state()
+        // sees the pid is gone it transitions to Stopped and reads the
+        // file in the same call.
+        let h = make_handle("clean", ContainerState::Running, Some(7777));
+        state::write(state.path(), &h).unwrap();
+        let cdir = state.path().join("containers/clean");
+        std::fs::write(cdir.join("exit_status"), b"0\n").unwrap();
+
+        let got = rt.state("clean").unwrap();
+        assert_eq!(got.state, ContainerState::Stopped);
+        assert_eq!(got.exit_code, Some(0));
+    }
+
+    /// Phase 0.5: signal-killed containers encode the signal as a
+    /// negative integer in `exit_status`. `Runtime::state` round-trips
+    /// the negative form so callers can distinguish exit(0) from
+    /// SIGKILL.
+    #[test]
+    fn runtime_state_reports_signal_kill_as_negative() {
+        let (state, _cg, rt) = fixture(always_dead);
+        let h = make_handle("killed", ContainerState::Running, Some(7778));
+        state::write(state.path(), &h).unwrap();
+        let cdir = state.path().join("containers/killed");
+        std::fs::write(cdir.join("exit_status"), b"-9\n").unwrap();
+
+        let got = rt.state("killed").unwrap();
+        assert_eq!(got.state, ContainerState::Stopped);
+        assert_eq!(got.exit_code, Some(-9));
+    }
+
+    /// Phase 0.5: a container in Stopped without an `exit_status`
+    /// file (reaper hasn't reaped yet, or container was deleted out
+    /// from under us) reports `exit_code: None`.
+    #[test]
+    fn runtime_state_no_exit_status_reports_none() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("nofile", ContainerState::Stopped, Some(1));
+        state::write(state.path(), &h).unwrap();
+        let got = rt.state("nofile").unwrap();
+        assert!(got.exit_code.is_none());
+    }
+
+    /// Phase 0.5: corrupt `exit_status` file (non-numeric contents)
+    /// is tolerated as `None` rather than failing the state read.
+    #[test]
+    fn runtime_state_corrupt_exit_status_treated_as_none() {
+        let (state, _cg, rt) = fixture(always_alive);
+        let h = make_handle("corrupt", ContainerState::Stopped, Some(1));
+        state::write(state.path(), &h).unwrap();
+        let cdir = state.path().join("containers/corrupt");
+        std::fs::create_dir_all(&cdir).unwrap();
+        std::fs::write(cdir.join("exit_status"), b"not-a-number\n").unwrap();
+        let got = rt.state("corrupt").unwrap();
+        assert!(got.exit_code.is_none());
     }
 }

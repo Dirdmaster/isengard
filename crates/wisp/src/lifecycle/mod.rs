@@ -170,6 +170,7 @@ fn create_container_inner<F: CgroupFs>(
         network_attachment: None,
         stdout_log_path: None,
         stderr_log_path: None,
+        exit_code: None,
     };
     state::write(state_dir, &handle)?;
 
@@ -538,7 +539,164 @@ pub fn start_container<F: CgroupFs>(
             handle.stdout_log_path = Some(stdout_log_path.clone());
             handle.stderr_log_path = Some(stderr_log_path.clone());
             state::write(state_dir, &handle)?;
+
+            // Phase 0.5: spawn a per-container reaper thread.
+            //
+            // Without the reaper, PID 1 of the container becomes a
+            // zombie when it exits and stays in /proc until the
+            // parent process exits. The agent (a long-lived parent)
+            // would accumulate zombies for every container it ever
+            // ran, exhausting the kernel's pid limit.
+            //
+            // Wisp-cli's foreground path used to call waitpid itself.
+            // Phase 0.5 switches it to polling the on-disk
+            // `exit_status` file the reaper writes, so the same
+            // reaper handles both the agent and the cli.
+            //
+            // Caveat: an external process / thread that races the
+            // reaper for waitpid will see ECHILD; the reaper will
+            // miss the reap and `exit_status` stays absent. The wisp
+            // crate's public API does not expose any external waitpid
+            // path, so this is purely an internal invariant.
+            spawn_reaper(state_dir.to_path_buf(), id.to_string(), child_pid);
+
             Ok(())
+        }
+    }
+}
+
+/// Phase 0.5: per-container reaper thread.
+///
+/// Polls `waitpid(child_pid, WNOHANG)` every 500ms until the child is
+/// reaped, then writes the exit status to
+/// `<state_dir>/containers/<id>/exit_status` and updates `state.json`
+/// from `Running` to `Stopped`. The thread is detached: on success it
+/// exits naturally; on a panic the JoinHandle drop is harmless because
+/// the reaper has no shared mutable state outside disk.
+///
+/// Linux only. The non-Linux build has no clone3 / waitpid story so
+/// the reaper is a no-op there.
+#[cfg(target_os = "linux")]
+fn spawn_reaper(state_dir: std::path::PathBuf, id: String, child_pid: u32) {
+    std::thread::spawn(move || {
+        // Poll cadence: 500ms is short enough that a `wisp run`
+        // foreground exit feels snappy, and long enough that the
+        // reaper doesn't measurably contend with other agent threads.
+        let tick = std::time::Duration::from_millis(500);
+        loop {
+            match reap_once(child_pid) {
+                ReapOutcome::Exited(code) => {
+                    record_exit(&state_dir, &id, code);
+                    return;
+                }
+                ReapOutcome::Signaled(signo) => {
+                    // Encode signal kills as a negative integer so the
+                    // operator can distinguish a clean exit(N) from a
+                    // SIGKILL: `Some(-9)` vs `Some(0..=255)`.
+                    record_exit(&state_dir, &id, -(signo as i32));
+                    return;
+                }
+                ReapOutcome::StillRunning => {}
+                ReapOutcome::Lost => {
+                    // ECHILD: someone else reaped (the wisp-cli shouldn't,
+                    // but a buggy embedder might). Persist the state-
+                    // transition so callers don't see the container as
+                    // perpetually Running, but with no exit code.
+                    transition_to_stopped(&state_dir, &id);
+                    return;
+                }
+            }
+            std::thread::sleep(tick);
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+fn spawn_reaper(_state_dir: std::path::PathBuf, _id: String, _child_pid: u32) {}
+
+/// One non-blocking reap attempt. Linux only.
+#[cfg(target_os = "linux")]
+enum ReapOutcome {
+    /// Child exited cleanly with the given status.
+    Exited(i32),
+    /// Child was killed by signal `signo`.
+    Signaled(u32),
+    /// Child still alive: try again next tick.
+    StillRunning,
+    /// `waitpid` returned `ECHILD` (no such child / already reaped).
+    Lost,
+}
+
+#[cfg(target_os = "linux")]
+fn reap_once(child_pid: u32) -> ReapOutcome {
+    let mut status: libc::c_int = 0;
+    // SAFETY: waitpid is async-signal-safe and well-behaved on a child
+    // pid we own. WNOHANG returns 0 when the child is still running.
+    let rc = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if rc == 0 {
+        return ReapOutcome::StillRunning;
+    }
+    if rc == -1 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ECHILD) {
+            return ReapOutcome::Lost;
+        }
+        // Treat other errors as "still running"; we'll retry. EINTR is
+        // the most common cause; the next tick handles it.
+        return ReapOutcome::StillRunning;
+    }
+    if libc::WIFEXITED(status) {
+        ReapOutcome::Exited(libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        ReapOutcome::Signaled(libc::WTERMSIG(status) as u32)
+    } else {
+        // Stopped / continued (we didn't pass WUNTRACED, so this is
+        // unexpected). Treat as "keep polling" and let the next tick
+        // pick it up.
+        ReapOutcome::StillRunning
+    }
+}
+
+/// Persist the captured exit status + transition state.json to
+/// `Stopped`. Best-effort; tracing on failure but never panic in the
+/// reaper thread.
+#[cfg(target_os = "linux")]
+fn record_exit(state_dir: &std::path::Path, id: &str, code: i32) {
+    let dir = state_dir.join("containers").join(id);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, container_id = id, "reaper: create_dir_all");
+        return;
+    }
+    let path = dir.join("exit_status");
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, format!("{code}\n").as_bytes()) {
+        tracing::warn!(error = %e, container_id = id, "reaper: write exit_status");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        tracing::warn!(error = %e, container_id = id, "reaper: rename exit_status");
+        return;
+    }
+    transition_to_stopped(state_dir, id);
+}
+
+/// Update `state.json` from `Running` to `Stopped`. Tolerates the
+/// state file already being `Stopped` (idempotent) or missing
+/// (container deleted before reaper noticed).
+#[cfg(target_os = "linux")]
+fn transition_to_stopped(state_dir: &std::path::Path, id: &str) {
+    match state::read(state_dir, id) {
+        Ok(mut h) => {
+            if h.state != ContainerState::Stopped {
+                h.state = ContainerState::Stopped;
+                if let Err(e) = state::write(state_dir, &h) {
+                    tracing::warn!(error = %e, container_id = id, "reaper: state write");
+                }
+            }
+        }
+        Err(_) => {
+            // State file gone (delete raced the reaper). Nothing to do.
         }
     }
 }

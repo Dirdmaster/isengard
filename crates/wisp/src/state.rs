@@ -57,6 +57,12 @@ pub enum ContainerState {
 /// child's stdout / stderr are dup2'd onto these files before exec).
 /// Both default to `None` for back-compat with Phase 0.1 / 0.3 state
 /// files; `start_container` populates them on every new run.
+///
+/// `exit_code` is set once the per-container reaper has reaped PID 1.
+/// Encoding mirrors shell convention: positive `0..=255` for a clean
+/// `_exit(N)`; negative `-N` when PID 1 was killed by signal `N` (so
+/// `Some(-9)` is SIGKILL, `Some(-15)` is SIGTERM). `None` until reap
+/// lands on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerHandle {
     pub id: String,
@@ -72,6 +78,8 @@ pub struct ContainerHandle {
     pub stdout_log_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_log_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// Compute the per-container directory: `<state_dir>/containers/<id>/`.
@@ -187,6 +195,7 @@ mod tests {
             network_attachment: None,
             stdout_log_path: None,
             stderr_log_path: None,
+            exit_code: None,
         }
     }
 

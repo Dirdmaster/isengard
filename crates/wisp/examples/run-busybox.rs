@@ -64,6 +64,23 @@ fn main() -> Result<()> {
         }
     }
 
+    // Phase 0.5: the per-container reaper writes an exit_status file
+    // when PID 1 is reaped. `Runtime::state` reads it back into
+    // `handle.exit_code`. Print whatever we got: `Some(0)` for a
+    // clean exit; `Some(-N)` for a signal kill (`-9` is SIGKILL).
+    // `None` means the reaper hasn't reaped yet (the poll loop above
+    // saw Stopped before the 500ms reaper tick fired); the demo
+    // reads it again briefly to give the reaper time to land.
+    let mut final_handle = stopped;
+    for _ in 0..20 {
+        if final_handle.exit_code.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        final_handle = rt.state(&handle.id)?;
+    }
+    println!("exit_code: {:?}", final_handle.exit_code);
+
     rt.delete(&handle.id, true)?;
     Ok(())
 }

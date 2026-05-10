@@ -1153,22 +1153,38 @@ fn last_n_lines(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
 /// Phase 0.4 dispatch C3: source of container snapshots that
 /// [`event_emitter_loop`] polls. A trait so tests can substitute a
 /// fake list without spinning up a real `wisp::Runtime`.
+///
+/// Phase 0.5: the snapshot tuple grows an `Option<i32>` exit code so
+/// the Die event can carry the captured status. Production callers
+/// run `Runtime::state(id)` for each running container so the lazy
+/// state-transition + exit_status read both fire on every tick.
 trait RuntimeListSource: Send + Sync + 'static {
-    /// Best-effort snapshot of every wisp container's id + state.
-    /// Returns an empty Vec on failure (the emitter shouldn't propagate
-    /// transient list errors as a stream of events).
-    fn snapshot(&self) -> Vec<(String, wisp::ContainerState)>;
+    /// Best-effort snapshot of every wisp container's id + state +
+    /// captured exit code (when known). Returns an empty Vec on
+    /// failure (the emitter shouldn't propagate transient list errors
+    /// as a stream of events).
+    fn snapshot(&self) -> Vec<(String, wisp::ContainerState, Option<i32>)>;
 }
 
 /// Production [`RuntimeListSource`] backed by the real wisp runtime.
 struct WispRuntimeListSource(Arc<wisp::Runtime>);
 
 impl RuntimeListSource for WispRuntimeListSource {
-    fn snapshot(&self) -> Vec<(String, wisp::ContainerState)> {
-        match self.0.list() {
-            Ok(handles) => handles.into_iter().map(|h| (h.id, h.state)).collect(),
-            Err(_) => Vec::new(),
-        }
+    fn snapshot(&self) -> Vec<(String, wisp::ContainerState, Option<i32>)> {
+        // Use Runtime::state per id so the lazy Running -> Stopped
+        // transition fires AND the exit_status file is read back into
+        // the handle. Runtime::list alone wouldn't trigger the
+        // /proc/<pid> check or the exit_status read.
+        let ids: Vec<String> = match self.0.list() {
+            Ok(handles) => handles.into_iter().map(|h| h.id).collect(),
+            Err(_) => return Vec::new(),
+        };
+        ids.into_iter()
+            .filter_map(|id| match self.0.state(&id) {
+                Ok(h) => Some((h.id, h.state, h.exit_code)),
+                Err(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -1176,10 +1192,15 @@ impl RuntimeListSource for WispRuntimeListSource {
 /// against the previous snapshot, and broadcasts Start / Die / Stop
 /// events for every transition.
 ///
-/// Transitions emitted (Phase 0.4):
+/// Transitions emitted:
 /// - new id seen in `Running`: Start
-/// - id transitions Running -> Stopped: Die (exit_code unknown,
-///   wisp does not currently capture it)
+/// - id transitions Running -> Stopped: Die. Phase 0.5: the exit
+///   code is taken from the snapshot's `Option<i32>` (set by
+///   `Runtime::state` reading the per-container `exit_status` file
+///   the lifecycle reaper writes). It may be `None` if the reaper
+///   hasn't reaped yet (race between /proc/<pid> going away and the
+///   reaper's 500ms tick); the emitter doesn't try to backfill on
+///   later ticks because the diff has already moved on.
 /// - id disappears entirely: Stop
 ///
 /// All other transitions (Created -> Running for example) are
@@ -1215,15 +1236,15 @@ async fn event_emitter_loop<S: RuntimeListSource>(
         // we'd still keep going. Acceptable: the loop is cheap.
 
         let snapshot = source.snapshot();
-        let mut current: std::collections::BTreeMap<String, wisp::ContainerState> =
+        let mut current: std::collections::BTreeMap<String, (wisp::ContainerState, Option<i32>)> =
             std::collections::BTreeMap::new();
-        for (id, st) in snapshot {
-            current.insert(id, st);
+        for (id, st, ex) in snapshot {
+            current.insert(id, (st, ex));
         }
 
         // New ids seen in Running: Start.
         // Existing ids that transitioned Running -> Stopped: Die.
-        for (id, state) in &current {
+        for (id, (state, exit_code)) in &current {
             match prev.get(id) {
                 None if *state == wisp::ContainerState::Running => {
                     let _ = event_tx.send(RuntimeEvent {
@@ -1238,7 +1259,9 @@ async fn event_emitter_loop<S: RuntimeListSource>(
                 {
                     let _ = event_tx.send(RuntimeEvent {
                         container_id: id.clone(),
-                        event_type: RuntimeEventType::Die { exit_code: None },
+                        event_type: RuntimeEventType::Die {
+                            exit_code: *exit_code,
+                        },
                         timestamp: SystemTime::now(),
                     });
                 }
@@ -1257,7 +1280,10 @@ async fn event_emitter_loop<S: RuntimeListSource>(
             }
         }
 
-        prev = current;
+        prev = current
+            .into_iter()
+            .map(|(id, (st, _ex))| (id, st))
+            .collect();
     }
 }
 
@@ -2093,20 +2119,25 @@ mod tests {
     /// Phase 0.4 dispatch C3: a fake [`RuntimeListSource`] backed by
     /// an `Arc<Mutex<Vec<...>>>` so tests can mutate the snapshot
     /// between ticks.
+    ///
+    /// Phase 0.5: tuples now include an optional exit code so the Die
+    /// event carries it.
+    type FakeSnapshot = Vec<(String, wisp::ContainerState, Option<i32>)>;
+
     #[derive(Clone)]
-    struct FakeRuntimeList(std::sync::Arc<std::sync::Mutex<Vec<(String, wisp::ContainerState)>>>);
+    struct FakeRuntimeList(std::sync::Arc<std::sync::Mutex<FakeSnapshot>>);
 
     impl FakeRuntimeList {
         fn new() -> Self {
             Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
         }
-        fn set(&self, items: Vec<(String, wisp::ContainerState)>) {
+        fn set(&self, items: FakeSnapshot) {
             *self.0.lock().unwrap() = items;
         }
     }
 
     impl RuntimeListSource for FakeRuntimeList {
-        fn snapshot(&self) -> Vec<(String, wisp::ContainerState)> {
+        fn snapshot(&self) -> FakeSnapshot {
             self.0.lock().unwrap().clone()
         }
     }
@@ -2116,7 +2147,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn event_emitter_detects_start() {
         let fake = FakeRuntimeList::new();
-        fake.set(vec![("ctr-a".to_string(), wisp::ContainerState::Running)]);
+        fake.set(vec![(
+            "ctr-a".to_string(),
+            wisp::ContainerState::Running,
+            None,
+        )]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
 
         let fake_for_loop = fake.clone();
@@ -2140,7 +2175,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn event_emitter_detects_die() {
         let fake = FakeRuntimeList::new();
-        fake.set(vec![("ctr-b".to_string(), wisp::ContainerState::Running)]);
+        fake.set(vec![(
+            "ctr-b".to_string(),
+            wisp::ContainerState::Running,
+            None,
+        )]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
 
         let fake_for_loop = fake.clone();
@@ -2156,8 +2195,13 @@ mod tests {
             .expect("recv");
         matches!(event.event_type, RuntimeEventType::Start);
 
-        // Flip to Stopped, advance to the next tick.
-        fake.set(vec![("ctr-b".to_string(), wisp::ContainerState::Stopped)]);
+        // Flip to Stopped with a captured exit code, advance to the
+        // next tick. The Die event must carry the same code.
+        fake.set(vec![(
+            "ctr-b".to_string(),
+            wisp::ContainerState::Stopped,
+            Some(42),
+        )]);
         tokio::time::advance(std::time::Duration::from_millis(150)).await;
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
@@ -2165,8 +2209,49 @@ mod tests {
             .expect("recv (Die)");
         assert_eq!(event.container_id, "ctr-b");
         match event.event_type {
-            RuntimeEventType::Die { exit_code } => assert!(exit_code.is_none()),
+            RuntimeEventType::Die { exit_code } => assert_eq!(exit_code, Some(42)),
             other => panic!("expected Die, got {other:?}"),
+        }
+    }
+
+    /// Phase 0.5: when wisp's per-container reaper hasn't reaped yet
+    /// (race between /proc/<pid> going away and the reaper's 500ms
+    /// tick), the Die event still fires but with `exit_code: None`.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn wisp_backend_die_event_carries_exit_code() {
+        let fake = FakeRuntimeList::new();
+        fake.set(vec![(
+            "ctr-x".to_string(),
+            wisp::ContainerState::Running,
+            None,
+        )]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+
+        let fake_for_loop = fake.clone();
+        let _loop_handle = tokio::spawn(async move {
+            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
+        });
+
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        // Drain the Start event.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+
+        // SIGKILL: encoded as -9 in the runtime, surfaces as Some(-9)
+        // in the Die event so the agent can distinguish a clean
+        // exit(0) from a signal kill.
+        fake.set(vec![(
+            "ctr-x".to_string(),
+            wisp::ContainerState::Stopped,
+            Some(-9),
+        )]);
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timed out (Die)")
+            .expect("recv (Die)");
+        match event.event_type {
+            RuntimeEventType::Die { exit_code } => assert_eq!(exit_code, Some(-9)),
+            other => panic!("expected Die with negative code, got {other:?}"),
         }
     }
 
@@ -2176,7 +2261,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn event_emitter_detects_stop_when_removed() {
         let fake = FakeRuntimeList::new();
-        fake.set(vec![("ctr-c".to_string(), wisp::ContainerState::Running)]);
+        fake.set(vec![(
+            "ctr-c".to_string(),
+            wisp::ContainerState::Running,
+            None,
+        )]);
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
 
         let fake_for_loop = fake.clone();
