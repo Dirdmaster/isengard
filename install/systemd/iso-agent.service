@@ -25,7 +25,7 @@ PartOf=iso-controller.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/isengard agent --controller https://controller.local:9417 --state-dir /var/lib/isengard/agent
+ExecStart=/usr/local/bin/isengard agent --controller https://localhost:9417 --state-dir /var/lib/isengard/agent
 Restart=on-failure
 RestartSec=5
 

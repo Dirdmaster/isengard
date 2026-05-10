@@ -642,21 +642,19 @@ impl Plan {
     fn install_systemd_units(&self) -> Result<()> {
         let dir = std::path::Path::new("/etc/systemd/system");
         std::fs::create_dir_all(dir).context("create /etc/systemd/system")?;
-        // The agent unit shipped on disk hardcodes
-        // `--controller https://controller.local:9417`. Phase 0.10 init
-        // talks to itself via `https://localhost:9417` because the
-        // controller's cert now has localhost in its SANs. Patch the
-        // ExecStart line on the way through.
-        let agent_unit = ISO_AGENT_UNIT.replace(
-            "--controller https://controller.local:9417",
-            "--controller https://localhost:9417",
-        );
+        // The agent unit ships pointing at https://localhost:9417 (the
+        // controller's cert now has localhost in its SANs). `join`
+        // rewrites the ExecStart for cross-host setups.
         write_secret(
             &dir.join("iso-controller.service"),
             ISO_CONTROLLER_UNIT.as_bytes(),
             0o644,
         )?;
-        write_secret(&dir.join("iso-agent.service"), agent_unit.as_bytes(), 0o644)?;
+        write_secret(
+            &dir.join("iso-agent.service"),
+            ISO_AGENT_UNIT.as_bytes(),
+            0o644,
+        )?;
         write_secret(
             &dir.join("iso-agent.target"),
             ISO_AGENT_TARGET.as_bytes(),
@@ -954,14 +952,14 @@ pub async fn run_join(args: JoinArgs) -> Result<()> {
     println!("[5/8] env file at {env_path:?}");
 
     // Install only the agent unit + target. The agent unit on disk
-    // hardcodes `--controller https://controller.local:9417`; rewrite
-    // ExecStart to use the operator-supplied URL. Drop PartOf= since
-    // there's no controller on this host.
+    // points at `https://localhost:9417`; rewrite ExecStart to use the
+    // operator-supplied controller URL. Drop PartOf= and the
+    // controller-side After= since there's no controller on this host.
     let dir = std::path::Path::new("/etc/systemd/system");
     std::fs::create_dir_all(dir).context("create /etc/systemd/system")?;
     let agent_unit = ISO_AGENT_UNIT
         .replace(
-            "--controller https://controller.local:9417",
+            "--controller https://localhost:9417",
             &format!("--controller {}", args.controller),
         )
         .replace("PartOf=iso-controller.service\n", "")
