@@ -6,17 +6,14 @@
 //!
 //! Two operating modes:
 //!
-//!   - **Interactive**: stdin (or `/dev/tty` when piped) is a real TTY and
-//!     `--non-interactive` was not set. A ratatui wizard collects every
-//!     unset value and streams the install steps live as they execute.
-//!   - **Non-interactive**: `--non-interactive` was set, or no TTY could be
-//!     opened (fully headless). Every required value must come from a flag;
-//!     missing values fail with a clear error naming the flag, and the
-//!     install runs as a plain stdout log.
+//!   - **Interactive**: stdin is a TTY and `--non-interactive` was not set.
+//!     Walks the operator through `inquire` prompts for each missing value.
+//!   - **Non-interactive**: stdin is piped (curl | bash) or `--non-interactive`
+//!     was set. Every required value must come from a flag; missing values
+//!     fail with a clear error naming the flag.
 //!
-//! The actual install steps live in [`Plan::execute_with_progress`] and run
-//! identically in both modes; the only difference is whether the wizard
-//! consumes the [`ProgressEvent`] stream or it gets dropped.
+//! The actual install steps live in [`Plan::execute`] and run identically in
+//! both modes; the only difference is how [`Plan`] gets populated.
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -25,13 +22,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
-use tokio::sync::mpsc;
-
-mod progress;
-mod theme;
-mod wizard;
-
-pub(crate) use progress::{BootstrapStep, ProgressEvent, SummaryData};
+use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text, validator::Validation};
 
 /// Flags shared between init and the bash bootstrap. Every prompt has a
 /// matching flag so the install can run unattended (`--non-interactive`)
@@ -101,28 +92,32 @@ pub struct InitArgs {
     pub host_ip: Option<String>,
 }
 
+impl InitArgs {
+    /// Should we skip prompts entirely? True if the operator passed the
+    /// flag or stdin isn't a terminal (curl | bash).
+    pub fn non_interactive_resolved(&self) -> bool {
+        self.non_interactive || !std::io::stdin().is_terminal()
+    }
+}
+
 /// Resolved configuration for one `isengard init` run. All values are
-/// fully populated by the time `execute_with_progress` runs: the wizard
-/// (interactive) or flag parsing (non-interactive) handled the resolution
-/// upstream.
-///
-/// Visible to the in-crate wizard module so it can construct a plan from
-/// the operator's wizard answers and hand it back to `run`.
+/// fully populated by the time `execute` runs: prompts (interactive) or
+/// flag parsing (non-interactive) handled the resolution upstream.
 #[derive(Debug, Clone)]
-pub(crate) struct Plan {
-    pub(crate) acme_email: String,
-    pub(crate) acme_domains: String,
-    pub(crate) acme_directory: String,
-    pub(crate) cf_dns_token: Option<String>,
-    pub(crate) backup_passphrase: Option<String>,
-    pub(crate) extra_sans: Vec<String>,
-    pub(crate) listen_grpc: String,
-    pub(crate) listen_dashboard: String,
-    pub(crate) state_dir: PathBuf,
-    pub(crate) etc_dir: PathBuf,
-    pub(crate) runtime: String,
-    pub(crate) force: bool,
-    pub(crate) host_ip: String,
+struct Plan {
+    acme_email: String,
+    acme_domains: String,
+    acme_directory: String,
+    cf_dns_token: Option<String>,
+    backup_passphrase: Option<String>,
+    extra_sans: Vec<String>,
+    listen_grpc: String,
+    listen_dashboard: String,
+    state_dir: PathBuf,
+    etc_dir: PathBuf,
+    runtime: String,
+    force: bool,
+    host_ip: String,
 }
 
 impl Plan {
@@ -151,6 +146,160 @@ impl Plan {
                 }
             },
             extra_sans: args.extra_sans.clone(),
+            listen_grpc: args.listen_grpc.clone(),
+            listen_dashboard: args.listen_dashboard.clone(),
+            state_dir: args.state_dir.clone(),
+            etc_dir: args.etc_dir.clone(),
+            runtime: args.runtime.clone(),
+            force: args.force,
+            host_ip,
+        })
+    }
+
+    /// Build a [`Plan`] by walking the operator through `inquire` prompts
+    /// for each unset CLI flag. Defaults pre-populate prompts so an
+    /// operator can hit Enter through the safe path.
+    fn interactive(args: &InitArgs, host_ip: String) -> Result<Self> {
+        println!();
+        println!("isengard init: interactive setup");
+        println!("==============================");
+        println!();
+
+        let acme_email = match &args.acme_email {
+            Some(e) => e.clone(),
+            None => Text::new("ACME contact email (blank for internal-only deploys):")
+                .with_help_message(
+                    "Used for Let's Encrypt account registration. Required for public HTTPS.",
+                )
+                .with_validator(|v: &str| {
+                    if v.is_empty() || v.contains('@') {
+                        Ok(Validation::Valid)
+                    } else {
+                        Ok(Validation::Invalid("must contain '@' or be blank".into()))
+                    }
+                })
+                .prompt()
+                .map_err(|e| anyhow!("acme email prompt: {e}"))?,
+        };
+
+        let acme_domains = match &args.acme_domains {
+            Some(d) => d.clone(),
+            None => Text::new("ACME domains, comma-separated (e.g. *.foo.com,foo.com):")
+                .with_default("")
+                .with_help_message("Wildcards require DNS-01 (Cloudflare token below).")
+                .prompt()
+                .map_err(|e| anyhow!("acme domains prompt: {e}"))?,
+        };
+
+        let acme_directory = match &args.acme_directory {
+            Some(d) => d.clone(),
+            None => {
+                let opts = vec!["staging", "production", "custom URL"];
+                let pick = Select::new("ACME directory:", opts)
+                    .with_starting_cursor(0)
+                    .prompt()
+                    .map_err(|e| anyhow!("acme directory prompt: {e}"))?;
+                if pick == "custom URL" {
+                    Text::new("Custom ACME directory URL:")
+                        .prompt()
+                        .map_err(|e| anyhow!("custom acme url prompt: {e}"))?
+                } else {
+                    pick.to_string()
+                }
+            }
+        };
+
+        let cf_dns_token = if args.no_cf_dns_token {
+            None
+        } else {
+            match &args.cf_dns_token {
+                Some(t) => Some(t.clone()),
+                None => {
+                    let want = Confirm::new("Set a Cloudflare DNS API token (DNS-01 wildcards)?")
+                        .with_default(false)
+                        .prompt()
+                        .map_err(|e| anyhow!("cf token confirm: {e}"))?;
+                    if want {
+                        let v = Password::new("Cloudflare DNS API token:")
+                            .with_display_mode(PasswordDisplayMode::Masked)
+                            .with_help_message("Hidden input. Encrypted with the master key.")
+                            .without_confirmation()
+                            .prompt()
+                            .map_err(|e| anyhow!("cf token prompt: {e}"))?;
+                        if v.is_empty() { None } else { Some(v) }
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        let backup_passphrase = if args.no_backup {
+            None
+        } else {
+            match &args.backup_passphrase_file {
+                Some(p) => Some(read_passphrase_file(p)?),
+                None => {
+                    let want = Confirm::new("Set a backup passphrase (encrypted snapshots)?")
+                        .with_default(false)
+                        .prompt()
+                        .map_err(|e| anyhow!("backup confirm: {e}"))?;
+                    if want {
+                        let v = Password::new("Backup passphrase:")
+                            .with_display_mode(PasswordDisplayMode::Masked)
+                            .with_help_message("Hidden input. Encrypted with the master key.")
+                            .prompt()
+                            .map_err(|e| anyhow!("backup prompt: {e}"))?;
+                        if v.is_empty() { None } else { Some(v) }
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        // Auto-detected IP confirmation. The flag `--host-ip`, when passed,
+        // already populated `host_ip`; we still let the operator override.
+        let host_ip = if args.host_ip.is_some() {
+            host_ip
+        } else {
+            let prompt = format!("Use detected host IP {host_ip} for cross-host join?");
+            let ok = Confirm::new(&prompt)
+                .with_default(true)
+                .prompt()
+                .map_err(|e| anyhow!("host ip confirm: {e}"))?;
+            if ok {
+                host_ip
+            } else {
+                Text::new("Host IP for join command:")
+                    .with_default(&host_ip)
+                    .prompt()
+                    .map_err(|e| anyhow!("host ip prompt: {e}"))?
+            }
+        };
+
+        let mut extra_sans = args.extra_sans.clone();
+        if extra_sans.is_empty() {
+            // One additional optional prompt; comma-split, blank skips.
+            let raw = Text::new("Extra SANs for the controller cert (comma-separated, optional):")
+                .with_default("")
+                .with_help_message("e.g. controller.example.com,10.0.0.5. Always includes localhost + 127.0.0.1 + detected host IP.")
+                .prompt()
+                .map_err(|e| anyhow!("extra sans prompt: {e}"))?;
+            extra_sans = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
+        Ok(Plan {
+            acme_email,
+            acme_domains,
+            acme_directory,
+            cf_dns_token,
+            backup_passphrase,
+            extra_sans,
             listen_grpc: args.listen_grpc.clone(),
             listen_dashboard: args.listen_dashboard.clone(),
             state_dir: args.state_dir.clone(),
@@ -204,16 +353,6 @@ impl Plan {
 }
 
 /// Public entry point invoked from `main.rs` after argument parsing.
-///
-/// Three branches:
-///
-///   1. `--non-interactive` (or no TTY available anywhere): build the plan
-///      from CLI flags, run the install with stdout logging.
-///   2. `/dev/tty` available: launch the ratatui wizard, collect missing
-///      values, run the install while streaming progress events into the
-///      wizard. The wizard owns the screen until completion.
-///   3. Wizard requested but no TTY: fall back to (1) with a friendly
-///      message naming the flags the operator can pass.
 pub async fn run(args: InitArgs) -> Result<()> {
     preflight()?;
     let host_ip = match &args.host_ip {
@@ -223,24 +362,12 @@ pub async fn run(args: InitArgs) -> Result<()> {
             "127.0.0.1".to_string()
         }),
     };
-
-    if args.non_interactive {
-        let plan = Plan::from_args(&args, host_ip)?;
-        return plan.execute_logged().await;
-    }
-
-    // Default (interactive). If stdin is a TTY use it directly; otherwise
-    // try `/dev/tty`. Headless: bail with a clear hint.
-    if std::io::stdin().is_terminal() {
-        return wizard::run(args, host_ip).await;
-    }
-    if std::path::Path::new("/dev/tty").exists() {
-        return wizard::run(args, host_ip).await;
-    }
-
-    bail!(
-        "isengard init: TUI unavailable (no controlling terminal). Re-run with --non-interactive and the required flags, e.g.:\n  isengard init --non-interactive --acme-email you@example.com --acme-domains example.com --acme-directory staging"
-    )
+    let plan = if args.non_interactive_resolved() {
+        Plan::from_args(&args, host_ip)?
+    } else {
+        Plan::interactive(&args, host_ip)?
+    };
+    plan.execute().await
 }
 
 /// Preflight checks. Bails before touching disk if we're not on Linux,
@@ -342,302 +469,55 @@ fn read_passphrase_file(path: &std::path::Path) -> Result<String> {
 // self-sufficient. Operators running `curl ... | bash` only need the
 // binary on disk; the bash bootstrap doesn't have to ship unit files
 // alongside.
-const ISO_CONTROLLER_UNIT: &str =
-    include_str!("../../../../install/systemd/iso-controller.service");
-const ISO_AGENT_UNIT: &str = include_str!("../../../../install/systemd/iso-agent.service");
-const ISO_AGENT_TARGET: &str = include_str!("../../../../install/systemd/iso-agent.target");
+const ISO_CONTROLLER_UNIT: &str = include_str!("../../../install/systemd/iso-controller.service");
+const ISO_AGENT_UNIT: &str = include_str!("../../../install/systemd/iso-agent.service");
+const ISO_AGENT_TARGET: &str = include_str!("../../../install/systemd/iso-agent.target");
 
 impl Plan {
-    /// Non-interactive install path: prints one log line per phase to
-    /// stdout. Used when `--non-interactive` is set or no TTY can be
-    /// opened. Calls into the same step methods the wizard uses, just
-    /// without the event channel.
-    async fn execute_logged(&self) -> Result<()> {
+    /// Drive every step of the install: dirs, master key, secrets, units,
+    /// service start, token mint, ca export, agent start, success banner.
+    /// Each step logs progress so a `curl | bash` operator sees what's
+    /// happening even without a TTY.
+    async fn execute(&self) -> Result<()> {
         println!();
         println!("[1/12] preflight ok");
-        let summary = self.execute_with_progress(None).await?;
+        self.setup_dirs()?;
+        println!(
+            "[2/12] state + etc dirs ready ({:?}, {:?})",
+            self.state_dir, self.etc_dir
+        );
+
+        self.setup_master_key()?;
+        println!("[3/12] master key at {:?}", self.master_key_file());
+
+        self.write_master_key_env()?;
+        println!("[4/12] master-key.env written");
+
+        self.bootstrap_secrets().await?;
+        println!("[5/12] secrets bootstrapped");
+
+        self.write_env_file()?;
+        println!("[6/12] env file at {:?}", self.env_file());
+
+        self.install_systemd_units()?;
+        println!("[7/12] systemd units installed");
+
+        self.start_controller().await?;
+        println!("[8/12] controller running");
+
+        self.export_ca().await?;
+        println!("[9/12] ca exported to {:?}", self.ca_pem_file());
+
+        let token = self.mint_token().await?;
+        self.write_token_file(&token)?;
+        println!("[10/12] enrollment token minted");
+
+        self.start_agent()?;
+        println!("[11/12] agent enrolled");
+
+        self.print_banner(&token);
         println!("[12/12] done");
-        self.print_banner(&summary.token);
         Ok(())
-    }
-
-    /// Drive every install phase, optionally streaming progress events
-    /// for the wizard. Returns the summary data the Done screen renders.
-    /// Errors propagate after a `Failed` event is emitted (so the wizard
-    /// has a chance to render the failed step before unwinding).
-    pub(crate) async fn execute_with_progress(
-        &self,
-        events: Option<mpsc::Sender<ProgressEvent>>,
-    ) -> Result<SummaryData> {
-        // Helper closures: they tolerate `events.is_none()` and a closed
-        // channel (best-effort; never block the install on a stuck UI).
-        let send = |evt: ProgressEvent| {
-            if let Some(tx) = events.as_ref() {
-                let _ = tx.try_send(evt);
-            }
-        };
-        let started = |step: BootstrapStep| ProgressEvent::Started(step);
-        let finished =
-            |step: BootstrapStep, detail: Option<String>| ProgressEvent::Finished { step, detail };
-        let failed = |step: BootstrapStep, error: String| ProgressEvent::Failed { step, error };
-
-        // ---- 1: dirs --------------------------------------------------
-        send(started(BootstrapStep::SetupDirs));
-        match self.setup_dirs() {
-            Ok(()) => send(finished(
-                BootstrapStep::SetupDirs,
-                Some(format!(
-                    "{} + {}",
-                    self.state_dir.display(),
-                    self.etc_dir.display()
-                )),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::SetupDirs, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 2: master key -------------------------------------------
-        send(started(BootstrapStep::GenerateMasterKey));
-        match self.setup_master_key() {
-            Ok(()) => send(finished(
-                BootstrapStep::GenerateMasterKey,
-                Some(self.master_key_file().display().to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::GenerateMasterKey, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 3: master-key.env ---------------------------------------
-        send(started(BootstrapStep::WriteMasterKeyEnv));
-        match self.write_master_key_env() {
-            Ok(()) => send(finished(
-                BootstrapStep::WriteMasterKeyEnv,
-                Some(self.master_key_env_file().display().to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::WriteMasterKeyEnv, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 4: secrets ----------------------------------------------
-        send(started(BootstrapStep::BootstrapSecrets));
-        let mut secret_count = 0usize;
-        if self.cf_dns_token.is_some() {
-            secret_count += 1;
-        }
-        if self.backup_passphrase.is_some() {
-            secret_count += 1;
-        }
-        match self.bootstrap_secrets().await {
-            Ok(()) => send(finished(
-                BootstrapStep::BootstrapSecrets,
-                Some(if secret_count == 0 {
-                    "no secrets to encrypt".to_string()
-                } else if secret_count == 1 {
-                    "1 secret encrypted".to_string()
-                } else {
-                    format!("{secret_count} secrets encrypted")
-                }),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::BootstrapSecrets, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 5: env file ---------------------------------------------
-        send(started(BootstrapStep::WriteEnvFile));
-        match self.write_env_file() {
-            Ok(()) => send(finished(
-                BootstrapStep::WriteEnvFile,
-                Some(self.env_file().display().to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::WriteEnvFile, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 6: systemd units ----------------------------------------
-        send(started(BootstrapStep::InstallSystemdUnits));
-        match self.install_systemd_units() {
-            Ok(()) => send(finished(
-                BootstrapStep::InstallSystemdUnits,
-                Some("daemon-reload OK".to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::InstallSystemdUnits, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 7+8: start + wait controller ----------------------------
-        // The legacy `start_controller` does both: systemctl start +
-        // 30s health poll. Split here for the wizard so the operator
-        // sees a separate spinner row for the wait.
-        send(started(BootstrapStep::StartController));
-        match self.systemctl_start_controller() {
-            Ok(()) => send(finished(
-                BootstrapStep::StartController,
-                Some("systemctl start iso-controller.service".to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::StartController, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-        send(started(BootstrapStep::WaitControllerHealthy));
-        match self.wait_controller_healthy(events.as_ref()).await {
-            Ok(()) => send(finished(
-                BootstrapStep::WaitControllerHealthy,
-                Some(format!("https://localhost:{}", self.listen_port())),
-            )),
-            Err(e) => {
-                send(failed(
-                    BootstrapStep::WaitControllerHealthy,
-                    format!("{e:#}"),
-                ));
-                return Err(e);
-            }
-        }
-
-        // ---- 9: export CA --------------------------------------------
-        send(started(BootstrapStep::ExportCa));
-        match self.export_ca().await {
-            Ok(()) => send(finished(
-                BootstrapStep::ExportCa,
-                Some(self.ca_pem_file().display().to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::ExportCa, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 10: mint token ------------------------------------------
-        send(started(BootstrapStep::MintToken));
-        let token = match self.mint_token().await {
-            Ok(t) => {
-                send(finished(
-                    BootstrapStep::MintToken,
-                    Some("15m TTL".to_string()),
-                ));
-                t
-            }
-            Err(e) => {
-                send(failed(BootstrapStep::MintToken, format!("{e:#}")));
-                return Err(e);
-            }
-        };
-
-        // ---- 11: token file ------------------------------------------
-        send(started(BootstrapStep::WriteTokenFile));
-        match self.write_token_file(&token) {
-            Ok(()) => send(finished(
-                BootstrapStep::WriteTokenFile,
-                Some(self.token_file().display().to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::WriteTokenFile, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        // ---- 12: agent ----------------------------------------------
-        send(started(BootstrapStep::StartAgent));
-        match self.start_agent() {
-            Ok(()) => send(finished(
-                BootstrapStep::StartAgent,
-                Some("iso-agent.service started".to_string()),
-            )),
-            Err(e) => {
-                send(failed(BootstrapStep::StartAgent, format!("{e:#}")));
-                return Err(e);
-            }
-        }
-
-        let summary = SummaryData {
-            controller_url_local: format!("https://localhost:{}", self.listen_port()),
-            controller_url_remote: format!(
-                "https://{}:{}",
-                if self.host_ip.is_empty() {
-                    "<your-host-ip>"
-                } else {
-                    &self.host_ip
-                },
-                self.listen_port()
-            ),
-            dashboard_url: format!("http://localhost:{}", self.dashboard_port()),
-            host_ip: self.host_ip.clone(),
-            token: token.clone(),
-            ca_pem_path: self.ca_pem_file().display().to_string(),
-            state_dir: self.state_dir.display().to_string(),
-        };
-        send(ProgressEvent::Summary(summary.clone()));
-        Ok(summary)
-    }
-
-    /// Listen port extracted from `listen_grpc` (`0.0.0.0:9417` -> 9417).
-    fn listen_port(&self) -> u16 {
-        self.listen_grpc
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(9417)
-    }
-
-    fn dashboard_port(&self) -> u16 {
-        self.listen_dashboard
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(9418)
-    }
-
-    fn systemctl_start_controller(&self) -> Result<()> {
-        run_systemctl(&["enable", "iso-controller.service"]).ok();
-        run_systemctl(&["start", "iso-controller.service"])
-    }
-
-    /// Poll for controller readiness, ticking the wizard on each retry.
-    /// Mirrors the legacy 30s budget; emits `Tick` events so the wizard
-    /// can show "Waiting for controller… 00:07".
-    async fn wait_controller_healthy(
-        &self,
-        events: Option<&mpsc::Sender<ProgressEvent>>,
-    ) -> Result<()> {
-        let inv_dir = self.controller_state_dir();
-        for i in 0..30u32 {
-            if let Some(tx) = events {
-                let _ = tx.try_send(ProgressEvent::Tick(BootstrapStep::WaitControllerHealthy));
-            }
-            let inv = match open_controller_inventory(&inv_dir).await {
-                Ok(i) => i,
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            if isengard_controller::ca::Authority::load_or_init(&inv)
-                .await
-                .is_ok()
-            {
-                return Ok(());
-            }
-            // Only print the dot in non-wizard mode (events == None).
-            if events.is_none() {
-                print!(".");
-                std::io::stdout().flush().ok();
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let _ = i;
-        }
-        bail!("controller did not become ready in 30s; check `journalctl -u iso-controller`")
     }
 
     fn setup_dirs(&self) -> Result<()> {
@@ -782,6 +662,37 @@ impl Plan {
         )?;
         run_systemctl(&["daemon-reload"])?;
         Ok(())
+    }
+
+    async fn start_controller(&self) -> Result<()> {
+        run_systemctl(&["enable", "iso-controller.service"]).ok();
+        run_systemctl(&["start", "iso-controller.service"])?;
+
+        // Poll for CA readiness (which doubles as a controller-up signal):
+        // `Authority::load_or_init` succeeds once the boot path has run.
+        let inv_dir = self.controller_state_dir();
+        for i in 0..30u32 {
+            let inv = match open_controller_inventory(&inv_dir).await {
+                Ok(i) => i,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            if isengard_controller::ca::Authority::load_or_init(&inv)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+            print!(".");
+            std::io::stdout().flush().ok();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Touch i to silence the unused-binding warning in case the
+            // last `Err` arm short-circuits.
+            let _ = i;
+        }
+        bail!("controller did not become ready in 30s; check `journalctl -u iso-controller`")
     }
 
     async fn export_ca(&self) -> Result<()> {
