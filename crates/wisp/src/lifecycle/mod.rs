@@ -524,7 +524,7 @@ pub fn start_container<F: CgroupFs>(
                 // best-effort detach so we don't leak iptables / veth
                 // state on the host.
                 if let (Some(record), Some(att)) =
-                    (handle.network_attachment.as_ref(), attacher.as_deref_mut())
+                    (handle.network_attachment.as_ref(), attacher)
                 {
                     let _ = att.detach(record);
                 }
