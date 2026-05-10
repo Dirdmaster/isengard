@@ -209,6 +209,23 @@ enum NetCmd {
         #[arg(long, default_value = "10.83.0.0/24")]
         subnet: String,
     },
+    /// Sweep orphan kernel networking (bridges, veths, iptables rules)
+    /// against the on-disk network registry. Idempotent: a clean host
+    /// returns "no orphans". Linux + root.
+    ///
+    /// Defaults to "preserve all container-scoped iptables rules": the
+    /// standalone CLI doesn't have an agent runtime to enumerate live
+    /// containers, so it would be wrong to revoke them. Use `--all` to
+    /// revoke every wisp-tagged rule that doesn't match a registered
+    /// network (treats the network-name set as the only ground truth).
+    Reconcile {
+        /// Revoke every container-scoped iptables rule whose scope
+        /// isn't in the registered-network set. Use ONLY when the
+        /// agent is stopped (otherwise live container rules get
+        /// torched).
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 fn main() {
@@ -885,7 +902,52 @@ fn cmd_net(state_dir: &Path, args: NetArgs) -> Result<()> {
         NetCmd::List => cmd_net_list(),
         NetCmd::Rm { name } => cmd_net_rm(&name),
         NetCmd::Inspect { name, subnet } => cmd_net_inspect(state_dir, &name, &subnet),
+        NetCmd::Reconcile { all } => cmd_net_reconcile(state_dir, all),
     }
+}
+
+/// `wisp net reconcile`. Orphan-state cleanup against the on-disk
+/// network registry (`<state-dir>/networks/<name>/network.json`).
+///
+/// Default (`all=false`): preserve every container-scoped iptables rule
+/// (the CLI can't enumerate live containers; the agent's boot hook
+/// handles those). Cleans only orphan bridges + veths + network-scoped
+/// rules.
+///
+/// With `--all`: pass `known_container_ids = Some(empty_set)` so every
+/// container-scoped rule whose scope isn't a registered network gets
+/// revoked. Use only when the agent is stopped.
+fn cmd_net_reconcile(state_dir: &Path, all: bool) -> Result<()> {
+    let networks_dir = state_dir.join("networks");
+    let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let inputs = wisp_net::ReconcileInputs {
+        networks_dir: &networks_dir,
+        known_container_ids: if all { Some(&empty) } else { None },
+    };
+
+    let report = wisp_net::reconcile(inputs).context("reconcile")?;
+    println!("bridges:        {}", report.orphan_bridges.len());
+    for b in &report.orphan_bridges {
+        println!("  cleaned: {b}");
+    }
+    println!("veths:          {}", report.orphan_veths.len());
+    for v in &report.orphan_veths {
+        println!("  cleaned: {v}");
+    }
+    println!("iptables:       {}", report.orphan_iptables_scopes.len());
+    for s in &report.orphan_iptables_scopes {
+        println!("  revoked: {s}");
+    }
+    println!("stale registry: {}", report.stale_registry_entries.len());
+    for e in &report.stale_registry_entries {
+        println!("  dropped: {e}");
+    }
+    if report.is_clean() {
+        println!("clean: no orphans found");
+    } else {
+        println!("total:          {}", report.total());
+    }
+    Ok(())
 }
 
 /// `wisp net create <name> [--subnet <cidr>]`.
