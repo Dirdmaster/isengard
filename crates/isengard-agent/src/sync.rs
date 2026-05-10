@@ -138,6 +138,11 @@ pub async fn run_sync_loop<S: LogSource>(
         .as_ref()
         .map(|b| b.name().to_string())
         .unwrap_or_default();
+    // Phase 0.6: heartbeat reads the container snapshot via the live
+    // backend when one was selected (so wisp hosts stop dialling
+    // docker.sock once per heartbeat). Falls back to the legacy
+    // bollard probe when backend selection failed at boot.
+    let heartbeat_backend = backend.clone();
     let mut heartbeat_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Skip the first immediate tick; we want the first heartbeat one
@@ -154,7 +159,10 @@ pub async fn run_sync_loop<S: LogSource>(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    let snapshots = crate::container_snapshot::list_container_snapshots().await;
+                    let snapshots = crate::container_snapshot::snapshots_via_backend_or_legacy(
+                        heartbeat_backend.as_ref(),
+                    )
+                    .await;
                     let stacks = crate::container_snapshot::derive_stacks(&snapshots);
                     let services = crate::container_snapshot::derive_services(&snapshots);
                     let msg = AgentMessage {
