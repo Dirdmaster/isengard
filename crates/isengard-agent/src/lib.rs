@@ -425,18 +425,21 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
-    // -- spawn the Docker label watcher (Phase 8b Task 16).
+    // -- spawn the runtime label watcher (Phase 8b Task 16, trait-ified
+    //    in Phase 0.5).
     //    Pushes ContainerLabelsReport / ContainerLabelsRemoved up the sync
     //    stream as containers come and go. Messages queue in `agent_msg_rx`
     //    while the stream is down; the sync loop drains them on reconnect.
-    //    Reuses the shared `docker` handle opened earlier.
+    //    Drives off `RuntimeBackend::stream_events` + `inspect_container`
+    //    so wisp can supply Pingora label discovery on the same path as
+    //    bollard.
     let (agent_msg_tx, mut agent_msg_rx) =
         tokio::sync::mpsc::channel::<isengard_proto::pb::AgentMessage>(64);
-    if let Some(docker) = docker.as_ref() {
-        let labels_docker = (**docker).clone();
+    if let Some(backend) = backend.as_ref() {
+        let labels_backend = backend.clone();
         let labels_out = agent_msg_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = labels::watch(labels_docker, labels_out).await {
+            if let Err(e) = labels::watch(labels_backend, labels_out).await {
                 tracing::error!(error = %e, "labels: watcher exited");
             }
         });
@@ -446,115 +449,126 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         // to the controller. Mounted at /etc/isengard/stacks via the
         // bind in docker/compose.yaml so the file persists across
         // container restarts.
-        let import_root = std::path::PathBuf::from(
-            std::env::var("ISENGARD_COMPOSE_IMPORT_ROOT")
-                .unwrap_or_else(|_| compose_import::DEFAULT_IMPORT_ROOT.to_string()),
-        );
-        compose_import::spawn(
-            docker.clone(),
-            agent_msg_tx.clone(),
-            agent_id.clone(),
-            import_root.clone(),
-            compose_import::DEFAULT_IMPORT_INTERVAL,
-        );
+        //
+        // Phase 0.5: still bollard-coupled (reverse-engineering compose.yaml
+        // from running containers reaches into bollard inspect details the
+        // trait doesn't surface yet). Gated on the bollard escape hatch;
+        // fresh wisp installs skip compose-import: the use case is
+        // migrating dockerd-installed homelabs and isn't applicable there.
+        if let Some(docker) = docker.as_ref() {
+            let import_root = std::path::PathBuf::from(
+                std::env::var("ISENGARD_COMPOSE_IMPORT_ROOT")
+                    .unwrap_or_else(|_| compose_import::DEFAULT_IMPORT_ROOT.to_string()),
+            );
+            compose_import::spawn(
+                docker.clone(),
+                agent_msg_tx.clone(),
+                agent_id.clone(),
+                import_root.clone(),
+                compose_import::DEFAULT_IMPORT_INTERVAL,
+            );
 
-        // v0.3d compose-as-truth: watch the same root for operator
-        // edits (vim, git pull, dashboard PUT). Each debounced change
-        // drives a reconcile sweep against the running containers.
-        let watcher_docker = docker.clone();
-        let watcher_root = import_root.clone();
-        let watcher_endpoint = endpoint.clone();
-        match compose_watcher::spawn(watcher_root.clone()) {
-            Ok((mut rx, watcher)) => {
-                // Hold the watcher Arc so it isn't dropped (which would
-                // stop the underlying inotify/FSEvents subscription).
-                tokio::spawn(async move {
-                    let _watcher_keepalive = watcher;
-                    while let Some(evt) = rx.recv().await {
-                        let yaml = match std::fs::read_to_string(&evt.path) {
-                            Ok(y) => y,
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    path = %evt.path.display(),
-                                    "compose_watcher: read after settle failed",
+            // v0.3d compose-as-truth: watch the same root for operator
+            // edits (vim, git pull, dashboard PUT). Each debounced change
+            // drives a reconcile sweep against the running containers.
+            let watcher_docker = docker.clone();
+            let watcher_root = import_root.clone();
+            let watcher_endpoint = endpoint.clone();
+            match compose_watcher::spawn(watcher_root.clone()) {
+                Ok((mut rx, watcher)) => {
+                    // Hold the watcher Arc so it isn't dropped (which would
+                    // stop the underlying inotify/FSEvents subscription).
+                    tokio::spawn(async move {
+                        let _watcher_keepalive = watcher;
+                        while let Some(evt) = rx.recv().await {
+                            let yaml = match std::fs::read_to_string(&evt.path) {
+                                Ok(y) => y,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        path = %evt.path.display(),
+                                        "compose_watcher: read after settle failed",
+                                    );
+                                    continue;
+                                }
+                            };
+                            let new_sha = compose_writer::sha256_hex(&yaml);
+                            // Skip reconcile when the on-disk hash matches
+                            // the agent's own last_applied_hash (we caused
+                            // this event ourselves via write_compose). The
+                            // first watcher event after our own write is
+                            // therefore a noop, which keeps recreate from
+                            // looping on its own writes.
+                            let stack_dir = watcher_root.join(&evt.stack_name);
+                            if compose_writer::matches_last_applied(&stack_dir, &new_sha)
+                                .unwrap_or(false)
+                            {
+                                tracing::debug!(
+                                    stack = %evt.stack_name,
+                                    "compose_watcher: change matches last_applied, skipping reconcile",
                                 );
                                 continue;
                             }
-                        };
-                        let new_sha = compose_writer::sha256_hex(&yaml);
-                        // Skip reconcile when the on-disk hash matches
-                        // the agent's own last_applied_hash (we caused
-                        // this event ourselves via write_compose). The
-                        // first watcher event after our own write is
-                        // therefore a noop, which keeps recreate from
-                        // looping on its own writes.
-                        let stack_dir = watcher_root.join(&evt.stack_name);
-                        if compose_writer::matches_last_applied(&stack_dir, &new_sha)
-                            .unwrap_or(false)
-                        {
-                            tracing::debug!(
+                            tracing::info!(
                                 stack = %evt.stack_name,
-                                "compose_watcher: change matches last_applied, skipping reconcile",
+                                sha256 = %new_sha,
+                                "compose_watcher: file changed, starting reconcile",
                             );
-                            continue;
-                        }
-                        tracing::info!(
-                            stack = %evt.stack_name,
-                            sha256 = %new_sha,
-                            "compose_watcher: file changed, starting reconcile",
-                        );
-                        // v0.3.6: when the compose declares external
-                        // secrets, route through the variant that
-                        // fetches + tmpfs-mounts them. We always pass the
-                        // endpoint; the variant only contacts the
-                        // controller when at least one service has
-                        // `secrets:` set.
-                        match compose_apply::reconcile_stack_with_secrets(
-                            watcher_docker.as_ref(),
-                            &evt.stack_name,
-                            &yaml,
-                            watcher_endpoint.clone(),
-                        )
-                        .await
-                        {
-                            Ok((plan, outcomes)) => {
-                                let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
-                                if plan.is_noop() {
-                                    tracing::debug!(
-                                        stack = %evt.stack_name,
-                                        "compose_watcher: reconcile noop",
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        stack = %evt.stack_name,
-                                        ops = plan.ops.len(),
-                                        failed = failed,
-                                        "compose_watcher: reconcile applied",
-                                    );
-                                }
-                                if failed == 0 {
-                                    if let Err(e) =
-                                        compose_writer::record_last_applied(&stack_dir, &new_sha)
-                                    {
-                                        tracing::warn!(
-                                            error = %e,
+                            // v0.3.6: when the compose declares external
+                            // secrets, route through the variant that
+                            // fetches + tmpfs-mounts them. We always pass the
+                            // endpoint; the variant only contacts the
+                            // controller when at least one service has
+                            // `secrets:` set.
+                            match compose_apply::reconcile_stack_with_secrets(
+                                watcher_docker.as_ref(),
+                                &evt.stack_name,
+                                &yaml,
+                                watcher_endpoint.clone(),
+                            )
+                            .await
+                            {
+                                Ok((plan, outcomes)) => {
+                                    let failed =
+                                        outcomes.iter().filter(|o| o.error.is_some()).count();
+                                    if plan.is_noop() {
+                                        tracing::debug!(
                                             stack = %evt.stack_name,
-                                            "compose_watcher: record_last_applied failed",
+                                            "compose_watcher: reconcile noop",
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            stack = %evt.stack_name,
+                                            ops = plan.ops.len(),
+                                            failed = failed,
+                                            "compose_watcher: reconcile applied",
                                         );
                                     }
+                                    if failed == 0 {
+                                        if let Err(e) = compose_writer::record_last_applied(
+                                            &stack_dir, &new_sha,
+                                        ) {
+                                            tracing::warn!(
+                                                error = %e,
+                                                stack = %evt.stack_name,
+                                                "compose_watcher: record_last_applied failed",
+                                            );
+                                        }
+                                    }
                                 }
+                                Err(e) => tracing::warn!(
+                                    error = %e,
+                                    stack = %evt.stack_name,
+                                    "compose_watcher: reconcile failed",
+                                ),
                             }
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                stack = %evt.stack_name,
-                                "compose_watcher: reconcile failed",
-                            ),
                         }
-                    }
-                });
+                    });
+                }
+                Err(e) => {
+                    warn!(error = %e, "compose_watcher: failed to spawn (continuing without)")
+                }
             }
-            Err(e) => warn!(error = %e, "compose_watcher: failed to spawn (continuing without)"),
         }
     }
 

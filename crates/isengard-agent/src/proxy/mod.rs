@@ -123,11 +123,11 @@ pub async fn apply_config(
 /// discovery. The sync loop uses this entrypoint; tests stick with the
 /// no-backend [`apply_config`] form so they don't need a daemon.
 ///
-/// Phase 0.4 dispatch A4: switched from `Option<&bollard::Docker>` to the
-/// trait. Bollard backend resolves IPs via [`discovery::resolve_container_ip`]
-/// (the existing pure-bollard path) by reaching for the underlying handle
-/// via [`crate::runtime::RuntimeBackend::as_bollard`]. Wisp backend's
-/// resolver lands in dispatch B.
+/// Phase 0.5: discovery is now trait-driven. Both bollard and wisp
+/// backends resolve IPs via [`discovery::resolve_container_ip`] using
+/// `inspect_container` + `network_settings.ip_addresses` from
+/// `ContainerSnapshot`; the bollard-specific accessor is no longer used
+/// here.
 pub async fn apply_config_with_backend(
     state: &ProxyState,
     cfg: isengard_proto::pb::ProxyConfig,
@@ -152,21 +152,11 @@ pub async fn apply_config_with_backend(
 
         // Discovery: prefer an IP shipped by the controller (test fixtures,
         // future controller-side discovery), then ask the runtime backend
-        // (today: bollard via discovery::resolve_container_ip; wisp lands
-        // in dispatch B), then fall back to 127.0.0.1.
+        // (any backend: bollard or wisp), then fall back to 127.0.0.1.
         let resolved_ip: Option<String> = if !up.container_ip.is_empty() {
             Some(up.container_ip.clone())
         } else if let Some(b) = backend {
-            // Phase 0.4 dispatch A: bollard backend keeps the existing
-            // pure-bollard discovery path (the picker logic is well
-            // tested against bollard's EndpointSettings shape). Wisp
-            // backend will surface ip_addresses through the trait's
-            // ContainerSnapshot in dispatch B.
-            if let Some(d) = b.as_bollard() {
-                discovery::resolve_container_ip(&d, &up.container_id).await
-            } else {
-                None
-            }
+            discovery::resolve_container_ip(b, &up.container_id).await
         } else {
             None
         };
