@@ -28,6 +28,9 @@
 //!     basename, matching Docker's container-id-as-hostname convention).
 //!   - `mounts`: APPENDED to the baseline mount set.
 //!   - `linux_resources`: replaces the baseline (no resources).
+//!   - `capabilities`: REPLACES the baseline cap allow-list when
+//!     `Some`. Otherwise the synthesised Spec keeps `CAP_KILL` +
+//!     `CAP_NET_BIND_SERVICE` (the busybox demo allow-list).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,6 +71,34 @@ pub struct ConfigOverrides {
     pub mounts: Vec<Mount>,
     /// Replaces the baseline (no resources). Set to apply cgroup limits.
     pub linux_resources: Option<LinuxResources>,
+    /// REPLACES the baseline capability set when `Some`. The baseline
+    /// is `CAP_KILL` + `CAP_NET_BIND_SERVICE` (matching the busybox
+    /// demo); operators that need to run images whose entrypoint drops
+    /// privilege from root to a service user (nginx, postgres, ...)
+    /// supply a richer set here. The five OCI capability sets
+    /// (bounding / effective / permitted / inheritable / ambient) are
+    /// each populated independently.
+    pub capabilities: Option<CapabilityOverride>,
+}
+
+/// Operator-supplied capability sets for `process.capabilities` in the
+/// synthesised runtime Spec. Each field carries a list of OCI cap
+/// names (`CAP_KILL`, `CAP_NET_BIND_SERVICE`, ...). Names with or
+/// without the `CAP_` prefix are accepted; both forms map to the same
+/// underlying [`oci_spec::runtime::Capability`].
+///
+/// All five fields default to empty so the override can be partial:
+/// e.g. populate only `bounding` to drop everything-but-bounding to a
+/// narrower allow-list while keeping the other sets at OCI defaults.
+/// In practice the wisp-cli `--cap-add` flag populates all five sets
+/// to the same list (matching docker `--cap-add` semantics).
+#[derive(Debug, Default, Clone)]
+pub struct CapabilityOverride {
+    pub bounding: Vec<String>,
+    pub effective: Vec<String>,
+    pub permitted: Vec<String>,
+    pub inheritable: Vec<String>,
+    pub ambient: Vec<String>,
 }
 
 /// Materialises a runtime bundle from a pulled image.
@@ -141,15 +172,34 @@ impl<'a> BundleBuilder<'a> {
             .unwrap_or_else(|| default_hostname(&self.bundle_dir));
 
         // Step 5: process. Default capabilities mirror the busybox
-        // demo's `CAP_KILL` + `CAP_NET_BIND_SERVICE` allow-list.
-        let caps = LinuxCapabilitiesBuilder::default()
-            .bounding(default_caps())
-            .effective(default_caps())
-            .permitted(default_caps())
-            .inheritable(Capabilities::new())
-            .ambient(Capabilities::new())
-            .build()
-            .map_err(|e| WispImageError::Manifest(format!("LinuxCapabilities build: {e}")))?;
+        // demo's `CAP_KILL` + `CAP_NET_BIND_SERVICE` allow-list. When
+        // `overrides.capabilities` is `Some`, replace each of the five
+        // sets (bounding / effective / permitted / inheritable / ambient)
+        // with the operator-supplied list.
+        let caps = if let Some(cap_override) = overrides.capabilities.as_ref() {
+            let bounding = parse_caps(&cap_override.bounding)?;
+            let effective = parse_caps(&cap_override.effective)?;
+            let permitted = parse_caps(&cap_override.permitted)?;
+            let inheritable = parse_caps(&cap_override.inheritable)?;
+            let ambient = parse_caps(&cap_override.ambient)?;
+            LinuxCapabilitiesBuilder::default()
+                .bounding(bounding)
+                .effective(effective)
+                .permitted(permitted)
+                .inheritable(inheritable)
+                .ambient(ambient)
+                .build()
+                .map_err(|e| WispImageError::Manifest(format!("LinuxCapabilities build: {e}")))?
+        } else {
+            LinuxCapabilitiesBuilder::default()
+                .bounding(default_caps())
+                .effective(default_caps())
+                .permitted(default_caps())
+                .inheritable(Capabilities::new())
+                .ambient(Capabilities::new())
+                .build()
+                .map_err(|e| WispImageError::Manifest(format!("LinuxCapabilities build: {e}")))?
+        };
 
         let process = ProcessBuilder::default()
             .terminal(false)
@@ -300,6 +350,26 @@ fn default_caps() -> Capabilities {
     s.insert(Capability::Kill);
     s.insert(Capability::NetBindService);
     s
+}
+
+/// Parse a list of OCI capability names into a [`Capabilities`] set.
+/// Accepts both the canonical `CAP_KILL` form and the prefix-stripped
+/// `KILL` form (oci_spec's enum strum-derives FromStr in
+/// SCREAMING_SNAKE_CASE without the prefix). Empty input yields an
+/// empty set; an unknown name surfaces a `Manifest` error naming the
+/// offender.
+fn parse_caps(names: &[String]) -> Result<Capabilities, WispImageError> {
+    let mut out: HashSet<Capability> = HashSet::new();
+    for raw in names {
+        let bare = raw.strip_prefix("CAP_").unwrap_or(raw.as_str());
+        let cap: Capability = bare.parse().map_err(|_| {
+            WispImageError::Manifest(format!(
+                "unknown OCI capability {raw:?}; expected something like CAP_NET_BIND_SERVICE"
+            ))
+        })?;
+        out.insert(cap);
+    }
+    Ok(out)
 }
 
 /// The six standard mounts. Order matches the busybox demo to keep
@@ -699,6 +769,143 @@ mod tests {
         assert!(!rootfs.exists());
         // Cleanup is idempotent: second call on a missing rootfs is fine.
         builder.cleanup().unwrap();
+    }
+
+    #[test]
+    fn synthesise_config_uses_default_caps_when_override_none() {
+        // Phase 0.5: with `capabilities: None`, the synthesised Spec
+        // matches the pre-0.5 default of `CAP_KILL` + `CAP_NET_BIND_SERVICE`
+        // in bounding / effective / permitted, and empty inheritable +
+        // ambient. The busybox demo + every prior phase relies on this.
+        let cfg = ConfigBuilder::default()
+            .entrypoint(vec!["/bin/sh".to_string()])
+            .build()
+            .unwrap();
+        let pulled = pulled_with_config(cfg);
+        let (_st_tmp, store, bundle_dir) = store_and_dir();
+        let builder = BundleBuilder::new(&pulled, &store, &bundle_dir);
+        let spec = builder
+            .synthesise_config(ConfigOverrides::default())
+            .unwrap();
+
+        let caps = spec
+            .process()
+            .as_ref()
+            .unwrap()
+            .capabilities()
+            .clone()
+            .unwrap();
+        let bounding = caps.bounding().clone().unwrap_or_default();
+        assert_eq!(
+            bounding.len(),
+            2,
+            "default bounding has Kill + NetBindService"
+        );
+        assert!(bounding.contains(&Capability::Kill));
+        assert!(bounding.contains(&Capability::NetBindService));
+        let inheritable = caps.inheritable().clone().unwrap_or_default();
+        assert!(inheritable.is_empty(), "default inheritable is empty");
+        let ambient = caps.ambient().clone().unwrap_or_default();
+        assert!(ambient.is_empty(), "default ambient is empty");
+    }
+
+    #[test]
+    fn synthesise_config_applies_cap_override() {
+        // Phase 0.5: `CapabilityOverride` replaces the default cap set
+        // across all five OCI sets. Each name accepts both `CAP_KILL`
+        // and `KILL` forms.
+        let cfg = ConfigBuilder::default()
+            .entrypoint(vec!["/bin/sh".to_string()])
+            .build()
+            .unwrap();
+        let pulled = pulled_with_config(cfg);
+        let (_st_tmp, store, bundle_dir) = store_and_dir();
+        let builder = BundleBuilder::new(&pulled, &store, &bundle_dir);
+
+        let cap_set = vec![
+            "CAP_CHOWN".to_string(),
+            "CAP_SETUID".to_string(),
+            "CAP_SETGID".to_string(),
+            "CAP_DAC_OVERRIDE".to_string(),
+            "CAP_FOWNER".to_string(),
+            "CAP_SETPCAP".to_string(),
+        ];
+        let overrides = ConfigOverrides {
+            capabilities: Some(CapabilityOverride {
+                bounding: cap_set.clone(),
+                effective: cap_set.clone(),
+                permitted: cap_set.clone(),
+                inheritable: cap_set.clone(),
+                ambient: cap_set.clone(),
+            }),
+            ..Default::default()
+        };
+        let spec = builder.synthesise_config(overrides).unwrap();
+        let caps = spec
+            .process()
+            .as_ref()
+            .unwrap()
+            .capabilities()
+            .clone()
+            .unwrap();
+        for set_name in [
+            "bounding",
+            "effective",
+            "permitted",
+            "inheritable",
+            "ambient",
+        ] {
+            let set: HashSet<Capability> = match set_name {
+                "bounding" => caps.bounding().clone().unwrap_or_default(),
+                "effective" => caps.effective().clone().unwrap_or_default(),
+                "permitted" => caps.permitted().clone().unwrap_or_default(),
+                "inheritable" => caps.inheritable().clone().unwrap_or_default(),
+                "ambient" => caps.ambient().clone().unwrap_or_default(),
+                _ => unreachable!(),
+            };
+            assert_eq!(set.len(), 6, "{set_name} has 6 entries");
+            assert!(
+                set.contains(&Capability::Chown),
+                "{set_name} contains Chown"
+            );
+            assert!(
+                set.contains(&Capability::Setuid),
+                "{set_name} contains Setuid"
+            );
+            assert!(
+                set.contains(&Capability::Setpcap),
+                "{set_name} contains Setpcap"
+            );
+        }
+    }
+
+    #[test]
+    fn synthesise_config_cap_override_rejects_unknown_name() {
+        // Garbage cap names surface a Manifest error so the operator
+        // sees the offender, not a panic deep inside the OCI builder.
+        let cfg = ConfigBuilder::default()
+            .entrypoint(vec!["/bin/sh".to_string()])
+            .build()
+            .unwrap();
+        let pulled = pulled_with_config(cfg);
+        let (_st_tmp, store, bundle_dir) = store_and_dir();
+        let builder = BundleBuilder::new(&pulled, &store, &bundle_dir);
+
+        let overrides = ConfigOverrides {
+            capabilities: Some(CapabilityOverride {
+                bounding: vec!["CAP_NOT_A_REAL_CAP".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = builder
+            .synthesise_config(overrides)
+            .expect_err("unknown cap should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CAP_NOT_A_REAL_CAP") || msg.contains("unknown"),
+            "expected error to name the bad cap, got: {msg}"
+        );
     }
 
     #[test]

@@ -71,7 +71,42 @@ pub fn spec_to_config_overrides(spec: &ContainerCreateSpec) -> wisp_image::Confi
         hostname: spec.hostname.clone(),
         mounts,
         linux_resources: spec.linux_resources.as_ref().map(linux_resources_to_oci),
+        capabilities: cap_add_from_labels(&spec.labels),
     }
+}
+
+/// Read the `isengard.cap.add` label off a container spec and convert
+/// its comma-separated cap names into a [`wisp_image::CapabilityOverride`]
+/// that adds the same cap list to all five OCI sets (bounding,
+/// effective, permitted, inheritable, ambient). Mirrors the wisp-cli
+/// `--cap-add` semantics + docker's behavior.
+///
+/// Returns `None` when the label is missing or empty so the
+/// BundleBuilder keeps its default `CAP_KILL` + `CAP_NET_BIND_SERVICE`
+/// allow-list. This is the agent equivalent of the wisp-cli flag: the
+/// container author opts in by setting
+/// `isengard.cap.add=CAP_CHOWN,CAP_SETUID,CAP_SETGID,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_SETPCAP`
+/// in their compose file (or any deployment metadata that lands in
+/// `ContainerCreateSpec::labels`).
+pub fn cap_add_from_labels(
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Option<wisp_image::CapabilityOverride> {
+    let raw = labels.get("isengard.cap.add")?;
+    let caps: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if caps.is_empty() {
+        return None;
+    }
+    Some(wisp_image::CapabilityOverride {
+        bounding: caps.clone(),
+        effective: caps.clone(),
+        permitted: caps.clone(),
+        inheritable: caps.clone(),
+        ambient: caps,
+    })
 }
 
 /// Translate a [`MountSpec`] into the OCI runtime [`OciMount`] shape
@@ -1403,6 +1438,49 @@ mod tests {
         // Tmpfs mounts shouldn't carry the `bind` option.
         assert!(!opts.contains(&"bind".to_string()));
         assert!(!opts.contains(&"ro".to_string()));
+    }
+
+    #[test]
+    fn wisp_backend_reads_cap_add_label() {
+        // Phase 0.5: agent containers opt in to a richer cap set by
+        // setting `isengard.cap.add=CAP_CHOWN,CAP_SETUID,...` on the
+        // spec's labels. The override fans the same list to all five
+        // OCI sets (matching wisp-cli's --cap-add).
+        let mut s = empty_spec("c", "nginx:alpine");
+        s.labels.insert(
+            "isengard.cap.add".into(),
+            "CAP_CHOWN,CAP_SETUID,CAP_SETGID,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_SETPCAP".into(),
+        );
+        let o = spec_to_config_overrides(&s);
+        let cap_override = o.capabilities.expect("cap override present");
+        assert_eq!(cap_override.bounding.len(), 6);
+        assert!(cap_override.bounding.contains(&"CAP_CHOWN".to_string()));
+        assert!(cap_override.bounding.contains(&"CAP_SETPCAP".to_string()));
+        // Same list across all five sets.
+        assert_eq!(cap_override.bounding, cap_override.effective);
+        assert_eq!(cap_override.bounding, cap_override.permitted);
+        assert_eq!(cap_override.bounding, cap_override.inheritable);
+        assert_eq!(cap_override.bounding, cap_override.ambient);
+    }
+
+    #[test]
+    fn wisp_backend_no_cap_label_keeps_defaults() {
+        // Without the label, `capabilities` stays `None` so the bundle
+        // synthesiser falls back to its default cap allow-list.
+        let s = empty_spec("c", "alpine:3.19");
+        let o = spec_to_config_overrides(&s);
+        assert!(o.capabilities.is_none());
+    }
+
+    #[test]
+    fn wisp_backend_empty_cap_label_keeps_defaults() {
+        // An empty / whitespace-only label is treated the same as no
+        // label: don't emit an override that would replace the default
+        // set with an empty allow-list.
+        let mut s = empty_spec("c", "alpine:3.19");
+        s.labels.insert("isengard.cap.add".into(), " , ,".into());
+        let o = spec_to_config_overrides(&s);
+        assert!(o.capabilities.is_none());
     }
 
     #[test]

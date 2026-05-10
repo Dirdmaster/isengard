@@ -34,7 +34,9 @@ use nix::sys::signal::Signal;
 use wisp::{
     ContainerHandle, ContainerState, NetworkSpec, PortProtocol, PortPublish, ResolvSource, Runtime,
 };
-use wisp_image::{BundleBuilder, Client, ConfigOverrides, ImageRef, PulledImage};
+use wisp_image::{
+    BundleBuilder, CapabilityOverride, Client, ConfigOverrides, ImageRef, PulledImage,
+};
 
 use crate::net_attacher::WispNetAttacher;
 
@@ -109,6 +111,17 @@ struct RunArgs {
     /// `--port` without `--network` auto-attaches to `wisp-default`.
     #[arg(long, value_name = "[HOST_IP:]HOST_PORT:CONTAINER_PORT[/PROTO]")]
     port: Vec<String>,
+    /// Grant a Linux capability to PID 1 inside the container.
+    /// Repeatable. Each `--cap-add CAP_<NAME>` value is added to all
+    /// five OCI capability sets (bounding, effective, permitted,
+    /// inheritable, ambient): matches docker `--cap-add` semantics.
+    /// Without `--cap-add`, the default set is `CAP_KILL` +
+    /// `CAP_NET_BIND_SERVICE` (the busybox demo allow-list). Real
+    /// images that drop privilege from root to a service user (nginx,
+    /// postgres, ...) typically need `CAP_CHOWN`, `CAP_SETUID`,
+    /// `CAP_SETGID`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_SETPCAP`.
+    #[arg(long, value_name = "CAP_NAME")]
+    cap_add: Vec<String>,
     /// With `--image`: extra args appended to the image's entrypoint.
     /// The positional `bundle` slot also folds into this list when
     /// `--image` is set. Ignored when running a positional bundle.
@@ -508,24 +521,12 @@ fn cmd_run_image(state_dir: &Path, args: RunArgs) -> Result<()> {
         } else {
             Some(args.args.clone())
         },
+        capabilities: cap_add_to_override(&args.cap_add),
         ..Default::default()
     };
     builder
         .write_config(overrides)
         .with_context(|| format!("write config.json for {id:?}"))?;
-
-    // Phase 0.3 demo workaround: wisp-image's default capability set
-    // is `KILL` + `NET_BIND_SERVICE` only (the Phase 0.1 busybox demo
-    // is the only thing it formally proves out). Real images like
-    // nginx need `CHOWN` + `SETUID` + `SETGID` + `DAC_OVERRIDE` for
-    // their entrypoint to drop privilege from root to the service
-    // user. Until wisp-image gains a capabilities override (deferred
-    // to a follow-up phase), patch the synthesised config.json in
-    // place so `wisp run --image` runs realistic workloads.
-    let cfg_path = bundle_dir.join("config.json");
-    if let Err(e) = augment_capabilities_in_config(&cfg_path) {
-        tracing::warn!("augment capabilities in {cfg_path:?} (best-effort): {e}");
-    }
 
     // Pin the layer set so a concurrent `wisp image gc` doesn't
     // pull blobs out from under the running container.
@@ -1102,59 +1103,26 @@ fn derive_id_from_bundle(bundle: &Path) -> String {
         .unwrap_or_else(|| "wisp".to_string())
 }
 
-/// In-place patch the bundle's config.json to grant a fuller
-/// runc-style default capability set to the container's PID 1.
+/// Aggregate `--cap-add CAP_NAME` flags into a [`CapabilityOverride`]
+/// that fills all five OCI sets (bounding, effective, permitted,
+/// inheritable, ambient) with the same list. Matches docker
+/// `--cap-add` semantics: an added cap shows up in every set so the
+/// entrypoint can both possess and pass it on.
 ///
-/// Phase 0.3 needs nginx (and any image whose entrypoint drops privs
-/// from root to a service user) to actually start. wisp-image ships a
-/// pared-down `KILL + NET_BIND_SERVICE` default; this helper folds in
-/// `CHOWN + SETUID + SETGID + DAC_OVERRIDE + FOWNER + SETPCAP` so the
-/// nginx demo works without operator-side spec editing. Idempotent: a
-/// missing `process.capabilities` entry is created; an existing one is
-/// extended, never narrowed.
-fn augment_capabilities_in_config(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&bytes).with_context(|| format!("parse {path:?}"))?;
-
-    let extra = [
-        "CAP_CHOWN",
-        "CAP_SETUID",
-        "CAP_SETGID",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FOWNER",
-        "CAP_SETPCAP",
-    ];
-
-    let process = value
-        .get_mut("process")
-        .ok_or_else(|| anyhow!("config.json: no process field"))?;
-    let caps = process
-        .as_object_mut()
-        .and_then(|p| p.get_mut("capabilities"))
-        .ok_or_else(|| anyhow!("config.json: process.capabilities missing"))?;
-    let caps_obj = caps
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("config.json: process.capabilities is not an object"))?;
-
-    for key in ["bounding", "permitted", "effective"] {
-        let arr = caps_obj
-            .entry(key.to_string())
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or_else(|| anyhow!("config.json: process.capabilities.{key} not an array"))?;
-        for cap in extra {
-            let already = arr.iter().any(|v| v.as_str() == Some(cap));
-            if !already {
-                arr.push(serde_json::Value::String(cap.to_string()));
-            }
-        }
+/// Returns `None` when the input is empty: the bundle synthesiser
+/// keeps its default `CAP_KILL` + `CAP_NET_BIND_SERVICE` allow-list in
+/// that case.
+fn cap_add_to_override(cap_add: &[String]) -> Option<CapabilityOverride> {
+    if cap_add.is_empty() {
+        return None;
     }
-
-    let new_bytes =
-        serde_json::to_vec_pretty(&value).with_context(|| format!("serialise {path:?}"))?;
-    std::fs::write(path, new_bytes).with_context(|| format!("write {path:?}"))?;
-    Ok(())
+    Some(CapabilityOverride {
+        bounding: cap_add.to_vec(),
+        effective: cap_add.to_vec(),
+        permitted: cap_add.to_vec(),
+        inheritable: cap_add.to_vec(),
+        ambient: cap_add.to_vec(),
+    })
 }
 
 /// Default container ID for `wisp run --image <ref>`. Strips the
@@ -1331,6 +1299,30 @@ mod tests {
     fn parse_port_rejects_non_numeric_port() {
         let err = parse_port_publish("abc:80").unwrap_err().to_string();
         assert!(err.contains("invalid host port"), "got: {err}");
+    }
+
+    #[test]
+    fn cap_add_flag_aggregates_to_all_five_sets() {
+        // --cap-add fans the same list out to bounding / effective /
+        // permitted / inheritable / ambient: matches docker's behavior.
+        let caps = vec![
+            "CAP_CHOWN".to_string(),
+            "CAP_SETUID".to_string(),
+            "CAP_SETGID".to_string(),
+        ];
+        let ov = cap_add_to_override(&caps).expect("non-empty input yields Some");
+        assert_eq!(ov.bounding, caps);
+        assert_eq!(ov.effective, caps);
+        assert_eq!(ov.permitted, caps);
+        assert_eq!(ov.inheritable, caps);
+        assert_eq!(ov.ambient, caps);
+    }
+
+    #[test]
+    fn cap_add_empty_keeps_defaults_via_none() {
+        // Empty --cap-add returns None so the bundle synthesiser keeps
+        // its default cap allow-list.
+        assert!(cap_add_to_override(&[]).is_none());
     }
 
     #[test]

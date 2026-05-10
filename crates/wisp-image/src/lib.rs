@@ -10,7 +10,7 @@ pub mod reference;
 pub mod registry;
 pub mod store;
 
-pub use bundle::{BundleBuilder, ConfigOverrides};
+pub use bundle::{BundleBuilder, CapabilityOverride, ConfigOverrides};
 pub use error::WispImageError;
 pub use reference::ImageRef;
 pub use registry::{Client, LayerRef, PulledImage};
