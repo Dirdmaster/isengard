@@ -12,7 +12,9 @@ use crate::host::{EnrollHost, Host, HostId};
 use crate::host_action::{HostAction, HostActionId, HostActionKind};
 use crate::service::{InsertService, Service, ServiceId, ServiceState};
 use crate::setting::Setting;
-use crate::stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};
+use crate::stack::{
+    InsertStack, Stack, StackComposeRow, StackHook, StackId, StackManifestBundle, StackSource,
+};
 
 /// Wraps a `sqlx::SqlitePool` opened against a single `.db` file.
 /// Cheap to clone (the pool is `Arc`-backed inside).
@@ -307,13 +309,13 @@ impl Inventory {
     pub async fn list_stacks(&self, host_id: Option<HostId>) -> Result<Vec<Stack>> {
         let rows = match host_id {
             Some(h) => {
-                sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE host_id = ? ORDER BY name")
+                sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet FROM stacks WHERE host_id = ? ORDER BY name")
                     .bind(h.to_bytes().as_slice())
                     .fetch_all(&self.pool)
                     .await?
             }
             None => {
-                sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks ORDER BY name")
+                sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet FROM stacks ORDER BY name")
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -324,7 +326,7 @@ impl Inventory {
 
     pub async fn get_stack(&self, id: StackId) -> Result<Option<Stack>> {
         let row =
-            sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE id = ?")
+            sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet FROM stacks WHERE id = ?")
                 .bind(id.0)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -401,6 +403,190 @@ impl Inventory {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Phase 0.13: write the manifest body + metadata + deploy strategy
+    /// for `stack_id`. Idempotent; called every time `isd deploy` ships
+    /// a stack with a manifest. Pass `None` for `deploy_strategy` /
+    /// `manifest_fleet` when the manifest doesn't pin them.
+    pub async fn update_stack_manifest(
+        &self,
+        stack_id: StackId,
+        manifest_toml: &str,
+        manifest_sha256: &str,
+        deploy_strategy: Option<&str>,
+        manifest_fleet: Option<&str>,
+    ) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"
+            UPDATE stacks
+               SET manifest_toml         = ?,
+                   manifest_sha256       = ?,
+                   manifest_imported_at  = ?,
+                   deploy_strategy       = ?,
+                   manifest_fleet        = ?
+             WHERE id = ?
+            "#,
+        )
+        .bind(manifest_toml)
+        .bind(manifest_sha256)
+        .bind(&now)
+        .bind(deploy_strategy)
+        .bind(manifest_fleet)
+        .bind(stack_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Phase 0.13: bind a set of secret names to `stack_id`. DELETE the
+    /// existing bindings, then INSERT the new list in one transaction.
+    /// Returns `Error::UnknownSecrets` listing every name in `names`
+    /// that does NOT have a matching row in the `secrets` table.
+    pub async fn set_stack_secrets(&self, stack_id: StackId, names: &[&str]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        // Pre-flight: collect all unknown names so the caller can surface
+        // them in one go instead of failing on the first.
+        let mut missing = Vec::new();
+        for name in names {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secrets WHERE name = ?")
+                .bind(name)
+                .fetch_one(&mut *tx)
+                .await?;
+            if count == 0 {
+                missing.push((*name).to_string());
+            }
+        }
+        if !missing.is_empty() {
+            return Err(Error::UnknownSecrets(missing));
+        }
+
+        sqlx::query("DELETE FROM stack_secrets WHERE stack_id = ?")
+            .bind(stack_id.0)
+            .execute(&mut *tx)
+            .await?;
+        for name in names {
+            sqlx::query("INSERT INTO stack_secrets (stack_id, secret_name) VALUES (?, ?)")
+                .bind(stack_id.0)
+                .bind(name)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Phase 0.13: replace the hook list for `stack_id`. Preserves
+    /// manifest order via the `ordinal` column. `cmd` is stored as a
+    /// JSON-encoded `Vec<String>`. Empty list clears all hooks.
+    pub async fn set_stack_hooks(&self, stack_id: StackId, hooks: &[StackHook]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM stack_hooks WHERE stack_id = ?")
+            .bind(stack_id.0)
+            .execute(&mut *tx)
+            .await?;
+        for (ordinal, hook) in hooks.iter().enumerate() {
+            let cmd_json = serde_json::to_string(&hook.cmd).map_err(|e| Error::Decode {
+                reason: format!("encoding hook cmd as json: {e}"),
+            })?;
+            sqlx::query(
+                r#"
+                INSERT INTO stack_hooks
+                    (stack_id, on_event, cmd_json, timeout_ms, on_error, ordinal)
+                VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(stack_id.0)
+            .bind(&hook.on_event)
+            .bind(&cmd_json)
+            .bind(hook.timeout_ms)
+            .bind(&hook.on_error)
+            .bind(ordinal as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Phase 0.13: read back the manifest bundle (manifest_toml, secrets,
+    /// hooks) for `stack_id`. Used by `GET /api/v1/stacks/<id>`. Returns
+    /// a bundle with NULL / empty fields when the stack has no manifest.
+    pub async fn get_stack_manifest_bundle(
+        &self,
+        stack_id: StackId,
+    ) -> Result<StackManifestBundle> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            r#"
+            SELECT manifest_toml, manifest_sha256, manifest_imported_at,
+                   deploy_strategy, manifest_fleet
+              FROM stacks
+             WHERE id = ?
+            "#,
+        )
+        .bind(stack_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet) =
+            match row {
+                Some(row) => (
+                    row.try_get("manifest_toml")?,
+                    row.try_get("manifest_sha256")?,
+                    row.try_get("manifest_imported_at")?,
+                    row.try_get("deploy_strategy")?,
+                    row.try_get("manifest_fleet")?,
+                ),
+                None => (None, None, None, None, None),
+            };
+
+        let secret_rows = sqlx::query(
+            "SELECT secret_name FROM stack_secrets WHERE stack_id = ? ORDER BY bound_at, secret_name",
+        )
+        .bind(stack_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut secrets = Vec::with_capacity(secret_rows.len());
+        for row in secret_rows {
+            secrets.push(row.try_get::<String, _>("secret_name")?);
+        }
+
+        let hook_rows = sqlx::query(
+            r#"
+            SELECT on_event, cmd_json, timeout_ms, on_error
+              FROM stack_hooks
+             WHERE stack_id = ?
+             ORDER BY on_event, ordinal
+            "#,
+        )
+        .bind(stack_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut hooks = Vec::with_capacity(hook_rows.len());
+        for row in hook_rows {
+            let cmd_json: String = row.try_get("cmd_json")?;
+            let cmd: Vec<String> = serde_json::from_str(&cmd_json).map_err(|e| Error::Decode {
+                reason: format!("decoding hook cmd json: {e}"),
+            })?;
+            hooks.push(StackHook {
+                on_event: row.try_get("on_event")?,
+                cmd,
+                timeout_ms: row.try_get("timeout_ms")?,
+                on_error: row.try_get("on_error")?,
+            });
+        }
+
+        Ok(StackManifestBundle {
+            manifest_toml,
+            manifest_sha256,
+            manifest_imported_at,
+            deploy_strategy,
+            manifest_fleet,
+            secrets,
+            hooks,
+        })
     }
 
     pub async fn insert_service(&self, req: InsertService) -> Result<ServiceId> {
@@ -667,12 +853,25 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
         reason: format!("unknown stack source: {source_str}"),
     })?;
     let discovered_at: chrono::DateTime<chrono::Utc> = row.try_get("discovered_at")?;
+    // Phase 0.13 manifest columns. Read defensively: pre-0.13 callers
+    // that SELECT only the base columns get None rather than a decode
+    // error.
+    let manifest_toml: Option<String> = row.try_get("manifest_toml").ok().flatten();
+    let manifest_sha256: Option<String> = row.try_get("manifest_sha256").ok().flatten();
+    let manifest_imported_at: Option<String> = row.try_get("manifest_imported_at").ok().flatten();
+    let deploy_strategy: Option<String> = row.try_get("deploy_strategy").ok().flatten();
+    let manifest_fleet: Option<String> = row.try_get("manifest_fleet").ok().flatten();
     Ok(Stack {
         id: StackId(row.try_get("id")?),
         host_id: HostId::from_bytes(arr),
         name: row.try_get("name")?,
         source,
         discovered_at,
+        manifest_toml,
+        manifest_sha256,
+        manifest_imported_at,
+        deploy_strategy,
+        manifest_fleet,
     })
 }
 
@@ -1187,5 +1386,124 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    // ------- Phase 0.13 manifest helpers -------
+
+    async fn setup_stack_for_manifest_tests(inv: &Inventory) -> StackId {
+        let host_id = test_enroll_h(inv, "h1").await;
+        inv.insert_stack(InsertStack {
+            host_id,
+            name: "servarr".into(),
+            source: StackSource::Manual,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_stack_manifest_round_trips() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let stack_id = setup_stack_for_manifest_tests(&inv).await;
+        let ok = inv
+            .update_stack_manifest(
+                stack_id,
+                "name = \"servarr\"\ncompose = [\"compose.toml\"]\n",
+                "abcd1234",
+                Some("blue-green"),
+                Some("homelab"),
+            )
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let stack = inv.get_stack(stack_id).await.unwrap().unwrap();
+        assert_eq!(stack.manifest_sha256.as_deref(), Some("abcd1234"));
+        assert_eq!(stack.deploy_strategy.as_deref(), Some("blue-green"));
+        assert_eq!(stack.manifest_fleet.as_deref(), Some("homelab"));
+        assert!(stack.manifest_imported_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn set_stack_secrets_rejects_unknown_names() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let stack_id = setup_stack_for_manifest_tests(&inv).await;
+
+        inv.upsert_secret("KNOWN_API_KEY", b"ciphertext", Some("op"))
+            .await
+            .unwrap();
+
+        let err = inv
+            .set_stack_secrets(stack_id, &["KNOWN_API_KEY", "MISSING_ONE", "MISSING_TWO"])
+            .await
+            .unwrap_err();
+        match err {
+            Error::UnknownSecrets(missing) => {
+                assert_eq!(missing, vec!["MISSING_ONE", "MISSING_TWO"]);
+            }
+            other => panic!("expected UnknownSecrets, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_stack_secrets_is_idempotent() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let stack_id = setup_stack_for_manifest_tests(&inv).await;
+        inv.upsert_secret("A", b"ct", None).await.unwrap();
+        inv.upsert_secret("B", b"ct", None).await.unwrap();
+
+        inv.set_stack_secrets(stack_id, &["A", "B"]).await.unwrap();
+        inv.set_stack_secrets(stack_id, &["A", "B"]).await.unwrap();
+
+        let bundle = inv.get_stack_manifest_bundle(stack_id).await.unwrap();
+        assert_eq!(bundle.secrets, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn set_stack_hooks_preserves_order() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let stack_id = setup_stack_for_manifest_tests(&inv).await;
+        let hooks = vec![
+            StackHook {
+                on_event: "pre-deploy".into(),
+                cmd: vec!["./first.sh".into()],
+                timeout_ms: 30_000,
+                on_error: "abort".into(),
+            },
+            StackHook {
+                on_event: "pre-deploy".into(),
+                cmd: vec!["./second.sh".into(), "arg".into()],
+                timeout_ms: 60_000,
+                on_error: "continue".into(),
+            },
+            StackHook {
+                on_event: "post-deploy".into(),
+                cmd: vec!["./notify.sh".into()],
+                timeout_ms: 60_000,
+                on_error: "continue".into(),
+            },
+        ];
+        inv.set_stack_hooks(stack_id, &hooks).await.unwrap();
+        let bundle = inv.get_stack_manifest_bundle(stack_id).await.unwrap();
+        assert_eq!(bundle.hooks.len(), 3);
+        let pre: Vec<_> = bundle
+            .hooks
+            .iter()
+            .filter(|h| h.on_event == "pre-deploy")
+            .collect();
+        assert_eq!(pre[0].cmd, vec!["./first.sh".to_string()]);
+        assert_eq!(pre[1].cmd, vec!["./second.sh".to_string(), "arg".into()]);
+    }
+
+    #[tokio::test]
+    async fn get_stack_manifest_bundle_returns_nulls_when_absent() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let stack_id = setup_stack_for_manifest_tests(&inv).await;
+        let bundle = inv.get_stack_manifest_bundle(stack_id).await.unwrap();
+        assert!(bundle.manifest_toml.is_none());
+        assert!(bundle.manifest_sha256.is_none());
+        assert!(bundle.deploy_strategy.is_none());
+        assert!(bundle.secrets.is_empty());
+        assert!(bundle.hooks.is_empty());
     }
 }

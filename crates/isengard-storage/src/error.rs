@@ -21,6 +21,12 @@ pub enum Error {
 
     #[error("conflict: {0}")]
     Conflict(String),
+
+    /// Returned by `set_stack_secrets` when one or more requested secret
+    /// names do not exist in the `secrets` table. The dashboard surfaces
+    /// this as a 422 with the missing-name list.
+    #[error("unknown secret names: {0:?}")]
+    UnknownSecrets(Vec<String>),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
