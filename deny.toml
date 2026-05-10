@@ -82,6 +82,10 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path deps within the workspace (e.g. wisp-cli depending on wisp,
+# wisp-net, wisp-image via `path = "../..."`) are intentionally version-less.
+# Allow them; the wildcards = "deny" rule still catches third-party wildcards.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
