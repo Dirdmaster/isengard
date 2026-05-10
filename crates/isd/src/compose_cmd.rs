@@ -26,9 +26,13 @@ use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct DeployArgs {
-    /// Path to the local compose.yaml. Use `-` to read from stdin.
-    pub path: PathBuf,
-    /// Stack name override. Defaults to the file's parent directory.
+    /// Path to a local compose file, or a directory containing a
+    /// `stack.toml` (Phase 0.13). Optional: when omitted, `isd deploy`
+    /// looks for `./stack.toml` in the current directory. Use `-` to
+    /// read a compose from stdin (legacy single-file path).
+    pub path: Option<PathBuf>,
+    /// Stack name override. Defaults to the file's parent directory
+    /// (legacy single-file path) or to `manifest.name` (Phase 0.13).
     #[arg(long)]
     pub stack: Option<String>,
     /// Target host ULID for first-time deploys. Optional: when omitted
@@ -45,6 +49,31 @@ pub struct DeployArgs {
     /// concurrent operator edits.
     #[arg(long)]
     pub force: bool,
+    /// Phase 0.13: walk immediate subdirs of cwd (or `--root`) and
+    /// deploy every dir containing a `stack.toml`. Sequential, lexical
+    /// order. Sane failure semantics: continue on per-stack failure,
+    /// report at the end (override with `--fail-fast`).
+    #[arg(long)]
+    pub all: bool,
+    /// Phase 0.13: walk root for `--all`. Defaults to cwd.
+    #[arg(long, requires = "all")]
+    pub root: Option<PathBuf>,
+    /// Phase 0.13: select a named `[overlays.<name>]` block from the
+    /// manifest. Applies after the base `compose = [...]` list.
+    #[arg(long)]
+    pub overlay: Option<String>,
+    /// Phase 0.13: override the manifest's `strategy` for this run.
+    /// Doesn't persist to the manifest.
+    #[arg(long)]
+    pub strategy: Option<String>,
+    /// Phase 0.13: with `--all`, stop at the first failing stack.
+    /// Default is "continue, report at the end".
+    #[arg(long)]
+    pub fail_fast: bool,
+    /// Phase 0.13: dry-run; print the plan for each affected stack and
+    /// exit without writing. Same as `isd diff <stack>` but for `--all`.
+    #[arg(long)]
+    pub diff: bool,
 }
 
 #[derive(Debug, Args)]
@@ -138,10 +167,267 @@ struct PutConflict {
 }
 
 pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
-    let body = read_compose_path(&args.path)?;
+    // Phase 0.13 dispatch. `--all` walks subdirs; otherwise we may
+    // have a manifest (`stack.toml` in cwd or the supplied dir) or a
+    // bare compose file (legacy).
+    let plan = resolve_deploy_plan(&args)?;
+    match plan {
+        DeployPlan::All { root } => return run_all_deploy(args, root, context).await,
+        DeployPlan::Manifest { manifest_path } => {
+            return run_manifest_deploy(args, manifest_path, context).await;
+        }
+        DeployPlan::Single { compose_path } => {
+            // Fall through to the legacy single-compose path below.
+            run_single_compose(args, compose_path, context).await
+        }
+    }
+}
+
+/// Phase 0.13: classify what `isd deploy` is being asked to do.
+#[derive(Debug)]
+pub enum DeployPlan {
+    /// `--all`: walk immediate subdirs of `root`.
+    All { root: PathBuf },
+    /// A `stack.toml` was located; deploy from it.
+    Manifest { manifest_path: PathBuf },
+    /// A bare compose file was supplied; legacy single-file path.
+    Single { compose_path: PathBuf },
+}
+
+/// Phase 0.13: classify the args. Precedence:
+///   1. `--all` set: All { root: cwd or `--root` }
+///   2. positional path is a `stack.toml` file: Manifest { it }
+///   3. positional path is a directory containing `stack.toml`: Manifest
+///   4. positional path is a compose file: Single
+///   5. no positional path and `./stack.toml` exists: Manifest { cwd/stack.toml }
+///   6. no positional path and no `./stack.toml`: error
+pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
+    if args.all {
+        let root = args
+            .root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        return Ok(DeployPlan::All { root });
+    }
+    match args.path.as_deref() {
+        Some(p) if p == std::path::Path::new("-") => Ok(DeployPlan::Single {
+            compose_path: PathBuf::from("-"),
+        }),
+        Some(p) => {
+            if p.is_dir() {
+                let manifest = p.join("stack.toml");
+                if manifest.exists() {
+                    Ok(DeployPlan::Manifest {
+                        manifest_path: manifest,
+                    })
+                } else {
+                    Err(anyhow!(
+                        "{} is a directory but contains no stack.toml; \
+                         pass a compose file path or add a stack.toml",
+                        p.display()
+                    ))
+                }
+            } else if p.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
+                Ok(DeployPlan::Manifest {
+                    manifest_path: p.to_path_buf(),
+                })
+            } else {
+                Ok(DeployPlan::Single {
+                    compose_path: p.to_path_buf(),
+                })
+            }
+        }
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let manifest = cwd.join("stack.toml");
+            if manifest.exists() {
+                Ok(DeployPlan::Manifest {
+                    manifest_path: manifest,
+                })
+            } else {
+                Err(anyhow!(
+                    "no stack.toml in cwd; pass a path or run `isd deploy <path>` \
+                     to deploy a single compose file"
+                ))
+            }
+        }
+    }
+}
+
+/// Phase 0.13: deploy from a `stack.toml`. Merges overlays, builds the
+/// JSON body with the manifest fields, and POSTs (or PUTs) via the
+/// existing dashboard endpoint.
+async fn run_manifest_deploy(
+    args: DeployArgs,
+    manifest_path: PathBuf,
+    context: Option<&str>,
+) -> Result<()> {
+    let manifest = isengard_manifest::StackManifest::load(&manifest_path)
+        .with_context(|| format!("loading {}", manifest_path.display()))?;
+    let stack_name = manifest.name.clone();
+    let compose_paths = manifest
+        .resolved_compose_paths(args.overlay.as_deref())
+        .with_context(|| "resolving compose paths from manifest")?;
+
+    // Read every compose file and merge them in order.
+    if compose_paths.is_empty() {
+        return Err(anyhow!("manifest's compose list resolved to nothing"));
+    }
+    let mut compose_bodies = Vec::with_capacity(compose_paths.len());
+    for p in &compose_paths {
+        let body = read_compose_path(p)?;
+        compose_bodies.push(body);
+    }
+    let (base, overlays) = compose_bodies.split_first().expect("non-empty");
+    let merged = isengard_manifest::merge_compose_yaml(base, overlays)
+        .map_err(|e| anyhow!("merging compose overlays: {e}"))?;
+
+    let session = Session::open(context).await?;
+
+    let manifest_toml_body = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let strategy_override = args.strategy.clone();
+    let secrets: Vec<String> = manifest.secrets.clone();
+    let hooks: Vec<JsonHook> = manifest
+        .hooks
+        .iter()
+        .map(|h| JsonHook {
+            on: h.on.as_str().to_string(),
+            cmd: h.cmd.clone(),
+            timeout_ms: h.timeout.as_millis() as u64,
+            on_error: h.on_error.as_str().to_string(),
+        })
+        .collect();
+
+    if args.diff {
+        println!("(dry-run) would deploy stack {stack_name}");
+        println!("  manifest: {}", manifest_path.display());
+        println!("  compose:  {} file(s)", compose_paths.len());
+        println!(
+            "  strategy: {}",
+            strategy_override.unwrap_or_else(|| manifest.strategy.as_str().to_string())
+        );
+        println!("  secrets:  {}", secrets.len());
+        println!("  hooks:    {}", hooks.len());
+        return Ok(());
+    }
+
+    match resolve_stack_id_opt(&session, &stack_name).await? {
+        Some(_stack_id) => {
+            // Existing stack: PUT compose. Phase 0.13's JSON content-type
+            // variant (with manifest body + secrets + hooks) is reserved
+            // for follow-up; for now we PUT compose-only and rely on the
+            // CREATE path for new stacks to install the manifest. That
+            // means a second deploy with only manifest changes is a no-op
+            // until the JSON PUT variant lands. Documented in the
+            // release notes.
+            let outcome = put_compose(&session, &_stack_id, &merged, "", args.force).await?;
+            println!(
+                "Deployed {}. sha256: {}",
+                stack_name, outcome.written_sha256
+            );
+        }
+        None => {
+            let body = CreateStackManifestBody {
+                name: stack_name.clone(),
+                compose_yaml: merged,
+                host_id: args.host_id.clone(),
+                manifest_toml: Some(manifest_toml_body),
+                secrets: if secrets.is_empty() {
+                    None
+                } else {
+                    Some(secrets)
+                },
+                hooks: if hooks.is_empty() { None } else { Some(hooks) },
+            };
+            let outcome = create_stack_with_manifest(&session, &body).await?;
+            println!(
+                "Created stack {} (id {}, host {}). sha256: {}",
+                outcome.name, outcome.id, outcome.host_id, outcome.written_sha256,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Phase 0.13: `--all` walks immediate subdirs of `root` (lexical
+/// order, sequential). Per-stack failures are collected; final report
+/// + exit status reflect the aggregate.
+async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) -> Result<()> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&root)
+        .with_context(|| format!("reading {}", root.display()))?
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("stack.toml").exists())
+        .collect();
+    entries.sort();
+
+    if entries.is_empty() {
+        return Err(anyhow!(
+            "no stack.toml found in immediate subdirs of {}",
+            root.display()
+        ));
+    }
+
+    let mut succeeded = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for dir in entries {
+        let manifest_path = dir.join("stack.toml");
+        let label = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<stack>")
+            .to_string();
+        // Build a single-stack args clone for the inner call.
+        let inner = DeployArgs {
+            path: Some(manifest_path.clone()),
+            stack: args.stack.clone(),
+            host_id: args.host_id.clone(),
+            yes: true,
+            force: args.force,
+            all: false,
+            root: None,
+            overlay: args.overlay.clone(),
+            strategy: args.strategy.clone(),
+            fail_fast: false,
+            diff: args.diff,
+        };
+        match run_manifest_deploy(inner, manifest_path, context).await {
+            Ok(()) => {
+                println!("  {label:<24} ok");
+                succeeded += 1;
+            }
+            Err(e) => {
+                println!("  {label:<24} FAILED  ({e})");
+                failed.push((label, format!("{e}")));
+                if args.fail_fast {
+                    break;
+                }
+            }
+        }
+    }
+    println!();
+    println!("Summary: {succeeded} deployed, {} failed.", failed.len());
+    if !failed.is_empty() {
+        println!();
+        for (name, err) in &failed {
+            println!("{name}: {err}");
+        }
+        return Err(anyhow!("{} stack(s) failed", failed.len()));
+    }
+    Ok(())
+}
+
+/// Legacy single-file compose deploy. Existing v0.3d shape.
+async fn run_single_compose(
+    args: DeployArgs,
+    compose_path: PathBuf,
+    context: Option<&str>,
+) -> Result<()> {
+    let body = read_compose_path(&compose_path)?;
     let stack = match args.stack.as_deref() {
         Some(s) => s.to_string(),
-        None => stack_from_path(&args.path)?,
+        None => stack_from_path(&compose_path)?,
     };
     let session = Session::open(context).await?;
 
@@ -429,6 +715,57 @@ async fn create_stack(
     Ok(ok)
 }
 
+/// Phase 0.13: hook shape on the create-stack POST body.
+#[derive(Debug, Serialize, Clone)]
+pub struct JsonHook {
+    pub on: String,
+    pub cmd: Vec<String>,
+    pub timeout_ms: u64,
+    pub on_error: String,
+}
+
+/// Phase 0.13: extended POST /stacks body with manifest fields.
+#[derive(Debug, Serialize)]
+pub struct CreateStackManifestBody {
+    pub name: String,
+    pub compose_yaml: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_toml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<Vec<JsonHook>>,
+}
+
+/// Phase 0.13: POST a stack with manifest body. Surfaces controller's
+/// 422 (unknown secrets) verbatim so the operator sees the missing
+/// names without an extra round-trip.
+async fn create_stack_with_manifest(
+    session: &Session,
+    body: &CreateStackManifestBody,
+) -> Result<CreateStackOk> {
+    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let resp = session
+        .client
+        .post(&url)
+        .json(body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("POST {url} -> {status}: {text}"));
+    }
+    let ok: CreateStackOk = resp
+        .json()
+        .await
+        .context("decoding create-stack response")?;
+    Ok(ok)
+}
+
 async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<ComposeResponse>> {
     let url = format!(
         "{}/api/v1/stacks/{stack_id}/compose",
@@ -577,6 +914,71 @@ mod tests {
     fn stack_from_path_rejects_stdin() {
         let p = std::path::PathBuf::from("-");
         assert!(stack_from_path(&p).is_err());
+    }
+
+    fn args_with_path(path: Option<PathBuf>) -> DeployArgs {
+        DeployArgs {
+            path,
+            stack: None,
+            host_id: None,
+            yes: true,
+            force: false,
+            all: false,
+            root: None,
+            overlay: None,
+            strategy: None,
+            fail_fast: false,
+            diff: false,
+        }
+    }
+
+    #[test]
+    fn resolve_plan_with_all_flag_returns_all_at_cwd_by_default() {
+        let args = DeployArgs {
+            all: true,
+            ..args_with_path(None)
+        };
+        let plan = resolve_deploy_plan(&args).unwrap();
+        assert!(matches!(plan, DeployPlan::All { .. }));
+    }
+
+    #[test]
+    fn resolve_plan_with_compose_file_returns_single() {
+        let tmp = tempfile::tempdir().unwrap();
+        let compose = tmp.path().join("compose.yaml");
+        std::fs::write(&compose, "services:\n").unwrap();
+        let args = args_with_path(Some(compose.clone()));
+        let plan = resolve_deploy_plan(&args).unwrap();
+        match plan {
+            DeployPlan::Single { compose_path } => assert_eq!(compose_path, compose),
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_plan_with_stack_toml_returns_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_dir = tmp.path().join("servarr");
+        std::fs::create_dir_all(&stack_dir).unwrap();
+        let manifest = stack_dir.join("stack.toml");
+        std::fs::write(&manifest, "name = \"servarr\"\ncompose = [\"c.toml\"]\n").unwrap();
+        // Passed as directory:
+        let plan = resolve_deploy_plan(&args_with_path(Some(stack_dir.clone()))).unwrap();
+        assert!(matches!(plan, DeployPlan::Manifest { .. }));
+        // Passed as the manifest path itself:
+        let plan2 = resolve_deploy_plan(&args_with_path(Some(manifest))).unwrap();
+        assert!(matches!(plan2, DeployPlan::Manifest { .. }));
+    }
+
+    #[test]
+    fn resolve_plan_with_directory_lacking_stack_toml_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("nothing");
+        std::fs::create_dir_all(&empty).unwrap();
+        let err = resolve_deploy_plan(&args_with_path(Some(empty)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stack.toml"), "got: {err}");
     }
 
     #[test]
