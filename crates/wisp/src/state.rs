@@ -1,0 +1,262 @@
+//! On-disk state directory for wisp containers.
+//!
+//! Layout, per spec section "State directory layout":
+//!
+//! ```text
+//! <state_dir>/
+//!   containers/
+//!     <id>/
+//!       state.json    # serialised ContainerHandle
+//!       config.json   # cached copy of the bundle's config.json
+//!       bundle.path   # absolute path to bundle dir (so state.json stays portable)
+//!       log           # combined wisp-internal log for this container
+//! ```
+//!
+//! Writes are atomic: serialise to `state.json.tmp`, fsync, rename onto
+//! `state.json`. Reads tolerate concurrent writers, so a half-written
+//! `state.json` looks like a parse failure to the reader. `list` swallows
+//! per-entry parse failures and emits a tracing warning so a single corrupt
+//! entry never poisons the whole listing.
+
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{Result, WispError};
+
+/// State a container is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContainerState {
+    /// State directory allocated, spec validated, cgroup created. No process yet.
+    Created,
+    /// PID 1 is alive. `pid` should be `Some`.
+    Running,
+    /// PID 1 has exited. State-dir + cgroup not yet cleaned.
+    Stopped,
+}
+
+/// Persisted handle for one container.
+///
+/// `bundle` is the absolute path to the bundle directory the operator passed
+/// to `Runtime::create`. We keep it on disk because the operator may invoke
+/// `wisp` from a different cwd later (e.g. via `wisp ps`), and the bundle
+/// path needs to round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerHandle {
+    pub id: String,
+    pub bundle: PathBuf,
+    pub state: ContainerState,
+    pub pid: Option<u32>,
+    pub created_at: SystemTime,
+}
+
+/// Compute the per-container directory: `<state_dir>/containers/<id>/`.
+fn container_dir(state_dir: &Path, id: &str) -> PathBuf {
+    state_dir.join("containers").join(id)
+}
+
+/// Serialise `h` to `<state_dir>/containers/<h.id>/state.json` atomically.
+///
+/// The container directory is created if it does not exist. The write is
+/// atomic via write-then-rename: we write to `state.json.tmp` (fsync the
+/// data), then `rename` onto `state.json`. A reader that catches us mid-write
+/// will see either the old contents or the new contents, never a torn file.
+pub fn write(state_dir: &Path, h: &ContainerHandle) -> Result<()> {
+    let dir = container_dir(state_dir, &h.id);
+    fs::create_dir_all(&dir)?;
+
+    let json = serde_json::to_vec_pretty(h)?;
+    let target = dir.join("state.json");
+    let tmp = dir.join("state.json.tmp");
+
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(&json)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, &target)?;
+    Ok(())
+}
+
+/// Read `<state_dir>/containers/<id>/state.json` and deserialise.
+pub fn read(state_dir: &Path, id: &str) -> Result<ContainerHandle> {
+    let path = container_dir(state_dir, id).join("state.json");
+    let data = fs::read(&path)?;
+    let h: ContainerHandle = serde_json::from_slice(&data)?;
+    Ok(h)
+}
+
+/// List every container handle under `<state_dir>/containers/`.
+///
+/// If a per-container `state.json` is missing, unreadable, or fails to parse
+/// we log a warning and skip the entry. This keeps `wisp ps` usable in the
+/// face of a single corrupt container directory; the caller can recover
+/// individual broken entries with `wisp delete --force`.
+pub fn list(state_dir: &Path) -> Result<Vec<ContainerHandle>> {
+    let containers_dir = state_dir.join("containers");
+    if !containers_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&containers_dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to read containers/ directory entry, skipping"
+                );
+                continue;
+            }
+        };
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        match read(state_dir, &id) {
+            Ok(h) => out.push(h),
+            Err(err) => {
+                tracing::warn!(
+                    container_id = %id,
+                    error = %err,
+                    "failed to parse state.json for container, skipping"
+                );
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Remove `<state_dir>/containers/<id>/` and everything in it.
+///
+/// Idempotent: removing a container that does not exist is a no-op. Errors
+/// only on filesystem failures we cannot interpret as "already gone".
+pub fn remove(state_dir: &Path, id: &str) -> Result<()> {
+    let dir = container_dir(state_dir, id);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(WispError::Io(err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+
+    fn make_handle(id: &str) -> ContainerHandle {
+        ContainerHandle {
+            id: id.to_string(),
+            bundle: PathBuf::from(format!("/tmp/bundle-{id}")),
+            state: ContainerState::Created,
+            pid: None,
+            // SystemTime serialised as a (sec, nsec) pair; pin to a known
+            // offset so round-trip equality is deterministic.
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        }
+    }
+
+    #[test]
+    fn write_then_read_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let h = make_handle("alpha");
+        write(dir.path(), &h).unwrap();
+        let got = read(dir.path(), "alpha").unwrap();
+        assert_eq!(got, h);
+    }
+
+    #[test]
+    fn list_empty_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let got = list(dir.path()).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn list_one_entry() {
+        let dir = TempDir::new().unwrap();
+        let h = make_handle("only");
+        write(dir.path(), &h).unwrap();
+
+        let got = list(dir.path()).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], h);
+    }
+
+    #[test]
+    fn list_many_entries() {
+        let dir = TempDir::new().unwrap();
+        let ids = ["one", "two", "three"];
+        for id in ids.iter() {
+            write(dir.path(), &make_handle(id)).unwrap();
+        }
+
+        let got = list(dir.path()).unwrap();
+        assert_eq!(got.len(), 3);
+
+        let mut got_ids: Vec<_> = got.iter().map(|h| h.id.clone()).collect();
+        got_ids.sort();
+        let mut want_ids: Vec<_> = ids.iter().map(|s| s.to_string()).collect();
+        want_ids.sort();
+        assert_eq!(got_ids, want_ids);
+    }
+
+    #[test]
+    fn list_skips_corrupt_entry_without_failing() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), &make_handle("good")).unwrap();
+
+        // Manually create a busted entry: directory present, state.json
+        // truncated to an obviously-invalid prefix.
+        let bad_dir = dir.path().join("containers").join("bad");
+        fs::create_dir_all(&bad_dir).unwrap();
+        fs::write(bad_dir.join("state.json"), b"{ this").unwrap();
+
+        let got = list(dir.path()).unwrap();
+        assert_eq!(got.len(), 1, "corrupt entry should be skipped");
+        assert_eq!(got[0].id, "good");
+    }
+
+    #[test]
+    fn list_skips_entry_missing_state_json() {
+        let dir = TempDir::new().unwrap();
+        // Container directory exists but never had its state.json written.
+        fs::create_dir_all(dir.path().join("containers").join("orphan")).unwrap();
+
+        let got = list(dir.path()).unwrap();
+        assert!(
+            got.is_empty(),
+            "orphan dir without state.json should be skipped"
+        );
+    }
+
+    #[test]
+    fn remove_cleans_directory() {
+        let dir = TempDir::new().unwrap();
+        let h = make_handle("victim");
+        write(dir.path(), &h).unwrap();
+        let cdir = container_dir(dir.path(), "victim");
+        assert!(cdir.exists());
+
+        remove(dir.path(), "victim").unwrap();
+        assert!(!cdir.exists(), "container dir should be gone");
+    }
+
+    #[test]
+    fn remove_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        // Never written: first remove must succeed.
+        remove(dir.path(), "ghost").unwrap();
+        // Second remove on a non-existent id must also succeed.
+        remove(dir.path(), "ghost").unwrap();
+    }
+}

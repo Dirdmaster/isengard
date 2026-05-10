@@ -1,0 +1,60 @@
+[package]
+name = "wisp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "Wisp: Rust-native daemonless OCI container runtime (Phase 0.1 skeleton)"
+
+[dependencies]
+# OCI runtime spec parsing. Pinned at 0.9.x; the crate has had API churn
+# historically, so the minor pin keeps us from surprise rewrites.
+oci-spec = { version = "0.9", default-features = false, features = ["runtime"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes = "1.8"
+# SIGKILL fallback for `Cgroup::kill_all` when the kernel lacks
+# `cgroup.kill` (pre-5.14). Pulled in directly rather than via `nix`:
+# we only need `kill(2)` and `SIGKILL`, and `libc` already lives in the
+# tree as a transitive dep so adding it as a direct dep keeps the
+# crate's ecosystem dependencies tight.
+libc = "0.2"
+
+# Linux syscall wrappers for the mount + pivot_root code paths. The
+# crate compiles cross-platform (the BSD/Apple targets expose a smaller
+# subset). The `mount` feature only emits the linux-specific
+# `MsFlags`/`mount`/`umount2` symbols on linux/android, so the
+# `mount.rs` module wraps `nix::mount::MsFlags` behind a thin
+# `MountFlags` alias with a Mac-only mirror. Features:
+#   mount: mount/umount/MsFlags
+#   fs:    chdir, etc.
+#   process / signal / sched: needed downstream by lifecycle (clone3,
+#                              CLONE_NEW* flags, SIGCHLD).
+#   user:  uid/gid helpers used during user-namespace setup.
+nix = { version = "0.30", features = ["mount", "fs", "process", "signal", "sched", "user", "hostname"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux capability set manipulation (drop bounding, set permitted /
+# effective / inheritable / ambient). The crate uses `prctl` and
+# `capget`/`capset` syscalls that don't exist on macOS, so it lives
+# under target-specific deps. Wisp re-exports `caps::Capability` only
+# on Linux; on macOS the capability module exposes a stub `Capability`
+# enum with the same OCI names so `from_oci` stays portable for unit
+# tests on the Mac dev loop.
+caps = "0.5"
+
+[dev-dependencies]
+tempfile.workspace = true
+# Used by the busybox demo example (`cargo run --example
+# run-busybox`). Dev-dep only: production callers handle errors via
+# `WispError`.
+anyhow.workspace = true
+
+[[example]]
+name = "run-busybox"
+path = "examples/run-busybox.rs"

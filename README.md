@@ -86,6 +86,10 @@ This reproduces the pre-Phase-15 behaviour. You'll need to handle CA distributio
 
 `isd` is the terminal companion to the dashboard. After the controller is up, run `cargo build -p isd --release` (or `just isd-build`) and `isd login https://controller.local:9417` once: the CLI captures the controller's TLS fingerprint, stores it alongside an API token in `~/.config/isengard/credentials.toml`, and pins both for subsequent calls. Day-to-day commands: `isd ps` (list stacks + services, `--json` for scripts), `isd open <stack>` (launch the stack's primary host in your default browser), and `isd logs <stack>/<service> -f` (stream logs over the controller WebSocket). More subcommands (`apply`, `forward`, `shell`) ship in v0.3c/d once the compose-store lands.
 
+## Wisp (runtime, Phase 0.1)
+
+`crates/wisp/` is the daemonless Rust-native OCI runtime that will eventually replace dockerd inside the agent. Phase 0.1 (the runc-equivalent) lands the library + CLI + busybox demo. See [`crates/wisp/README.md`](./crates/wisp/README.md) for the API surface, the OrbStack VM dev loop, and the roadmap.
+
 ---
 
 # Isengard (legacy Go)
