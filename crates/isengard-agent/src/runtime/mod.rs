@@ -95,6 +95,20 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     /// Backend identity for diagnostics (`"docker"` or `"wisp"`).
     fn name(&self) -> &'static str;
 
+    /// Boot-time orphan cleanup hook. Wisp's impl walks kernel network
+    /// state (bridges + veths + iptables) against the on-disk registry
+    /// and the live container list, removing anything not accounted
+    /// for. Bollard's impl returns 0 (docker daemon owns its own
+    /// reconcile). Called once from `run_agent` before the first
+    /// compose reconcile fires, so a fresh container start doesn't
+    /// race a stale bridge from a previous boot.
+    ///
+    /// Returns the number of cleanup actions taken. Non-fatal: errors
+    /// are logged at the call site; the agent keeps booting.
+    async fn reconcile_network_orphans(&self) -> Result<usize, RuntimeError> {
+        Ok(0)
+    }
+
     /// Borrow the underlying bollard handle when this backend is the
     /// bollard one. Returns `None` for non-bollard backends (today: wisp,
     /// once dispatch B lands). Phase 0.4 dispatch A keeps a handful of

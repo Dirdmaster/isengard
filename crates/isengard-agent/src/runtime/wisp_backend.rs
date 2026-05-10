@@ -403,6 +403,50 @@ impl WispBackend {
         })
     }
 
+    /// Boot-time orphan cleanup. Walks kernel network state (`wbr-*`
+    /// bridges, `wveth-*` veth halves, `wisp:<scope>:*` iptables rules)
+    /// against the on-disk network registry and the live wisp runtime,
+    /// and best-effort removes anything orphaned (e.g. host reboot or
+    /// agent-crash leftovers).
+    ///
+    /// Called once from `lib.rs::run_agent` before the first compose
+    /// reconcile fires, so a fresh container start doesn't race a
+    /// stale `wbr-app` from yesterday. The trait shim
+    /// [`RuntimeBackend::reconcile_network_orphans`] delegates here
+    /// and returns the [`wisp_net::ReconcileReport::total`] count.
+    ///
+    /// Linux only. Wisp-net's reconcile relies on `ip` + `iptables-save`
+    /// + `/sys/class/net`, none of which exist on Mac.
+    #[cfg(target_os = "linux")]
+    pub fn reconcile_network_inherent(&self) -> Result<wisp_net::ReconcileReport, RuntimeError> {
+        let networks_dir = self.state_dir.join("networks");
+
+        // Live container ids the runtime knows about. Reconcile keeps
+        // their iptables rules and treats anything else as orphan.
+        // Failure to enumerate is non-fatal: prefer "keep all
+        // container-scoped rules" over "delete them all".
+        let known: std::collections::BTreeSet<String> = match self.runtime.list() {
+            Ok(handles) => handles.into_iter().map(|h| h.id).collect(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "reconcile: Runtime::list failed, skipping container-rule cleanup"
+                );
+                return wisp_net::reconcile(wisp_net::ReconcileInputs {
+                    networks_dir: &networks_dir,
+                    known_container_ids: None,
+                })
+                .map_err(|e| RuntimeError::Network(format!("reconcile: {e}")));
+            }
+        };
+
+        wisp_net::reconcile(wisp_net::ReconcileInputs {
+            networks_dir: &networks_dir,
+            known_container_ids: Some(&known),
+        })
+        .map_err(|e| RuntimeError::Network(format!("reconcile: {e}")))
+    }
+
     #[cfg(target_os = "linux")]
     fn build_default_attacher(state_dir: &Path) -> Option<Box<dyn wisp::NetworkAttacher + Send>> {
         let subnet_str = std::env::var("WISP_DEFAULT_SUBNET")
@@ -1004,6 +1048,25 @@ impl RuntimeBackend for WispBackend {
 
     fn name(&self) -> &'static str {
         "wisp"
+    }
+
+    /// Wisp-specific orphan sweep. See
+    /// [`Self::reconcile_network_inherent`].
+    ///
+    /// On Mac the wisp backend's reconcile path is a noop (the kernel
+    /// helpers wisp-net wraps don't exist), so the inherent method only
+    /// compiles on Linux; we surface the same total-actions number
+    /// through the trait by gating the body.
+    async fn reconcile_network_orphans(&self) -> Result<usize, RuntimeError> {
+        #[cfg(target_os = "linux")]
+        {
+            let report = self.reconcile_network_inherent()?;
+            Ok(report.total())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(0)
+        }
     }
 }
 

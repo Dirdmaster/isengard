@@ -249,6 +249,22 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             None
         }
     };
+
+    // Boot-time wisp-net orphan sweep. After Phase 0.7+0.8 (systemd-native
+    // install) every kernel-update reboot lands the agent on a clean re-exec
+    // with stale wbr-* / wveth-* / iptables rules from the previous boot. The
+    // wisp backend reconciles them against the on-disk network registry +
+    // live runtime; the bollard backend's trait default is a noop (docker
+    // daemon owns its own state). Non-fatal: errors get logged, boot
+    // continues.
+    if let Some(b) = backend.as_ref() {
+        match b.reconcile_network_orphans().await {
+            Ok(0) => {}
+            Ok(n) => info!(orphans = n, "reconcile: cleaned wisp network orphans"),
+            Err(e) => warn!(error = %e, "reconcile: wisp network orphan sweep failed"),
+        }
+    }
+
     // Legacy bollard-typed handle for callers that haven't moved to the
     // trait yet (compose_apply, deployment/driver::RealDriverDeps, the
     // labels watcher, the bollard log source, proxy/discovery). Dispatch B
