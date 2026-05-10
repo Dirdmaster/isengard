@@ -407,6 +407,9 @@ mod tests {
             exit_code: None,
             restart_count: 0,
             network_settings: ns,
+            env: BTreeMap::new(),
+            port_bindings: Vec::new(),
+            restart: None,
         }
     }
 

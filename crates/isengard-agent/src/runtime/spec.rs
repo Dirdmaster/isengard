@@ -170,6 +170,11 @@ pub struct ListFilter {
 /// (which carries only the bits the controller's stacks/services
 /// projection needs). This shape is the runtime view: lifecycle state,
 /// network attachments, exit details.
+///
+/// Phase 0.6: extended with `env`, `port_bindings`, and `restart` so the
+/// compose reconciler can detect drift through the trait without
+/// reaching for backend-native inspect responses. Bollard fills these
+/// from `inspect_container`; wisp from the persisted spec.
 #[derive(Debug, Clone)]
 pub struct ContainerSnapshot {
     pub id: String,
@@ -185,6 +190,20 @@ pub struct ContainerSnapshot {
     pub exit_code: Option<i32>,
     pub restart_count: u32,
     pub network_settings: NetworkSettings,
+    /// Environment variables visible to the running container, parsed
+    /// out of `KEY=VALUE` strings. Populated by inspect-driven backends
+    /// (bollard) and from the persisted spec (wisp). Empty when the
+    /// backend can't read env without an extra round-trip (list calls
+    /// for bollard skip env; the agent inspects per container when it
+    /// needs drift detection).
+    pub env: BTreeMap<String, String>,
+    /// Compose-style published port strings (e.g. `"8080:80"`,
+    /// `"127.0.0.1:80"`). Order-insensitive on the diff path.
+    pub port_bindings: Vec<String>,
+    /// Effective `restart:` string (`"always"`, `"on-failure"`,
+    /// `"unless-stopped"`, `"no"`) or `None` when the runtime has no
+    /// recorded policy.
+    pub restart: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -590,6 +590,32 @@ impl WispBackend {
                     });
             }
         }
+        // Phase 0.6: surface env / port_bindings / restart so the
+        // compose reconciler can detect drift through the trait without
+        // reaching for native runtime types. Bollard fills these from
+        // inspect; wisp from the persisted spec.
+        let env = spec.as_ref().map(|s| s.env.clone()).unwrap_or_default();
+        let port_bindings: Vec<String> = spec
+            .as_ref()
+            .map(|s| {
+                let mut out: Vec<String> = s
+                    .ports
+                    .iter()
+                    .map(|p| match p.host_ip {
+                        Some(ip) => format!("{ip}:{}:{}", p.host_port, p.container_port),
+                        None => format!("{}:{}", p.host_port, p.container_port),
+                    })
+                    .collect();
+                out.sort();
+                out
+            })
+            .unwrap_or_default();
+        let restart = spec.as_ref().map(|s| match s.restart {
+            super::spec::RestartPolicy::Always => "always".to_string(),
+            super::spec::RestartPolicy::UnlessStopped => "unless-stopped".to_string(),
+            super::spec::RestartPolicy::OnFailure { .. } => "on-failure".to_string(),
+            super::spec::RestartPolicy::No => "no".to_string(),
+        });
         Ok(ContainerSnapshot {
             id: handle.id.clone(),
             name: handle.id.clone(),
@@ -604,6 +630,9 @@ impl WispBackend {
             exit_code: None,
             restart_count: 0,
             network_settings,
+            env,
+            port_bindings,
+            restart,
         })
     }
 }

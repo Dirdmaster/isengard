@@ -14,7 +14,7 @@
 //! defined here are the surface used by lib.rs / sync.rs and by the
 //! WispBackend translation that dispatch B will mirror.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::pin::Pin;
 use std::time::SystemTime;
@@ -309,6 +309,11 @@ pub(crate) fn map_summary(summary: ContainerSummary) -> ContainerSnapshot {
         exit_code: None,
         restart_count: 0,
         network_settings,
+        // List responses don't carry env / port_bindings / restart;
+        // map_inspect fills them via a follow-up inspect on demand.
+        env: std::collections::BTreeMap::new(),
+        port_bindings: Vec::new(),
+        restart: None,
     }
 }
 
@@ -396,6 +401,71 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
         }
     }
 
+    // Env: parse the `KEY=VALUE` list bollard returns into a BTreeMap,
+    // dropping daemon-injected keys that aren't user state (PATH,
+    // HOSTNAME, COMPOSE_*, com.docker.*) so the reconciler diff doesn't
+    // false-positive on them. Mirrors the filter in the legacy
+    // RunningService::from_inspect.
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(env_list) = inspect.config.as_ref().and_then(|c| c.env.as_ref()) {
+        for e in env_list {
+            if let Some((k, v)) = e.split_once('=') {
+                if k == "PATH"
+                    || k == "HOSTNAME"
+                    || k.starts_with("com.docker.")
+                    || k.starts_with("COMPOSE_")
+                {
+                    continue;
+                }
+                env.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+
+    // Port bindings: project to the same compose-style string shape the
+    // legacy RunningService::from_inspect built so the diff path stays
+    // byte-identical.
+    let mut port_bindings: Vec<String> = Vec::new();
+    if let Some(pb) = inspect
+        .host_config
+        .as_ref()
+        .and_then(|h| h.port_bindings.as_ref())
+    {
+        let mut keys: Vec<&String> = pb.keys().collect();
+        keys.sort();
+        for cport in keys {
+            let Some(Some(bs)) = pb.get(cport).map(|v| v.as_ref()) else {
+                continue;
+            };
+            for b in bs {
+                let host = b.host_port.as_deref().unwrap_or("");
+                let cport_compose: String = match cport.split_once('/') {
+                    Some((p, "tcp")) => p.to_string(),
+                    _ => cport.clone(),
+                };
+                if host.is_empty() {
+                    port_bindings.push(cport_compose);
+                } else {
+                    port_bindings.push(format!("{host}:{cport_compose}"));
+                }
+            }
+        }
+        port_bindings.sort();
+    }
+
+    let restart = inspect
+        .host_config
+        .as_ref()
+        .and_then(|h| h.restart_policy.as_ref())
+        .and_then(|r| r.name)
+        .and_then(|n| match n {
+            RestartPolicyNameEnum::ALWAYS => Some("always".to_string()),
+            RestartPolicyNameEnum::UNLESS_STOPPED => Some("unless-stopped".to_string()),
+            RestartPolicyNameEnum::ON_FAILURE => Some("on-failure".to_string()),
+            RestartPolicyNameEnum::NO => Some("no".to_string()),
+            RestartPolicyNameEnum::EMPTY => None,
+        });
+
     ContainerSnapshot {
         id,
         name,
@@ -422,6 +492,9 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
         exit_code,
         restart_count,
         network_settings,
+        env,
+        port_bindings,
+        restart,
     }
 }
 
