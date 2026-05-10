@@ -45,6 +45,19 @@ fmt-check:
 fmt:
     cargo fmt
 
+# Run the EXACT CI gates inside the OrbStack `wisp` Linux VM. Catches
+# Mac-vs-Linux divergence (cfg-gated unused imports, clippy lint
+# differences, dashboard build env). Same checks the pre-push
+# `linux-mirror` hook runs.
+ci-linux:
+    @if ! command -v orb >/dev/null 2>&1; then \
+        echo "ERROR: OrbStack not installed; install from https://orbstack.dev"; exit 1; \
+    fi
+    @if ! orbctl list 2>/dev/null | awk '{print $1}' | grep -qx 'wisp'; then \
+        echo "ERROR: no 'wisp' OrbStack machine; create with: orb create ubuntu:noble wisp"; exit 1; \
+    fi
+    orb -m wisp bash -lc "set -euo pipefail; source ~/.cargo/env; cd '$(pwd)'; export RUSTFLAGS='-D warnings'; cargo fmt --check; cargo clippy --workspace --all-targets -- -D warnings; if command -v cargo-nextest >/dev/null 2>&1; then cargo nextest run --workspace; else cargo test --workspace; fi"
+
 # === Local dev ===
 
 # Run the binary in agent mode
