@@ -2681,6 +2681,7 @@ dependencies = [
  "bollard",
  "bytes",
  "chrono",
+ "futures",
  "futures-util",
  "hostname",
  "if-addrs",
@@ -2690,7 +2691,9 @@ dependencies = [
  "isengard-proto",
  "isengard-storage",
  "mdns-sd",
+ "nix 0.30.1",
  "notify",
+ "oci-spec",
  "pingora-boringssl",
  "pingora-core",
  "pingora-http",
@@ -2711,6 +2714,9 @@ dependencies = [
  "tonic",
  "tracing",
  "ulid",
+ "wisp",
+ "wisp-image",
+ "wisp-net",
  "x509-parser 0.16.0",
 ]
 

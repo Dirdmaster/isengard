@@ -43,6 +43,21 @@ tracing.workspace = true
 ulid = { workspace = true }
 x509-parser.workspace = true
 
+# Phase 0.4 dispatch B: WispBackend reaches into the wisp runtime,
+# image client, and (Linux only) network attacher. wisp + wisp-image
+# build cleanly on Mac so the dev loop covers the translation paths;
+# wisp-net is Linux-only (it links against iptables / netlink crates
+# that don't compile on Mac), so we gate that one behind cfg(target_os
+# = "linux") at the dependency level.
+wisp = { path = "../wisp" }
+wisp-image = { path = "../wisp-image" }
+nix = { version = "0.30", default-features = false, features = ["signal"] }
+oci-spec = { version = "0.9", default-features = false, features = ["runtime"] }
+futures = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wisp-net = { path = "../wisp-net" }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 isengard-controller = { workspace = true }

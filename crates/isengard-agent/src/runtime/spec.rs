@@ -12,11 +12,19 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
 /// Describes a container the agent wants to create. Backend-agnostic shape;
 /// each [`super::RuntimeBackend`] translates to its native config (bollard
 /// `Config<String>` for dockerd, wisp `BundleBuilder` + `NetworkSpec` for
 /// wisp).
-#[derive(Debug, Clone)]
+///
+/// Phase 0.4 dispatch B serialises this on disk (under
+/// `<state_dir>/containers/<id>/spec.json`) so [`super::RuntimeBackend::inspect_container`]
+/// and the agent's restart-policy watcher can recover labels and
+/// healthcheck info without re-running compose. All sub-types thus carry
+/// `Serialize + Deserialize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerCreateSpec {
     pub container_name: String,
     pub image: String,
@@ -40,7 +48,7 @@ pub struct ContainerCreateSpec {
 
 /// Volume / bind / tmpfs mount entry. Phase 0.4 dispatch A uses bind + tmpfs
 /// since they're what compose_apply already emits; volume drivers come later.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountSpec {
     pub source: String,
     pub target: String,
@@ -48,7 +56,7 @@ pub struct MountSpec {
     pub read_only: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MountKind {
     Bind,
     Volume,
@@ -56,7 +64,7 @@ pub enum MountKind {
 }
 
 /// Port publishing entry. `host_ip` is None when bound to all interfaces.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortSpec {
     pub host_ip: Option<std::net::IpAddr>,
     pub host_port: u16,
@@ -64,13 +72,13 @@ pub struct PortSpec {
     pub protocol: PortProtocol,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortProtocol {
     Tcp,
     Udp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestartPolicy {
     No,
     Always,
@@ -78,7 +86,7 @@ pub enum RestartPolicy {
     UnlessStopped,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthcheckSpec {
     pub test: Vec<String>,
     pub interval: Duration,
@@ -87,7 +95,7 @@ pub struct HealthcheckSpec {
     pub start_period: Duration,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LinuxResources {
     pub memory_max_bytes: Option<u64>,
     pub memory_swap_max_bytes: Option<u64>,
@@ -100,7 +108,7 @@ pub struct LinuxResources {
 /// Request to mount one secret value at `target` inside the container. The
 /// agent's `secret_fetch` materializes the bytes onto a tmpfs path; the
 /// backend translates the entry into a bind-mount.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretMount {
     pub source: String,
     pub target: PathBuf,

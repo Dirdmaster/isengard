@@ -20,6 +20,7 @@ pub mod bollard_backend;
 mod error;
 pub mod select;
 mod spec;
+pub mod wisp_backend;
 
 pub use error::RuntimeError;
 pub use select::{BackendChoice, select_backend};
