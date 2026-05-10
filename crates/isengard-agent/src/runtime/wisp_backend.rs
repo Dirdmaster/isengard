@@ -1782,6 +1782,7 @@ mod tests {
     /// the syscall.
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn network_registry_conflict_on_subnet_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = WispBackend::from_env(tmp.path()).await.unwrap();
@@ -1849,6 +1850,7 @@ mod tests {
     /// blocking is not allowed"). Production agents drop the backend
     /// when the host process shuts down, where this isn't an issue.
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn wisp_backend_persist_then_read_spec_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = WispBackend::from_env(tmp.path())
@@ -2049,6 +2051,7 @@ mod tests {
     /// the watcher starts. Pre-write into the wisp container layout
     /// so `stream_logs` finds something to read.
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn stream_logs_backfills_existing_file_content() {
         use futures_util::StreamExt;
 
@@ -2089,6 +2092,7 @@ mod tests {
     /// inotify. Spawn the stream with follow=true, append a line,
     /// then assert we receive it within a generous timeout.
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn stream_logs_emits_appended_lines_on_modify() {
         use futures_util::StreamExt;
         use std::io::Write;

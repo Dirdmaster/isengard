@@ -66,6 +66,58 @@ pre-push:
         env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo deny check
       tags: rust
 
+    linux-mirror:
+      # Mac vs Linux divergence catches us repeatedly: cfg-gated unused
+      # imports, clippy lint differences, dashboard build env, tests
+      # that need docker.sock. Run the SAME gates inside the OrbStack
+      # `wisp` VM (Linux + matches CI's ubuntu-latest closely:
+      # docker.io installed, dockerd running) so we stop round-tripping
+      # through GitHub Actions to find Linux-only failures.
+      #
+      # VM bootstrap (one-time):
+      #   orb create ubuntu:noble wisp
+      #   orb -m wisp -u root bash -c 'apt update && apt install -y docker.io build-essential pkg-config libssl-dev curl'
+      #   orb -m wisp -u root bash -c 'systemctl enable --now docker && usermod -aG docker $(id -un 1000)'
+      #   orb -m wisp bash -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal'
+      #
+      # Skipped if OrbStack isn't installed or the `wisp` machine
+      # doesn't exist (lone-Mac contributors aren't blocked but also
+      # won't catch Linux-only issues; that risk is acceptable).
+      #
+      # Opt out for emergencies: LEFTHOOK_SKIP_LINUX_MIRROR=1 git push
+      run: |
+        if [ "${LEFTHOOK_SKIP_LINUX_MIRROR:-0}" = "1" ]; then
+          echo "linux-mirror: skipped (LEFTHOOK_SKIP_LINUX_MIRROR=1)"
+          exit 0
+        fi
+        if ! command -v orb >/dev/null 2>&1; then
+          echo "linux-mirror: skipped (orb not installed; install OrbStack to catch Linux-only issues locally)"
+          exit 0
+        fi
+        if ! orbctl list 2>/dev/null | awk '{print $1}' | grep -qx 'wisp'; then
+          echo "linux-mirror: skipped (no 'wisp' OrbStack machine; see comment in lefthook.yml for bootstrap)"
+          exit 0
+        fi
+        WORKTREE="$(pwd)"
+        orb -m wisp bash -lc "
+          set -euo pipefail
+          source ~/.cargo/env
+          cd '$WORKTREE'
+          export RUSTFLAGS='-D warnings'
+          export CARGO_BUILD_JOBS=2
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            cargo nextest run --workspace
+          else
+            cargo test --workspace
+          fi
+        "
+      tags: rust
+
 # Skip hooks on a single push by setting LEFTHOOK=0:
 #   LEFTHOOK=0 git push
 # (Don't make this a habit. The hooks exist for a reason.)
+#
+# Skip ONLY the Linux mirror (e.g., when wisp VM is unavailable):
+#   LEFTHOOK_SKIP_LINUX_MIRROR=1 git push
