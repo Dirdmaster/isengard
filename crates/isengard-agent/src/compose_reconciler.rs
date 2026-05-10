@@ -9,10 +9,22 @@
 //! follow-ups. The diff logic here is what `isd diff` shows the operator
 //! before they say yes.
 //!
+//! Compose files are parsed in two formats:
+//! - YAML (`.yml` / `.yaml`): docker-compose-compatible, `services:` wrapper.
+//! - TOML (`.toml`): Isengard-native flat shape. Every top-level table IS
+//!   a service; there is no `services:` wrapper. Top-level scalars are
+//!   reserved for future metadata (version, description) and currently
+//!   ignored. Top-level arrays-of-tables (`[[foo]]`) are rejected.
+//!
+//! The TOML path lifts every top-level table under a synthetic `services:`
+//! map and re-runs the existing YAML parser, so env / ports / labels /
+//! networks / secrets all use the same canonical decode.
+//!
 //! All YAML parsing uses `serde_yaml`. v0.3d still loses comments on
 //! round-trip; the dashboard editor's banner calls this out explicitly.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use bollard::secret::ContainerInspectResponse;
 use serde::{Deserialize, Serialize};
@@ -192,6 +204,142 @@ impl DesiredCompose {
         }
         Ok(out)
     }
+}
+
+/// Source format of a compose file. Detected from the on-disk extension
+/// at read time; the wire/persistence representation that the agent
+/// receives over the sync stream is always YAML today (the controller's
+/// proto carries a `compose_yaml` field), so this enum is operator-side
+/// scaffolding only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeFormat {
+    /// `.yml` / `.yaml`: standard docker-compose, `services:` wrapper.
+    Yaml,
+    /// `.toml`: Isengard-native flat shape; every top-level table is a
+    /// service.
+    Toml,
+}
+
+/// Detect a compose file's format from its path's extension.
+pub fn detect_format(path: &Path) -> anyhow::Result<ComposeFormat> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("yml") | Some("yaml") => Ok(ComposeFormat::Yaml),
+        Some("toml") => Ok(ComposeFormat::Toml),
+        Some(other) => Err(anyhow::anyhow!(
+            "unrecognised compose extension {other:?} on {} (expected .yml, .yaml, or .toml)",
+            path.display()
+        )),
+        None => Err(anyhow::anyhow!(
+            "compose path {} has no extension; cannot detect format",
+            path.display()
+        )),
+    }
+}
+
+/// Read a compose file from disk and parse it. Format is detected from
+/// the file extension; see [`detect_format`].
+pub fn parse_compose_path(path: &Path) -> anyhow::Result<DesiredCompose> {
+    let format = detect_format(path)?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    parse_compose_str(&content, format)
+}
+
+/// Parse compose `content` as `format` into a [`DesiredCompose`].
+///
+/// For [`ComposeFormat::Yaml`] this is a straight passthrough to
+/// [`parse_compose`]. For [`ComposeFormat::Toml`] the content is parsed
+/// to a `toml::Value`, lifted into a synthetic `{services: <flat-map>}`
+/// shape, re-emitted as YAML, and run back through [`parse_compose`] so
+/// the canonical YAML path stays the only place that knows about env /
+/// ports / labels / networks / secrets shapes.
+pub fn parse_compose_str(content: &str, format: ComposeFormat) -> anyhow::Result<DesiredCompose> {
+    match format {
+        ComposeFormat::Yaml => parse_compose(content),
+        ComposeFormat::Toml => {
+            let toml_value: toml::Value =
+                toml::from_str(content).map_err(|e| anyhow::anyhow!("parse compose.toml: {e}"))?;
+            let yaml_equivalent = toml_to_compose_yaml(toml_value)?;
+            parse_compose(&yaml_equivalent)
+        }
+    }
+}
+
+/// Lift a parsed flat-shape TOML compose into the YAML shape the
+/// existing parser understands.
+///
+/// Rules:
+/// - Every top-level table becomes an entry under `services:`.
+/// - Top-level non-table values (scalars, arrays) are currently ignored.
+///   They are reserved for future metadata (e.g. `version`, `description`).
+/// - A top-level array-of-tables (`[[foo]]`) is rejected: it has no
+///   sensible mapping into compose semantics.
+fn toml_to_compose_yaml(value: toml::Value) -> anyhow::Result<String> {
+    let toml::Value::Table(tbl) = value else {
+        return Err(anyhow::anyhow!(
+            "compose.toml root must be a table; got {value:?}"
+        ));
+    };
+    let mut services_map = serde_json::Map::new();
+    for (k, v) in tbl {
+        match v {
+            toml::Value::Table(_) => {
+                services_map.insert(k, toml_value_to_json(v)?);
+            }
+            toml::Value::Array(ref arr)
+                if arr.iter().all(|x| matches!(x, toml::Value::Table(_))) =>
+            {
+                // Array-of-tables (`[[k]]`). Compose has no sensible
+                // mapping for this shape; reject loudly so an operator
+                // doesn't think it silently became a service.
+                return Err(anyhow::anyhow!(
+                    "compose.toml top-level `[[{k}]]` array-of-tables is not supported; \
+                     each service must be a single `[name]` table"
+                ));
+            }
+            _other => {
+                // Scalar or non-table-array. Reserved for future top-level
+                // metadata; ignore for now.
+                continue;
+            }
+        }
+    }
+    let mut top = serde_json::Map::new();
+    top.insert("services".into(), serde_json::Value::Object(services_map));
+    serde_yaml::to_string(&serde_json::Value::Object(top))
+        .map_err(|e| anyhow::anyhow!("serialize toml-as-yaml: {e}"))
+}
+
+/// Recursively translate a `toml::Value` into a `serde_json::Value`.
+///
+/// `toml::Value::Datetime` has no native serde_json equivalent: we
+/// project it as an RFC3339 string. compose has no datetime fields
+/// today, so this is a defensive serialisation only.
+fn toml_value_to_json(v: toml::Value) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value as JV;
+    Ok(match v {
+        toml::Value::String(s) => JV::String(s),
+        toml::Value::Integer(i) => JV::Number(i.into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map(JV::Number)
+            .unwrap_or(JV::Null),
+        toml::Value::Boolean(b) => JV::Bool(b),
+        toml::Value::Datetime(dt) => JV::String(dt.to_string()),
+        toml::Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                out.push(toml_value_to_json(item)?);
+            }
+            JV::Array(out)
+        }
+        toml::Value::Table(tbl) => {
+            let mut out = serde_json::Map::with_capacity(tbl.len());
+            for (k, v) in tbl {
+                out.insert(k, toml_value_to_json(v)?);
+            }
+            JV::Object(out)
+        }
+    })
 }
 
 /// Parse `compose.yaml` text into a [`DesiredCompose`]. Strict-ish: the
@@ -845,6 +993,151 @@ mod tests {
     #[test]
     fn parse_compose_invalid_yaml_errors() {
         assert!(parse_compose(":\n  not: yaml: at-all").is_err());
+    }
+
+    // ----- TOML flat-shape -----
+
+    #[test]
+    fn parse_toml_flat_shape_with_one_service() {
+        // Flat-shape: top-level `[web]` table IS a service. No `services:`
+        // wrapper. Mirrors the basic YAML smoke shape (image, env, ports,
+        // labels) so the canonical decode path is exercised end-to-end.
+        let toml_str = r#"
+[web]
+image = "nginx:1.27"
+ports = ["8080:80"]
+
+[web.environment]
+TZ = "Europe/Zurich"
+
+[web.labels]
+"isengard.expose" = "foo.example.com"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(parsed.services.len(), 1);
+        let web = &parsed.services["web"];
+        assert_eq!(web.image.as_deref(), Some("nginx:1.27"));
+        assert_eq!(web.ports, vec!["8080:80".to_string()]);
+        assert_eq!(web.environment["TZ"], "Europe/Zurich");
+        assert_eq!(web.labels["isengard.expose"], "foo.example.com");
+    }
+
+    #[test]
+    fn parse_toml_with_multiple_services() {
+        let toml_str = r#"
+[web]
+image = "nginx"
+networks = ["frontend"]
+
+[api]
+image = "alpine"
+networks = ["frontend", "backend"]
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(parsed.services.len(), 2);
+        assert!(
+            parsed.services["web"]
+                .networks
+                .contains(&"frontend".to_string())
+        );
+        assert_eq!(parsed.services["api"].networks.len(), 2);
+    }
+
+    #[test]
+    fn parse_toml_top_level_scalars_are_ignored_metadata() {
+        // Top-level scalars (version, description, etc.) are reserved
+        // for future metadata. Today they're ignored without error: the
+        // services list still parses cleanly.
+        let toml_str = r#"
+version = "1"
+description = "smoke"
+
+[web]
+image = "nginx"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(parsed.services.len(), 1);
+        assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
+    }
+
+    #[test]
+    fn parse_toml_rejects_top_level_array_of_tables() {
+        // `[[foo]]` is array-of-tables in TOML; there's no sensible
+        // mapping into compose. Reject loudly so an operator doesn't
+        // think it silently became a service.
+        let toml_str = r#"
+[[svc]]
+image = "nginx"
+
+[[svc]]
+image = "alpine"
+"#;
+        let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
+        assert!(format!("{err}").contains("array-of-tables"));
+    }
+
+    #[test]
+    fn parse_toml_with_native_placement_verbs_passes_through() {
+        // Phase 0.9 marker: native placement verbs (`spread`, `global`,
+        // `on`, `where`) aren't yet wired into the reconciler. They
+        // should at least parse cleanly without rejection so an
+        // operator can author them today; the apply path picks them up
+        // when later phases land. TODO(phase 1.x): surface these on
+        // DesiredService.
+        let toml_str = r#"
+[web]
+image = "nginx"
+spread = 2
+global = true
+on = "lausanne"
+where = "node.role==worker"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(parsed.services.len(), 1);
+        assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
+    }
+
+    #[test]
+    fn parse_compose_path_dispatches_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let yaml_path = dir.path().join("compose.yaml");
+        std::fs::write(&yaml_path, "services:\n  web:\n    image: nginx\n").unwrap();
+        let parsed = parse_compose_path(&yaml_path).unwrap();
+        assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
+
+        let toml_path = dir.path().join("compose.toml");
+        std::fs::write(&toml_path, "[web]\nimage = \"alpine\"\n").unwrap();
+        let parsed = parse_compose_path(&toml_path).unwrap();
+        assert_eq!(parsed.services["web"].image.as_deref(), Some("alpine"));
+
+        let unknown_path = dir.path().join("compose.json");
+        std::fs::write(&unknown_path, "{}").unwrap();
+        assert!(parse_compose_path(&unknown_path).is_err());
+    }
+
+    #[test]
+    fn detect_format_reads_extension() {
+        assert_eq!(
+            detect_format(Path::new("/etc/isengard/stacks/hello/compose.yaml")).unwrap(),
+            ComposeFormat::Yaml
+        );
+        assert_eq!(
+            detect_format(Path::new("compose.yml")).unwrap(),
+            ComposeFormat::Yaml
+        );
+        assert_eq!(
+            detect_format(Path::new("compose.toml")).unwrap(),
+            ComposeFormat::Toml
+        );
+        assert!(detect_format(Path::new("compose.json")).is_err());
+        assert!(detect_format(Path::new("compose")).is_err());
+    }
+
+    #[test]
+    fn parse_toml_invalid_input_errors() {
+        let err = parse_compose_str("not = = valid", ComposeFormat::Toml).unwrap_err();
+        assert!(format!("{err}").contains("compose.toml"));
     }
 
     #[test]
