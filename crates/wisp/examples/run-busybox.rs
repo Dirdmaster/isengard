@@ -16,6 +16,7 @@
 //! `waitpid`); this example demonstrates that the polling
 //! `Runtime::state` flow also works for a non-CLI consumer.
 
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -38,12 +39,29 @@ fn main() -> Result<()> {
 
     // Poll state until Stopped. The runtime's state() lazily
     // transitions Running -> Stopped when /proc/<pid> goes away.
-    loop {
+    let stopped = loop {
         let s = rt.state(&handle.id)?;
         if s.state == wisp::ContainerState::Stopped {
-            break;
+            break s;
         }
         std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // Phase 0.4 dispatch C: stdout / stderr now redirect into
+    // <state_dir>/containers/<id>/{stdout,stderr}.log so the agent's
+    // `stream_logs` can tail them. The demo used to inherit the
+    // parent terminal's stdout, so to keep the visible behaviour
+    // identical (still prints "hello\nwisp-demo") we read the log
+    // files back here and dump them to the example's stdout / stderr.
+    if let Some(stdout_path) = &stopped.stdout_log_path {
+        if let Ok(bytes) = std::fs::read(stdout_path) {
+            let _ = std::io::stdout().write_all(&bytes);
+        }
+    }
+    if let Some(stderr_path) = &stopped.stderr_log_path {
+        if let Ok(bytes) = std::fs::read(stderr_path) {
+            let _ = std::io::stderr().write_all(&bytes);
+        }
     }
 
     rt.delete(&handle.id, true)?;

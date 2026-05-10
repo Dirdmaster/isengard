@@ -51,6 +51,12 @@ pub enum ContainerState {
 /// runtime actually attached at start time. Both default to `None` for
 /// the no-network path so existing `state.json` files (Phase 0.1)
 /// deserialize unchanged.
+///
+/// `stdout_log_path` / `stderr_log_path` point at the per-container
+/// log files written by [`crate::lifecycle::start_container`] (the
+/// child's stdout / stderr are dup2'd onto these files before exec).
+/// Both default to `None` for back-compat with Phase 0.1 / 0.3 state
+/// files; `start_container` populates them on every new run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerHandle {
     pub id: String,
@@ -62,6 +68,10 @@ pub struct ContainerHandle {
     pub network_spec: Option<NetworkSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_attachment: Option<NetworkAttachmentRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_log_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_log_path: Option<PathBuf>,
 }
 
 /// Compute the per-container directory: `<state_dir>/containers/<id>/`.
@@ -175,6 +185,8 @@ mod tests {
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             network_spec: None,
             network_attachment: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
         }
     }
 

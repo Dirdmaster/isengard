@@ -407,6 +407,8 @@ mod tests {
             created_at: SystemTime::UNIX_EPOCH,
             network_spec: None,
             network_attachment: None,
+            stdout_log_path: None,
+            stderr_log_path: None,
         }
     }
 

@@ -168,6 +168,8 @@ fn create_container_inner<F: CgroupFs>(
         created_at: SystemTime::now(),
         network_spec: None,
         network_attachment: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
     };
     state::write(state_dir, &handle)?;
 
@@ -327,6 +329,47 @@ pub fn start_container<F: CgroupFs>(
         .and_then(|l| l.readonly_paths().clone())
         .unwrap_or_default();
 
+    // Step: open per-container stdout / stderr log files in append
+    // mode. The child dup2's these onto fd 1 / 2 BEFORE execvpe so
+    // the entrypoint's stdout / stderr land on disk for `wisp logs`
+    // / agent `stream_logs` to tail. Files are opened in the parent
+    // (where allocation + open errors can be surfaced cleanly) and
+    // their raw fds are handed to `run_child` via positional args.
+    //
+    // We do NOT pass O_CLOEXEC here: the whole point is for the fds
+    // to survive into the child's exec'd entrypoint via dup2 onto
+    // 1 / 2. Once dup2 runs, the originals are closed in the child
+    // anyway; the parent drops its copies via OwnedFd's Drop right
+    // after clone3 returns.
+    let container_dir = state_dir.join("containers").join(id);
+    let stdout_log_path = container_dir.join("stdout.log");
+    let stderr_log_path = container_dir.join("stderr.log");
+    let stdout_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_log_path)
+        .map_err(|err| {
+            WispError::Lifecycle(format!(
+                "open stdout.log {}: {}",
+                stdout_log_path.display(),
+                err
+            ))
+        })?;
+    let stderr_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log_path)
+        .map_err(|err| {
+            WispError::Lifecycle(format!(
+                "open stderr.log {}: {}",
+                stderr_log_path.display(),
+                err
+            ))
+        })?;
+    use std::os::fd::AsRawFd;
+    let stdout_fd = stdout_log.as_raw_fd();
+    let stderr_fd = stderr_log.as_raw_fd();
+
     // Step: open the parent/child sync pipe. O_CLOEXEC keeps the
     // ends from leaking past `execvpe`.
     let ReadyPipe { reader, writer } = pipe::pair()?;
@@ -366,6 +409,8 @@ pub fn start_container<F: CgroupFs>(
                 &writer,
                 &argv,
                 &envp,
+                stdout_fd,
+                stderr_fd,
             );
             // run_child only returns on error; on success it execs.
             // Whatever message we have, dump to stderr (the parent
@@ -388,6 +433,12 @@ pub fn start_container<F: CgroupFs>(
             // Parent: close the writer eagerly so EOF reaches the
             // reader if the child dies before signalling.
             drop(writer);
+            // Parent's copies of the log files are no longer needed
+            // (the child's dup2 already ran in its own fd table). Drop
+            // them so the parent doesn't pin extra fds for the lifetime
+            // of the runtime.
+            drop(stdout_log);
+            drop(stderr_log);
 
             // cgroup.add_pid BEFORE wait_ready: by the time the
             // child's first significant syscall lands (mount,
@@ -484,6 +535,8 @@ pub fn start_container<F: CgroupFs>(
             // Persist the running state.
             handle.state = ContainerState::Running;
             handle.pid = Some(child_pid);
+            handle.stdout_log_path = Some(stdout_log_path.clone());
+            handle.stderr_log_path = Some(stderr_log_path.clone());
             state::write(state_dir, &handle)?;
             Ok(())
         }
@@ -523,8 +576,49 @@ fn run_child(
     writer: &std::os::fd::OwnedFd,
     argv: &[std::ffi::CString],
     envp: &[std::ffi::CString],
+    stdout_fd: std::os::fd::RawFd,
+    stderr_fd: std::os::fd::RawFd,
 ) -> Result<()> {
     use std::ffi::CString;
+
+    // 0. Redirect stdout / stderr onto the per-container log files
+    //    the parent opened. dup2 keeps fd 1 / 2 pointing at the
+    //    files even after we close the original log fds, so the
+    //    entrypoint's writes flow into stdout.log / stderr.log.
+    //
+    //    We call libc::dup2 directly: nix 0.30's wrapper takes a
+    //    `&mut OwnedFd` for newfd, and synthesising one for fd 1 / 2
+    //    is more lifetime gymnastics than the bare syscall warrants.
+    // SAFETY: dup2 is async-signal-safe and we are running pre-exec
+    // in the cloned child; touching libc directly is fine here.
+    let dup_stdout = unsafe { libc::dup2(stdout_fd, 1) };
+    if dup_stdout < 0 {
+        return Err(WispError::Lifecycle(format!(
+            "dup2(stdout_fd={stdout_fd}, 1): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let dup_stderr = unsafe { libc::dup2(stderr_fd, 2) };
+    if dup_stderr < 0 {
+        return Err(WispError::Lifecycle(format!(
+            "dup2(stderr_fd={stderr_fd}, 2): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Close the originals: dup2 already gave us fd 1 / 2 pointing at
+    // the files, so the original numbered fds are surplus. Best-effort
+    // close (the kernel will reject EBADF if we somehow got the same
+    // number back; that's harmless).
+    if stdout_fd != 1 {
+        unsafe {
+            libc::close(stdout_fd);
+        }
+    }
+    if stderr_fd != 2 {
+        unsafe {
+            libc::close(stderr_fd);
+        }
+    }
 
     // 1. Drop bounding BEFORE pivot_root: post-pivot processes can
     //    never re-acquire what we removed, even via an SUID binary

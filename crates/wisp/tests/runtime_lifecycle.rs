@@ -208,3 +208,64 @@ fn kill_stops_container() {
     runtime.delete("victim", true).expect("delete");
     common::teardown_cgroup_root(&cgroup_root);
 }
+
+/// Phase 0.4 dispatch C1: child stdout / stderr land on
+/// `<state_dir>/containers/<id>/{stdout,stderr}.log`. Run a busybox
+/// `echo hi-from-stdout` and assert the log file picks it up.
+#[test]
+fn redirect_stdout_stderr_writes_to_file() {
+    if common::requires_root("redirect_stdout_stderr_writes_to_file") {
+        return;
+    }
+    let state_tmp = TempDir::new().unwrap();
+    let bundle_tmp = TempDir::new().unwrap();
+    let cgroup_root = common::unique_cgroup_root();
+
+    let bundle = common::prepare_bundle(
+        bundle_tmp.path(),
+        &[
+            "/bin/sh",
+            "-c",
+            "echo hi-from-stdout; echo hi-from-stderr 1>&2",
+        ],
+        &[],
+        None,
+    );
+    let runtime = common::isolated_runtime(state_tmp.path(), &cgroup_root);
+
+    runtime.create("logsdemo", &bundle).expect("create");
+    runtime.start("logsdemo").expect("start");
+    let _ = common::wait_until_state(
+        &runtime,
+        "logsdemo",
+        ContainerState::Stopped,
+        Duration::from_secs(5),
+    );
+
+    // The persisted handle records the log paths. Read both files
+    // and assert each line landed on the expected stream.
+    let handle = runtime.state("logsdemo").expect("state after stop");
+    let stdout_path = handle
+        .stdout_log_path
+        .clone()
+        .expect("stdout_log_path persisted");
+    let stderr_path = handle
+        .stderr_log_path
+        .clone()
+        .expect("stderr_log_path persisted");
+    let stdout_bytes = std::fs::read(&stdout_path).expect("read stdout.log");
+    let stderr_bytes = std::fs::read(&stderr_path).expect("read stderr.log");
+    let stdout_text = String::from_utf8_lossy(&stdout_bytes);
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes);
+    assert!(
+        stdout_text.contains("hi-from-stdout"),
+        "stdout.log should contain echo: got {stdout_text:?}"
+    );
+    assert!(
+        stderr_text.contains("hi-from-stderr"),
+        "stderr.log should contain echo: got {stderr_text:?}"
+    );
+
+    runtime.delete("logsdemo", true).expect("delete");
+    common::teardown_cgroup_root(&cgroup_root);
+}
