@@ -1970,7 +1970,13 @@ mod tests {
 
     /// `["NONE"]` short-circuits to Healthy without touching nsenter.
     /// Verifies the docker-compatible "skip the check" semantics.
+    ///
+    /// Ignored by default: WispBackend::from_env requires writable cgroup v2
+    /// (real /sys/fs/cgroup access), which CI runners and unprivileged dev
+    /// environments don't have. Run as root on a wisp host:
+    ///   cargo test -p isengard-agent --lib -- --ignored healthcheck
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn healthcheck_test_none_returns_healthy() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = WispBackend::from_env(tmp.path()).await.unwrap();
@@ -1988,6 +1994,7 @@ mod tests {
     /// Matches docker's `inspect` output for containers without a
     /// HealthConfig.
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn healthcheck_test_empty_returns_healthy() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = WispBackend::from_env(tmp.path()).await.unwrap();
@@ -2004,6 +2011,7 @@ mod tests {
     /// `CMD-SHELL` with no command string errors with a clear
     /// healthcheck-flavored error. Same for `CMD` with no argv.
     #[tokio::test]
+    #[ignore = "needs root + linux + cgroup v2"]
     async fn healthcheck_invalid_test_shape_errors_clearly() {
         let tmp = tempfile::tempdir().unwrap();
         let backend = WispBackend::from_env(tmp.path()).await.unwrap();
