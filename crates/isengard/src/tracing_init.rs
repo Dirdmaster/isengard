@@ -113,10 +113,23 @@ pub fn init(mode: &str, cli_filter: Option<&str>) {
 /// Emit the post-init banner. JSON mode emits a structured ready event;
 /// pretty mode emits a colored single-line banner that's easy to spot in
 /// `docker logs` when something restarts.
+///
+/// Suppressed for one-shot CLI flows (`init`, `join`) where the banner
+/// would clash with the install transcript's hand-rolled ASCII banner.
+/// Long-running daemon modes (`controller`, `agent`) keep the banner so
+/// it shows up in journalctl right next to the boot sequence.
 fn ready_banner(mode: &str, format: LogFormat, ansi: bool) {
     let version = env!("CARGO_PKG_VERSION");
     if matches!(format, LogFormat::Json) {
         tracing::info!(version, mode, "isengard ready");
+        return;
+    }
+
+    if matches!(mode, "init" | "join") {
+        // The init/join flow renders its own polished banner; the
+        // tracing-init line would land above it and clash with the
+        // ASCII art. Stay quiet here; long-running daemons still print
+        // it for journalctl.
         return;
     }
 

@@ -1,8 +1,7 @@
-//! Phase 0.10: `isengard init` subcommand.
-//!
-//! Replaces the ~900 line `install/install.sh` with native Rust. The bash
-//! script becomes a ~50 line bootstrap that downloads the binary and execs
-//! `isengard init` with the same flags the operator would have passed.
+//! Phase 0.11: `isengard init` subcommand. Linear, scrollback-friendly
+//! install transcript. Polished `println!` + ANSI color + braille
+//! spinners; no full-screen TUI (a one-shot installer that takes over
+//! the screen vanishes from history once it exits).
 //!
 //! Two operating modes:
 //!
@@ -13,9 +12,15 @@
 //!     fail with a clear error naming the flag.
 //!
 //! The actual install steps live in [`Plan::execute`] and run identically in
-//! both modes; the only difference is how [`Plan`] gets populated.
+//! both modes; the only difference is how [`Plan`] gets populated. The
+//! visual chrome lives in [`ui`] and [`progress`] so the install logic
+//! is not entangled with print formatting.
 
-use std::io::{IsTerminal, Write};
+mod progress;
+mod ui;
+
+use std::fmt;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +28,35 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text, validator::Validation};
+
+/// One choice in a [`Select`] prompt. The `Display` impl renders as
+/// `<label>  <detail>` in dim grey for `<detail>`, so picking from a
+/// list with descriptions matches the mockup. inquire 0.7 has no
+/// per-option help-text API, so we encode the description into the
+/// `Display` output.
+#[derive(Clone, Copy)]
+struct SelectOption {
+    /// Stable token returned to the caller (`production`, `staging`, ...).
+    value: &'static str,
+    /// Human label shown left of the description.
+    label: &'static str,
+    /// Dim explanatory text after the label.
+    detail: &'static str,
+}
+
+impl fmt::Display for SelectOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Two-space gap separates the label from the dim detail. The
+        // label is left-padded so options align in a column even when
+        // labels differ in length.
+        write!(
+            f,
+            "{:<26}  {}",
+            self.label,
+            console::style(self.detail).dim()
+        )
+    }
+}
 
 /// Flags shared between init and the bash bootstrap. Every prompt has a
 /// matching flag so the install can run unattended (`--non-interactive`)
@@ -158,56 +192,86 @@ impl Plan {
 
     /// Build a [`Plan`] by walking the operator through `inquire` prompts
     /// for each unset CLI flag. Defaults pre-populate prompts so an
-    /// operator can hit Enter through the safe path.
+    /// operator can hit Enter through the safe path. Section headers,
+    /// prompt labels, and help text are printed via [`ui`]; inquire's
+    /// own widget message is kept short so the formatted label stays
+    /// readable above the input cursor.
     fn interactive(args: &InitArgs, host_ip: String) -> Result<Self> {
-        println!();
-        println!("isengard init: interactive setup");
-        println!("==============================");
-        println!();
+        ui::section("Network identity");
 
         let acme_email = match &args.acme_email {
             Some(e) => e.clone(),
-            None => Text::new("ACME contact email (blank for internal-only deploys):")
-                .with_help_message(
-                    "Used for Let's Encrypt account registration. Required for public HTTPS.",
-                )
-                .with_validator(|v: &str| {
-                    if v.is_empty() || v.contains('@') {
-                        Ok(Validation::Valid)
-                    } else {
-                        Ok(Validation::Invalid("must contain '@' or be blank".into()))
-                    }
-                })
-                .prompt()
-                .map_err(|e| anyhow!("acme email prompt: {e}"))?,
+            None => {
+                ui::prompt_header(
+                    "ACME contact email",
+                    Some(
+                        "Used for Let's Encrypt expiry notifications. Blank for internal-only deploys.",
+                    ),
+                );
+                Text::new("›")
+                    .with_validator(|v: &str| {
+                        if v.is_empty() || v.contains('@') {
+                            Ok(Validation::Valid)
+                        } else {
+                            Ok(Validation::Invalid("must contain '@' or be blank".into()))
+                        }
+                    })
+                    .prompt()
+                    .map_err(|e| anyhow!("acme email prompt: {e}"))?
+            }
         };
 
         let acme_domains = match &args.acme_domains {
             Some(d) => d.clone(),
-            None => Text::new("ACME domains, comma-separated (e.g. *.foo.com,foo.com):")
-                .with_default("")
-                .with_help_message("Wildcards require DNS-01 (Cloudflare token below).")
-                .prompt()
-                .map_err(|e| anyhow!("acme domains prompt: {e}"))?,
+            None => {
+                ui::prompt_header(
+                    "ACME domains (cert SANs)",
+                    Some("Comma-separated, e.g. *.foo.com,foo.com. Wildcards require DNS-01."),
+                );
+                Text::new("›")
+                    .with_default("")
+                    .prompt()
+                    .map_err(|e| anyhow!("acme domains prompt: {e}"))?
+            }
         };
 
         let acme_directory = match &args.acme_directory {
             Some(d) => d.clone(),
             None => {
-                let opts = vec!["staging", "production", "custom URL"];
-                let pick = Select::new("ACME directory:", opts)
+                ui::prompt_header("ACME directory", None);
+                let opts = vec![
+                    SelectOption {
+                        value: "production",
+                        label: "Let's Encrypt production",
+                        detail: "real certs, requires DNS",
+                    },
+                    SelectOption {
+                        value: "staging",
+                        label: "Let's Encrypt staging",
+                        detail: "test only",
+                    },
+                    SelectOption {
+                        value: "custom",
+                        label: "Custom URL",
+                        detail: "self-hosted CA",
+                    },
+                ];
+                let pick = Select::new("›", opts)
                     .with_starting_cursor(0)
                     .prompt()
                     .map_err(|e| anyhow!("acme directory prompt: {e}"))?;
-                if pick == "custom URL" {
-                    Text::new("Custom ACME directory URL:")
+                if pick.value == "custom" {
+                    ui::prompt_header("Custom ACME directory URL", None);
+                    Text::new("›")
                         .prompt()
                         .map_err(|e| anyhow!("custom acme url prompt: {e}"))?
                 } else {
-                    pick.to_string()
+                    pick.value.to_string()
                 }
             }
         };
+
+        ui::section("Secrets");
 
         let cf_dns_token = if args.no_cf_dns_token {
             None
@@ -215,14 +279,21 @@ impl Plan {
             match &args.cf_dns_token {
                 Some(t) => Some(t.clone()),
                 None => {
-                    let want = Confirm::new("Set a Cloudflare DNS API token (DNS-01 wildcards)?")
+                    ui::prompt_header(
+                        "Set Cloudflare DNS API token?",
+                        Some("Required for DNS-01 wildcard issuance. Stored encrypted."),
+                    );
+                    let want = Confirm::new("›")
                         .with_default(false)
                         .prompt()
                         .map_err(|e| anyhow!("cf token confirm: {e}"))?;
                     if want {
-                        let v = Password::new("Cloudflare DNS API token:")
+                        ui::prompt_header(
+                            "Cloudflare DNS API token",
+                            Some("Hidden input. Encrypted with the master key."),
+                        );
+                        let v = Password::new("›")
                             .with_display_mode(PasswordDisplayMode::Masked)
-                            .with_help_message("Hidden input. Encrypted with the master key.")
                             .without_confirmation()
                             .prompt()
                             .map_err(|e| anyhow!("cf token prompt: {e}"))?;
@@ -240,14 +311,21 @@ impl Plan {
             match &args.backup_passphrase_file {
                 Some(p) => Some(read_passphrase_file(p)?),
                 None => {
-                    let want = Confirm::new("Set a backup passphrase (encrypted snapshots)?")
+                    ui::prompt_header(
+                        "Set a backup passphrase?",
+                        Some("Used to encrypt automated snapshots. Stored encrypted."),
+                    );
+                    let want = Confirm::new("›")
                         .with_default(false)
                         .prompt()
                         .map_err(|e| anyhow!("backup confirm: {e}"))?;
                     if want {
-                        let v = Password::new("Backup passphrase:")
+                        ui::prompt_header(
+                            "Backup passphrase",
+                            Some("Hidden input. Encrypted with the master key."),
+                        );
+                        let v = Password::new("›")
                             .with_display_mode(PasswordDisplayMode::Masked)
-                            .with_help_message("Hidden input. Encrypted with the master key.")
                             .prompt()
                             .map_err(|e| anyhow!("backup prompt: {e}"))?;
                         if v.is_empty() { None } else { Some(v) }
@@ -263,15 +341,19 @@ impl Plan {
         let host_ip = if args.host_ip.is_some() {
             host_ip
         } else {
-            let prompt = format!("Use detected host IP {host_ip} for cross-host join?");
-            let ok = Confirm::new(&prompt)
+            ui::prompt_header(
+                &format!("Use detected host IP {host_ip} for cross-host join?"),
+                Some("This IP is added to the controller cert SANs."),
+            );
+            let ok = Confirm::new("›")
                 .with_default(true)
                 .prompt()
                 .map_err(|e| anyhow!("host ip confirm: {e}"))?;
             if ok {
                 host_ip
             } else {
-                Text::new("Host IP for join command:")
+                ui::prompt_header("Host IP for join command", None);
+                Text::new("›")
                     .with_default(&host_ip)
                     .prompt()
                     .map_err(|e| anyhow!("host ip prompt: {e}"))?
@@ -280,10 +362,14 @@ impl Plan {
 
         let mut extra_sans = args.extra_sans.clone();
         if extra_sans.is_empty() {
-            // One additional optional prompt; comma-split, blank skips.
-            let raw = Text::new("Extra SANs for the controller cert (comma-separated, optional):")
+            ui::prompt_header(
+                "Extra SANs for the controller cert (optional)",
+                Some(
+                    "Comma-separated. localhost, 127.0.0.1, and detected host IP are added automatically.",
+                ),
+            );
+            let raw = Text::new("›")
                 .with_default("")
-                .with_help_message("e.g. controller.example.com,10.0.0.5. Always includes localhost + 127.0.0.1 + detected host IP.")
                 .prompt()
                 .map_err(|e| anyhow!("extra sans prompt: {e}"))?;
             extra_sans = raw
@@ -353,8 +439,29 @@ impl Plan {
 }
 
 /// Public entry point invoked from `main.rs` after argument parsing.
+///
+/// Order of operations:
+///   1. Preflight (Linux + systemd + root)
+///   2. TTY-vs-flags reconciliation (refuse to proceed when piped + no flags)
+///   3. Banner + detected host
+///   4. Apply the inquire theme (no-op on the non-interactive path)
+///   5. Build a [`Plan`] (interactive prompts or pure flag parse)
+///   6. [`Plan::execute`] runs the install with spinners + summary box
 pub async fn run(args: InitArgs) -> Result<()> {
     preflight()?;
+
+    // TTY fallback: when stdin is piped (e.g. `curl ... | bash`) and no
+    // flags were supplied, prompts can't read keys. Bail with a hint
+    // instead of failing inside an inquire prompt with a cryptic EOF.
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    if !stdin_is_tty && !args.non_interactive && !has_required_flags(&args) {
+        bail!(
+            "isengard init has no TTY for prompts and no flags supplied. \
+             Either run interactively (`isengard init` from a terminal) or pass \
+             `--non-interactive` plus the required flags. See `isengard init --help`."
+        );
+    }
+
     let host_ip = match &args.host_ip {
         Some(ip) => ip.clone(),
         None => detect_host_ip().unwrap_or_else(|e| {
@@ -362,12 +469,45 @@ pub async fn run(args: InitArgs) -> Result<()> {
             "127.0.0.1".to_string()
         }),
     };
-    let plan = if args.non_interactive_resolved() {
-        Plan::from_args(&args, host_ip)?
+
+    ui::banner();
+    ui::detected(&ui::probe_host());
+
+    if args.non_interactive_resolved() {
+        ui::note("Using flag-driven config (non-interactive mode).");
+        let plan = Plan::from_args(&args, host_ip)?;
+        plan.execute().await
     } else {
-        Plan::interactive(&args, host_ip)?
-    };
-    plan.execute().await
+        ui::install_inquire_theme();
+        let plan = Plan::interactive(&args, host_ip)?;
+        plan.execute().await
+    }
+}
+
+/// True if the caller passed enough flags to drive a non-interactive
+/// install without prompts. Conservative: we require at least the ACME
+/// triple so a piped install doesn't silently fall through to defaults
+/// the operator can't see.
+fn has_required_flags(args: &InitArgs) -> bool {
+    args.acme_email.is_some() && args.acme_directory.is_some()
+        || args.no_cf_dns_token && args.no_backup
+}
+
+/// Display the first 8 chars of a token followed by an ellipsis, e.g.
+/// `01KR9876…`. Used in the spinner-finalize line so the operator can
+/// eyeball it without leaking the full token into shell history.
+fn token_preview(token: &str) -> String {
+    let prefix: String = token.chars().take(8).collect();
+    format!("{prefix}…")
+}
+
+/// Display the first 12 chars of a hex fingerprint followed by an
+/// ellipsis. 12 hex chars = 48 bits of entropy, enough for the
+/// operator to recognize the right CA without printing the whole 64
+/// chars (which would force a wrap inside the summary box).
+fn short_fingerprint(fp: &str) -> String {
+    let prefix: String = fp.chars().take(12).collect();
+    format!("{prefix}…")
 }
 
 /// Preflight checks. Bails before touching disk if we're not on Linux,
@@ -416,7 +556,7 @@ unsafe fn libc_getuid() -> u32 {
 /// out `src <addr>`), then falls back to the first non-loopback IPv4 from
 /// `getifaddrs`. Returns the IP as a string suitable for embedding in the
 /// controller's server cert.
-fn detect_host_ip() -> Result<String> {
+pub(super) fn detect_host_ip() -> Result<String> {
     // Path 1: `ip route get 1.1.1.1` outputs a line like
     //   `1.1.1.1 via 10.0.0.1 dev eth0 src 10.0.0.42 uid 0`
     if let Ok(out) = std::process::Command::new("ip")
@@ -469,54 +609,105 @@ fn read_passphrase_file(path: &std::path::Path) -> Result<String> {
 // self-sufficient. Operators running `curl ... | bash` only need the
 // binary on disk; the bash bootstrap doesn't have to ship unit files
 // alongside.
-const ISO_CONTROLLER_UNIT: &str = include_str!("../../../install/systemd/iso-controller.service");
-const ISO_AGENT_UNIT: &str = include_str!("../../../install/systemd/iso-agent.service");
-const ISO_AGENT_TARGET: &str = include_str!("../../../install/systemd/iso-agent.target");
+const ISO_CONTROLLER_UNIT: &str =
+    include_str!("../../../../install/systemd/iso-controller.service");
+const ISO_AGENT_UNIT: &str = include_str!("../../../../install/systemd/iso-agent.service");
+const ISO_AGENT_TARGET: &str = include_str!("../../../../install/systemd/iso-agent.target");
 
 impl Plan {
     /// Drive every step of the install: dirs, master key, secrets, units,
-    /// service start, token mint, ca export, agent start, success banner.
-    /// Each step logs progress so a `curl | bash` operator sees what's
-    /// happening even without a TTY.
+    /// service start, token mint, ca export, agent start, summary box.
+    /// Each step renders via [`progress`] so the operator sees a live
+    /// braille spinner while a step is in flight, then a static `✓`
+    /// line once it completes (or `✗` on failure). After the install,
+    /// only the static lines remain in scrollback.
     async fn execute(&self) -> Result<()> {
-        println!();
-        println!("[1/12] preflight ok");
+        ui::bootstrap_header();
+
+        // Instant ops: dirs + master key + master-key.env + env file.
         self.setup_dirs()?;
-        println!(
-            "[2/12] state + etc dirs ready ({:?}, {:?})",
-            self.state_dir, self.etc_dir
+        progress::instant_done(
+            "Created directories",
+            format!("{} + {}", self.state_dir.display(), self.etc_dir.display()),
         );
 
         self.setup_master_key()?;
-        println!("[3/12] master key at {:?}", self.master_key_file());
+        progress::instant_done(
+            "Generated master key",
+            self.master_key_file().display().to_string(),
+        );
 
         self.write_master_key_env()?;
-        println!("[4/12] master-key.env written");
+        progress::instant_done(
+            "Wrote master-key.env",
+            self.master_key_env_file().display().to_string(),
+        );
 
-        self.bootstrap_secrets().await?;
-        println!("[5/12] secrets bootstrapped");
+        // Bootstrap secrets touches SQLite, but it's fast enough that a
+        // spinner would only flash for one frame. Time it via the
+        // wrapped step anyway so the timing label appears.
+        let secret_count = self.cf_dns_token.iter().count() + self.backup_passphrase.iter().count();
+        if secret_count == 0 {
+            progress::instant_done("Encrypted secrets", "(none configured)");
+        } else {
+            let pb = progress::start("Encrypting secrets");
+            match self.bootstrap_secrets().await {
+                Ok(()) => pb.done(format!("{secret_count} secret(s) stored")),
+                Err(e) => {
+                    pb.fail(format!("{e:#}"));
+                    return Err(e);
+                }
+            }
+        }
 
         self.write_env_file()?;
-        println!("[6/12] env file at {:?}", self.env_file());
+        progress::instant_done("Wrote env file", self.env_file().display().to_string());
 
         self.install_systemd_units()?;
-        println!("[7/12] systemd units installed");
+        progress::instant_done("Installed systemd units", "iso-controller, iso-agent");
 
-        self.start_controller().await?;
-        println!("[8/12] controller running");
+        // Controller boot: spawn the unit, then poll for CA readiness.
+        // The spinner stays animated while we wait; on success it
+        // collapses to a single ✓ line.
+        let pb = progress::start("Starting iso-controller");
+        match self.start_controller_with_progress(&pb).await {
+            Ok(()) => pb.done("https://localhost:9417"),
+            Err(e) => {
+                pb.fail(format!("{e:#}"));
+                return Err(e);
+            }
+        }
 
+        // CA export is fast; treat as instant.
         self.export_ca().await?;
-        println!("[9/12] ca exported to {:?}", self.ca_pem_file());
+        progress::instant_done("Exported CA cert", self.ca_pem_file().display().to_string());
 
-        let token = self.mint_token().await?;
+        let token = {
+            let pb = progress::start("Minting enrollment token");
+            match self.mint_token().await {
+                Ok(t) => {
+                    let preview = token_preview(&t);
+                    pb.done(format!("{preview} (15m TTL)"));
+                    t
+                }
+                Err(e) => {
+                    pb.fail(format!("{e:#}"));
+                    return Err(e);
+                }
+            }
+        };
         self.write_token_file(&token)?;
-        println!("[10/12] enrollment token minted");
 
-        self.start_agent()?;
-        println!("[11/12] agent enrolled");
+        let pb = progress::start("Starting iso-agent");
+        match self.start_agent_with_progress() {
+            Ok(()) => pb.done("enrolled"),
+            Err(e) => {
+                pb.fail(format!("{e:#}"));
+                return Err(e);
+            }
+        }
 
-        self.print_banner(&token);
-        println!("[12/12] done");
+        self.print_summary(&token);
         Ok(())
     }
 
@@ -664,9 +855,14 @@ impl Plan {
         Ok(())
     }
 
-    async fn start_controller(&self) -> Result<()> {
+    /// Boot the controller unit and poll for CA readiness. The caller
+    /// owns the spinner; this just updates the per-attempt message
+    /// (`Waiting for controller (3/30s)`) so the operator sees forward
+    /// progress on slow first boots without us spamming new lines.
+    async fn start_controller_with_progress(&self, pb: &progress::StepGuard) -> Result<()> {
         run_systemctl(&["enable", "iso-controller.service"]).ok();
         run_systemctl(&["start", "iso-controller.service"])?;
+        pb.set_message("Waiting for controller to become ready…");
 
         // Poll for CA readiness (which doubles as a controller-up signal):
         // `Authority::load_or_init` succeeds once the boot path has run.
@@ -675,6 +871,7 @@ impl Plan {
             let inv = match open_controller_inventory(&inv_dir).await {
                 Ok(i) => i,
                 Err(_) => {
+                    pb.set_message(format!("Waiting for controller ({}/30s)…", i + 1));
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -685,12 +882,8 @@ impl Plan {
             {
                 return Ok(());
             }
-            print!(".");
-            std::io::stdout().flush().ok();
+            pb.set_message(format!("Waiting for controller ({}/30s)…", i + 1));
             tokio::time::sleep(Duration::from_secs(1)).await;
-            // Touch i to silence the unused-binding warning in case the
-            // last `Err` arm short-circuits.
-            let _ = i;
         }
         bail!("controller did not become ready in 30s; check `journalctl -u iso-controller`")
     }
@@ -734,42 +927,110 @@ impl Plan {
         Ok(())
     }
 
-    fn start_agent(&self) -> Result<()> {
+    /// Best-effort agent boot. The agent's gRPC enrollment is async; we
+    /// don't poll for completion here (see [`Plan::execute`] for the
+    /// summary box's verification hint).
+    fn start_agent_with_progress(&self) -> Result<()> {
         run_systemctl(&["enable", "iso-agent.service"]).ok();
         run_systemctl(&["start", "iso-agent.service"])?;
-        // Best-effort: agent enrollment is async via gRPC; we don't poll
-        // here today. The success banner instructs the operator how to
-        // verify (`systemctl status iso-agent` + `isengard controller agent list`).
         Ok(())
     }
 
-    fn print_banner(&self, token: &str) {
+    /// Render the final "Ready" summary box. Includes controller URLs,
+    /// state paths, journalctl hint, and the cross-host join command
+    /// (with the freshly-minted token + CA fingerprint pre-baked in).
+    /// The box stays in scrollback so the operator can scroll up after
+    /// the install completes.
+    fn print_summary(&self, token: &str) {
         let host_ip = if self.host_ip.is_empty() {
             "<your-host-ip>".to_string()
         } else {
             self.host_ip.clone()
         };
-        println!();
-        println!("=================================================================");
-        println!("Isengard is up.");
-        println!();
-        println!("Controller (local):  https://localhost:9417");
-        println!("Controller (remote): https://{host_ip}:9417");
-        println!("Dashboard:           http://localhost:9418");
-        println!();
-        println!("To enroll another host, run on that host:");
-        println!();
-        println!(
-            "  isengard join \\\n    --token {token} \\\n    --ca-pem-path /etc/isengard/ca.pem \\\n    https://{host_ip}:9417"
+
+        // Compute the CA fingerprint for the optional pin hint. Failure
+        // is non-fatal: the join command falls back to pem-path pinning
+        // (which always works since we just wrote the file).
+        let ca_fingerprint = std::fs::read_to_string(self.ca_pem_file())
+            .ok()
+            .and_then(|pem| ca_sha256_fingerprint(&pem).ok());
+
+        let mut lines: Vec<String> = Vec::new();
+        // The box helper renders its own top/bottom padding rows; no
+        // need for an explicit blank line here.
+        lines.push(format!(
+            "{:<13} {}",
+            "Controller",
+            console::style(format!("https://{host_ip}:9417")).bold()
+        ));
+        lines.push(format!(
+            "{:<13} {}",
+            "Dashboard",
+            console::style("http://localhost:9418").bold()
+        ));
+        lines.push(format!(
+            "{:<13} {}",
+            "State",
+            console::style(self.state_dir.display().to_string()).bold()
+        ));
+        lines.push(format!(
+            "{:<13} {}",
+            "Logs",
+            console::style("journalctl -u iso-controller -u iso-agent").dim()
+        ));
+        lines.push(String::new());
+        lines.push(console::style("Add another host:").bold().to_string());
+        lines.push(String::new());
+        // Pre-split the join command onto its own indented lines with
+        // shell backslash continuations, matching the mockup. The wrap
+        // helper in `summary_box` would otherwise break on the long
+        // base32 token (which has no whitespace) and produce ragged
+        // chunks that overflow the box. We default to `--ca-pem-path`
+        // because the path is short and always fits on one line; the
+        // computed fingerprint is shown below the join block as a
+        // belt-and-braces pin the operator can append manually.
+        lines.push(console::style("  isengard join \\").cyan().to_string());
+        lines.push(
+            console::style(format!("    --token {token} \\"))
+                .cyan()
+                .to_string(),
         );
-        println!();
-        println!("(Copy /etc/isengard/ca.pem from this host to the joining host first,");
-        println!(" or paste it via --ca-pem-base64. Token expires in 15 minutes.)");
-        println!();
-        println!("Logs:    journalctl -u iso-controller -f");
-        println!("         journalctl -u iso-agent -f");
-        println!("Status:  systemctl status iso-controller iso-agent");
-        println!("=================================================================");
+        lines.push(
+            console::style("    --ca-pem-path /etc/isengard/ca.pem \\")
+                .cyan()
+                .to_string(),
+        );
+        lines.push(
+            console::style(format!("    https://{host_ip}:9417"))
+                .cyan()
+                .to_string(),
+        );
+        if let Some(fp) = &ca_fingerprint {
+            // CA pin hint: short prefix only, dim. The full 64-char
+            // hex shows up in `cat /etc/isengard/ca.pem | openssl ...`
+            // so we don't need to print all of it; the prefix is
+            // enough for the operator to verify the right CA was
+            // provisioned.
+            lines.push(String::new());
+            lines.push(format!(
+                "  {} sha256:{}",
+                console::style("CA fingerprint:").dim(),
+                console::style(short_fingerprint(fp)).dim(),
+            ));
+        }
+        lines.push(String::new());
+        lines.push(
+            console::style("Next: deploy your first stack")
+                .bold()
+                .to_string(),
+        );
+        lines.push(
+            console::style("  isd deploy --file ./compose.toml --stack hello")
+                .cyan()
+                .to_string(),
+        );
+
+        ui::summary_box("Ready", &lines);
     }
 }
 
@@ -792,6 +1053,7 @@ fn write_secret(path: &std::path::Path, bytes: &[u8], mode: u32) -> Result<()> {
     }
     let tmp = path.with_extension("tmp.isengard-init");
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -815,13 +1077,24 @@ fn chmod(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
     std::fs::set_permissions(path, perms)
 }
 
+/// Invoke `systemctl <args>` and capture its output instead of letting
+/// it print directly. systemd's `enable` and `daemon-reload` paths
+/// write `Created symlink …` to stderr, which interleaves with our
+/// spinner+println chrome and breaks the layout. We swallow the chatter
+/// on success and re-emit captured output on failure so debugging is
+/// still possible.
 fn run_systemctl(args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("systemctl")
+    let out = std::process::Command::new("systemctl")
         .args(args)
-        .status()
+        .output()
         .with_context(|| format!("exec systemctl {args:?}"))?;
-    if !status.success() {
-        bail!("systemctl {args:?} failed: {status}");
+    if !out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "systemctl {args:?} failed: {status}\n--- stdout ---\n{stdout}--- stderr ---\n{stderr}",
+            status = out.status,
+        );
     }
     Ok(())
 }

@@ -188,6 +188,14 @@ rpassword = "7"
 # change the prompt UX.
 inquire = "0.7"
 
+# Phase 0.11: linear install transcript polish for `isengard init`. `console`
+# provides ANSI styling + terminal width detection; `indicatif` powers the
+# in-place spinners that get replaced by static "done" lines so the full
+# install transcript stays in scrollback. Pin tight so a transitive bump
+# can't quietly change the look.
+console = "0.16"
+indicatif = "0.18"
+
 # v0.3b: embedded DNS server hosted by the controller for a configurable zone
 # (e.g. `*.iso`). Pinned to 0.25; 0.26+ requires Rust 1.88, the workspace
 # MSRV is 1.86. RUSTSEC-2026-0119 is acknowledged in deny.toml; not

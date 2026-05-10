@@ -35,6 +35,8 @@ hex = "0.4"
 humantime = "2.1"
 if-addrs = { workspace = true }
 inquire = { workspace = true }
+console = { workspace = true }
+indicatif = { workspace = true }
 inventory.workspace = true
 rand = { workspace = true }
 sha2 = { workspace = true }
