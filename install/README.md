@@ -2,7 +2,7 @@
 
 The supported way to put Isengard on a server. Two flows:
 
-1. **Phase 0.10 default: systemd-native, Rust-driven.** `install/install.sh` is a thin bootstrap that downloads the static musl binary from GitHub Releases, verifies its sha256, and execs `isengard init` (a Rust subcommand with an interactive TUI). The init flow generates the master key, bootstraps secrets, writes the systemd unit files, brings up the controller, and enrolls the local agent. Operators add extra hosts via `isengard join`.
+1. **Phase 0.10 default: systemd-native, Rust-driven.** `install/install.sh` is a thin bootstrap that downloads the static musl binary from GitHub Releases, verifies its sha256, drops it at `/usr/local/bin/isengard`, and prints a usage hint. The operator then runs `isengard init` (becomes a controller) or `isengard join` (enrolls as an agent in an existing fleet). Both are Rust subcommands with an interactive cliclack TUI. The init flow generates the master key, bootstraps secrets, writes the systemd unit files, brings up the controller, and enrolls the local agent. Operators add extra hosts via `isengard join`.
 2. **Legacy: docker compose.** `install/install-docker.sh` is the pre-0.8 flow. Pulls images from GHCR and brings up controller + agent as containers via `docker compose`. Stays around for operators who haven't migrated. Phase 0.11+ removes it.
 
 Both flows share the same secrets model (master key on disk, encrypted SQLite for everything else), the same env file shape, and the same operator CLI (`isd`).
@@ -11,13 +11,19 @@ Both flows share the same secrets model (master key on disk, encrypted SQLite fo
 
 ### Quick install (interactive)
 
-On the controller host:
+Step 1: drop the binary on the host. Runs the same way whether the host will become a controller or an agent.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
 ```
 
-`install.sh` downloads the binary to `/usr/local/bin/isengard` and execs `isengard init`, which walks you through prompts:
+`install.sh` downloads the binary to `/usr/local/bin/isengard`, verifies the sha256, and prints a usage hint. It does NOT pick `init` or `join` for you: that was a footgun pre-2026-05-11, where every host that ran the curl pipe silently spun up a fresh controller. Now you choose explicitly.
+
+Step 2 (controller host only): run `isengard init`. It walks you through prompts:
+
+```sh
+sudo isengard init
+```
 
 - ACME contact email (Let's Encrypt account registration; blank skips)
 - ACME domains (comma-separated; wildcards require DNS-01)
@@ -27,13 +33,16 @@ curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/i
 - Auto-detected host IP confirmation (used as a SAN on the controller cert)
 - Optional extra SANs for the controller cert
 
-After the prompts, init does the install: dirs + master key + secrets + systemd units + env file + start controller + export CA + mint enrollment token + start agent + success banner.
+After the prompts, init does the install: dirs + master key + secrets + systemd units + env file + start controller + export CA + mint enrollment token + start agent + success banner. The banner includes a copy-pasteable `isengard join` command for the other hosts in the fleet.
 
 ### Quick install (non-interactive)
+
+Bake the subcommand into the install pipe via `bash -s --`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | \
   sudo bash -s -- \
+    init \
     --non-interactive \
     --acme-email ops@example.com \
     --acme-domains "*.example.com,example.com" \
@@ -42,18 +51,34 @@ curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/i
     --no-backup
 ```
 
-Every prompt has a matching flag. Missing required values fail with a clear error. The bootstrap forwards all args to `isengard init`.
+Note the explicit `init` after `--`: that is the new requirement. Pre-2026-05-11 the bootstrap auto-appended `init`, which is why every piped curl turned the host into a controller. Now any args after `--` are exec'd as-is: `init [flags]` for a controller, `join [flags] <url>` for an agent.
+
+Every prompt has a matching flag. Missing required values fail with a clear error.
 
 ### Adding more hosts to the fleet
 
 After `init` finishes, the success banner prints a join command. On each additional host:
 
 ```sh
-# Copy /etc/isengard/ca.pem from the controller host to this one first.
+# 1. Drop the binary (same one-liner the controller host used).
+curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
+
+# 2. Copy /etc/isengard/ca.pem from the controller host to this one first.
 sudo isengard join \
   --token "<token-from-init-banner>" \
   --ca-pem-path /etc/isengard/ca.pem \
   https://<controller-host-ip>:9417
+```
+
+Or fold both steps into a piped one-liner:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | \
+  sudo bash -s -- \
+    join \
+    --token "<token>" \
+    --ca-pem-base64 "<base64-ca>" \
+    https://<controller-host-ip>:9417
 ```
 
 Or pipe the CA inline:
@@ -148,8 +173,9 @@ Secrets (Cloudflare API token, backup passphrase, etc.) live encrypted in the co
 ### Updating
 
 ```sh
-# Re-run the bootstrap to fetch a new binary; init is safe to re-run
-# (existing master key + secrets are preserved).
+# Re-run the bootstrap to fetch a new binary. Drops the new binary
+# and exits; no init or join is triggered. Re-running `isengard init`
+# afterward is safe (existing master key + secrets are preserved).
 curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
 ```
 

@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
-# Isengard install bootstrap (Phase 0.10).
+# Isengard install bootstrap (Phase 0.10, P1 footgun fix 2026-05-11).
 #
 # Downloads the isengard binary from GitHub Releases, verifies its
-# sha256, drops it at /usr/local/bin/isengard, and execs `isengard init`.
-# All real install logic lives inside the binary now (interactive TUI
-# via inquire, or flag-driven for scripted setups). This script's job
-# is to put the binary in place and hand off; nothing else.
+# sha256, drops it at /usr/local/bin/isengard, then hands off to a
+# subcommand the operator chooses. All real install logic lives
+# inside the binary (interactive cliclack TUI, or flag-driven for
+# scripted setups). This script's job is to put the binary in place
+# and hand off; nothing else.
+#
+# Subcommand handling (FOOTGUN FIX):
+#   - With NO subcommand: drop the binary and print a usage hint.
+#     Previously this exec'd `isengard init` unconditionally, which
+#     meant every host that ran `curl | bash` became a controller,
+#     including hosts intended to be agents. Now the operator must
+#     explicitly choose `init` or `join`.
+#   - With a subcommand: exec `isengard <subcommand> [args...]`.
 #
 # Usage:
+#   # Drop the binary, then choose what to do next:
 #   curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
+#   sudo isengard init                                   # become a controller
+#   sudo isengard join --token <t> https://<ctrl>:9417   # enroll as an agent
 #
-# With arguments forwarded to `isengard init`:
-#   curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | \
-#     sudo bash -s -- --acme-email me@example.com --acme-domains example.com
+#   # Or bake the subcommand into the curl pipe:
+#   curl ... | sudo bash -s -- init --acme-email me@example.com
+#   curl ... | sudo bash -s -- join --token <t> --ca-pem-path /etc/isengard/ca.pem https://<ctrl>:9417
 #
 # Env vars (all optional):
 #   ISENGARD_VERSION             Release tag. Default "latest".
@@ -21,8 +33,8 @@
 #   ISENGARD_BIN                 Final binary path. Default /usr/local/bin/isengard.
 #
 # This script intentionally does NOT detect existing installs, write
-# config, generate keys, or talk to systemd. `isengard init` does all
-# of that and is idempotent (re-running keeps the master key + secrets).
+# config, generate keys, or talk to systemd. `isengard init` (and
+# `isengard join`) do all of that and are idempotent.
 
 set -euo pipefail
 
@@ -117,9 +129,37 @@ log "sha256 verified: ${expected}"
 install -m 0755 "${tmp}" "${ISENGARD_BIN}"
 log "installed ${ISENGARD_BIN}"
 
-# Hand off. `isengard init` handles everything else: dirs, master key,
-# secrets bootstrap, systemd units, env file, controller boot, agent
-# enrollment. Forwards "$@" so the operator can pass flags through:
+# Hand off. The operator picks the subcommand. We refuse to silently
+# pick `init` for them: that's the v0.4.0 footgun where every host
+# that ran `curl | bash` became a controller, including ones intended
+# to be agents. See header comment for details.
 #
-#   curl ... | sudo bash -s -- --non-interactive --acme-email me@example.com
-exec "${ISENGARD_BIN}" init "$@"
+# - No args: print a usage hint and exit clean. The binary is in
+#   place; the operator runs `isengard init` or `isengard join` next.
+# - With args: exec `isengard <args...>`. So `bash -s -- init ...`
+#   and `bash -s -- join ...` both work for one-shot piped installs.
+if [[ $# -eq 0 ]]; then
+  cat <<EOF >&2
+[isengard] binary installed at ${ISENGARD_BIN}.
+
+What this host should be next determines the command to run:
+
+  Create a new fleet (this host runs the controller):
+    sudo ${ISENGARD_BIN} init
+
+  Join an existing fleet (this host runs only an agent):
+    sudo ${ISENGARD_BIN} join \\
+      --token <token-from-controller> \\
+      --ca-pem-path /etc/isengard/ca.pem \\
+      https://<controller-host>:9417
+
+To bake the choice into a one-liner, pass it through the install pipe:
+
+  curl ... | sudo bash -s -- init [init flags...]
+  curl ... | sudo bash -s -- join --token <t> https://<ctrl>:9417
+
+EOF
+  exit 0
+fi
+
+exec "${ISENGARD_BIN}" "$@"

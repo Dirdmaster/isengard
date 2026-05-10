@@ -4,15 +4,31 @@
 >
 > **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
 
-## Production install (one command)
+## Production install (two commands)
 
-For a fresh server: install the full stack (controller + agent + shared proxy network) with one command. No source checkout, no Rust toolchain, no Justfile. Pulls signed images from GHCR and writes config under `/etc/isengard/`.
+For a fresh server: drop the binary, then pick a role for the host. The bootstrap is intentionally two steps so `curl | bash` cannot silently turn an agent host into a second controller.
 
 ```sh
+# Step 1: download + verify + drop the binary at /usr/local/bin/isengard.
 curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
+
+# Step 2a (first host, becomes the controller):
+sudo isengard init
+
+# Step 2b (every other host, enrolls as an agent):
+sudo isengard join --token <token> --ca-pem-path /etc/isengard/ca.pem https://<controller-host>:9417
 ```
 
-The first run writes `/etc/isengard/isengard.env` (a commented template) and exits. Edit the file, set the secrets it asks for, and re-run the same command. See [`install/README.md`](./install/README.md) for the full guide, env reference, and uninstall.
+Both `init` and `join` are interactive cliclack TUIs with `--non-interactive` modes for scripted setups. The init success banner prints a copy-pasteable join command for the agent hosts.
+
+If you prefer a true one-liner, bake the subcommand into the pipe:
+
+```sh
+curl ... | sudo bash -s -- init [init flags...]
+curl ... | sudo bash -s -- join --token <t> https://<ctrl>:9417
+```
+
+See [`install/README.md`](./install/README.md) for the full guide, flag reference, and uninstall.
 
 The recipe in [`docker/`](./docker/) remains the dev story: source build, named volumes, `just dev`. Use `install/` for any host you want to keep running.
 
