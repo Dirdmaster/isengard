@@ -16,6 +16,7 @@ use isengard_storage::host::HostId;
 
 #[cfg(feature = "dev")]
 mod dev_plugin;
+mod init;
 mod tracing_init;
 
 // Force-link the notifier plugin so its `inventory::submit!` registration is
@@ -56,6 +57,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Phase 0.10: bootstrap a fresh host. Generates the master key,
+    /// bootstraps secrets, writes the systemd units + env files, brings
+    /// up the controller and the local agent. Replaces the legacy
+    /// `install/install.sh` bash flow. Interactive when stdin is a TTY,
+    /// flag-driven (`--non-interactive`) for scripted installs.
+    Init(init::InitArgs),
     /// Run in controller mode: aggregates agent state, hosts the dashboard
     /// and notifier plugins, distributes config. With no subcommand the
     /// controller boots and serves; subcommands provide operator tooling
@@ -295,6 +302,7 @@ async fn main() {
         Command::Agent { .. } => "agent",
         Command::Secret { .. } => "secret",
         Command::SelfUpdate { .. } => "self-update",
+        Command::Init(_) => "init",
     };
     tracing_init::init(mode, cli.log.as_deref());
 
@@ -382,6 +390,7 @@ async fn dispatch(command: Command) -> Result<()> {
             unit,
             no_restart,
         } => run_self_update(url, sha256, unit, no_restart).await,
+        Command::Init(args) => init::run(args).await,
     }
 }
 

@@ -454,10 +454,25 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // workflows don't require extra env wiring.
     let controller_dns =
         std::env::var("ISENGARD_CONTROLLER_DNS").unwrap_or_else(|_| "controller.local".into());
+    // Phase 0.10: extra SANs threaded through `isengard init` so the
+    // controller's server cert is valid for `localhost`, `127.0.0.1`,
+    // the auto-detected host IP, and any operator-supplied hostnames.
+    // Comma-separated; whitespace and blank entries are ignored.
+    let extra_sans: Vec<String> = std::env::var("ISENGARD_EXTRA_SANS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     // Imp-1: controller's own server cert needs both ClientAuth and
     // ServerAuth. Agents only get ClientAuth via sign_agent_leaf.
     let server_leaf = ca
-        .sign_server_leaf(HostId::new(), &controller_dns, chrono::Duration::days(30))
+        .sign_server_leaf_with_sans(
+            HostId::new(),
+            &controller_dns,
+            &extra_sans,
+            chrono::Duration::days(30),
+        )
         .context("sign controller server leaf")?;
     let identity = Identity::from_pem(
         server_leaf.cert_pem.as_bytes(),

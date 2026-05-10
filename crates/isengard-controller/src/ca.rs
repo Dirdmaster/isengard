@@ -131,6 +131,7 @@ impl Authority {
         self.sign_leaf_inner(
             host_id,
             hostname,
+            &[],
             ttl,
             &[ExtendedKeyUsagePurpose::ClientAuth],
         )
@@ -146,9 +147,31 @@ impl Authority {
         hostname: &str,
         ttl: Duration,
     ) -> Result<IssuedLeaf> {
+        self.sign_server_leaf_with_sans(host_id, hostname, &[], ttl)
+    }
+
+    /// Phase 0.10: mint a server cert with extra Subject Alternative Names
+    /// beyond the primary `hostname`. Each entry in `extra_sans` is parsed
+    /// as either an IP address (v4 or v6) when it lexes as one, or a DNS
+    /// name otherwise. Empty / blank entries are silently skipped so the
+    /// caller can pass an unfiltered comma-split.
+    ///
+    /// Used by `isengard init` to thread `localhost`, `127.0.0.1`, the
+    /// auto-detected host IP, and any operator-supplied hostnames through
+    /// to the controller's first-boot server-cert generation. Without this,
+    /// the local agent can't reach `https://localhost:9417` and remote
+    /// `isengard join` hosts can't pin the controller by IP.
+    pub fn sign_server_leaf_with_sans(
+        &self,
+        host_id: HostId,
+        hostname: &str,
+        extra_sans: &[String],
+        ttl: Duration,
+    ) -> Result<IssuedLeaf> {
         self.sign_leaf_inner(
             host_id,
             hostname,
+            extra_sans,
             ttl,
             &[
                 ExtendedKeyUsagePurpose::ClientAuth,
@@ -161,6 +184,7 @@ impl Authority {
         &self,
         host_id: HostId,
         hostname: &str,
+        extra_sans: &[String],
         ttl: Duration,
         ekus: &[ExtendedKeyUsagePurpose],
     ) -> Result<IssuedLeaf> {
@@ -180,6 +204,21 @@ impl Authority {
         params.subject_alt_names.push(SanType::DnsName(
             hostname.try_into().context("hostname not ia5")?,
         ));
+        for raw in extra_sans {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == hostname {
+                continue;
+            }
+            if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+                params.subject_alt_names.push(SanType::IpAddress(ip));
+            } else {
+                params.subject_alt_names.push(SanType::DnsName(
+                    trimmed
+                        .try_into()
+                        .with_context(|| format!("extra SAN {trimmed:?} not ia5"))?,
+                ));
+            }
+        }
         params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
             KeyUsagePurpose::KeyEncipherment,

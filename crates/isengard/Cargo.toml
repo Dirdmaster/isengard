@@ -33,7 +33,11 @@ chrono.workspace = true
 clap.workspace = true
 hex = "0.4"
 humantime = "2.1"
+if-addrs = { workspace = true }
+inquire = { workspace = true }
 inventory.workspace = true
+rand = { workspace = true }
+which = { workspace = true }
 isengard-agent.workspace = true
 # Direct rustls dep: main.rs installs the default CryptoProvider at startup
 # (required since instant-acme 0.8 pulled in rustls-platform-verifier).
