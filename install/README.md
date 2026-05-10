@@ -95,7 +95,7 @@ Optional defense-in-depth pin via `--ca-fingerprint sha256:<hex>`: when set, the
 The token is single-use with a 15-minute TTL by default. Mint a fresh one on the controller when needed:
 
 ```sh
-isengard controller --state-dir /var/lib/isengard/controller token mint --role agent
+isengard controller token mint --role agent
 ```
 
 ### `isengard init` flags
@@ -205,7 +205,7 @@ This script is on a deprecation timer. Phase 0.11+ removes it; pin to a tag if y
 ## Threat model
 
 - The master key is the single thing on the host filesystem that gates access to every stored secret. It's mode `0600 root:root` at `/etc/isengard/master.key`. Same threat profile as Docker Swarm's default raft unlock key.
-- The encrypted DB at `/var/lib/isengard/controller/isengard.db` holds ChaCha20-Poly1305 ciphertexts. Without the master key it's a pile of opaque bytes.
+- The encrypted DB at `/var/lib/isengard/isengard.db` holds ChaCha20-Poly1305 ciphertexts. Without the master key it's a pile of opaque bytes.
 - Secret values that the operator types at the install prompt live in the kernel pipe and the bootstrap process's memory only. They never hit the host filesystem in plaintext form.
 - The systemd-native install runs both services as root. Phase 0.10 calls this out explicitly: the agent needs broad caps (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, SYS_RESOURCE, plus chown/setuid/setgid for workload bootstrap) and AppArmor profiles aren't shipped yet. Phase 0.11+ tightens to a dedicated user + AmbientCapabilities + an AppArmor profile.
 

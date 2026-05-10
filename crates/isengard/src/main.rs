@@ -512,6 +512,16 @@ async fn run_controller(
         .parse()
         .map_err(|e| anyhow!("invalid --dns-listen address {dns_listen:?}: {e}"))?;
 
+    // Phase 0.16 migration: pre-Phase-0.16 installs put the controller's
+    // SQLite + CA under `<state_dir>/controller/`. The new layout writes
+    // them at `<state_dir>` directly. If we see the legacy DB and the new
+    // location is empty, fall back to the legacy path so an in-place
+    // upgrade doesn't lose data. The CLI's matching subcommands
+    // (token mint / agent list / ca export) default to the same
+    // `--state-dir` value, so they pick up the migrated path here too via
+    // the boot-side log line.
+    let state_dir = resolve_controller_state_dir(state_dir);
+
     // Create state dir if missing (controller can't run without somewhere to put the db).
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
@@ -537,14 +547,51 @@ async fn run_controller(
 
 /// Open the inventory at the same path the controller boot path uses
 /// (`<state_dir>/isengard.db`). Subcommands need direct access for one-shot
-/// admin operations (mint / revoke / list).
+/// admin operations (mint / revoke / list). Auto-applies the Phase 0.16
+/// state-dir migration so `isengard controller token mint` works on
+/// pre-0.16 hosts (data under `<state_dir>/controller/`) without
+/// requiring the operator to pass `--state-dir /var/lib/isengard/controller`.
 async fn open_inventory(state_dir: &std::path::Path) -> Result<Inventory> {
-    std::fs::create_dir_all(state_dir)
+    let state_dir = resolve_controller_state_dir(state_dir.to_path_buf());
+    std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("creating state dir {state_dir:?}: {e}"))?;
     let db_path = state_dir.join("isengard.db");
     Inventory::open(&db_path)
         .await
         .with_context(|| format!("opening inventory at {db_path:?}"))
+}
+
+/// Phase 0.16 state-dir migration shim. Previously the systemd-native
+/// install rooted the controller at `<state_dir>/controller/`; Phase 0.16
+/// drops the suffix so the CLI's `--state-dir /var/lib/isengard` default
+/// matches the running unit.
+///
+/// Behaviour:
+///   * If `<state_dir>/isengard.db` exists, use the new layout (return
+///     `state_dir` unchanged).
+///   * Else if `<state_dir>/controller/isengard.db` exists, log a one-line
+///     hint and return the legacy path. Operators can move the data up one
+///     level at their leisure; nothing forces a flag-day migration.
+///   * Else (greenfield install) return `state_dir` unchanged so the new
+///     directory is created at the new path.
+fn resolve_controller_state_dir(state_dir: std::path::PathBuf) -> std::path::PathBuf {
+    let new_db = state_dir.join("isengard.db");
+    if new_db.exists() {
+        return state_dir;
+    }
+    let legacy = state_dir.join("controller");
+    let legacy_db = legacy.join("isengard.db");
+    if legacy_db.exists() {
+        tracing::warn!(
+            ?legacy,
+            "Phase 0.16: controller state still at legacy `<state_dir>/controller/`; \
+             using it as-is. Move data up one level (`mv {legacy}/* {new}/`) when convenient.",
+            legacy = legacy.display(),
+            new = state_dir.display(),
+        );
+        return legacy;
+    }
+    state_dir
 }
 
 fn parse_role(role: &str) -> Result<TokenRole> {

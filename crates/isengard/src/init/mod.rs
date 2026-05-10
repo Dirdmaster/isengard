@@ -79,8 +79,10 @@ pub struct InitArgs {
     /// Dashboard HTTP listen address.
     #[arg(long, default_value = "0.0.0.0:9418")]
     pub listen_dashboard: String,
-    /// Top-level state directory. Subdirectories `controller/` and `agent/`
-    /// are created under here; SQLite + CA + agent cert live in those.
+    /// Top-level state directory. The controller writes its SQLite + CA
+    /// directly here; the local agent's cert bundle + agent.json live
+    /// under the `agent/` subdir so the controller and agent don't fight
+    /// over the same filenames.
     #[arg(long, default_value = "/var/lib/isengard")]
     pub state_dir: PathBuf,
     /// Config dir for env files, master key, and CA pem.
@@ -289,8 +291,26 @@ impl Plan {
         })
     }
 
+    /// The controller's state-dir. Matches the systemd unit's
+    /// `--state-dir /var/lib/isengard` ExecStart so a one-shot CLI like
+    /// `isengard controller token mint` lands on the same SQLite DB the
+    /// running controller is using. Phase 0.16 dropped the `/controller`
+    /// suffix that was a leak from the bollard-compose era.
+    ///
+    /// Migration: if a pre-0.16 install has data at
+    /// `<state_dir>/controller/isengard.db`, prefer that path so a re-run
+    /// of `isengard init` is idempotent. Greenfield installs land on the
+    /// new path.
     fn controller_state_dir(&self) -> PathBuf {
-        self.state_dir.join("controller")
+        let new_db = self.state_dir.join("isengard.db");
+        if new_db.exists() {
+            return self.state_dir.clone();
+        }
+        let legacy = self.state_dir.join("controller");
+        if legacy.join("isengard.db").exists() {
+            return legacy;
+        }
+        self.state_dir.clone()
     }
     fn agent_state_dir(&self) -> PathBuf {
         self.state_dir.join("agent")
@@ -698,8 +718,11 @@ impl Plan {
     fn setup_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.etc_dir)
             .with_context(|| format!("create {:?}", self.etc_dir))?;
-        std::fs::create_dir_all(self.controller_state_dir())
-            .with_context(|| format!("create {:?}", self.controller_state_dir()))?;
+        // Controller state lives at `self.state_dir` directly (no
+        // `/controller` subdir as of Phase 0.16). The agent's state lives
+        // under `agent/` so the two co-tenants don't fight over filenames.
+        std::fs::create_dir_all(&self.state_dir)
+            .with_context(|| format!("create {:?}", self.state_dir))?;
         std::fs::create_dir_all(self.agent_state_dir())
             .with_context(|| format!("create {:?}", self.agent_state_dir()))?;
         std::fs::create_dir_all(self.state_dir.join("stacks"))
