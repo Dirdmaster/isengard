@@ -30,8 +30,8 @@ use oci_spec::runtime::{
 
 use super::spec::{
     ContainerCreateSpec, ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec,
-    LinuxResources, ListFilter, LogChunk, LogOptions, MountKind, MountSpec, NetworkSettings,
-    PortProtocol as SpecPortProtocol, PortSpec, RuntimeEvent, RuntimeEventType,
+    LinuxResources, ListFilter, LogChunk, LogOptions, LogSource, MountKind, MountSpec,
+    NetworkSettings, PortProtocol as SpecPortProtocol, PortSpec, RuntimeEvent, RuntimeEventType,
 };
 use super::{RuntimeBackend, RuntimeError};
 
@@ -731,13 +731,30 @@ impl RuntimeBackend for WispBackend {
 
     fn stream_logs(
         &self,
-        _id: &str,
-        _opts: LogOptions,
+        id: &str,
+        opts: LogOptions,
     ) -> Pin<Box<dyn Stream<Item = LogChunk> + Send>> {
-        // Dispatch C wires this up via inotify-tail on the bundle log
-        // file. For B2 we return an empty stream so callers get a clean
-        // "no logs yet" signal rather than an error.
-        Box::pin(futures::stream::empty())
+        // Dispatch C2: inotify-tail the per-container stdout.log /
+        // stderr.log files written by wisp lifecycle. Backfill existing
+        // content first (capped by opts.tail), then watch each file for
+        // Modify events and emit deltas as they land.
+        //
+        // The wisp state-dir layout puts each container under
+        // `<state_dir>/wisp/containers/<id>/`. (See `WispBackend::from_env`:
+        // `let wisp_state = state_dir.join("wisp")`.)
+        let stdout_path = self
+            .state_dir
+            .join("wisp")
+            .join("containers")
+            .join(id)
+            .join("stdout.log");
+        let stderr_path = self
+            .state_dir
+            .join("wisp")
+            .join("containers")
+            .join(id)
+            .join("stderr.log");
+        Box::pin(inotify_tail_logs(stdout_path, stderr_path, opts))
     }
 
     fn stream_events(&self) -> Pin<Box<dyn Stream<Item = RuntimeEvent> + Send>> {
@@ -879,6 +896,249 @@ async fn run_nsenter_shell(
     } else {
         Ok(HealthState::Unhealthy)
     }
+}
+
+/// Read from `path` starting at `*offset` to EOF, advancing `*offset`
+/// past whatever was read. Returns the bytes; an empty Vec if the file
+/// is missing or the offset is already at EOF. We tolerate ENOENT
+/// because the wisp lifecycle creates the log files lazily on
+/// `start_container`; callers may invoke `stream_logs` before the
+/// container has started and we want a clean empty backfill in that
+/// case rather than an error.
+fn read_tail(path: &Path, offset: &mut u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(_) => return Vec::new(),
+    };
+    if file.seek(SeekFrom::Start(*offset)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    let n = match file.read_to_end(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    *offset += n as u64;
+    buf
+}
+
+/// Trim `bytes` to its last `tail_lines` newline-terminated segments.
+/// Used by [`inotify_tail_logs`] when LogOptions.tail is set: only the
+/// final N lines from the backfill phase are emitted, matching docker /
+/// kubectl `--tail`.
+///
+/// Treats a trailing newline as the terminator of the last line (not
+/// an empty extra line); a buffer without a trailing newline still
+/// counts its dangling-final segment as one line.
+fn last_n_lines(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
+    if tail_lines == 0 {
+        return Vec::new();
+    }
+    let want = tail_lines as usize;
+    // Strip a single trailing `\n` for counting purposes so the final
+    // line and a dangling-no-trailing-newline final line are treated
+    // uniformly.
+    let scan_end = if bytes.last() == Some(&b'\n') {
+        bytes.len() - 1
+    } else {
+        bytes.len()
+    };
+    let scan = &bytes[..scan_end];
+    // Walk backwards counting newlines. Each newline within `scan`
+    // closes one prior line; once we've passed `want - 1` of them, the
+    // next byte after that newline is the cut point for the last
+    // `want` lines.
+    let mut count = 0usize;
+    let mut cut = 0usize;
+    for (i, b) in scan.iter().enumerate().rev() {
+        if *b == b'\n' {
+            count += 1;
+            if count >= want {
+                cut = i + 1;
+                break;
+            }
+        }
+    }
+    bytes[cut..].to_vec()
+}
+
+/// State carried across [`futures::stream::unfold`] poll calls for the
+/// inotify-backed log tail.
+///
+/// We use unfold rather than `async_stream` (not in our deps) so the
+/// watcher's lifetime can be threaded through each poll cleanly. The
+/// `RecommendedWatcher` is kept alive in `_watcher` until the consumer
+/// drops the stream; dropping releases the inotify subscription.
+struct LogTailState {
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    stdout_offset: u64,
+    stderr_offset: u64,
+    /// Backfill items emitted before we start receiving live events.
+    /// Each `Some(LogChunk)` is yielded immediately; once empty we
+    /// transition into the watcher-event loop.
+    backfill: std::collections::VecDeque<LogChunk>,
+    follow: bool,
+    /// Receiver fed by the `notify` callback. Each path hint is one of
+    /// `stdout_path` / `stderr_path` (other paths are filtered in the
+    /// callback before being sent).
+    events: tokio::sync::mpsc::UnboundedReceiver<PathBuf>,
+    /// Held to keep the watcher alive for the lifetime of the stream.
+    /// Dropped when the consumer drops the unfold stream.
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
+/// Stream backfill + inotify-tail of stdout / stderr log files.
+///
+/// Both files are watched via a single `notify::recommended_watcher`;
+/// each Modify / Create event on the matching path triggers a
+/// read-from-offset and emits a [`LogChunk`] tagged with the
+/// [`LogSource`].
+///
+/// The watcher is sync; we bridge to async via a tokio
+/// `mpsc::unbounded_channel`. The `RecommendedWatcher` value lives in
+/// the unfold state and drops when the consumer stops polling.
+///
+/// LogOptions semantics (Phase 0.4):
+/// - `tail`: cap the backfill phase to the last N lines.
+/// - `follow`: when false, the stream completes after backfill.
+/// - `since_seconds` / `timestamps`: not honored in 0.4 (wisp doesn't
+///   write per-line timestamps; documented limitation).
+fn inotify_tail_logs(
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    opts: LogOptions,
+) -> impl Stream<Item = LogChunk> + Send {
+    // Phase 1: backfill. Read whatever's on disk before arming the
+    // watcher so events that arrive between read + watch can't be
+    // missed.
+    let mut stdout_offset: u64 = 0;
+    let mut stderr_offset: u64 = 0;
+    let mut stdout_initial = read_tail(&stdout_path, &mut stdout_offset);
+    let mut stderr_initial = read_tail(&stderr_path, &mut stderr_offset);
+    if let Some(tail_n) = opts.tail {
+        stdout_initial = last_n_lines(&stdout_initial, tail_n);
+        stderr_initial = last_n_lines(&stderr_initial, tail_n);
+    }
+    let mut backfill = std::collections::VecDeque::new();
+    if !stdout_initial.is_empty() {
+        backfill.push_back(LogChunk {
+            source: LogSource::Stdout,
+            bytes: bytes::Bytes::from(stdout_initial),
+        });
+    }
+    if !stderr_initial.is_empty() {
+        backfill.push_back(LogChunk {
+            source: LogSource::Stderr,
+            bytes: bytes::Bytes::from(stderr_initial),
+        });
+    }
+
+    // Phase 2: arm the watcher (only when follow=true). The callback
+    // forwards path hints through an unbounded mpsc; the unfold loop
+    // below drains them.
+    //
+    // We canonicalize both the parent dir and the per-file paths
+    // before storing them as match keys: macOS FSEvents reports
+    // `/private/var/folders/...` even when we hand it `/var/folders/...`
+    // (the latter is a symlink), so the path comparison in the
+    // callback would otherwise miss every event in tempdir-backed
+    // tests. Canonicalize is a noop on Linux when no symlinks
+    // intervene.
+    let parent = stdout_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let _ = std::fs::create_dir_all(&parent);
+    let parent_canon = std::fs::canonicalize(&parent).unwrap_or(parent);
+    let stdout_canon = std::fs::canonicalize(&stdout_path).unwrap_or_else(|_| stdout_path.clone());
+    let stderr_canon = std::fs::canonicalize(&stderr_path).unwrap_or_else(|_| stderr_path.clone());
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+    let stdout_path_cb = stdout_canon.clone();
+    let stderr_path_cb = stderr_canon.clone();
+    let mut watcher_opt: Option<notify::RecommendedWatcher> = None;
+    if opts.follow {
+        if let Ok(mut w) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let event = match res {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            if !matches!(
+                event.kind,
+                notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+            ) {
+                return;
+            }
+            for p in event.paths {
+                if p == stdout_path_cb {
+                    let _ = tx.send(stdout_path_cb.clone());
+                } else if p == stderr_path_cb {
+                    let _ = tx.send(stderr_path_cb.clone());
+                }
+            }
+        }) {
+            if notify::Watcher::watch(&mut w, &parent_canon, notify::RecursiveMode::NonRecursive)
+                .is_ok()
+            {
+                watcher_opt = Some(w);
+            }
+        }
+    }
+
+    let state = LogTailState {
+        stdout_path: stdout_canon,
+        stderr_path: stderr_canon,
+        stdout_offset,
+        stderr_offset,
+        backfill,
+        follow: opts.follow,
+        events: rx,
+        _watcher: watcher_opt,
+    };
+
+    futures::stream::unfold(state, |mut s| async move {
+        // 1. Drain pre-buffered backfill chunks first.
+        if let Some(chunk) = s.backfill.pop_front() {
+            return Some((chunk, s));
+        }
+        // 2. End of stream when we're not following.
+        if !s.follow {
+            return None;
+        }
+        // 3. Wait for the next inotify hit; stop if the channel closed.
+        loop {
+            let path = s.events.recv().await?;
+            let (source, offset_field, target_path) = if path == s.stdout_path {
+                (
+                    LogSource::Stdout,
+                    &mut s.stdout_offset,
+                    s.stdout_path.clone(),
+                )
+            } else if path == s.stderr_path {
+                (
+                    LogSource::Stderr,
+                    &mut s.stderr_offset,
+                    s.stderr_path.clone(),
+                )
+            } else {
+                continue;
+            };
+            let delta = read_tail(&target_path, offset_field);
+            if delta.is_empty() {
+                // Spurious event (e.g. directory metadata touched) -
+                // keep waiting.
+                continue;
+            }
+            let chunk = LogChunk {
+                source,
+                bytes: bytes::Bytes::from(delta),
+            };
+            return Some((chunk, s));
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1236,5 +1496,163 @@ mod tests {
         tokio::task::spawn_blocking(move || drop(backend))
             .await
             .unwrap();
+    }
+
+    /// Phase 0.4 dispatch C2: existing log content backfills before
+    /// the watcher starts. Pre-write into the wisp container layout
+    /// so `stream_logs` finds something to read.
+    #[tokio::test]
+    async fn stream_logs_backfills_existing_file_content() {
+        use futures_util::StreamExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = WispBackend::from_env(tmp.path()).await.unwrap();
+        let cdir = tmp.path().join("wisp/containers/ctr-1");
+        std::fs::create_dir_all(&cdir).unwrap();
+        std::fs::write(cdir.join("stdout.log"), b"line-one\nline-two\n").unwrap();
+        std::fs::write(cdir.join("stderr.log"), b"err-one\n").unwrap();
+
+        // follow=false so the stream completes after backfill.
+        let opts = LogOptions {
+            follow: false,
+            tail: None,
+            since_seconds: None,
+            timestamps: false,
+        };
+        let mut s = backend.stream_logs("ctr-1", opts);
+
+        let mut got_stdout = Vec::new();
+        let mut got_stderr = Vec::new();
+        while let Some(chunk) = s.next().await {
+            match chunk.source {
+                LogSource::Stdout => got_stdout.extend_from_slice(&chunk.bytes),
+                LogSource::Stderr => got_stderr.extend_from_slice(&chunk.bytes),
+            }
+        }
+
+        assert_eq!(got_stdout, b"line-one\nline-two\n");
+        assert_eq!(got_stderr, b"err-one\n");
+
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .unwrap();
+    }
+
+    /// Phase 0.4 dispatch C2: appended bytes after backfill arrive via
+    /// inotify. Spawn the stream with follow=true, append a line,
+    /// then assert we receive it within a generous timeout.
+    #[tokio::test]
+    async fn stream_logs_emits_appended_lines_on_modify() {
+        use futures_util::StreamExt;
+        use std::io::Write;
+        use tokio::time::{Duration, timeout};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = WispBackend::from_env(tmp.path()).await.unwrap();
+        let cdir = tmp.path().join("wisp/containers/ctr-2");
+        std::fs::create_dir_all(&cdir).unwrap();
+        // Pre-create the log files so the watcher's directory watch
+        // picks up future writes immediately.
+        std::fs::write(cdir.join("stdout.log"), b"").unwrap();
+        std::fs::write(cdir.join("stderr.log"), b"").unwrap();
+
+        let opts = LogOptions {
+            follow: true,
+            tail: None,
+            since_seconds: None,
+            timestamps: false,
+        };
+        let mut s = backend.stream_logs("ctr-2", opts);
+
+        // Append after a longer delay so notify's FSEvents backend
+        // (mac) / inotify (linux) has time to register the watch.
+        // FSEvents on macOS takes ~500ms to settle in some kernel
+        // versions; inotify on Linux is sub-millisecond. The 1.5s
+        // delay is conservative for both.
+        let stdout_path = cdir.join("stdout.log");
+        let writer_handle = tokio::task::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&stdout_path)
+                .unwrap();
+            f.write_all(b"appended-line\n").unwrap();
+            f.sync_all().unwrap();
+        });
+
+        // Wait up to 10s for the appended bytes (notify on Mac uses
+        // FSEvents which has higher latency than Linux inotify).
+        let chunk = timeout(Duration::from_secs(10), s.next())
+            .await
+            .expect("stream timed out")
+            .expect("stream ended without emitting");
+        assert_eq!(chunk.source, LogSource::Stdout);
+        // FSEvents on Mac can coalesce write+attr-change events; the
+        // delta we read may include the appended line plus possibly
+        // more (zero-byte writes). We assert the line is present
+        // rather than insisting on exact equality, since the test
+        // really cares about "we got the bytes".
+        let received = String::from_utf8_lossy(&chunk.bytes).to_string();
+        assert!(
+            received.contains("appended-line"),
+            "expected appended-line in chunk, got {received:?}"
+        );
+
+        writer_handle.await.unwrap();
+        // Drop the stream first to release the watcher, then drop the
+        // backend off the runtime as the other tests do.
+        drop(s);
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .unwrap();
+    }
+
+    /// Phase 0.4 dispatch C2: `last_n_lines` keeps the trailing N
+    /// newline-terminated segments of a buffer (matches docker
+    /// --tail).
+    #[test]
+    fn last_n_lines_returns_only_trailing_segments() {
+        let buf = b"a\nb\nc\nd\n";
+        assert_eq!(last_n_lines(buf, 2), b"c\nd\n".to_vec());
+        assert_eq!(last_n_lines(buf, 0), Vec::<u8>::new());
+        assert_eq!(last_n_lines(buf, 99), buf.to_vec());
+        // No trailing newline: last "line" is the dangling segment.
+        assert_eq!(last_n_lines(b"a\nb\nc", 1), b"c".to_vec());
+    }
+
+    /// Phase 0.4 dispatch C2: `read_tail` advances offsets and is
+    /// tolerant of missing files. Backfill semantics rely on this.
+    #[test]
+    fn read_tail_advances_offset_and_tolerates_missing() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nope.log");
+        let mut offset = 0u64;
+        let bytes = read_tail(&path, &mut offset);
+        assert!(bytes.is_empty());
+        assert_eq!(offset, 0);
+
+        let path = tmp.path().join("present.log");
+        std::fs::write(&path, b"hello").unwrap();
+        let mut offset = 0u64;
+        let bytes = read_tail(&path, &mut offset);
+        assert_eq!(bytes, b"hello".to_vec());
+        assert_eq!(offset, 5);
+
+        // Subsequent read at the same offset returns nothing until
+        // someone appends.
+        let bytes = read_tail(&path, &mut offset);
+        assert!(bytes.is_empty());
+        assert_eq!(offset, 5);
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"-more")
+            .unwrap();
+        let bytes = read_tail(&path, &mut offset);
+        assert_eq!(bytes, b"-more".to_vec());
+        assert_eq!(offset, 10);
     }
 }
