@@ -65,7 +65,7 @@ pub enum SecretCommand {
     Put(PutArgs),
     /// List secret names + timestamps. NEVER prints values: secrets are
     /// write-only from the operator's CLI.
-    List,
+    List(ListArgs),
     /// Delete a secret by name. Idempotent in spirit but errors if the
     /// name doesn't exist (so a typo doesn't silently no-op).
     Rm(RmArgs),
@@ -99,6 +99,19 @@ pub struct RmArgs {
     pub scope: Scope,
 }
 
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Where the listing reads from. `fleet` (default) lists secrets in
+    /// the current `--context`; `global` aggregates across every saved
+    /// context, marking each name as `global` (present in every fleet
+    /// with the same name), `fleet` (only one fleet has it), or
+    /// `partial` (some fleets have it, others don't). Per-context fetch
+    /// errors are reported on stderr and the context is omitted from
+    /// aggregation.
+    #[arg(long, value_enum, default_value_t = Scope::Fleet)]
+    pub scope: Scope,
+}
+
 #[derive(Debug, Serialize)]
 struct PutBody {
     value: String,
@@ -120,7 +133,7 @@ struct SecretEntry {
 pub async fn run(args: SecretArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         SecretCommand::Put(a) => run_put(a, context).await,
-        SecretCommand::List => run_list(context).await,
+        SecretCommand::List(a) => run_list(a, context).await,
         SecretCommand::Rm(a) => run_rm(a, context).await,
     }
 }
@@ -180,7 +193,14 @@ async fn put_to_context(ctx: &ContextEntry, name: &str, value: String) -> Result
     put_secret(&session, name, value).await
 }
 
-async fn run_list(context: Option<&str>) -> Result<()> {
+async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
+    match args.scope {
+        Scope::Fleet => run_list_fleet(context).await,
+        Scope::Global => run_list_global().await,
+    }
+}
+
+async fn run_list_fleet(context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let entries = list_secrets(&session).await?;
     if entries.is_empty() {
@@ -201,6 +221,137 @@ async fn run_list(context: Option<&str>) -> Result<()> {
     }
     println!("{table}");
     Ok(())
+}
+
+/// Aggregate secrets across every saved context. The scope column is
+/// derived purely from coverage: a secret present in every reachable
+/// context is `global`; in some but not all is `partial`; in exactly
+/// one is `fleet`. This is name-only: values are not fetched (and
+/// couldn't be — secrets are write-only from the operator side), so
+/// "partial" does NOT detect value divergence; it only detects name
+/// coverage. The operator decides what to do.
+async fn run_list_global() -> Result<()> {
+    let contexts = load_all_contexts()?;
+    if contexts.is_empty() {
+        return Err(anyhow!(
+            "no saved contexts; run `isd context create <name> --ssh <target>` first"
+        ));
+    }
+    let snapshot = collect_global_snapshot(&contexts).await;
+    print_global_listing(&snapshot);
+    if snapshot.unreachable_count() == contexts.len() {
+        return Err(anyhow!(
+            "scope=global: every context failed; nothing to aggregate"
+        ));
+    }
+    Ok(())
+}
+
+/// Snapshot of secret presence across reachable contexts. Used by
+/// `secret ls --scope global`. `unreachable` carries the contexts whose
+/// listing failed so the summary can mention them on stderr.
+pub(crate) struct GlobalSnapshot {
+    /// Number of contexts that responded successfully. Used to decide
+    /// `global` vs `partial` (a name is `global` only when present in
+    /// every reachable context, NOT every saved context, so an offline
+    /// fleet doesn't flip every entry to `partial`).
+    pub(crate) reachable: usize,
+    /// `name -> list of context names that hold it`, sorted by name for
+    /// stable output.
+    pub(crate) coverage: Vec<(String, Vec<String>)>,
+    /// Contexts whose listing failed, with the cause for the summary.
+    pub(crate) unreachable: Vec<(String, anyhow::Error)>,
+}
+
+impl GlobalSnapshot {
+    pub(crate) fn unreachable_count(&self) -> usize {
+        self.unreachable.len()
+    }
+}
+
+async fn collect_global_snapshot(contexts: &[ContextEntry]) -> GlobalSnapshot {
+    use std::collections::BTreeMap;
+    let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unreachable: Vec<(String, anyhow::Error)> = Vec::new();
+    let mut reachable = 0usize;
+    for ctx in contexts {
+        match list_from_context(ctx).await {
+            Ok(entries) => {
+                reachable += 1;
+                for e in entries {
+                    by_name.entry(e.name).or_default().push(ctx.name.clone());
+                }
+            }
+            Err(e) => unreachable.push((ctx.name.clone(), e)),
+        }
+    }
+    let coverage: Vec<_> = by_name.into_iter().collect();
+    GlobalSnapshot {
+        reachable,
+        coverage,
+        unreachable,
+    }
+}
+
+async fn list_from_context(ctx: &ContextEntry) -> Result<Vec<SecretEntry>> {
+    let session = Session::from_context(ctx.clone()).await?;
+    list_secrets(&session).await
+}
+
+/// Render `name / scope / fleets` table for `secret ls --scope global`.
+/// Pure formatter so it stays testable without any HTTP scaffolding.
+pub(crate) fn print_global_listing(snapshot: &GlobalSnapshot) {
+    if snapshot.coverage.is_empty() {
+        if snapshot.unreachable.is_empty() {
+            println!("No secrets stored in any context.");
+        } else {
+            println!("No secrets stored in any reachable context.");
+        }
+    } else {
+        let mut table = Table::new();
+        table
+            .load_preset(NOTHING)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["NAME", "SCOPE", "FLEETS"]);
+        for (name, fleets) in &snapshot.coverage {
+            let scope = classify_coverage(fleets.len(), snapshot.reachable);
+            table.add_row(vec![name.clone(), scope.into(), fleets.join(", ")]);
+        }
+        println!("{table}");
+    }
+    if !snapshot.unreachable.is_empty() {
+        let parts: Vec<_> = snapshot
+            .unreachable
+            .iter()
+            .map(|(name, err)| format!("{name} ({})", short_err(err)))
+            .collect();
+        eprintln!(
+            "warning: {} of {} context(s) unreachable: {}",
+            snapshot.unreachable.len(),
+            snapshot.reachable + snapshot.unreachable.len(),
+            parts.join(", ")
+        );
+    }
+}
+
+/// Classify a name's coverage relative to the reachable context count.
+/// - `fleet`: only one reachable context has the secret (or there's only
+///   one context to consider in total).
+/// - `global`: present in every reachable context, and there's more than
+///   one reachable context.
+/// - `partial`: present in some but not all of multiple reachable
+///   contexts.
+pub(crate) fn classify_coverage(present_in: usize, reachable: usize) -> &'static str {
+    // With zero or one reachable context, "global" loses meaning;
+    // treat everything as "fleet" so the operator isn't misled into
+    // thinking a single-fleet secret is synced anywhere.
+    if reachable <= 1 || present_in <= 1 {
+        "fleet"
+    } else if present_in >= reachable {
+        "global"
+    } else {
+        "partial"
+    }
 }
 
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
@@ -538,6 +689,55 @@ mod tests {
             SecretCommand::Put(a) => assert_eq!(a.scope, Scope::Global),
             other => panic!("expected Put, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn list_args_scope_defaults_to_fleet() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: SecretCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "list"]).unwrap();
+        match w.c {
+            SecretCommand::List(a) => assert_eq!(a.scope, Scope::Fleet),
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_args_scope_global_parses() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: SecretCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "list", "--scope", "global"]).unwrap();
+        match w.c {
+            SecretCommand::List(a) => assert_eq!(a.scope, Scope::Global),
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_coverage_global_when_present_everywhere() {
+        assert_eq!(classify_coverage(3, 3), "global");
+        assert_eq!(classify_coverage(2, 2), "global");
+    }
+
+    #[test]
+    fn classify_coverage_partial_when_some_missing() {
+        assert_eq!(classify_coverage(2, 3), "partial");
+    }
+
+    #[test]
+    fn classify_coverage_fleet_when_only_one() {
+        // Single context: everything is "fleet" (no concept of global with N=1).
+        assert_eq!(classify_coverage(1, 1), "fleet");
+        // Multi context, only one has it.
+        assert_eq!(classify_coverage(1, 3), "fleet");
     }
 
     #[test]
