@@ -47,13 +47,26 @@ impl Inventory {
     /// `enrolled_at` timestamp is set to "now" (Unix seconds).
     pub async fn enroll_host(&self, req: EnrollHost) -> Result<HostId> {
         let id = HostId::new();
+        self.enroll_host_with_id(id, req).await?;
+        Ok(id)
+    }
+
+    /// Insert a new host using a caller-supplied `HostId`.
+    ///
+    /// The enrollment flow needs to mint the agent's leaf cert (whose CN is
+    /// the `HostId`) before inserting the hosts row (whose `fingerprint`
+    /// derives from that cert's SHA-256). Pre-fix the controller passed
+    /// `fingerprint: ""` and the second redeem collided on the UNIQUE
+    /// constraint; the fix flips the order, which means storage has to
+    /// accept an externally-chosen `HostId`.
+    pub async fn enroll_host_with_id(&self, id: HostId, req: EnrollHost) -> Result<()> {
         let id_bytes: &[u8] = &id.to_bytes();
         let enrolled_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        // Ensure the fleet exists. Caller passes the fleet name (required —
+        // Ensure the fleet exists. Caller passes the fleet name (required:
         // there is no implicit 'default' fleet).
         sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES (?)")
             .bind(&req.fleet)
@@ -80,7 +93,7 @@ impl Inventory {
         .execute(&self.pool)
         .await?;
 
-        Ok(id)
+        Ok(())
     }
 
     /// Look up a host by id. Returns `None` if no row matches.

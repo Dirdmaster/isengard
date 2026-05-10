@@ -81,3 +81,75 @@ async fn redeem_twice_errors_second_time() {
     let err = svc.redeem(&token, host_info()).await.unwrap_err();
     assert!(format!("{err}").to_lowercase().contains("token"));
 }
+
+/// Regression: two distinct hosts enrolling back-to-back must both land in
+/// the hosts table. Pre-fix the controller passed `fingerprint: ""` for
+/// every enrollment, and the second insert collided on the
+/// `hosts.fingerprint TEXT NOT NULL UNIQUE` constraint, surfacing to the
+/// agent as `status: Unauthenticated, message: "enroll host"`. The fix
+/// derives the fingerprint from the leaf cert's SHA-256, which is unique
+/// by construction (random 16-byte serial per leaf).
+#[tokio::test]
+async fn two_back_to_back_enrollments_get_distinct_fingerprints() {
+    let (inv, svc) = fixture().await;
+
+    let token_a = svc
+        .mint(TokenRole::Agent, Duration::minutes(15))
+        .await
+        .unwrap();
+    let token_b = svc
+        .mint(TokenRole::Agent, Duration::minutes(15))
+        .await
+        .unwrap();
+
+    let resp_a = svc
+        .redeem(
+            &token_a,
+            HostInfo {
+                hostname: "iso-fresh-1".into(),
+                os: "linux".into(),
+                version: "0.4.1".into(),
+            },
+        )
+        .await
+        .expect("first redeem must succeed");
+    let resp_b = svc
+        .redeem(
+            &token_b,
+            HostInfo {
+                hostname: "iso-fresh-2".into(),
+                os: "linux".into(),
+                version: "0.4.1".into(),
+            },
+        )
+        .await
+        .expect("second redeem must succeed (was the P0 fingerprint bug)");
+
+    assert_ne!(resp_a.host_id, resp_b.host_id, "host_ids must differ");
+
+    let host_a = inv.get_host(resp_a.host_id).await.unwrap().unwrap();
+    let host_b = inv.get_host(resp_b.host_id).await.unwrap().unwrap();
+
+    assert_ne!(
+        host_a.fingerprint, host_b.fingerprint,
+        "fingerprints must differ between enrollments"
+    );
+    assert!(
+        !host_a.fingerprint.is_empty() && !host_b.fingerprint.is_empty(),
+        "fingerprints must not be empty (the original bug)"
+    );
+    assert_eq!(
+        host_a.fingerprint.len(),
+        64,
+        "fingerprint should be sha256 hex (64 chars), got {:?}",
+        host_a.fingerprint
+    );
+    assert!(
+        host_a
+            .fingerprint
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "fingerprint should be lowercase hex: {}",
+        host_a.fingerprint
+    );
+}

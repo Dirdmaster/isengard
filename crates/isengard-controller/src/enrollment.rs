@@ -108,8 +108,20 @@ impl EnrollmentService {
         Ok(token)
     }
 
-    /// Redeem a token: validate → enroll host → sign leaf → persist cert →
+    /// Redeem a token: validate, sign leaf, enroll host, persist cert,
     /// consume token. See module-level docs for the failure / race semantics.
+    ///
+    /// Step order: we mint the leaf cert before inserting the host row so we
+    /// can use the leaf's SHA-256 fingerprint as the `hosts.fingerprint`
+    /// column (which carries a UNIQUE constraint). Pre-fix the controller
+    /// passed an empty string, so the second enrollment on any controller
+    /// would collide on UNIQUE and fail with `enroll host`. The leaf cert is
+    /// signed under the controller's CA with a 16-byte random serial, so its
+    /// SHA-256 is unique by construction per enrollment.
+    ///
+    /// The CN-in-the-cert is the `HostId`, but the host row also needs that
+    /// id at insert time. We work around the chicken-and-egg by pre-minting
+    /// a `HostId` and passing it to both `sign_agent_leaf` and `enroll_host`.
     pub async fn redeem(&self, token: &str, host_info: HostInfo) -> Result<EnrollResponse> {
         let hash = Sha256::digest(token.as_bytes()).to_vec();
         let _record = self
@@ -119,27 +131,39 @@ impl EnrollmentService {
             .context("token lookup")?
             .ok_or_else(|| anyhow!("enrollment token unknown, expired, or already consumed"))?;
 
-        // Storage assigns the HostId. We pass the agent-supplied descriptor and
-        // sane placeholders for the fields agents don't carry at bootstrap;
-        // these get refined by subsequent agent reports.
-        let host_id = self
-            .inventory
-            .enroll_host(EnrollHost {
-                fingerprint: String::new(),
-                hostname: host_info.hostname.clone(),
-                os: host_info.os.clone(),
-                arch: String::new(),
-                agent_version: host_info.version.clone(),
-                docker_version: String::new(),
-                fleet: "default".to_string(),
-            })
-            .await
-            .context("enroll host")?;
+        // Pre-mint the HostId so we can sign the leaf cert (CN = host_id)
+        // before inserting the hosts row (which needs the fingerprint).
+        let host_id = HostId::new();
 
         let leaf = self
             .ca
             .sign_agent_leaf(host_id, &host_info.hostname, Duration::days(LEAF_TTL_DAYS))
             .context("sign leaf cert")?;
+
+        // Derive the agent's stable fingerprint from the SHA-256 of the leaf
+        // cert DER bytes. Hex-encoded lowercase to match the rest of the
+        // codebase's hex conventions (e.g. `hex::encode` in the updater /
+        // dashboard signing paths).
+        let fingerprint = cert_fingerprint(&leaf.cert_pem).context("compute cert fingerprint")?;
+
+        // Storage uses the pre-minted HostId. We pass the agent-supplied
+        // descriptor and sane placeholders for the fields agents don't carry
+        // at bootstrap; these get refined by subsequent agent reports.
+        self.inventory
+            .enroll_host_with_id(
+                host_id,
+                EnrollHost {
+                    fingerprint,
+                    hostname: host_info.hostname.clone(),
+                    os: host_info.os.clone(),
+                    arch: String::new(),
+                    agent_version: host_info.version.clone(),
+                    docker_version: String::new(),
+                    fleet: "default".to_string(),
+                },
+            )
+            .await
+            .context("enroll host")?;
 
         self.inventory
             .insert_agent_cert(AgentCert {
@@ -207,5 +231,53 @@ impl EnrollmentService {
             agent_key_pem: leaf.key_pem,
             expires_at: leaf.expires_at,
         })
+    }
+}
+
+/// Compute the SHA-256 fingerprint of a PEM-encoded certificate's DER bytes
+/// and return it as a lowercase hex string. Used as the stable, unique
+/// `hosts.fingerprint` for enrolled agents: the leaf cert is freshly minted
+/// per redeem with a 16-byte random serial, so its hash is collision-free
+/// in practice.
+fn cert_fingerprint(cert_pem: &str) -> Result<String> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
+        .map_err(|e| anyhow!("parse leaf cert PEM: {e}"))?;
+    Ok(hex::encode(Sha256::digest(&pem.contents)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cert_fingerprint_is_64_hex_chars_and_deterministic() {
+        // Two arbitrary self-signed certs from rcgen so we exercise the
+        // PEM-decode path with realistic input. Using the same PEM twice
+        // must produce the same digest; different PEMs must differ.
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["fp-test".into()]).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let pem = cert.pem();
+
+        let fp_a = cert_fingerprint(&pem).unwrap();
+        let fp_b = cert_fingerprint(&pem).unwrap();
+        assert_eq!(fp_a, fp_b, "fingerprint must be deterministic for same PEM");
+        assert_eq!(fp_a.len(), 64, "sha256 hex is 64 chars");
+        assert!(
+            fp_a.chars().all(|c| c.is_ascii_hexdigit()),
+            "fp must be lowercase hex: {fp_a}"
+        );
+
+        let key2 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let params2 = rcgen::CertificateParams::new(vec!["other".into()]).unwrap();
+        let cert2 = params2.self_signed(&key2).unwrap();
+        let fp_other = cert_fingerprint(&cert2.pem()).unwrap();
+        assert_ne!(fp_a, fp_other, "different certs must produce different fps");
+    }
+
+    #[test]
+    fn cert_fingerprint_rejects_garbage() {
+        let err = cert_fingerprint("not a pem at all").unwrap_err();
+        assert!(format!("{err}").to_lowercase().contains("parse"));
     }
 }
