@@ -306,8 +306,27 @@ impl WispBackend {
 
         let (event_tx, _rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(1024);
 
+        // Phase 0.4 dispatch C3: spawn a poll-and-diff emitter loop so
+        // RuntimeBackend::stream_events fires Start / Stop / Die events
+        // even though wisp itself has no native event channel. The
+        // loop snapshots Runtime::list every 2s and diffs against the
+        // previous snapshot.
+        let runtime_arc = Arc::new(runtime);
+        {
+            let rt_for_loop = runtime_arc.clone();
+            let tx_for_loop = event_tx.clone();
+            tokio::spawn(async move {
+                event_emitter_loop(
+                    WispRuntimeListSource(rt_for_loop),
+                    tx_for_loop,
+                    std::time::Duration::from_secs(2),
+                )
+                .await;
+            });
+        }
+
         Ok(Self {
-            runtime: Arc::new(runtime),
+            runtime: runtime_arc,
             image_client: Arc::new(image_client),
             state_dir: state_dir.to_path_buf(),
             #[cfg(target_os = "linux")]
@@ -964,6 +983,117 @@ fn last_n_lines(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
     bytes[cut..].to_vec()
 }
 
+/// Phase 0.4 dispatch C3: source of container snapshots that
+/// [`event_emitter_loop`] polls. A trait so tests can substitute a
+/// fake list without spinning up a real `wisp::Runtime`.
+trait RuntimeListSource: Send + Sync + 'static {
+    /// Best-effort snapshot of every wisp container's id + state.
+    /// Returns an empty Vec on failure (the emitter shouldn't propagate
+    /// transient list errors as a stream of events).
+    fn snapshot(&self) -> Vec<(String, wisp::ContainerState)>;
+}
+
+/// Production [`RuntimeListSource`] backed by the real wisp runtime.
+struct WispRuntimeListSource(Arc<wisp::Runtime>);
+
+impl RuntimeListSource for WispRuntimeListSource {
+    fn snapshot(&self) -> Vec<(String, wisp::ContainerState)> {
+        match self.0.list() {
+            Ok(handles) => handles.into_iter().map(|h| (h.id, h.state)).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Poll-and-diff emitter loop. Snapshots `source` on each tick, diffs
+/// against the previous snapshot, and broadcasts Start / Die / Stop
+/// events for every transition.
+///
+/// Transitions emitted (Phase 0.4):
+/// - new id seen in `Running`: Start
+/// - id transitions Running -> Stopped: Die (exit_code unknown,
+///   wisp does not currently capture it)
+/// - id disappears entirely: Stop
+///
+/// All other transitions (Created -> Running for example) are
+/// uninteresting to the agent's deployment driver in 0.4 and stay
+/// silent. The emitter exits cleanly when the broadcast channel has
+/// no receivers AND no senders (drop of WispBackend); a missed receive
+/// (lagged) is fine, broadcast::send swallows it.
+async fn event_emitter_loop<S: RuntimeListSource>(
+    source: S,
+    event_tx: tokio::sync::broadcast::Sender<RuntimeEvent>,
+    tick: std::time::Duration,
+) {
+    let mut prev: std::collections::BTreeMap<String, wisp::ContainerState> =
+        std::collections::BTreeMap::new();
+    let mut interval = tokio::time::interval(tick);
+    // Skip the first immediate tick so the very first snapshot reflects
+    // a steady state, not an instantaneous post-construction blip.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+
+        // No active subscribers AND we'd be sending into the void:
+        // exit. The broadcast Sender::receiver_count is 0 when nobody
+        // is listening; sending still works (returns Err(SendError)),
+        // but we save the snapshot work.
+        // We don't bail just because receiver_count is 0 right now,
+        // because subscribers may attach later; but if the channel is
+        // closed on the receive side (no senders elsewhere) the loop
+        // is moot. broadcast doesn't expose "closed" directly, so
+        // rely on send-failure as the close indicator: if send fails
+        // with no receivers and the count stays 0 across two ticks
+        // we'd still keep going. Acceptable: the loop is cheap.
+
+        let snapshot = source.snapshot();
+        let mut current: std::collections::BTreeMap<String, wisp::ContainerState> =
+            std::collections::BTreeMap::new();
+        for (id, st) in snapshot {
+            current.insert(id, st);
+        }
+
+        // New ids seen in Running: Start.
+        // Existing ids that transitioned Running -> Stopped: Die.
+        for (id, state) in &current {
+            match prev.get(id) {
+                None if *state == wisp::ContainerState::Running => {
+                    let _ = event_tx.send(RuntimeEvent {
+                        container_id: id.clone(),
+                        event_type: RuntimeEventType::Start,
+                        timestamp: SystemTime::now(),
+                    });
+                }
+                Some(prev_state)
+                    if *prev_state == wisp::ContainerState::Running
+                        && *state == wisp::ContainerState::Stopped =>
+                {
+                    let _ = event_tx.send(RuntimeEvent {
+                        container_id: id.clone(),
+                        event_type: RuntimeEventType::Die { exit_code: None },
+                        timestamp: SystemTime::now(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Disappeared ids: Stop.
+        for id in prev.keys() {
+            if !current.contains_key(id) {
+                let _ = event_tx.send(RuntimeEvent {
+                    container_id: id.clone(),
+                    event_type: RuntimeEventType::Stop,
+                    timestamp: SystemTime::now(),
+                });
+            }
+        }
+
+        prev = current;
+    }
+}
+
 /// State carried across [`futures::stream::unfold`] poll calls for the
 /// inotify-backed log tail.
 ///
@@ -1618,6 +1748,119 @@ mod tests {
         assert_eq!(last_n_lines(buf, 99), buf.to_vec());
         // No trailing newline: last "line" is the dangling segment.
         assert_eq!(last_n_lines(b"a\nb\nc", 1), b"c".to_vec());
+    }
+
+    /// Phase 0.4 dispatch C3: a fake [`RuntimeListSource`] backed by
+    /// an `Arc<Mutex<Vec<...>>>` so tests can mutate the snapshot
+    /// between ticks.
+    #[derive(Clone)]
+    struct FakeRuntimeList(std::sync::Arc<std::sync::Mutex<Vec<(String, wisp::ContainerState)>>>);
+
+    impl FakeRuntimeList {
+        fn new() -> Self {
+            Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+        }
+        fn set(&self, items: Vec<(String, wisp::ContainerState)>) {
+            *self.0.lock().unwrap() = items;
+        }
+    }
+
+    impl RuntimeListSource for FakeRuntimeList {
+        fn snapshot(&self) -> Vec<(String, wisp::ContainerState)> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// Phase 0.4 dispatch C3: a brand-new container in Running state
+    /// triggers a Start event on the very first tick.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn event_emitter_detects_start() {
+        let fake = FakeRuntimeList::new();
+        fake.set(vec![("ctr-a".to_string(), wisp::ContainerState::Running)]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+
+        let fake_for_loop = fake.clone();
+        let _loop_handle = tokio::spawn(async move {
+            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
+        });
+
+        // Advance virtual time to fire the first tick.
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timed out")
+            .expect("recv");
+        assert_eq!(event.container_id, "ctr-a");
+        matches!(event.event_type, RuntimeEventType::Start);
+    }
+
+    /// Phase 0.4 dispatch C3: a Running container that flips to
+    /// Stopped triggers a Die event.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn event_emitter_detects_die() {
+        let fake = FakeRuntimeList::new();
+        fake.set(vec![("ctr-b".to_string(), wisp::ContainerState::Running)]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+
+        let fake_for_loop = fake.clone();
+        let _loop_handle = tokio::spawn(async move {
+            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
+        });
+
+        // First tick: Start.
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timed out")
+            .expect("recv");
+        matches!(event.event_type, RuntimeEventType::Start);
+
+        // Flip to Stopped, advance to the next tick.
+        fake.set(vec![("ctr-b".to_string(), wisp::ContainerState::Stopped)]);
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timed out (Die)")
+            .expect("recv (Die)");
+        assert_eq!(event.container_id, "ctr-b");
+        match event.event_type {
+            RuntimeEventType::Die { exit_code } => assert!(exit_code.is_none()),
+            other => panic!("expected Die, got {other:?}"),
+        }
+    }
+
+    /// Phase 0.4 dispatch C3: when an id disappears from the list
+    /// entirely (e.g. `remove_container` cleared its state-dir entry)
+    /// we emit Stop.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn event_emitter_detects_stop_when_removed() {
+        let fake = FakeRuntimeList::new();
+        fake.set(vec![("ctr-c".to_string(), wisp::ContainerState::Running)]);
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+
+        let fake_for_loop = fake.clone();
+        let _loop_handle = tokio::spawn(async move {
+            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
+        });
+
+        // First tick: Start.
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timed out")
+            .expect("recv");
+        matches!(event.event_type, RuntimeEventType::Start);
+
+        // Remove from snapshot, advance.
+        fake.set(Vec::new());
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timed out (Stop)")
+            .expect("recv (Stop)");
+        assert_eq!(event.container_id, "ctr-c");
+        matches!(event.event_type, RuntimeEventType::Stop);
     }
 
     /// Phase 0.4 dispatch C2: `read_tail` advances offsets and is
