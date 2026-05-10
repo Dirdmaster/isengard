@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish = false
 description = "Wisp image library: pull, store, extract OCI images for wisp-runtime (Phase 0.2)"
 
 [dependencies]
