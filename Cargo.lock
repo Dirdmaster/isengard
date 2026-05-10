@@ -2683,6 +2683,7 @@ dependencies = [
  "chrono",
  "futures",
  "futures-util",
+ "hex",
  "hostname",
  "if-addrs",
  "instant-acme",

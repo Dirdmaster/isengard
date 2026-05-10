@@ -108,6 +108,36 @@ enum Command {
         #[command(subcommand)]
         op: SecretOp,
     },
+    /// Phase 0.8 binary self-update. Downloads a new isengard binary,
+    /// verifies its sha256 against `--sha256`, atomically replaces the
+    /// running binary on disk, and triggers `systemctl restart` on the
+    /// named unit (default: `iso-agent.service` for the agent updating
+    /// itself; pass `--no-restart` to skip and orchestrate manually).
+    ///
+    /// Designed for the systemd-native install. The legacy
+    /// docker-compose path uses the rename-and-recreate flow in
+    /// `crates/isengard-plugins/updater/src/self_update.rs` instead.
+    SelfUpdate {
+        /// HTTPS URL of the new binary. Typically a GitHub Releases
+        /// asset URL (e.g.
+        /// https://github.com/Weavers-Engineering/Isengard/releases/download/vX.Y.Z/isengard-x86_64-unknown-linux-musl).
+        #[arg(long)]
+        url: String,
+        /// Lowercase-hex sha256 of the expected bytes. Matches the
+        /// format the release pipeline writes to `<asset>.sha256`.
+        #[arg(long)]
+        sha256: String,
+        /// systemd unit to restart after the rename. Default
+        /// `iso-agent.service`. Set to an empty string or pass
+        /// `--no-restart` to skip the restart entirely.
+        #[arg(long, default_value = "iso-agent.service")]
+        unit: String,
+        /// Skip the post-install systemctl restart. The new binary is
+        /// in place but the old process keeps running until the next
+        /// manual restart.
+        #[arg(long)]
+        no_restart: bool,
+    },
     /// Run in agent mode: registers with a controller, runs agent-side plugins
     /// (updater).
     Agent {
@@ -264,6 +294,7 @@ async fn main() {
         Command::Controller { .. } => "controller",
         Command::Agent { .. } => "agent",
         Command::Secret { .. } => "secret",
+        Command::SelfUpdate { .. } => "self-update",
     };
     tracing_init::init(mode, cli.log.as_deref());
 
@@ -345,7 +376,30 @@ async fn dispatch(command: Command) -> Result<()> {
                 state_dir,
             } => run_secret_list_bootstrap(master_key_file, state_dir).await,
         },
+        Command::SelfUpdate {
+            url,
+            sha256,
+            unit,
+            no_restart,
+        } => run_self_update(url, sha256, unit, no_restart).await,
     }
+}
+
+/// Phase 0.8 binary self-update entry point. Thin wrapper that picks
+/// the right `restart_unit` argument based on the CLI flags and
+/// delegates to [`isengard_agent::self_update::run_self_update`].
+async fn run_self_update(
+    url: String,
+    sha256: String,
+    unit: String,
+    no_restart: bool,
+) -> Result<()> {
+    let restart_unit = if no_restart || unit.is_empty() {
+        None
+    } else {
+        Some(unit.as_str())
+    };
+    isengard_agent::self_update::run_self_update(&url, &sha256, restart_unit).await
 }
 
 /// Read the master key from `master_key_file`, open the controller's

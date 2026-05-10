@@ -1,0 +1,22 @@
+# Isengard agent target (Phase 0.8 convenience wrapper).
+#
+# Pulls in iso-controller.service + iso-agent.service so an operator can
+# bring the whole stack up or down with one command:
+#
+#   sudo systemctl start iso-agent.target
+#   sudo systemctl stop iso-agent.target
+#   sudo systemctl status iso-agent.target
+#
+# Without this target, the controller and agent are independent units
+# that happen to depend on each other via PartOf=. With it, the operator
+# has a single named handle for "Isengard on this host". install.sh
+# enables this target rather than the individual services.
+
+[Unit]
+Description=Isengard (controller + agent)
+Documentation=https://github.com/Weavers-Engineering/Isengard
+Wants=iso-controller.service iso-agent.service
+After=iso-controller.service iso-agent.service
+
+[Install]
+WantedBy=multi-user.target

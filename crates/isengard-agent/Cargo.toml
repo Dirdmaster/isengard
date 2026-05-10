@@ -17,6 +17,7 @@ bollard.workspace = true
 bytes = "1"
 chrono.workspace = true
 futures-util.workspace = true
+hex.workspace = true
 hostname.workspace = true
 if-addrs.workspace = true
 instant-acme.workspace = true
@@ -30,6 +31,9 @@ pingora-http = "0.8"
 pingora-proxy = { workspace = true }
 pingora-boringssl = "0.8"
 rcgen = "0.13"
+# Phase 0.8 self-update: download a new musl binary, verify sha256,
+# atomic-rename, trigger systemctl restart. Plain GET, no JSON.
+reqwest = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
