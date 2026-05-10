@@ -1,23 +1,22 @@
 //! v0.3d compose apply: take a [`ReconcilePlan`] + the desired compose,
-//! drive bollard to bring the running containers in line.
+//! drive the [`crate::runtime::RuntimeBackend`] to bring the running
+//! containers in line.
 //!
 //! Scope: v0.3d implements `Start | Recreate | Stop` for the smoke-test
 //! shape (image, env, ports, restart, labels). Networks, volumes,
 //! healthchecks, and depends_on are passed through best-effort but not
 //! reconciled per-service. Follow-up work tracked in the v0.3 status
 //! note.
+//!
+//! Phase 0.6 (wisp arc): rewritten to drive the [`crate::runtime::RuntimeBackend`]
+//! trait instead of bollard directly. Bollard remains the default
+//! backend; the byte-level Config the bollard backend hands to dockerd
+//! still flows through `BollardBackend::spec_to_config`, so the v0.3d
+//! reconcile bytes are unchanged. WispBackend gets the same trait
+//! surface, which is what makes engine-end-to-end deploys work.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use bollard::Docker;
-use bollard::container::{
-    Config, CreateContainerOptions, ListContainersOptions, RemoveContainerOptions,
-    StartContainerOptions, StopContainerOptions,
-};
-use bollard::secret::{
-    ContainerInspectResponse, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
-};
 use tokio::sync::RwLock;
 use tonic::transport::Endpoint;
 
@@ -26,8 +25,8 @@ use crate::compose_reconciler::{
     parse_compose,
 };
 use crate::runtime::{
-    ContainerCreateSpec, MountKind, MountSpec, PortProtocol, PortSpec,
-    RestartPolicy as SpecRestartPolicy, SecretMount,
+    ContainerCreateSpec, ListFilter, MountKind, MountSpec, PortProtocol, PortSpec,
+    RestartPolicy as SpecRestartPolicy, RuntimeBackend, SecretMount,
 };
 use crate::secret_fetch;
 
@@ -48,14 +47,14 @@ pub struct ApplyOutcome {
 /// should use [`reconcile_stack_with_secrets`] instead so the agent
 /// fetches + tmpfs-mounts the values at apply time.
 pub async fn reconcile_stack(
-    docker: &Docker,
+    backend: &dyn RuntimeBackend,
     stack_name: &str,
     compose_yaml: &str,
 ) -> anyhow::Result<(ReconcilePlan, Vec<ApplyOutcome>)> {
     let desired = parse_compose(compose_yaml)?;
-    let running = list_running_for_stack(docker, stack_name).await?;
+    let running = list_running_for_stack(backend, stack_name).await?;
     let plan = build_plan(stack_name, &desired, &running);
-    let outcomes = apply_plan(docker, stack_name, &desired, &plan, None).await;
+    let outcomes = apply_plan(backend, stack_name, &desired, &plan, None).await;
     Ok((plan, outcomes))
 }
 
@@ -70,7 +69,7 @@ pub async fn reconcile_stack(
 /// [`secret_fetch::cleanup_for_container`]; recreate cleans the prior
 /// container's directory before the new one is started.
 pub async fn reconcile_stack_with_secrets(
-    docker: &Docker,
+    backend: &dyn RuntimeBackend,
     stack_name: &str,
     compose_yaml: &str,
     controller_endpoint: Arc<RwLock<Endpoint>>,
@@ -81,10 +80,10 @@ pub async fn reconcile_stack_with_secrets(
     // for the common case, but the agent re-validates so a malformed
     // file written directly to disk can't slip through.
     desired.referenced_external_secrets()?;
-    let running = list_running_for_stack(docker, stack_name).await?;
+    let running = list_running_for_stack(backend, stack_name).await?;
     let plan = build_plan(stack_name, &desired, &running);
     let outcomes = apply_plan(
-        docker,
+        backend,
         stack_name,
         &desired,
         &plan,
@@ -94,42 +93,47 @@ pub async fn reconcile_stack_with_secrets(
     Ok((plan, outcomes))
 }
 
-/// List the running containers belonging to `stack_name`. Filters by
-/// either `com.docker.compose.project=<stack>` or
-/// `isengard.stack=<stack>`, projecting each into a [`RunningService`].
+/// List the running containers belonging to `stack_name`. Filters via
+/// the trait's [`ListFilter`] (which encodes both
+/// `com.docker.compose.project=<stack>` and
+/// `isengard.stack=<stack>` for the bollard backend), then inspects
+/// each handle to fill in env / ports / restart so the diff path has
+/// what it needs. WispBackend's list response already carries those
+/// fields from the persisted spec, so the inspect round-trip is cheap.
 pub async fn list_running_for_stack(
-    docker: &Docker,
+    backend: &dyn RuntimeBackend,
     stack_name: &str,
 ) -> anyhow::Result<Vec<RunningService>> {
-    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
-    filters.insert(
-        "label".to_string(),
-        vec![
-            format!("com.docker.compose.project={stack_name}"),
-            format!("isengard.stack={stack_name}"),
-        ],
-    );
-    let containers = docker
-        .list_containers(Some(ListContainersOptions::<String> {
-            all: false,
-            filters,
+    let summaries = backend
+        .list_containers(ListFilter {
+            stack: Some(stack_name.to_string()),
             ..Default::default()
-        }))
+        })
         .await
         .map_err(|e| anyhow::anyhow!("list_containers for stack {stack_name}: {e}"))?;
 
-    let mut out = Vec::with_capacity(containers.len());
-    for c in containers {
-        let Some(id) = c.id else { continue };
-        match docker.inspect_container(&id, None).await {
-            Ok(inspect) => {
-                if let Some(rs) = RunningService::from_inspect(&inspect) {
-                    out.push(rs);
-                }
-            }
+    let mut out = Vec::with_capacity(summaries.len());
+    for s in summaries {
+        // For bollard the list response doesn't carry env / ports /
+        // restart; re-inspect to populate them. For wisp the list
+        // response is already complete, but inspect is a cheap
+        // file-read so we re-call uniformly. If inspect fails (e.g.
+        // container removed mid-sweep) we drop the entry rather than
+        // surfacing partial data.
+        let snap = match backend.inspect_container(&s.id).await {
+            Ok(Some(snap)) => snap,
+            Ok(None) => continue,
             Err(e) => {
-                tracing::warn!(error = %e, container_id = %id, "compose_apply: inspect failed")
+                tracing::warn!(
+                    error = %e,
+                    container_id = %s.id,
+                    "compose_apply: inspect failed",
+                );
+                continue;
             }
+        };
+        if let Some(rs) = RunningService::from_snapshot(&snap) {
+            out.push(rs);
         }
     }
     Ok(out)
@@ -144,7 +148,7 @@ pub async fn list_running_for_stack(
 /// it on tmpfs, and bind-mount the directory into the container. When
 /// `None`, secrets are silently dropped (matches the v0.3d call site).
 pub async fn apply_plan(
-    docker: &Docker,
+    backend: &dyn RuntimeBackend,
     stack_name: &str,
     desired: &DesiredCompose,
     plan: &ReconcilePlan,
@@ -163,7 +167,7 @@ pub async fn apply_plan(
                     continue;
                 };
                 ensure_container_started(
-                    docker,
+                    backend,
                     stack_name,
                     svc,
                     None,
@@ -183,19 +187,19 @@ pub async fn apply_plan(
                 // Find the existing container by service name and stop+remove
                 // before starting fresh. Best-effort: if the container is gone
                 // we still attempt the start.
-                let existing = list_running_for_stack(docker, stack_name)
+                let existing = list_running_for_stack(backend, stack_name)
                     .await
                     .unwrap_or_default();
                 let prior = existing.iter().find(|r| &r.service_name == service);
                 if let Some(prior) = prior {
-                    let _ = stop_and_remove(docker, &prior.container_id).await;
+                    let _ = stop_and_remove(backend, &prior.container_id).await;
                     // Cleanup any stale tmpfs secrets from the previous
                     // container; the new one gets a fresh fetch.
                     let prior_container = container_name_for(stack_name, service, svc);
                     let _ = secret_fetch::cleanup_for_container(&prior_container);
                 }
                 ensure_container_started(
-                    docker,
+                    backend,
                     stack_name,
                     svc,
                     prior.map(|r| r.container_id.as_str()),
@@ -208,7 +212,7 @@ pub async fn apply_plan(
                 service,
                 container_id,
             } => {
-                let res = stop_and_remove(docker, container_id).await;
+                let res = stop_and_remove(backend, container_id).await;
                 // Best-effort cleanup of any tmpfs secrets the prior
                 // container had mounted. The actual container_name is
                 // either the operator's `container_name:` or our default.
@@ -385,23 +389,24 @@ fn parse_bind_string(bind: &str) -> Option<MountSpec> {
 }
 
 async fn ensure_container_started(
-    docker: &Docker,
+    backend: &dyn RuntimeBackend,
     stack_name: &str,
     svc: &DesiredService,
     _prior_container: Option<&str>,
     desired: &DesiredCompose,
     controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
 ) -> anyhow::Result<()> {
-    let Some(image) = svc.image.as_ref() else {
+    if svc.image.is_none() {
         return Err(anyhow::anyhow!("service {} has no image", svc.name));
-    };
+    }
     let container_name = container_name_for(stack_name, &svc.name, svc);
 
     // v0.3.6: fetch + materialise external secrets BEFORE creating the
-    // container so the bind-mount source paths exist when bollard wires
-    // them in. On any failure we abort the start; the operator gets the
-    // error in the apply outcome.
+    // container so the bind-mount source paths exist when the backend
+    // wires them in. On any failure we abort the start; the operator
+    // gets the error in the apply outcome.
     let mut binds: Vec<String> = Vec::new();
+    let mut secret_mounts: Vec<SecretMount> = Vec::new();
     if !svc.secrets.is_empty() {
         let Some(endpoint) = controller_endpoint.clone() else {
             return Err(anyhow::anyhow!(
@@ -421,26 +426,38 @@ async fn ensure_container_started(
         // `/run/secrets/<name>`) and pair them up with the materialised
         // host paths. The order is stable: `service_secret_targets` and
         // `fetch_and_materialise` both walk the same `svc.secrets` list.
+        //
+        // Two parallel collections: `binds` are kept for backward
+        // compatibility with the bollard call shape (the legacy
+        // build_create_config consumed `host:container:ro` strings);
+        // `secret_mounts` carries the structured form the trait
+        // surface uses. BollardBackend's spec_to_config consumes
+        // SecretMount entries directly.
         for (m, (_, target)) in materialised.iter().zip(targets.iter()) {
-            binds.push(format!("{}:{}:ro", m.host_path.to_string_lossy(), target,));
+            binds.push(format!("{}:{}:ro", m.host_path.to_string_lossy(), target));
+            secret_mounts.push(SecretMount {
+                source: m.host_path.to_string_lossy().to_string(),
+                target: std::path::PathBuf::from(target),
+                mode: 0o400,
+            });
         }
     }
 
-    let cfg = build_create_config(stack_name, svc, image, binds)?;
-    // Best-effort: a previous run may have left a container with the
-    // same name. Stop+remove it before creating a new one. bollard's
-    // create_container errors out on conflict, which is the most
-    // common failure mode for the smoke test.
-    let _ = stop_named(docker, &container_name).await;
+    // Build the backend-agnostic spec. `binds` is intentionally empty
+    // here: the secret bind-mounts are routed through the typed
+    // `secrets` field so each backend (bollard, wisp) can decide how to
+    // surface them. Plain compose volumes would land in `binds` once
+    // the parser models them; today the reconciler doesn't.
+    let spec = desired_service_to_create_spec(stack_name, svc, &[], secret_mounts);
 
-    let create = docker
-        .create_container(
-            Some(CreateContainerOptions {
-                name: container_name.clone(),
-                platform: None,
-            }),
-            cfg,
-        )
+    // Best-effort: a previous run may have left a container with the
+    // same name. Stop+remove it before creating a new one. The
+    // backend's create_container errors out on conflict, which is the
+    // most common failure mode for the smoke test.
+    let _ = stop_named(backend, &container_name).await;
+
+    let id = backend
+        .create_container(&spec)
         .await
         .map_err(|e| anyhow::anyhow!("create_container {container_name}: {e}"))?;
 
@@ -452,141 +469,36 @@ async fn ensure_container_started(
     // to connect each one explicitly afterward. Disconnecting from
     // `bridge` matches `docker compose up` (containers with explicit
     // `networks:` aren't on the default bridge).
+    //
+    // For wisp the trait routes the primary network through
+    // create_container; connect_network for additional networks
+    // currently errors out (live attach is a 0.5 stretch). For bollard
+    // it's a noop dance for stack-only networks.
     if !svc.networks.is_empty() {
-        let _ = docker
-            .disconnect_network(
-                "bridge",
-                bollard::network::DisconnectNetworkOptions {
-                    container: container_name.clone(),
-                    force: false,
-                },
-            )
-            .await; // best-effort: swallow if already off
+        // best-effort: swallow disconnect failures (already off / not
+        // applicable to wisp).
+        let _ = backend.disconnect_network(&id, "bridge").await;
         for net in &svc.networks {
-            docker
-                .connect_network(
-                    net,
-                    bollard::network::ConnectNetworkOptions {
-                        container: container_name.clone(),
-                        endpoint_config: Default::default(),
-                    },
+            backend.connect_network(&id, net).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "connect_network {net} -> {container_name}: {e} (does the network exist?)"
                 )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "connect_network {net} -> {container_name}: {e} (does the network exist? `docker network ls`)"
-                    )
-                })?;
+            })?;
         }
     }
 
-    docker
-        .start_container(&create.id, None::<StartContainerOptions<String>>)
+    backend
+        .start_container(&id)
         .await
         .map_err(|e| anyhow::anyhow!("start_container {container_name}: {e}"))?;
     Ok(())
 }
 
-fn build_create_config(
-    stack_name: &str,
-    svc: &DesiredService,
-    image: &str,
-    binds: Vec<String>,
-) -> anyhow::Result<Config<String>> {
-    // Environment: KEY=VALUE pairs.
-    let mut env: Vec<String> = svc
-        .environment
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    env.sort();
-
-    // Labels: ensure compose project + service labels are present so
-    // the next reconcile can match the container back to the service.
-    let mut labels: HashMap<String, String> = HashMap::new();
-    labels.insert(
-        "com.docker.compose.project".to_string(),
-        stack_name.to_string(),
-    );
-    labels.insert("com.docker.compose.service".to_string(), svc.name.clone());
-    labels.insert("isengard.stack".to_string(), stack_name.to_string());
-    for (k, v) in &svc.labels {
-        labels.insert(k.clone(), v.clone());
-    }
-
-    // Ports.
-    let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-    let mut exposed_ports: HashMap<String, HashMap<(), ()>> = HashMap::new();
-    for spec in &svc.ports {
-        if let Some((host, container)) = parse_port_mapping(spec) {
-            let key = if container.contains('/') {
-                container.clone()
-            } else {
-                format!("{container}/tcp")
-            };
-            port_bindings
-                .entry(key.clone())
-                .or_insert_with(|| Some(Vec::new()))
-                .as_mut()
-                .unwrap()
-                .push(PortBinding {
-                    host_ip: None,
-                    host_port: Some(host),
-                });
-            exposed_ports.insert(key, HashMap::new());
-        }
-    }
-
-    let restart_policy = svc.restart.as_deref().and_then(|s| match s {
-        "no" => Some(RestartPolicy {
-            name: Some(RestartPolicyNameEnum::NO),
-            maximum_retry_count: None,
-        }),
-        "always" => Some(RestartPolicy {
-            name: Some(RestartPolicyNameEnum::ALWAYS),
-            maximum_retry_count: None,
-        }),
-        "unless-stopped" => Some(RestartPolicy {
-            name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
-            maximum_retry_count: None,
-        }),
-        "on-failure" => Some(RestartPolicy {
-            name: Some(RestartPolicyNameEnum::ON_FAILURE),
-            maximum_retry_count: None,
-        }),
-        _ => None,
-    });
-
-    let host_config = HostConfig {
-        port_bindings: if port_bindings.is_empty() {
-            None
-        } else {
-            Some(port_bindings)
-        },
-        restart_policy,
-        binds: if binds.is_empty() { None } else { Some(binds) },
-        ..Default::default()
-    };
-
-    Ok(Config {
-        image: Some(image.to_string()),
-        cmd: svc.command.clone(),
-        entrypoint: svc.entrypoint.clone(),
-        env: Some(env),
-        labels: Some(labels),
-        exposed_ports: if exposed_ports.is_empty() {
-            None
-        } else {
-            Some(exposed_ports)
-        },
-        host_config: Some(host_config),
-        ..Default::default()
-    })
-}
-
 /// Parse a compose port string like `"8080:80"` / `"127.0.0.1:8080:80/tcp"`
 /// / `"80"`. Returns `(host_port, container_port_with_proto)` or `None`
-/// for unmappable specs.
+/// for unmappable specs. Used only by the helper that builds typed
+/// [`PortSpec`] entries; the bollard backend re-derives bindings from
+/// the typed shape.
 fn parse_port_mapping(spec: &str) -> Option<(String, String)> {
     // Normalize: drop optional `host_ip:` prefix when present.
     let bare = match spec.matches(':').count() {
@@ -601,54 +513,38 @@ fn parse_port_mapping(spec: &str) -> Option<(String, String)> {
     Some((host.to_string(), container.to_string()))
 }
 
-async fn stop_named(docker: &Docker, name: &str) -> anyhow::Result<()> {
-    // Inspect by name; if found, stop + remove.
-    match docker.inspect_container(name, None).await {
-        Ok(ContainerInspectResponse { id: Some(id), .. }) => stop_and_remove(docker, &id).await,
-        Ok(_) => Ok(()),
-        Err(_) => Ok(()), // not found
+async fn stop_named(backend: &dyn RuntimeBackend, name: &str) -> anyhow::Result<()> {
+    // Inspect by name; if the runtime knows about it, stop + remove.
+    // The trait's inspect_container accepts both the runtime ID and
+    // the operator-chosen container name (bollard normalises
+    // internally; wisp uses the name as the ID).
+    match backend.inspect_container(name).await {
+        Ok(Some(snap)) => stop_and_remove(backend, &snap.id).await,
+        Ok(None) => Ok(()),
+        Err(_) => Ok(()), // best-effort: not found
     }
 }
 
-async fn stop_and_remove(docker: &Docker, container_id: &str) -> anyhow::Result<()> {
-    let _ = docker
-        .stop_container(container_id, Some(StopContainerOptions { t: 10 }))
-        .await;
-    docker
-        .remove_container(
-            container_id,
-            Some(RemoveContainerOptions {
-                force: true,
-                v: false,
-                link: false,
-            }),
-        )
-        .await
-        .map_err(|e| {
-            let s = e.to_string();
-            if s.contains("404") || s.to_lowercase().contains("no such container") {
-                anyhow::anyhow!("noop")
-            } else {
-                anyhow::anyhow!("remove_container {container_id}: {e}")
-            }
-        })
-        .or_else(|e| {
-            if format!("{e:#}") == "noop" {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
+async fn stop_and_remove(backend: &dyn RuntimeBackend, container_id: &str) -> anyhow::Result<()> {
+    // Best-effort stop with the legacy 10s timeout: matches the
+    // pre-Phase-0.6 bollard invocation. remove with force=true matches
+    // the legacy v=false / link=false / force=true shape.
+    let _ = backend.stop_container(container_id, 10).await;
+    match backend.remove_container(container_id, true).await {
+        Ok(()) => Ok(()),
+        Err(crate::runtime::RuntimeError::NotFound(_)) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("remove_container {container_id}: {e}")),
+    }
 }
 
 /// Convenience: same as [`reconcile_stack`] but the caller already has
-/// an `Arc<Docker>` (matches the agent's main loop).
+/// an `Arc<dyn RuntimeBackend>` (matches the agent's main loop).
 pub async fn reconcile_stack_arc(
-    docker: Arc<Docker>,
+    backend: Arc<dyn RuntimeBackend>,
     stack_name: &str,
     compose_yaml: &str,
 ) -> anyhow::Result<(ReconcilePlan, Vec<ApplyOutcome>)> {
-    reconcile_stack(&docker, stack_name, compose_yaml).await
+    reconcile_stack(backend.as_ref(), stack_name, compose_yaml).await
 }
 
 #[cfg(test)]
@@ -677,56 +573,6 @@ mod tests {
     }
 
     #[test]
-    fn build_config_includes_compose_project_labels() {
-        let svc = DesiredService {
-            name: "web".into(),
-            image: Some("nginx".into()),
-            ..Default::default()
-        };
-        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
-        let labels = cfg.labels.unwrap();
-        assert_eq!(labels["com.docker.compose.project"], "hello");
-        assert_eq!(labels["com.docker.compose.service"], "web");
-        assert_eq!(labels["isengard.stack"], "hello");
-    }
-
-    #[test]
-    fn build_config_passes_environment() {
-        let mut svc = DesiredService {
-            name: "web".into(),
-            image: Some("nginx".into()),
-            ..Default::default()
-        };
-        svc.environment.insert("FOO".into(), "bar".into());
-        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
-        let env = cfg.env.unwrap();
-        assert!(env.iter().any(|e| e == "FOO=bar"));
-    }
-
-    #[test]
-    fn build_config_passes_through_binds_when_provided() {
-        let svc = DesiredService {
-            name: "web".into(),
-            image: Some("nginx".into()),
-            ..Default::default()
-        };
-        let binds = vec!["/run/isengard-secrets/hello-web/cf:/run/secrets/cf:ro".to_string()];
-        let cfg = build_create_config("hello", &svc, "nginx", binds.clone()).unwrap();
-        assert_eq!(cfg.host_config.unwrap().binds, Some(binds));
-    }
-
-    #[test]
-    fn build_config_no_binds_means_none_in_host_config() {
-        let svc = DesiredService {
-            name: "web".into(),
-            image: Some("nginx".into()),
-            ..Default::default()
-        };
-        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
-        assert!(cfg.host_config.unwrap().binds.is_none());
-    }
-
-    #[test]
     fn container_name_for_uses_default_when_unset() {
         let svc = DesiredService {
             name: "web".into(),
@@ -743,22 +589,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(container_name_for("hello", "web", &svc), "my-web");
-    }
-
-    #[test]
-    fn build_config_translates_restart_policy() {
-        let svc = DesiredService {
-            name: "web".into(),
-            image: Some("nginx".into()),
-            restart: Some("unless-stopped".into()),
-            ..Default::default()
-        };
-        let cfg = build_create_config("hello", &svc, "nginx", vec![]).unwrap();
-        let rp = cfg.host_config.unwrap().restart_policy.unwrap();
-        assert!(matches!(
-            rp.name,
-            Some(RestartPolicyNameEnum::UNLESS_STOPPED)
-        ));
     }
 
     // ----- Phase 0.6: desired_service_to_create_spec golden tests -----

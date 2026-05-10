@@ -471,7 +471,14 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             // v0.3d compose-as-truth: watch the same root for operator
             // edits (vim, git pull, dashboard PUT). Each debounced change
             // drives a reconcile sweep against the running containers.
-            let watcher_docker = docker.clone();
+            //
+            // Phase 0.6: reconcile_stack_with_secrets now drives the
+            // RuntimeBackend trait directly. The watcher captures an
+            // Arc<dyn RuntimeBackend> so the spawn doesn't need to
+            // borrow the bollard handle. The outer if-let-Some-docker
+            // gate is removed in a follow-up commit so wisp deploys
+            // also reach the watcher.
+            let watcher_backend = backend.clone();
             let watcher_root = import_root.clone();
             let watcher_endpoint = endpoint.clone();
             match compose_watcher::spawn(watcher_root.clone()) {
@@ -521,7 +528,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                             // controller when at least one service has
                             // `secrets:` set.
                             match compose_apply::reconcile_stack_with_secrets(
-                                watcher_docker.as_ref(),
+                                watcher_backend.as_ref(),
                                 &evt.stack_name,
                                 &yaml,
                                 watcher_endpoint.clone(),
