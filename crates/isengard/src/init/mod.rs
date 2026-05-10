@@ -321,8 +321,14 @@ impl Plan {
     fn token_file(&self) -> PathBuf {
         self.etc_dir.join("agent-token.env")
     }
-    fn enrollment_file(&self) -> PathBuf {
-        self.etc_dir.join("enrollment.txt")
+    /// File the operator reads to invite a second host into the fleet.
+    /// Pre-Phase-0.16 this file was misnamed `enrollment.txt` and held
+    /// the same token the local agent had just redeemed (so the snippet
+    /// was dead on arrival). Phase 0.16 mints a dedicated second token
+    /// and renames the file to `join.txt` to match the `isengard join`
+    /// CLI subcommand it goes with.
+    fn join_file(&self) -> PathBuf {
+        self.etc_dir.join("join.txt")
     }
     fn master_key_file(&self) -> PathBuf {
         self.etc_dir.join("master.key")
@@ -617,25 +623,26 @@ impl Plan {
             &self.ca_pem_file().display().to_string(),
         ))?;
 
-        let token = {
+        // Phase 0.16 (P2.2 fix): two-token flow. `agent_token` is consumed
+        // by the local agent at boot; `join_token` is minted *after* the
+        // local agent enrolls and is what we surface to the operator for
+        // inviting a second host. Previously both jobs reused one token,
+        // so the printed snippet + enrollment.txt were dead on arrival.
+        let agent_token = {
             let sp = cliclack::spinner();
-            sp.start("Minting enrollment token");
+            sp.start("Minting local-agent enrollment token");
             match self.mint_token().await {
                 Ok(t) => {
-                    sp.stop(done(
-                        "Minted enrollment token",
-                        &format!("{} (15m TTL)", token_preview(&t)),
-                    ));
+                    sp.stop(done("Minted local-agent token", "(single-use)"));
                     t
                 }
                 Err(e) => {
-                    sp.error(format!("Mint enrollment token failed: {e:#}"));
+                    sp.error(format!("Mint local-agent token failed: {e:#}"));
                     return Err(e);
                 }
             }
         };
-        self.write_token_file(&token)?;
-        self.write_enrollment_file(&token)?;
+        self.write_token_file(&agent_token)?;
 
         let sp = cliclack::spinner();
         sp.start("Starting iso-agent");
@@ -651,7 +658,26 @@ impl Plan {
             }
         }
 
-        Ok(token)
+        let join_token = {
+            let sp = cliclack::spinner();
+            sp.start("Minting join token");
+            match self.mint_token().await {
+                Ok(t) => {
+                    sp.stop(done(
+                        "Minted join token",
+                        &format!("{} (15m TTL)", token_preview(&t)),
+                    ));
+                    t
+                }
+                Err(e) => {
+                    sp.error(format!("Mint join token failed: {e:#}"));
+                    return Err(e);
+                }
+            }
+        };
+        self.write_join_file(&join_token)?;
+
+        Ok(join_token)
     }
 
     /// Execute the install with plain stdout. Used when stdin is piped
@@ -659,7 +685,7 @@ impl Plan {
     /// render unreadably without a TTY.
     async fn execute_plain(&self) -> Result<String> {
         let mut step = 0u32;
-        let total = 9u32;
+        let total = 10u32;
         let mut emit = |label: &str, detail: &str| {
             step += 1;
             println!("[{step}/{total}] {label:<26}{detail}");
@@ -701,18 +727,24 @@ impl Plan {
         emit("Controller healthy", "https://localhost:9417");
 
         self.export_ca().await?;
-        let token = self.mint_token().await?;
-        self.write_token_file(&token)?;
-        self.write_enrollment_file(&token)?;
-        emit(
-            "Minted enrollment token",
-            &format!("{} (15m TTL)", token_preview(&token)),
-        );
+
+        // Phase 0.16 (P2.2 fix): two-token flow. See execute_with_clack
+        // for the rationale; same shape, plain-stdout step emitters.
+        let agent_token = self.mint_token().await?;
+        self.write_token_file(&agent_token)?;
+        emit("Minted local-agent token", "(single-use)");
 
         self.start_agent_with_progress()?;
         emit("Agent enrolled", "");
 
-        Ok(token)
+        let join_token = self.mint_token().await?;
+        self.write_join_file(&join_token)?;
+        emit(
+            "Minted join token",
+            &format!("{} (15m TTL)", token_preview(&join_token)),
+        );
+
+        Ok(join_token)
     }
 
     fn setup_dirs(&self) -> Result<()> {
@@ -935,14 +967,20 @@ impl Plan {
         Ok(())
     }
 
-    /// Persist the freshly-minted enrollment token to a dedicated file
-    /// (chmod 0600) so an operator who needs to add another host an
-    /// hour later can grab it without re-running init.
-    fn write_enrollment_file(&self, token: &str) -> Result<()> {
-        let path = self.enrollment_file();
+    /// Persist a freshly-minted join token (chmod 0600) so an operator
+    /// can invite another host within the TTL without re-running init.
+    ///
+    /// IMPORTANT: this MUST be a token distinct from the one the local
+    /// agent consumed at boot. Enrollment tokens are single-use; writing
+    /// the local agent's token here yielded a snippet that was dead on
+    /// arrival (the P2.2 bug from the wave 2.D multi-host smoke).
+    fn write_join_file(&self, token: &str) -> Result<()> {
+        let path = self.join_file();
         let body = format!(
-            "# Isengard enrollment token (15 min TTL from mint time).\n\
-             # Use with: isengard join --token <token> --ca-pem-path /etc/isengard/ca.pem <controller-url>\n\
+            "# Isengard join token (15 min TTL from mint time, single-use).\n\
+             # Use on the new host:\n\
+             #   isengard join --token <token> --ca-pem-path /etc/isengard/ca.pem https://<controller-host>:9417\n\
+             # Mint a fresh one any time with: isengard controller token mint --role agent\n\
              token: {token}\n\
              ca:    {ca}\n\
              controller: https://{host}:9417\n",

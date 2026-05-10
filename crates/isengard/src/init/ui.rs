@@ -102,7 +102,7 @@ pub fn format_ready_block(plan: &Plan, token: &str) -> String {
         "Logs"
     ));
     out.push('\n');
-    out.push_str("Add another host:\n");
+    out.push_str("Add another host (token: 15m TTL, single-use):\n");
     out.push_str("  isengard join \\\n");
     out.push_str(&format!("    --token {token} \\\n"));
     out.push_str(&format!("    --ca-pem-path {} \\\n", ca_pem_path.display()));
@@ -112,6 +112,11 @@ pub fn format_ready_block(plan: &Plan, token: &str) -> String {
         let short: String = fp.chars().take(12).collect();
         out.push_str(&format!("  CA fingerprint: sha256:{short}..."));
     }
+    out.push('\n');
+    out.push_str(&format!(
+        "  (also saved to {})",
+        plan.etc_dir.join("join.txt").display()
+    ));
     out.push_str("\n\nNext:\n  isd deploy --file ./compose.toml --stack hello");
 
     out
