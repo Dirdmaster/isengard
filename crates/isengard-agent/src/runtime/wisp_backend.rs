@@ -924,11 +924,17 @@ impl RuntimeBackend for WispBackend {
         }
     }
 
-    async fn connect_network(
-        &self,
-        _container_id: &str,
-        _network: &str,
-    ) -> Result<(), RuntimeError> {
+    async fn connect_network(&self, container_id: &str, network: &str) -> Result<(), RuntimeError> {
+        // wisp wires the primary network at create_container time via
+        // spec.networks[0]. The compose_apply path then loops the
+        // declared networks calling connect_network for each. Treat the
+        // already-attached primary as a no-op so the canonical
+        // single-network compose case succeeds. Live attach for
+        // additional networks remains unimplemented.
+        let spec = self.read_spec(container_id)?;
+        if spec.networks.first().map(String::as_str) == Some(network) {
+            return Ok(());
+        }
         Err(RuntimeError::Network(
             "wisp does not support live network attach in 0.4; recreate the container".into(),
         ))
@@ -937,8 +943,16 @@ impl RuntimeBackend for WispBackend {
     async fn disconnect_network(
         &self,
         _container_id: &str,
-        _network: &str,
+        network: &str,
     ) -> Result<(), RuntimeError> {
+        // The compose_apply path issues a best-effort `disconnect_network
+        // bridge` before connecting declared networks. Accept that as a
+        // no-op since wisp containers never join Docker's `bridge`. The
+        // surrounding caller already swallows errors here, but returning
+        // Ok keeps the trace clean for operators reading logs.
+        if network == "bridge" {
+            return Ok(());
+        }
         Err(RuntimeError::Network(
             "wisp does not support live network detach in 0.4; recreate the container".into(),
         ))
