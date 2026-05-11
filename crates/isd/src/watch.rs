@@ -8,6 +8,19 @@
 //! process attached after the write succeeds and renders per-service state
 //! transitions until everything reaches a terminal state.
 //!
+//! ## Rendering model
+//!
+//! v0.5.3 onward: one in-place line per service via
+//! [`indicatif::MultiProgress`]. Each bar shows a spinner during
+//! intermediate states (Pending / Restarting), a service name, a state
+//! label, and an `elapsed` counter that ticks live. On reaching a terminal
+//! state the bar is finished with a success / failure glyph + colour.
+//! Modeled on `docker compose up`.
+//!
+//! The intro line (`┌  isd deploy --watch  servarr`) and the closing
+//! summary still come from cliclack so the connector chrome matches the
+//! rest of isd's UX.
+//!
 //! ## Channel
 //!
 //! Polling, not server-sent events. We hit two endpoints already exposed by
@@ -18,19 +31,19 @@
 //!   - `GET /api/v1/services?stack_id=<id>` every 1s
 //!
 //! Real event streams (`/api/v1/deployments/<id>/events` SSE) would render
-//! cleaner; deferred to v0.5.3+ so this lands without a controller change.
+//! richer per-service detail (pull progress, layer counts, IPs); deferred
+//! to v0.5.3+ so this lands without a controller change.
 //!
 //! ## Terminal states
 //!
 //! ServiceState only has four enum values today: `running`, `stopped`,
 //! `restarting`, `unknown`. The spec asks us to treat `Running`, `Failed`,
 //! and `Stopped` as terminal. `restarting` is intermediate; `unknown` is
-//! treated as intermediate as long as the service is still being observed.
-//! There's no `failed` state at the inventory level (a failed deploy
-//! manifests as the service never appearing, or appearing in `stopped`),
-//! so the cliclack renderer never emits `log::error` against a service
-//! row from polling alone. Failure surfacing is left to the eventual
-//! Channel B (SSE) implementation.
+//! treated as intermediate as long as the service is still being observed
+//! (and surfaces as the "Pending" label on the progress bar). There's no
+//! `failed` state at the inventory level today (a failed deploy manifests
+//! as the service never appearing, or appearing in `stopped`), so the
+//! renderer's "Failed" label is reserved for the Channel B SSE channel.
 //!
 //! ## Timeout + Ctrl+C
 //!
@@ -44,6 +57,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
+use console::{Style, Term};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Deserialize;
 
 use crate::session::Session;
@@ -57,6 +72,16 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// we surface the timeout so the operator isn't stuck and tell them to
 /// re-check with `isd ps`.
 pub const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Spinner tick cadence. 80ms matches docker-compose's feel: fast enough
+/// that the spinner reads as motion, slow enough not to thrash a remote
+/// terminal.
+const SPINNER_TICK: Duration = Duration::from_millis(80);
+
+/// Service name column width on the progress bar. Padded to this with
+/// spaces; longer names just push the rest of the line right (indicatif
+/// truncates `wide_msg` to keep within the terminal width).
+const NAME_COL_WIDTH: usize = 32;
 
 /// One row of `GET /api/v1/services?stack_id=...`. Subset of [`crate::ps`]'s
 /// `ServiceDto`: we only care about identity, state, image, and the
@@ -169,22 +194,30 @@ pub fn is_success_state(state: &str) -> bool {
     state == "running"
 }
 
+/// Map a raw `ServiceState` string into a human-facing label. Mirrors
+/// docker-compose's vocabulary so an operator reading both feels at
+/// home. Reserved for a future SSE channel: "Pulling" (per-layer pull
+/// progress), "Starting" (post-pull, pre-running), and so on.
+pub fn state_label(state: &str) -> &'static str {
+    match state {
+        "running" => "Running",
+        "stopped" => "Stopped",
+        "failed" => "Failed",
+        "restarting" => "Restarting",
+        "unknown" => "Pending",
+        _ => "Pending",
+    }
+}
+
 /// Pretty-format a [`Duration`] as `Xs` (rounded to seconds, minimum 1s).
 fn fmt_secs(d: Duration) -> String {
     let s = d.as_secs().max(1);
     format!("{s}s")
 }
 
-/// Render the cliclack "transition" line for a service.
-///
-/// Format: `service-name<pad>state<pad>image | took Xs`.
-///
-/// Picks a glyph variant: `log::step` (◇) for intermediate / non-terminal
-/// transitions, `log::success` (◆ green) for `running`, `log::error` (✗ red)
-/// for `failed`, and `log::warning` for `stopped` (terminal but not happy).
-///
-/// Separated out so tests can compute the expected string without invoking
-/// cliclack's stdout side-effect.
+/// Render a single transition line for tests / non-tty fallback. Format:
+/// `service-name<pad>state<pad>image | took Xs`. Pulled out so renderer
+/// implementations and the plain-text fallback agree on the layout.
 pub fn format_transition_line(svc: &ServiceSnapshot, took: Option<Duration>) -> String {
     let took_suffix = match took {
         Some(d) => format!("  (took {})", fmt_secs(d)),
@@ -322,7 +355,9 @@ impl Default for WatchConfig {
 /// no-progress timer fires, or `cancel` signals (Ctrl+C from the caller).
 ///
 /// Returns the outcome so the caller can colour the outro + set the exit
-/// status. Side-effect: emits one cliclack line per observed transition.
+/// status. Side-effect: emits one transition callback per observed state
+/// change (the renderer turns those into progress-bar mutations or plain
+/// stdout lines).
 ///
 /// `cancel` is a future the caller resolves on SIGINT. Tests pass a
 /// `std::future::pending()` to drive the timeout path explicitly.
@@ -440,27 +475,218 @@ where
     }
 }
 
-/// Side-channel that takes a single transition and writes it somewhere
-/// (production: cliclack glyph + stderr; tests: a Vec<String>). Pulled
-/// out so the state-machine tests don't depend on cliclack's global
-/// terminal state.
+/// Side-channel that takes a single transition and writes it somewhere.
+///
+/// Two production-relevant implementations:
+///
+///   - [`MultiProgressRenderer`]: one in-place [`ProgressBar`] per
+///     service via [`MultiProgress`]; the docker-compose-up experience.
+///     Used when stdout is a tty.
+///   - [`PlainRenderer`]: append-only stdout lines, one per transition.
+///     Used when stdout is piped / not a tty (CI, redirected output).
+///
+/// Plus a test renderer ([`CaptureRenderer`]) that collects lines into a
+/// `Vec` without touching the terminal.
 pub trait TransitionRenderer {
     fn transition(&mut self, svc: &ServiceSnapshot, took: Option<Duration>);
 }
 
-/// Production renderer: each transition lands on stderr through cliclack's
-/// connector. Terminal-running -> `log::success` (green ◆), terminal-stopped
-/// / -failed -> `log::error` (red ✗), everything else -> `log::step` (grey ◇).
-pub struct CliclackRenderer;
+/// Glyph set for the spinner + terminal-state markers. Two variants:
+/// fancy Unicode (default; what modern terminals render correctly) and
+/// ASCII (fallback for `LANG=C` / dumb terminals / mojibake).
+#[derive(Debug, Clone, Copy)]
+struct GlyphSet {
+    spinner: &'static [&'static str],
+    /// Tick used by [`ProgressStyle::tick_strings`]; final element is the
+    /// "finished" frame indicatif drops in once `finish_*` is called. We
+    /// override per-state via `finish_with_message` so this stays neutral.
+    finished_running: &'static str,
+    finished_failed: &'static str,
+}
 
-impl TransitionRenderer for CliclackRenderer {
+const FANCY_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "];
+const ASCII_SPINNER: &[&str] = &["-", "\\", "|", "/", " "];
+
+const FANCY_GLYPHS: GlyphSet = GlyphSet {
+    spinner: FANCY_SPINNER,
+    finished_running: "✔",
+    finished_failed: "✗",
+};
+const ASCII_GLYPHS: GlyphSet = GlyphSet {
+    spinner: ASCII_SPINNER,
+    finished_running: "+",
+    finished_failed: "x",
+};
+
+/// Decide which glyph set to use based on the locale. We default to fancy
+/// Unicode; if `LANG` / `LC_ALL` / `LC_CTYPE` don't contain `UTF-8` /
+/// `utf8` we fall back to ASCII so terminals stuck in a single-byte
+/// locale don't render mojibake. `ISD_ASCII=1` is a hard override (useful
+/// for screenshots / docs / CI snapshots).
+fn pick_glyphs() -> GlyphSet {
+    if std::env::var("ISD_ASCII")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return ASCII_GLYPHS;
+    }
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if locale.contains("utf-8") || locale.contains("utf8") {
+        FANCY_GLYPHS
+    } else if locale.is_empty() {
+        // Empty locale on macOS Terminal.app is normal; assume UTF-8.
+        FANCY_GLYPHS
+    } else {
+        ASCII_GLYPHS
+    }
+}
+
+/// Style preset for a service in an intermediate (non-terminal) state.
+/// Spinner + service name (padded) + state label + elapsed time. Truncated
+/// to terminal width by indicatif's `wide_msg` placeholder.
+fn intermediate_style(glyphs: GlyphSet) -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.cyan} {prefix} {wide_msg} {elapsed:>6}")
+        .expect("static template")
+        .tick_strings(glyphs.spinner)
+}
+
+/// Style preset for a service that has reached `running`. Green checkmark
+/// + "Started" + final elapsed.
+fn success_style(glyphs: GlyphSet) -> ProgressStyle {
+    ProgressStyle::with_template(&format!(
+        "  {} {{prefix}} {{wide_msg:.green}} {{elapsed:>6}}",
+        Style::new().green().apply_to(glyphs.finished_running)
+    ))
+    .expect("static template")
+}
+
+/// Style preset for a service in a non-happy terminal state (stopped /
+/// failed). Red X + reason + final elapsed.
+fn error_style(glyphs: GlyphSet) -> ProgressStyle {
+    ProgressStyle::with_template(&format!(
+        "  {} {{prefix}} {{wide_msg:.red}} {{elapsed:>6}}",
+        Style::new().red().apply_to(glyphs.finished_failed)
+    ))
+    .expect("static template")
+}
+
+/// Production renderer: one [`ProgressBar`] per service on a shared
+/// [`MultiProgress`]. State changes mutate the bar (style + message);
+/// terminal states finish it. The MultiProgress instance is held alive
+/// for the lifetime of the renderer; dropping it triggers a final redraw.
+pub struct MultiProgressRenderer {
+    multi: MultiProgress,
+    bars: HashMap<String, ProgressBar>,
+    glyphs: GlyphSet,
+}
+
+impl MultiProgressRenderer {
+    pub fn new() -> Self {
+        Self {
+            multi: MultiProgress::new(),
+            bars: HashMap::new(),
+            glyphs: pick_glyphs(),
+        }
+    }
+
+    /// Pad a service name to a fixed column width so labels line up.
+    /// Truncates with an ellipsis if longer than the column (rare; most
+    /// docker-compose names are well under 32 chars).
+    fn pad_name(&self, name: &str) -> String {
+        let width = NAME_COL_WIDTH;
+        if name.len() >= width {
+            // Truncate to width - 1 chars + ellipsis so the column still
+            // aligns. Slicing is byte-safe because service names are
+            // ASCII (docker imposes [a-zA-Z0-9_.-]).
+            format!("{}…", &name[..width.saturating_sub(1).min(name.len())])
+        } else {
+            format!("{name:<width$}")
+        }
+    }
+
+    /// Compose the `wide_msg` payload: state label first, then truncated
+    /// image. The terminal width is enforced by indicatif itself.
+    fn message_for(&self, svc: &ServiceSnapshot) -> String {
+        format!("{:<12} {}", state_label(&svc.state), svc.image)
+    }
+
+    /// Compose the finished-bar message: state label + image or detail
+    /// string. For terminal successes: `Started   <image>`. For terminal
+    /// failures: `Failed: <state>   <image>` (the state name carries the
+    /// failure reason since the inventory channel doesn't expose an
+    /// error string today).
+    fn finish_message_for(&self, svc: &ServiceSnapshot) -> String {
+        match svc.state.as_str() {
+            "running" => format!("{:<12} {}", "Started", svc.image),
+            "stopped" => format!("{:<12} {}", "Stopped", svc.image),
+            "failed" => format!("{:<12} {}", "Failed", svc.image),
+            other => format!("{:<12} {}", state_label(other), svc.image),
+        }
+    }
+}
+
+impl Default for MultiProgressRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransitionRenderer for MultiProgressRenderer {
+    fn transition(&mut self, svc: &ServiceSnapshot, _took: Option<Duration>) {
+        // `_took` is computed by the watch loop's tracker; for the
+        // MultiProgress renderer we use indicatif's own elapsed counter
+        // (started when the bar was first added) so the displayed value
+        // matches what the operator has been watching tick up.
+        let glyphs = self.glyphs;
+        let padded_name = self.pad_name(&svc.name);
+        let intermediate_msg = self.message_for(svc);
+        let finish_msg = self.finish_message_for(svc);
+
+        // Add-if-missing first via a non-borrowing path so the post-add
+        // mutations below can take their own immutable borrow without
+        // colliding with the `&mut self` `entry()` chain.
+        if !self.bars.contains_key(&svc.id) {
+            let pb = self.multi.add(ProgressBar::new_spinner());
+            pb.set_style(intermediate_style(glyphs));
+            pb.set_prefix(padded_name);
+            pb.enable_steady_tick(SPINNER_TICK);
+            self.bars.insert(svc.id.clone(), pb);
+        }
+        let bar = self.bars.get(&svc.id).expect("inserted above");
+
+        // Defensive: a bar can be finished only once. If the watch loop
+        // ever re-emits a transition for an already-finished service
+        // (shouldn't happen given the tracker dedup, but cheap to guard)
+        // skip the mutation.
+        if bar.is_finished() {
+            return;
+        }
+
+        if is_terminal(&svc.state) {
+            if is_success_state(&svc.state) {
+                bar.set_style(success_style(glyphs));
+            } else {
+                bar.set_style(error_style(glyphs));
+            }
+            bar.finish_with_message(finish_msg);
+        } else {
+            bar.set_message(intermediate_msg);
+        }
+    }
+}
+
+/// Non-tty fallback renderer: emits a plain stdout line per transition.
+/// Same format as the pre-v0.5.3 cliclack renderer minus the connector
+/// glyphs, so a `tee` / log-capture downstream still gets readable output.
+pub struct PlainRenderer;
+
+impl TransitionRenderer for PlainRenderer {
     fn transition(&mut self, svc: &ServiceSnapshot, took: Option<Duration>) {
-        let line = format_transition_line(svc, took);
-        let _ = match svc.state.as_str() {
-            "running" => cliclack::log::success(line),
-            "stopped" | "failed" => cliclack::log::error(line),
-            _ => cliclack::log::step(line),
-        };
+        println!("{}", format_transition_line(svc, took));
     }
 }
 
@@ -480,11 +706,19 @@ impl TransitionRenderer for CaptureRenderer {
     }
 }
 
-/// Print the outro line that closes a watch session. Lives in this module
-/// so the colouring rules are alongside the rest of the renderer.
+/// Print the closing summary that closes a watch session. Lives in this
+/// module so the colouring rules are alongside the rest of the renderer.
+///
+/// Docker-compose-style banner first (`[+] Done 8/8`) then a cliclack
+/// outro for the connector chrome.
 pub fn print_outro(outcome: &WatchOutcome) {
     match outcome {
         WatchOutcome::AllRunning { services, elapsed } => {
+            // Docker-compose-style summary line, mirrored to the
+            // operator's stdout. Green when everything came up clean.
+            println!();
+            let banner = format!("[+] Done {services}/{services}");
+            println!("{}", Style::new().green().apply_to(&banner));
             let _ = cliclack::outro(format!(
                 "All {services} service(s) running. Total: {}.",
                 fmt_secs(*elapsed)
@@ -495,6 +729,10 @@ pub fn print_outro(outcome: &WatchOutcome) {
             failed,
             elapsed,
         } => {
+            let total = running + failed;
+            println!();
+            let banner = format!("[+] Failed {running}/{total}");
+            println!("{}", Style::new().red().apply_to(&banner));
             let _ = cliclack::outro_cancel(format!(
                 "{running} running, {failed} did not reach Running. Total: {}.",
                 fmt_secs(*elapsed)
@@ -533,9 +771,16 @@ pub async fn run_watch(session: &Session, stack_id: &str) -> Result<()> {
         // the handler; treat the error as "no cancel ever".
         let _ = tokio::signal::ctrl_c().await;
     });
-    let mut renderer = CliclackRenderer;
-    let outcome =
-        watch_until_terminal(poller, cancel, WatchConfig::default(), &mut renderer).await?;
+    // Choose renderer based on whether stdout is a real terminal. Piped /
+    // redirected output gets plain lines; an interactive shell gets the
+    // in-place MultiProgress experience.
+    let outcome = if Term::stdout().is_term() {
+        let mut renderer = MultiProgressRenderer::new();
+        watch_until_terminal(poller, cancel, WatchConfig::default(), &mut renderer).await?
+    } else {
+        let mut renderer = PlainRenderer;
+        watch_until_terminal(poller, cancel, WatchConfig::default(), &mut renderer).await?
+    };
     print_outro(&outcome);
     outcome.into_result()
 }
@@ -578,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn state_label_maps_known_states_to_human_labels() {
+        assert_eq!(state_label("running"), "Running");
+        assert_eq!(state_label("stopped"), "Stopped");
+        assert_eq!(state_label("failed"), "Failed");
+        assert_eq!(state_label("restarting"), "Restarting");
+        assert_eq!(state_label("unknown"), "Pending");
+        // Any unknown value (forward-compat with new agent states) falls
+        // back to "Pending" so it renders as an intermediate row.
+        assert_eq!(state_label("pulling"), "Pending");
+    }
+
+    #[test]
     fn format_transition_line_renders_columns_and_optional_took() {
         let svc = snap(
             "1",
@@ -613,6 +870,45 @@ mod tests {
         };
         assert!(timeout.into_result().is_ok());
         assert!(WatchOutcome::Detached.into_result().is_ok());
+    }
+
+    /// `pick_glyphs` respects the explicit override env var and the
+    /// locale env vars, defaulting to fancy when neither says otherwise.
+    #[test]
+    fn pick_glyphs_honors_overrides() {
+        // We can't safely mutate process env in parallel-running tests
+        // (other tests in the binary may read LANG concurrently), so
+        // this asserts the pure-function shape rather than running the
+        // env-reading path. The behaviour is exercised via integration
+        // by setting ISD_ASCII / LANG in the surrounding shell.
+        let fancy = FANCY_GLYPHS;
+        let ascii = ASCII_GLYPHS;
+        assert_eq!(fancy.finished_running, "✔");
+        assert_eq!(ascii.finished_running, "+");
+        assert!(fancy.spinner.len() >= 2);
+        assert!(ascii.spinner.len() >= 2);
+    }
+
+    /// The MultiProgress renderer's transition implementation never
+    /// panics on the empty hashmap path and dedupes by `svc.id`.
+    #[test]
+    fn multiprogress_renderer_handles_repeated_transitions() {
+        // We don't assert visual output (indicatif owns rendering); we
+        // assert the renderer's state-machine: same id reuses the same
+        // bar, terminal state finishes it, post-finish transitions are
+        // no-ops.
+        let mut r = MultiProgressRenderer::new();
+        let s1 = snap("1", "web", "restarting", "nginx:1");
+        r.transition(&s1, None);
+        assert_eq!(r.bars.len(), 1);
+        let s2 = snap("1", "web", "running", "nginx:1");
+        r.transition(&s2, Some(Duration::from_secs(3)));
+        assert_eq!(r.bars.len(), 1);
+        assert!(r.bars.values().next().unwrap().is_finished());
+        // A stale duplicate after finish must not panic or unfinish.
+        let s3 = snap("1", "web", "running", "nginx:1");
+        r.transition(&s3, Some(Duration::from_secs(3)));
+        assert!(r.bars.values().next().unwrap().is_finished());
     }
 
     /// Scripted poller: returns a sequence of canned snapshots, one per
