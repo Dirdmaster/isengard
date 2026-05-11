@@ -36,14 +36,19 @@
 //!
 //! ## Terminal states
 //!
-//! ServiceState only has four enum values today: `running`, `stopped`,
-//! `restarting`, `unknown`. The spec asks us to treat `Running`, `Failed`,
-//! and `Stopped` as terminal. `restarting` is intermediate; `unknown` is
-//! treated as intermediate as long as the service is still being observed
-//! (and surfaces as the "Pending" label on the progress bar). There's no
-//! `failed` state at the inventory level today (a failed deploy manifests
-//! as the service never appearing, or appearing in `stopped`), so the
-//! renderer's "Failed" label is reserved for the Channel B SSE channel.
+//! v0.5.3 extended `ServiceState` to surface mid-startup transitions
+//! (`pulling`, `creating`, `restarting`) and the explicit `failed` terminal.
+//! The spec's rule "Running, Failed, Stopped are terminal" maps cleanly:
+//!
+//!   - Terminal: `running`, `stopped`, `failed`
+//!   - Intermediate: `pulling`, `creating`, `restarting`, `unknown`
+//!
+//! `unknown` stays intermediate so a service that the agent reports
+//! before the heartbeat carries a recognisable state string doesn't
+//! short-circuit the watch loop to a misleading "all terminal" outcome.
+//! The MultiProgress renderer surfaces `Pulling` / `Creating` as the
+//! human label on the per-service progress bar (with the cyan spinner),
+//! and `Failed` as a red row via `finish_with_message`.
 //!
 //! ## Timeout + Ctrl+C
 //!
@@ -182,9 +187,12 @@ impl WatchOutcome {
 }
 
 /// Classify a service state string into "this is a terminal end-state".
-/// Mirrors the spec's "Running, Failed, Stopped are terminal" while
-/// adapting to the actual `ServiceState` enum values exposed by the
-/// controller (`running`, `stopped`, `restarting`, `unknown`).
+///
+/// v0.5.3: matches the extended `ServiceState` (running / stopped /
+/// failed are terminal; pulling / creating / restarting / unknown are
+/// intermediate). Unknown stays intermediate so the watch loop keeps
+/// polling instead of short-circuiting on a service the agent hasn't
+/// yet reported a recognisable state for.
 pub fn is_terminal(state: &str) -> bool {
     matches!(state, "running" | "stopped" | "failed")
 }
@@ -196,17 +204,29 @@ pub fn is_success_state(state: &str) -> bool {
 
 /// Map a raw `ServiceState` string into a human-facing label. Mirrors
 /// docker-compose's vocabulary so an operator reading both feels at
-/// home. Reserved for a future SSE channel: "Pulling" (per-layer pull
-/// progress), "Starting" (post-pull, pre-running), and so on.
+/// home. v0.5.3 added Pulling / Creating / Failed mid-startup states.
 pub fn state_label(state: &str) -> &'static str {
     match state {
         "running" => "Running",
         "stopped" => "Stopped",
         "failed" => "Failed",
         "restarting" => "Restarting",
+        "pulling" => "Pulling",
+        "creating" => "Creating",
+        "starting" => "Starting",
         "unknown" => "Pending",
         _ => "Pending",
     }
+}
+
+/// Inverse of [`is_terminal`] for the v0.5.3 mid-startup states.
+/// The indicatif MultiProgress renderer uses this to label "still
+/// working" rows without re-encoding the classification rule.
+pub fn is_intermediate(state: &str) -> bool {
+    matches!(
+        state,
+        "pulling" | "creating" | "starting" | "restarting" | "unknown"
+    )
 }
 
 /// Pretty-format a [`Duration`] as `Xs` (rounded to seconds, minimum 1s).
@@ -686,6 +706,12 @@ pub struct PlainRenderer;
 
 impl TransitionRenderer for PlainRenderer {
     fn transition(&mut self, svc: &ServiceSnapshot, took: Option<Duration>) {
+        // Non-tty fallback: append-only stdout lines. The MultiProgress
+        // renderer (production path) handles tty output via indicatif.
+        // Intermediate states (pulling, creating, restarting, unknown)
+        // and terminal states (running, stopped, failed) all land here
+        // as a flat append; downstream tooling parsing piped output
+        // gets the full transition log.
         println!("{}", format_transition_line(svc, took));
     }
 }
@@ -804,15 +830,34 @@ mod tests {
 
     #[test]
     fn terminal_classifier_matches_spec() {
-        // Spec: Running, Failed, Stopped are terminal. ServiceState only
-        // exposes `running` / `stopped` today, but `failed` is reserved
-        // for the future SSE channel.
+        // v0.5.3: ServiceState exposes pulling / creating / restarting
+        // as intermediate; running / stopped / failed as terminal;
+        // unknown is treated as intermediate so the watch loop keeps
+        // polling instead of short-circuiting on a service the agent
+        // hasn't yet reported a recognised state for.
         assert!(is_terminal("running"));
         assert!(is_terminal("stopped"));
         assert!(is_terminal("failed"));
+        assert!(!is_terminal("pulling"));
+        assert!(!is_terminal("creating"));
         assert!(!is_terminal("restarting"));
         assert!(!is_terminal("unknown"));
-        assert!(!is_terminal("pulling")); // not a real state but documents intent
+    }
+
+    #[test]
+    fn intermediate_classifier_covers_mid_startup_states() {
+        // The v0.5.3 extension's mid-startup states must all classify
+        // as intermediate so the watch loop keeps drawing progress.
+        assert!(is_intermediate("pulling"));
+        assert!(is_intermediate("creating"));
+        assert!(is_intermediate("starting"));
+        assert!(is_intermediate("restarting"));
+        assert!(is_intermediate("unknown"));
+        // Terminal states are NOT intermediate; the two classifiers
+        // partition the state space (modulo any unrecognised string).
+        assert!(!is_intermediate("running"));
+        assert!(!is_intermediate("stopped"));
+        assert!(!is_intermediate("failed"));
     }
 
     #[test]
@@ -967,6 +1012,44 @@ mod tests {
         assert!(renderer.lines[0].contains("restarting"));
         assert!(renderer.lines[1].contains("running"));
         assert!(renderer.lines[1].contains("took"));
+        assert!(matches!(
+            outcome,
+            WatchOutcome::AllRunning { services: 1, .. }
+        ));
+    }
+
+    /// v0.5.3: walks the full pulling -> creating -> running sequence
+    /// the extended `ServiceState` enum now exposes. Every intermediate
+    /// step renders a transition line; only `running` is terminal.
+    #[tokio::test(flavor = "current_thread")]
+    async fn state_machine_walks_pulling_creating_running() {
+        let ticks = vec![
+            vec![snap("1", "web", "pulling", "nginx:1")],
+            vec![snap("1", "web", "creating", "nginx:1")],
+            vec![snap("1", "web", "running", "nginx:1")],
+        ];
+        let poller = ScriptedPoller {
+            ticks: Arc::new(Mutex::new(ticks)),
+            cursor: Arc::new(Mutex::new(0)),
+        };
+        let mut renderer = CaptureRenderer::default();
+        let outcome = watch_until_terminal(
+            poller,
+            Box::pin(pending::<()>()),
+            WatchConfig {
+                poll_interval: TDuration::from_millis(10),
+                no_progress_timeout: TDuration::from_secs(60),
+            },
+            &mut renderer,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(renderer.lines.len(), 3, "lines: {:#?}", renderer.lines);
+        assert!(renderer.lines[0].contains("pulling"));
+        assert!(renderer.lines[1].contains("creating"));
+        assert!(renderer.lines[2].contains("running"));
+        assert!(renderer.lines[2].contains("took"));
         assert!(matches!(
             outcome,
             WatchOutcome::AllRunning { services: 1, .. }
