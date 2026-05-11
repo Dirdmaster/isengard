@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 
 use crate::session::Session;
+use crate::watch;
 
 #[derive(Debug, Args)]
 pub struct DeployArgs {
@@ -74,6 +75,15 @@ pub struct DeployArgs {
     /// exit without writing. Same as `isd diff <stack>` but for `--all`.
     #[arg(long)]
     pub diff: bool,
+    /// v0.5.2: keep isd attached after the deploy submits and stream
+    /// per-service state transitions back to the operator's terminal.
+    /// Polls `GET /api/v1/services?stack_id=...` every 1s, renders one
+    /// cliclack line per observed transition, and exits when every
+    /// service reaches a terminal state (`running`, `stopped`, `failed`).
+    /// Ctrl+C detaches without canceling the deploy on the agent side.
+    /// Default (`false`) keeps the historical fire-and-forget behaviour.
+    #[arg(long)]
+    pub watch: bool,
 }
 
 #[derive(Debug, Args)]
@@ -376,7 +386,7 @@ async fn run_manifest_deploy(
         return Ok(());
     }
 
-    match resolve_stack_id_opt(&session, &stack_name).await? {
+    let stack_id_for_watch: String = match resolve_stack_id_opt(&session, &stack_name).await? {
         Some(stack_id) => {
             // Existing stack: PUT compose with the JSON content-type
             // variant so manifest body, secrets, and hooks propagate
@@ -403,6 +413,7 @@ async fn run_manifest_deploy(
                 "Deployed {}. sha256: {}",
                 stack_name, outcome.written_sha256
             );
+            stack_id
         }
         None => {
             let body = CreateStackManifestBody {
@@ -422,7 +433,11 @@ async fn run_manifest_deploy(
                 "Created stack {} (id {}, host {}). sha256: {}",
                 outcome.name, outcome.id, outcome.host_id, outcome.written_sha256,
             );
+            outcome.id
         }
+    };
+    if args.watch {
+        watch::run_watch(&session, &stack_id_for_watch).await?;
     }
     Ok(())
 }
@@ -456,6 +471,11 @@ async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) 
             .unwrap_or("<stack>")
             .to_string();
         // Build a single-stack args clone for the inner call.
+        // `--watch` propagates: with `--all --watch` each stack is
+        // deployed and then watched sequentially before moving to the
+        // next. Concurrent watching of N stacks would require multiplexed
+        // cliclack output; deferred until there's an operator-reported
+        // need for it.
         let inner = DeployArgs {
             path: Some(manifest_path.clone()),
             stack: args.stack.clone(),
@@ -468,6 +488,7 @@ async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) 
             strategy: args.strategy.clone(),
             fail_fast: false,
             diff: args.diff,
+            watch: args.watch,
         };
         match run_manifest_deploy(inner, manifest_path, context).await {
             Ok(()) => {
@@ -525,6 +546,9 @@ async fn run_single_compose(
                 "Created stack {:?} (id {}, host {}). New sha256: {}",
                 outcome.name, outcome.id, outcome.host_id, outcome.written_sha256,
             );
+            if args.watch {
+                watch::run_watch(&session, &outcome.id).await?;
+            }
             return Ok(());
         }
     };
@@ -564,6 +588,9 @@ async fn run_single_compose(
         .unwrap_or_default();
     let outcome = put_compose(&session, &stack_id, &body, &expected, args.force).await?;
     println!("Deployed. New sha256: {}", outcome.written_sha256);
+    if args.watch {
+        watch::run_watch(&session, &stack_id).await?;
+    }
     Ok(())
 }
 
@@ -1065,6 +1092,7 @@ mod tests {
             strategy: None,
             fail_fast: false,
             diff: false,
+            watch: false,
         }
     }
 

@@ -37,7 +37,9 @@ tracing-subscriber.workspace = true
 similar.workspace = true
 tempfile.workspace = true
 
-# v0.5.2: `isd update` plan / confirm UX, matched against `isengard update`.
+# v0.5.2: cliclack drives both `isd update` (plan / confirm UX) and
+# `isd deploy --watch` (per-service state-transition streaming). Same
+# renderer the `isengard init` wizard uses for visual consistency.
 cliclack.workspace = true
 # v0.5.2: SemVer compare so `0.5.1 == 0.5.1+meta` and the dev pre-release
 # (`0.1.0-alpha`) never short-circuits an update against a real tag.
