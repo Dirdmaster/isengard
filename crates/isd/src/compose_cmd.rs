@@ -75,15 +75,22 @@ pub struct DeployArgs {
     /// exit without writing. Same as `isd diff <stack>` but for `--all`.
     #[arg(long)]
     pub diff: bool,
-    /// v0.5.2: keep isd attached after the deploy submits and stream
-    /// per-service state transitions back to the operator's terminal.
-    /// Polls `GET /api/v1/services?stack_id=...` every 1s, renders one
-    /// cliclack line per observed transition, and exits when every
-    /// service reaches a terminal state (`running`, `stopped`, `failed`).
-    /// Ctrl+C detaches without canceling the deploy on the agent side.
-    /// Default (`false`) keeps the historical fire-and-forget behaviour.
+    /// v0.5.2: stream per-service state transitions until every service
+    /// reaches a terminal state. ON by default. Pass `--detach` to
+    /// revert to the pre-v0.5.2 fire-and-forget shape. Polls
+    /// `GET /api/v1/services?stack_id=...` every 1s and renders one
+    /// cliclack line per observed transition. Ctrl+C detaches without
+    /// canceling the deploy on the agent side.
     #[arg(long)]
-    pub watch: bool,
+    pub detach: bool,
+}
+
+impl DeployArgs {
+    /// True when state transitions should be streamed to the terminal.
+    /// Default: on (operator opts out via `--detach`).
+    pub fn watch(&self) -> bool {
+        !self.detach
+    }
 }
 
 #[derive(Debug, Args)]
@@ -436,7 +443,7 @@ async fn run_manifest_deploy(
             outcome.id
         }
     };
-    if args.watch {
+    if args.watch() {
         watch::run_watch(&session, &stack_id_for_watch).await?;
     }
     Ok(())
@@ -488,7 +495,7 @@ async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) 
             strategy: args.strategy.clone(),
             fail_fast: false,
             diff: args.diff,
-            watch: args.watch,
+            detach: args.detach,
         };
         match run_manifest_deploy(inner, manifest_path, context).await {
             Ok(()) => {
@@ -546,7 +553,7 @@ async fn run_single_compose(
                 "Created stack {:?} (id {}, host {}). New sha256: {}",
                 outcome.name, outcome.id, outcome.host_id, outcome.written_sha256,
             );
-            if args.watch {
+            if args.watch() {
                 watch::run_watch(&session, &outcome.id).await?;
             }
             return Ok(());
@@ -588,7 +595,7 @@ async fn run_single_compose(
         .unwrap_or_default();
     let outcome = put_compose(&session, &stack_id, &body, &expected, args.force).await?;
     println!("Deployed. New sha256: {}", outcome.written_sha256);
-    if args.watch {
+    if args.watch() {
         watch::run_watch(&session, &stack_id).await?;
     }
     Ok(())
@@ -1092,7 +1099,7 @@ mod tests {
             strategy: None,
             fail_fast: false,
             diff: false,
-            watch: false,
+            detach: true,
         }
     }
 
