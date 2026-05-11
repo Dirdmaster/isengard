@@ -112,6 +112,7 @@ fn main() {
         ctr_ip,
         net.subnet.prefix_len(),
         net.gateway,
+        "eth0",
     )
     .expect("veth::attach_to_ns");
     eprintln!("veth attached + addr/route configured inside ns");

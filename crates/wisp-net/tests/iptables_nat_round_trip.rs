@@ -63,6 +63,7 @@ fn nat_round_trip_curl_to_in_ns_listener() {
         ctr_ip,
         net.subnet.prefix_len(),
         net.gateway,
+        "eth0",
     );
 
     // Plan + apply iptables.
