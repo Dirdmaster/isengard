@@ -356,6 +356,21 @@ pub struct WispBackend {
     #[cfg(target_os = "linux")]
     net_attacher:
         std::sync::Mutex<Option<Box<crate::runtime::wisp_backend_attacher::MultiNetAttacher>>>,
+    /// Phase 0.18: serialises [`Self::ensure_bridge`] across concurrent
+    /// `create_container` calls. The bridge + iptables work is
+    /// idempotent, but concurrent `iptables-restore` invocations on the
+    /// same chain race in the kernel and surface as
+    /// `Resource temporarily unavailable`. Compose's parallel apply
+    /// pre-passes every distinct network through `ensure_network`
+    /// first; the create-time re-check is now a fast no-op, but the
+    /// lock keeps belt-and-braces safety for any caller that skips the
+    /// pre-pass.
+    ///
+    /// Linux-only. The Mac dev loop never reaches `ensure_bridge` (the
+    /// `wisp_net` helpers it wraps are not compiled), so the field
+    /// would be dead-code there.
+    #[cfg(target_os = "linux")]
+    iptables_lock: Arc<tokio::sync::Mutex<()>>,
     event_tx: tokio::sync::broadcast::Sender<RuntimeEvent>,
 }
 
@@ -445,6 +460,8 @@ impl WispBackend {
             state_dir: state_dir.to_path_buf(),
             #[cfg(target_os = "linux")]
             net_attacher: std::sync::Mutex::new(Self::build_default_attacher(state_dir)),
+            #[cfg(target_os = "linux")]
+            iptables_lock: Arc::new(tokio::sync::Mutex::new(())),
             event_tx,
         })
     }
@@ -842,8 +859,19 @@ impl RuntimeBackend for WispBackend {
             // `<state_dir>/networks/<name>/network.json` lets later
             // ensures reuse the same subnet, and detects an operator
             // picking a conflicting subnet for the same network name.
+            //
+            // Phase 0.18: compose's parallel apply pre-passes each
+            // distinct network through `RuntimeBackend::ensure_network`
+            // before any container create fires, so by the time we get
+            // here the registry is already populated and this loop is
+            // a fast registry read. The `iptables_lock` is still held
+            // for any caller that skipped the pre-pass: concurrent
+            // `iptables-restore` invocations on the same chain race in
+            // the kernel and surface as `Resource temporarily
+            // unavailable`.
             #[cfg(target_os = "linux")]
             {
+                let _guard = self.iptables_lock.lock().await;
                 for net in &network_specs {
                     self.ensure_bridge(&net.network_name, None)?;
                 }
@@ -1080,6 +1108,30 @@ impl RuntimeBackend for WispBackend {
         Err(RuntimeError::Network(
             "wisp does not support live network detach in 0.4; recreate the container".into(),
         ))
+    }
+
+    /// Phase 0.18: pre-pass entry point for compose's parallel apply.
+    /// Walks the same `ensure_bridge` path the create-time call does,
+    /// but explicitly, ahead of any container creation. The
+    /// `iptables_lock` serialises with concurrent create-time
+    /// `ensure_bridge` calls so a race-condition iptables apply can't
+    /// surface even if a caller skips this pre-pass.
+    ///
+    /// Mac builds: the wisp_net helpers don't compile on Mac (no
+    /// `iptables` / netlink), so this collapses to a no-op there. The
+    /// Mac dev loop never wires up real networks.
+    async fn ensure_network(&self, network: &str) -> Result<(), RuntimeError> {
+        #[cfg(target_os = "linux")]
+        {
+            let _guard = self.iptables_lock.lock().await;
+            self.ensure_bridge(network, None)?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = network;
+            Ok(())
+        }
     }
 
     fn stream_logs(

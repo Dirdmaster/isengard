@@ -161,9 +161,43 @@ pub async fn list_running_for_stack(
     Ok(out)
 }
 
-/// Apply each op in `plan`. Returns one outcome per op, in the same
-/// order. Failures don't short-circuit: the operator gets the full
-/// summary at the end.
+/// Maximum concurrent ops in [`apply_plan`]. Sized for a homelab; eight
+/// containers can pull + extract + start in parallel without saturating
+/// disk IO on the boxes Isengard targets. Tunable as a future env knob
+/// once a fleet's bottleneck profile demands it.
+const APPLY_PLAN_CONCURRENCY: usize = 8;
+
+/// Apply each op in `plan` concurrently and return one outcome per op,
+/// in plan-declaration order. Up to [`APPLY_PLAN_CONCURRENCY`] ops run
+/// in parallel. Failures don't short-circuit: the operator gets the
+/// full summary at the end.
+///
+/// Phase 0.18: parallelism. Live on lausanne servarr reconciles took
+/// ~30s wall-clock for 8 services because the previous `for op in
+/// &plan.ops` loop awaited each container's pull + extract + start
+/// before moving on. With `buffer_unordered` the wall-clock collapses
+/// to roughly `max(per_service_time)`.
+///
+/// Ordering constraints preserved:
+///
+/// 1. Stop-before-Start within one op (Recreate). Single-op concern,
+///    not cross-op: each future already does this dance internally.
+/// 2. Networks ensured before any container attaches. The pre-pass
+///    below walks every distinct network name across all ops that will
+///    create or recreate a container and calls
+///    [`RuntimeBackend::ensure_network`] sequentially. The per-container
+///    create still re-checks the registry, but at that point each
+///    bridge already exists and iptables is already applied, so the
+///    work is a fast no-op.
+/// 3. iptables: WispBackend wraps every `ensure_bridge` call with an
+///    internal `tokio::sync::Mutex` so concurrent `iptables-restore`
+///    invocations can't race. Per-container DNAT rules (in
+///    `start_container`) already serialise through the existing
+///    `net_attacher` mutex.
+///
+/// Logging: each ensure / create / start call line carries
+/// `service=<name>`, so interleaved completion order is still
+/// trivially demuxable in the operator's tail.
 ///
 /// `controller_endpoint`: when `Some`, services with `secrets:` entries
 /// fetch each value over the controller's FetchSecret RPC, materialise
@@ -183,44 +217,121 @@ pub async fn apply_plan(
     controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
     stack_level_secrets: &[String],
 ) -> Vec<ApplyOutcome> {
-    let mut outcomes = Vec::with_capacity(plan.ops.len());
+    use futures::stream::{self, StreamExt};
+
+    // Pre-pass 1: collect distinct network names across every op that
+    // will create or recreate a container, and ensure each on the host
+    // before the parallel fan-out fires. Idempotent; failures are
+    // logged here and re-surfaced as part of the per-op outcome (the
+    // create-time ensure_bridge call will fail with the same error).
+    let mut nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for op in &plan.ops {
-        let result = match op {
-            ServiceOp::NoChange { .. } => Ok(()),
-            ServiceOp::Start { service, .. } => {
-                let Some(svc) = desired.services.get(service) else {
-                    outcomes.push(ApplyOutcome {
-                        op: op.clone(),
-                        error: Some(format!("service {service} missing from compose")),
-                    });
-                    continue;
+        let service = match op {
+            ServiceOp::Start { service, .. } | ServiceOp::Recreate { service, .. } => service,
+            ServiceOp::Stop { .. } | ServiceOp::NoChange { .. } => continue,
+        };
+        if let Some(svc) = desired.services.get(service) {
+            for n in &svc.networks {
+                nets.insert(n.clone());
+            }
+        }
+    }
+    for net in &nets {
+        if let Err(e) = backend.ensure_network(net).await {
+            tracing::warn!(
+                error = %e,
+                stack = %stack_name,
+                network = %net,
+                "compose_apply: pre-pass ensure_network failed; per-op create will retry",
+            );
+        }
+    }
+
+    // Pre-pass 2: snapshot the running containers once, so each
+    // Recreate future doesn't fan out N concurrent list_containers
+    // calls. The list is read-only relative to the apply path.
+    let running = list_running_for_stack(backend, stack_name)
+        .await
+        .unwrap_or_default();
+
+    // Fan out: each op produces a `(index, outcome)` future so we can
+    // re-sort into declaration order after `buffer_unordered` drains.
+    // The owned ServiceOp clone keeps the future `'static`-friendly
+    // when the planner hands us a borrow; the outer apply_plan future
+    // already holds `&desired` / `&running` for the duration of the
+    // stream, so the inner borrow is sound.
+    let running_ref = &running;
+    let indexed: Vec<(usize, ServiceOp)> = plan.ops.iter().cloned().enumerate().collect();
+    let mut collected: Vec<(usize, ApplyOutcome)> = stream::iter(indexed)
+        .map(|(idx, op)| {
+            let controller_endpoint = controller_endpoint.clone();
+            async move {
+                let outcome = apply_one_op(
+                    backend,
+                    stack_name,
+                    desired,
+                    &op,
+                    running_ref,
+                    controller_endpoint,
+                    stack_level_secrets,
+                )
+                .await;
+                (idx, outcome)
+            }
+        })
+        .buffer_unordered(APPLY_PLAN_CONCURRENCY)
+        .collect()
+        .await;
+    collected.sort_by_key(|(i, _)| *i);
+    collected.into_iter().map(|(_, o)| o).collect()
+}
+
+/// Apply a single op. Extracted from [`apply_plan`] so the parallel
+/// `buffer_unordered` future can be a plain async block. Mirrors the
+/// pre-Phase-0.18 sequential body exactly.
+async fn apply_one_op(
+    backend: &dyn RuntimeBackend,
+    stack_name: &str,
+    desired: &DesiredCompose,
+    op: &ServiceOp,
+    running: &[RunningService],
+    controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
+    stack_level_secrets: &[String],
+) -> ApplyOutcome {
+    let result: anyhow::Result<()> = match op {
+        ServiceOp::NoChange { .. } => Ok(()),
+        ServiceOp::Start { service, .. } => match desired.services.get(service) {
+            None => {
+                return ApplyOutcome {
+                    op: op.clone(),
+                    error: Some(format!("service {service} missing from compose")),
                 };
+            }
+            Some(svc) => {
                 ensure_container_started(
                     backend,
                     stack_name,
                     svc,
                     None,
                     desired,
-                    controller_endpoint.clone(),
+                    controller_endpoint,
                     stack_level_secrets,
                 )
                 .await
             }
-            ServiceOp::Recreate { service, .. } => {
-                let Some(svc) = desired.services.get(service) else {
-                    outcomes.push(ApplyOutcome {
-                        op: op.clone(),
-                        error: Some(format!("service {service} missing from compose")),
-                    });
-                    continue;
+        },
+        ServiceOp::Recreate { service, .. } => match desired.services.get(service) {
+            None => {
+                return ApplyOutcome {
+                    op: op.clone(),
+                    error: Some(format!("service {service} missing from compose")),
                 };
-                // Find the existing container by service name and stop+remove
-                // before starting fresh. Best-effort: if the container is gone
-                // we still attempt the start.
-                let existing = list_running_for_stack(backend, stack_name)
-                    .await
-                    .unwrap_or_default();
-                let prior = existing.iter().find(|r| &r.service_name == service);
+            }
+            Some(svc) => {
+                // Find the existing container in the pre-snapshot.
+                // Best-effort: if the container is gone we still attempt
+                // the start.
+                let prior = running.iter().find(|r| &r.service_name == service);
                 if let Some(prior) = prior {
                     let _ = stop_and_remove(backend, &prior.container_id).await;
                     // Cleanup any stale tmpfs secrets from the previous
@@ -234,35 +345,34 @@ pub async fn apply_plan(
                     svc,
                     prior.map(|r| r.container_id.as_str()),
                     desired,
-                    controller_endpoint.clone(),
+                    controller_endpoint,
                     stack_level_secrets,
                 )
                 .await
             }
-            ServiceOp::Stop {
-                service,
-                container_id,
-            } => {
-                let res = stop_and_remove(backend, container_id).await;
-                // Best-effort cleanup of any tmpfs secrets the prior
-                // container had mounted. The actual container_name is
-                // either the operator's `container_name:` or our default.
-                if let Some(svc) = desired.services.get(service) {
-                    let cn = container_name_for(stack_name, service, svc);
-                    let _ = secret_fetch::cleanup_for_container(&cn);
-                } else {
-                    let cn = format!("{stack_name}-{service}");
-                    let _ = secret_fetch::cleanup_for_container(&cn);
-                }
-                res
+        },
+        ServiceOp::Stop {
+            service,
+            container_id,
+        } => {
+            let res = stop_and_remove(backend, container_id).await;
+            // Best-effort cleanup of any tmpfs secrets the prior
+            // container had mounted. The actual container_name is
+            // either the operator's `container_name:` or our default.
+            if let Some(svc) = desired.services.get(service) {
+                let cn = container_name_for(stack_name, service, svc);
+                let _ = secret_fetch::cleanup_for_container(&cn);
+            } else {
+                let cn = format!("{stack_name}-{service}");
+                let _ = secret_fetch::cleanup_for_container(&cn);
             }
-        };
-        outcomes.push(ApplyOutcome {
-            op: op.clone(),
-            error: result.err().map(|e| format!("{e:#}")),
-        });
+            res
+        }
+    };
+    ApplyOutcome {
+        op: op.clone(),
+        error: result.err().map(|e| format!("{e:#}")),
     }
-    outcomes
 }
 
 /// Compute the container name the agent will use for this service.
@@ -1045,5 +1155,283 @@ mod tests {
         let out = merge_secret_targets(&d, "web", &stack).unwrap();
         let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta", "gamma", "delta"]);
+    }
+
+    // ----- Phase 0.18: parallel apply_plan -----
+
+    use crate::runtime::{
+        ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec, LogChunk, LogOptions,
+        NetworkSettings, RestartPolicy, RuntimeError, RuntimeEvent,
+    };
+    use async_trait::async_trait;
+    use futures_util::Stream;
+    use std::collections::BTreeMap;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    /// Mock backend that drives `apply_plan` end-to-end. Tracks how many
+    /// concurrent `create_container` calls were in flight at peak so a
+    /// parallelism test can assert the fan-out actually happened.
+    #[derive(Debug)]
+    struct ParallelMock {
+        /// Per-service create delay; missing entries return immediately.
+        delays: BTreeMap<String, Duration>,
+        /// Per-service hard failure: when the service name appears, the
+        /// create_container call returns an Err carrying the canned msg.
+        fail_create: BTreeMap<String, String>,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+        /// Distinct network names the pre-pass touched.
+        ensured_networks: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ParallelMock {
+        fn new() -> Self {
+            Self {
+                delays: BTreeMap::new(),
+                fail_create: BTreeMap::new(),
+                in_flight: AtomicUsize::new(0),
+                peak_in_flight: AtomicUsize::new(0),
+                ensured_networks: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeBackend for ParallelMock {
+        async fn ensure_image(&self, _r: &str) -> Result<String, RuntimeError> {
+            Ok(String::new())
+        }
+        async fn create_container(
+            &self,
+            spec: &crate::runtime::ContainerCreateSpec,
+        ) -> Result<String, RuntimeError> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            // Bump peak under a relaxed fetch_max compatibility loop.
+            let mut peak = self.peak_in_flight.load(Ordering::SeqCst);
+            while now > peak {
+                match self.peak_in_flight.compare_exchange(
+                    peak,
+                    now,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(curr) => peak = curr,
+                }
+            }
+            if let Some(d) = self.delays.get(&spec.service) {
+                tokio::time::sleep(*d).await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if let Some(msg) = self.fail_create.get(&spec.service) {
+                return Err(RuntimeError::Container(msg.clone()));
+            }
+            Ok(spec.container_name.clone())
+        }
+        async fn start_container(&self, _id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn stop_container(&self, _id: &str, _t: u32) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn remove_container(&self, _id: &str, _force: bool) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn list_containers(
+            &self,
+            _f: ListFilter,
+        ) -> Result<Vec<ContainerSnapshot>, RuntimeError> {
+            Ok(Vec::new())
+        }
+        async fn inspect_container(
+            &self,
+            _id: &str,
+        ) -> Result<Option<ContainerSnapshot>, RuntimeError> {
+            Ok(None)
+        }
+        async fn connect_network(&self, _c: &str, _n: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn disconnect_network(&self, _c: &str, _n: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn ensure_network(&self, network: &str) -> Result<(), RuntimeError> {
+            self.ensured_networks
+                .lock()
+                .expect("ensured_networks poisoned")
+                .push(network.to_string());
+            Ok(())
+        }
+        fn stream_logs(
+            &self,
+            _id: &str,
+            _opts: LogOptions,
+        ) -> Pin<Box<dyn Stream<Item = LogChunk> + Send>> {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn stream_events(&self) -> Pin<Box<dyn Stream<Item = RuntimeEvent> + Send>> {
+            Box::pin(futures_util::stream::empty())
+        }
+        async fn run_healthcheck(
+            &self,
+            _id: &str,
+            _hc: &HealthcheckSpec,
+        ) -> Result<HealthState, RuntimeError> {
+            Ok(HealthState::Healthy)
+        }
+        fn name(&self) -> &'static str {
+            "parallel-mock"
+        }
+    }
+
+    /// Build a [`DesiredCompose`] with N services named `svc-1..=svc-N`,
+    /// each with the same image. Each service attaches to `network`.
+    fn desired_with_n_services(n: usize, network: &str) -> DesiredCompose {
+        let mut d = DesiredCompose::default();
+        for i in 1..=n {
+            let name = format!("svc-{i}");
+            let mut svc = DesiredService {
+                name: name.clone(),
+                image: Some("nginx:1.27".into()),
+                ..Default::default()
+            };
+            svc.networks.push(network.to_string());
+            d.services.insert(name, svc);
+        }
+        d
+    }
+
+    /// Build a Start-only plan covering every service in `desired`.
+    fn start_plan(stack: &str, desired: &DesiredCompose) -> ReconcilePlan {
+        let ops = desired
+            .services
+            .values()
+            .map(|svc| ServiceOp::Start {
+                service: svc.name.clone(),
+                image: svc.image.clone().unwrap_or_default(),
+            })
+            .collect();
+        ReconcilePlan {
+            stack: stack.to_string(),
+            ops,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_plan_parallel_all_succeed_preserves_declaration_order() {
+        let desired = desired_with_n_services(4, "appnet");
+        let plan = start_plan("stack", &desired);
+        let backend = ParallelMock::new();
+        let outcomes = apply_plan(&backend, "stack", &desired, &plan, None, &[]).await;
+        assert_eq!(outcomes.len(), 4);
+        // Outcomes must match plan.ops index-for-index even though the
+        // futures completed concurrently. ServiceOp's PartialEq is
+        // derived; equal ops match by service name + image.
+        for (i, oc) in outcomes.iter().enumerate() {
+            assert_eq!(oc.op, plan.ops[i], "outcome {i} op mismatch");
+            assert!(oc.error.is_none(), "outcome {i} unexpectedly errored");
+        }
+        // Pre-pass walked the (single) distinct network exactly once.
+        let nets = backend.ensured_networks.lock().unwrap().clone();
+        assert_eq!(nets, vec!["appnet".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn apply_plan_parallel_mixed_failures_all_outcomes_present() {
+        let desired = desired_with_n_services(4, "appnet");
+        let plan = start_plan("stack", &desired);
+        let mut backend = ParallelMock::new();
+        backend
+            .fail_create
+            .insert("svc-2".into(), "boom svc-2".into());
+        backend
+            .fail_create
+            .insert("svc-4".into(), "boom svc-4".into());
+        let outcomes = apply_plan(&backend, "stack", &desired, &plan, None, &[]).await;
+        assert_eq!(outcomes.len(), 4);
+        // Outcomes still aligned to plan order; the failing services
+        // surface their errors verbatim while the others succeed.
+        assert!(outcomes[0].error.is_none());
+        assert!(
+            outcomes[1]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("boom svc-2")
+        );
+        assert!(outcomes[2].error.is_none());
+        assert!(
+            outcomes[3]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("boom svc-4")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_plan_parallel_dedups_network_pre_pass() {
+        let mut desired = desired_with_n_services(4, "appnet");
+        // Add a second network to svc-2 and svc-3 so the pre-pass sees
+        // two distinct names across the plan.
+        desired
+            .services
+            .get_mut("svc-2")
+            .unwrap()
+            .networks
+            .push("dbnet".into());
+        desired
+            .services
+            .get_mut("svc-3")
+            .unwrap()
+            .networks
+            .push("dbnet".into());
+        let plan = start_plan("stack", &desired);
+        let backend = ParallelMock::new();
+        let _ = apply_plan(&backend, "stack", &desired, &plan, None, &[]).await;
+        let nets = backend.ensured_networks.lock().unwrap().clone();
+        // BTreeSet collection gives sorted unique order.
+        assert_eq!(nets, vec!["appnet".to_string(), "dbnet".to_string()]);
+    }
+
+    /// Wall-clock test: with N=4 ops each sleeping 1s, the parallel
+    /// implementation should finish in well under 4s (single-pass
+    /// concurrency = 8 covers all 4). The pre-Phase-0.18 sequential
+    /// loop would take ~4s. Marked `#[ignore]` so it doesn't slow the
+    /// regular `cargo test` run; opt in via `cargo test ...
+    /// apply_plan_parallel_wall_clock_under_budget -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn apply_plan_parallel_wall_clock_under_budget() {
+        let desired = desired_with_n_services(4, "appnet");
+        let plan = start_plan("stack", &desired);
+        let mut backend = ParallelMock::new();
+        for i in 1..=4 {
+            backend
+                .delays
+                .insert(format!("svc-{i}"), Duration::from_secs(1));
+        }
+        let start = std::time::Instant::now();
+        let outcomes = apply_plan(&backend, "stack", &desired, &plan, None, &[]).await;
+        let elapsed = start.elapsed();
+        assert_eq!(outcomes.len(), 4);
+        assert!(
+            elapsed < Duration::from_millis(3500),
+            "parallel apply_plan took {elapsed:?}, expected < 3.5s (was sequential?)",
+        );
+        // Peak in-flight should be > 1 if any concurrency happened.
+        let peak = backend.peak_in_flight.load(Ordering::SeqCst);
+        assert!(peak > 1, "expected peak in-flight > 1, got {peak}");
+    }
+
+    /// Silence unused-import warnings for items only the mock pulls in.
+    #[allow(dead_code)]
+    fn _suppress_unused() {
+        let _ = ContainerState::Running;
+        let _ = SystemTime::UNIX_EPOCH;
+        let _ = RestartPolicy::No;
+        let _: NetworkSettings = NetworkSettings::default();
     }
 }
