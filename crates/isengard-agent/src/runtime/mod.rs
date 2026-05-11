@@ -69,6 +69,22 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
         network: &str,
     ) -> Result<(), RuntimeError>;
 
+    /// Idempotently ensure a named network exists on the host before any
+    /// container is asked to attach to it. Bollard / dockerd manages
+    /// network lifetime itself, so the default is a no-op. WispBackend
+    /// overrides this to call `ensure_bridge` (bridge + iptables + on-disk
+    /// registry).
+    ///
+    /// Phase 0.18: compose_apply's parallel container creates would race
+    /// each other on the per-container `ensure_bridge` call (concurrent
+    /// `iptables-restore` invocations on the same chain collide). Doing
+    /// a sequential pre-pass over the distinct network names before the
+    /// parallel fan-out removes the race; the per-container create still
+    /// re-checks the registry but the work is now a fast no-op.
+    async fn ensure_network(&self, _network: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     /// Stream container logs. Each frame keeps its native framing; the
     /// caller is responsible for newline splitting and (when
     /// [`LogOptions::timestamps`] is set) timestamp parsing.
