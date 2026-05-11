@@ -2899,8 +2899,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let manifest_toml =
-            "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
+        let manifest_toml = "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
         phase_0_13_persist_manifest_bundle(
             &handles,
             stack_id,
@@ -3001,8 +3000,7 @@ mod tests {
             .unwrap();
 
         let app = router(handles.clone());
-        let manifest_toml =
-            "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
+        let manifest_toml = "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
         let body = serde_json::json!({
             "manifest_toml": manifest_toml,
         })

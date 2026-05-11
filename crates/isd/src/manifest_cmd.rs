@@ -288,10 +288,9 @@ async fn put_manifest(
         "{}/api/v1/stacks/{stack_id}/manifest",
         session.controller_url()
     );
-    let mut req = session
-        .client
-        .put(&url)
-        .json(&PutManifestBody { manifest_toml: body });
+    let mut req = session.client.put(&url).json(&PutManifestBody {
+        manifest_toml: body,
+    });
     if !expected_sha256.is_empty() {
         req = req.header("If-Match", expected_sha256);
     }
