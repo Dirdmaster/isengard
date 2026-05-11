@@ -377,15 +377,28 @@ async fn run_manifest_deploy(
     }
 
     match resolve_stack_id_opt(&session, &stack_name).await? {
-        Some(_stack_id) => {
-            // Existing stack: PUT compose. Phase 0.13's JSON content-type
-            // variant (with manifest body + secrets + hooks) is reserved
-            // for follow-up; for now we PUT compose-only and rely on the
-            // CREATE path for new stacks to install the manifest. That
-            // means a second deploy with only manifest changes is a no-op
-            // until the JSON PUT variant lands. Documented in the
-            // release notes.
-            let outcome = put_compose(&session, &_stack_id, &merged, "", args.force).await?;
+        Some(stack_id) => {
+            // Existing stack: PUT compose with the JSON content-type
+            // variant so manifest body, secrets, and hooks propagate
+            // alongside the compose. Pre-follow-up isd shipped only the
+            // YAML body shape and dropped manifest changes on the floor;
+            // operators had to delete + recreate stacks to push a new
+            // manifest. With the JSON variant we round-trip the full
+            // bundle every time.
+            let body = PutComposeJsonBody {
+                compose: merged,
+                manifest_toml: Some(manifest_toml_body),
+                secrets: if secrets.is_empty() {
+                    None
+                } else {
+                    Some(secrets)
+                },
+                hooks: if hooks.is_empty() { None } else { Some(hooks) },
+                force: if args.force { Some(true) } else { None },
+                compose_sha256: None,
+                manifest_sha256: None,
+            };
+            let outcome = put_compose_json(&session, &stack_id, &body).await?;
             println!(
                 "Deployed {}. sha256: {}",
                 stack_name, outcome.written_sha256
@@ -827,6 +840,65 @@ async fn create_stack_with_manifest(
         .json()
         .await
         .context("decoding create-stack response")?;
+    Ok(ok)
+}
+
+/// Phase 0.13 (wave 2.A follow-up): body for the JSON content-type
+/// variant of `PUT /api/v1/stacks/:id/compose`. Mirrors the controller's
+/// `PutComposeJsonBody` shape. Used by `isd deploy` so a second deploy
+/// with manifest changes actually propagates, instead of silently
+/// dropping the new bindings.
+#[derive(Debug, Serialize)]
+pub struct PutComposeJsonBody {
+    pub compose: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_toml: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<Vec<JsonHook>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+}
+
+/// Phase 0.13 (wave 2.A follow-up): PUT a compose + manifest bundle via
+/// the JSON variant. Surfaces the controller's 409 / 422 / 400 bodies
+/// verbatim so the operator sees the underlying error (e.g. the missing
+/// secret name) without an extra round-trip.
+async fn put_compose_json(
+    session: &Session,
+    stack_id: &str,
+    body: &PutComposeJsonBody,
+) -> Result<PutOk> {
+    let url = format!(
+        "{}/api/v1/stacks/{stack_id}/compose",
+        session.controller_url()
+    );
+    let resp = session
+        .client
+        .put(&url)
+        .json(body)
+        .send()
+        .await
+        .with_context(|| format!("PUT {url}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::CONFLICT {
+        let conflict: PutConflict = resp.json().await.context("decoding 409 body")?;
+        return Err(anyhow!(
+            "conflict: {}\n  current_sha256: {}\n  rerun with --force to overwrite (loses concurrent edits)",
+            conflict.error,
+            conflict.current_sha256,
+        ));
+    }
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("PUT {url} -> {status}: {text}"));
+    }
+    let ok: PutOk = resp.json().await.context("decoding 200 body")?;
     Ok(ok)
 }
 
