@@ -49,7 +49,7 @@ pub mod pipe;
 #[cfg(target_os = "linux")]
 pub use clone::{CloneArgs, CloneResult};
 pub use network_setup::ensure_global_ip_forward;
-pub use pipe::{ReadyPipe, signal_ready, wait_ready};
+pub use pipe::{GoPipe, ReadyPipe, signal_go, signal_ready, wait_go, wait_ready};
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -371,9 +371,21 @@ pub fn start_container<F: CgroupFs>(
     let stdout_fd = stdout_log.as_raw_fd();
     let stderr_fd = stderr_log.as_raw_fd();
 
-    // Step: open the parent/child sync pipe. O_CLOEXEC keeps the
+    // Step: open the parent / child sync pipes. O_CLOEXEC keeps the
     // ends from leaking past `execvpe`.
+    //
+    // - ReadyPipe (child -> parent): child writes `ready` after
+    //   pivot + caps. Parent reads it to know the child is past
+    //   the lifecycle module and waiting in pre-exec hold.
+    // - GoPipe (parent -> child, Phase 0.17): parent writes `go`
+    //   after cgroup + network attach complete; child unblocks and
+    //   raises ambient + exec. Closes the nsenter race for
+    //   short-lived workloads.
     let ReadyPipe { reader, writer } = pipe::pair()?;
+    let GoPipe {
+        reader: go_reader,
+        writer: go_writer,
+    } = pipe::pair_go()?;
 
     // Step: clone3 with the five namespace flags + SIGCHLD.
     let args = CloneArgs {
@@ -387,8 +399,12 @@ pub fn start_container<F: CgroupFs>(
 
     match result {
         CloneResult::Child => {
-            // Reader fd dies with us when we exec; close it eagerly.
+            // Reader fds the child doesn't own die with us when we exec.
+            // The ReadyPipe reader belongs to the parent; the GoPipe
+            // writer also belongs to the parent. Drop both eagerly so
+            // the parent's EOF semantics work cleanly.
             drop(reader);
+            drop(go_writer);
 
             // Run the child body; on error write the message into
             // the pipe (parent surfaces it), then exit non-zero so
@@ -408,6 +424,7 @@ pub fn start_container<F: CgroupFs>(
                 &inheritable_caps,
                 &ambient_caps,
                 &writer,
+                &go_reader,
                 &argv,
                 &envp,
                 stdout_fd,
@@ -431,9 +448,14 @@ pub fn start_container<F: CgroupFs>(
             }
         }
         CloneResult::Parent { child_pid } => {
-            // Parent: close the writer eagerly so EOF reaches the
-            // reader if the child dies before signalling.
+            // Parent: close the ends we don't own.
+            //
+            // - ReadyPipe writer: belongs to child. Drop ours so EOF
+            //   reaches the reader if the child dies before signalling.
+            // - GoPipe reader: belongs to child. Drop ours; we only
+            //   own the writer side.
             drop(writer);
+            drop(go_reader);
             // Parent's copies of the log files are no longer needed
             // (the child's dup2 already ran in its own fd table). Drop
             // them so the parent doesn't pin extra fds for the lifetime
@@ -446,9 +468,12 @@ pub fn start_container<F: CgroupFs>(
             // pivot_root) the kernel already accounts it under the
             // per-container cgroup. If add_pid fails we still need
             // to reap the child.
+            //
+            // The GoPipe writer is dropped here on the failure path
+            // so the child's wait_go observes EOF and exits cleanly
+            // rather than blocking forever.
             if let Err(err) = cgroup.add_pid(id, child_pid) {
-                // Best-effort kill; the child is hung up on its own
-                // setup at this point.
+                drop(go_writer);
                 unsafe {
                     libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
                 }
@@ -471,17 +496,23 @@ pub fn start_container<F: CgroupFs>(
             //   - The child blocks on signal_ready until AFTER it
             //     pivots, so by the time the parent reads
             //     wait_ready, the entrypoint has not yet exec'd.
-            //     That window is enough for the kernel to plumb
-            //     eth0 into the child's ns before its first network
-            //     syscall.
+            //
+            // NOTE: this sequence is the pre-Phase-0.17 shape and
+            // leaves the nsenter race against short-lived workloads
+            // in place. The follow-up commit moves attach to AFTER
+            // wait_ready, leaning on the new GoPipe to keep the
+            // child pinned through attach.
             //
             // If attach fails we kill + reap the child before
-            // returning, same shape as cgroup.add_pid above.
+            // returning, same shape as cgroup.add_pid above. The
+            // GoPipe writer is dropped first so any racing wait_go
+            // observes EOF.
             let mut attacher = attacher;
             if let Some(spec) = handle.network_spec.clone() {
                 let att = match attacher.as_deref_mut() {
                     Some(a) => a,
                     None => {
+                        drop(go_writer);
                         unsafe {
                             libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
                         }
@@ -499,6 +530,7 @@ pub fn start_container<F: CgroupFs>(
                         handle.network_attachment = Some(record);
                     }
                     Err(err) => {
+                        drop(go_writer);
                         unsafe {
                             libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
                         }
@@ -516,6 +548,7 @@ pub fn start_container<F: CgroupFs>(
             // wait for the child's "ready" signal. If the child
             // died before signalling we get a clear EOF error.
             if let Err(err) = pipe::wait_ready(&reader) {
+                drop(go_writer);
                 let mut status: libc::c_int = 0;
                 unsafe {
                     libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
@@ -530,6 +563,26 @@ pub fn start_container<F: CgroupFs>(
                     "child {child_pid} did not signal ready: {err}"
                 )));
             }
+
+            // Phase 0.17: release the child from its pre-exec hold.
+            // For this step the call sits immediately after
+            // wait_ready (no functional change vs. pre-0.17). The
+            // follow-up commit moves attach above wait_ready so
+            // signal_go genuinely gates exec on attach completion.
+            if let Err(err) = pipe::signal_go(&go_writer) {
+                drop(go_writer);
+                let mut status: libc::c_int = 0;
+                unsafe {
+                    libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
+                }
+                if let (Some(record), Some(att)) = (handle.network_attachment.as_ref(), attacher) {
+                    let _ = att.detach(record);
+                }
+                return Err(WispError::Lifecycle(format!(
+                    "failed to signal go to child {child_pid}: {err}"
+                )));
+            }
+            drop(go_writer);
 
             // Persist the running state.
             handle.state = ContainerState::Running;
@@ -730,6 +783,7 @@ fn run_child(
     inheritable: &[crate::capability::Capability],
     ambient: &[crate::capability::Capability],
     writer: &std::os::fd::OwnedFd,
+    go_reader: &std::os::fd::OwnedFd,
     argv: &[std::ffi::CString],
     envp: &[std::ffi::CString],
     stdout_fd: std::os::fd::RawFd,
@@ -845,6 +899,21 @@ fn run_child(
     let raw = std::os::fd::AsRawFd::as_raw_fd(writer);
     unsafe {
         libc::close(raw);
+    }
+
+    // 8b. Phase 0.17: pre-exec hold. Block until the parent has
+    //     finished cgroup attach + (if applicable) network attach.
+    //     Without this hold a short-lived workload (e.g.
+    //     `sh -c 'exit 0'`) can exec + exit before the parent's
+    //     `nsenter -t <pid> -n ip ...` calls open /proc/<pid>/ns/net,
+    //     turning a clean Die into a "veth::attach_to_ns: No such
+    //     file or directory" lifecycle error. We wait here BEFORE
+    //     raising ambient so that the operator-controlled caps land
+    //     post-attach (matching the existing ambient-last invariant).
+    pipe::wait_go(go_reader)?;
+    let go_raw = std::os::fd::AsRawFd::as_raw_fd(go_reader);
+    unsafe {
+        libc::close(go_raw);
     }
 
     // 9. Ambient last, after pivot. Inheritable was set above; the
