@@ -35,6 +35,7 @@ mod secret;
 mod session;
 mod ssh_tunnel;
 mod table;
+mod watch;
 
 #[derive(Parser, Debug)]
 #[command(

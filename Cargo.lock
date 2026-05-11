@@ -2656,6 +2656,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "cliclack",
  "comfy-table",
  "dirs",
  "futures-util",

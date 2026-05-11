@@ -37,6 +37,11 @@ tracing-subscriber.workspace = true
 similar.workspace = true
 tempfile.workspace = true
 
+# v0.5.2: `isd deploy --watch` streams state transitions back to the
+# operator's terminal using cliclack's intro/step/outro shape. Same
+# renderer the `isengard init` wizard uses for visual consistency.
+cliclack = { workspace = true }
+
 # v0.3.5: gateway DNS + reverse proxy on the operator's Mac. Bridges browser
 # traffic to containerized backends without fighting mDNS-in-Docker on macOS.
 hickory-server.workspace = true
