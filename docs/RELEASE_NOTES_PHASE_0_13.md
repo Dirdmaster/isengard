@@ -147,11 +147,17 @@ pre-0.13 controllers don't set them.
 
 ## Known limitations (Phase 0.13)
 
-- **Hook execution on the host is NOT yet implemented in the agent.**
-  The proto carries the hook list and the dashboard persists it; the
-  agent-side `lifecycle_hooks` module that runs pre/post/failure hooks
-  is deferred to a follow-up. Manifest persistence on the agent works
-  (`stack.toml` lands at `/etc/isengard/stacks/<name>/stack.toml`).
+- **Hook execution lands in wave 3.D** (`crates/isengard-agent/src/lifecycle_hooks.rs`).
+  Pre-deploy / post-deploy / failure hooks now spawn on the host with
+  cwd at `/etc/isengard/stacks/<name>/`, deny-by-default whitelisted
+  env (`PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TZ` only), the spec'd
+  `ISENGARD_*` context vars, per-hook `timeout_ms` (default 60s),
+  SIGTERM then SIGKILL after a 5s grace, and `lifecycle_hook.*` audit
+  events flowing back to the controller via the existing event stream.
+  Pre-deploy failures abort the deploy; post-deploy failures log a
+  warning but do not unwind (the compose write already happened).
+  Hooks run as the agent user (today: root); the dedicated
+  `isengard-hooks` user + AppArmor profile is a Phase 0.16+ tightening.
 - **Stack-level secret mounting from the manifest is also deferred.**
   Per-service compose `secrets:` blocks remain the canonical surface
   in 0.13; the stack-level mount layered from `secrets = [...]` is a
@@ -175,7 +181,10 @@ pre-0.13 controllers don't set them.
 - **Hooks run as the agent user (today: root).** Operators with
   malicious `cmd` values can wreck the host. A dedicated
   `isengard-hooks` user with `NoNewPrivileges` + `ReadOnlyPaths` is
-  a Phase 0.16+ tightening.
+  a Phase 0.16+ tightening. Wave 3.D mitigates the env blast radius
+  by whitelisting which parent variables flow through: `ISENGARD_*`,
+  controller CA paths, and other agent-private state are NOT
+  inherited; hook authors who need extra env must declare it per-hook.
 
 ## Compatibility
 
