@@ -50,8 +50,12 @@ impl NetworkAttacher for WispNetAttacher {
         container_id: &str,
         container_pid: u32,
         rootfs: &Path,
+        eth_index: u32,
     ) -> Result<NetworkAttachmentRecord, WispError> {
         use wisp_net::Ipam as _;
+
+        let iface_name = format!("eth{eth_index}");
+        let is_primary = eth_index == 0;
 
         // 1. Lazily ensure the bridge.
         wisp_net::bridge::ensure(&self.network)
@@ -88,6 +92,7 @@ impl NetworkAttacher for WispNetAttacher {
             ip,
             self.network.subnet.prefix_len(),
             self.network.gateway,
+            &iface_name,
         ) {
             // veth::attach_to_ns rolls back the host side on failure;
             // release the IP ourselves so the next start can reuse it.
@@ -107,30 +112,33 @@ impl NetworkAttacher for WispNetAttacher {
         }
 
         // 6. Render /etc/resolv.conf + /etc/hosts inside the bundle's
-        //    rootfs. The child has not yet pivot_root'd, so writes to
-        //    `<rootfs>/etc/...` show up as `/etc/...` once it has.
-        match &spec.resolv_source {
-            wisp::ResolvSource::HostCopy => {
-                let nameservers = wisp_net::host_nameservers().unwrap_or_default();
-                if let Err(e) = wisp_net::write_resolv_conf(rootfs, &nameservers) {
-                    return Err(WispError::Lifecycle(format!(
-                        "write_resolv_conf (host copy): {e}"
-                    )));
+        //    rootfs (primary attach only). The child has not yet
+        //    pivot_root'd, so writes to `<rootfs>/etc/...` show up as
+        //    `/etc/...` once it has.
+        if is_primary {
+            match &spec.resolv_source {
+                wisp::ResolvSource::HostCopy => {
+                    let nameservers = wisp_net::host_nameservers().unwrap_or_default();
+                    if let Err(e) = wisp_net::write_resolv_conf(rootfs, &nameservers) {
+                        return Err(WispError::Lifecycle(format!(
+                            "write_resolv_conf (host copy): {e}"
+                        )));
+                    }
+                }
+                wisp::ResolvSource::Static(addrs) => {
+                    if let Err(e) = wisp_net::write_resolv_conf(rootfs, addrs) {
+                        return Err(WispError::Lifecycle(format!(
+                            "write_resolv_conf (static): {e}"
+                        )));
+                    }
+                }
+                wisp::ResolvSource::None => {
+                    // Operator opted out; leave whatever the bundle ships.
                 }
             }
-            wisp::ResolvSource::Static(addrs) => {
-                if let Err(e) = wisp_net::write_resolv_conf(rootfs, addrs) {
-                    return Err(WispError::Lifecycle(format!(
-                        "write_resolv_conf (static): {e}"
-                    )));
-                }
+            if let Err(e) = wisp_net::write_hosts(rootfs, container_id, ip) {
+                return Err(WispError::Lifecycle(format!("write_hosts: {e}")));
             }
-            wisp::ResolvSource::None => {
-                // Operator opted out; leave whatever the bundle ships.
-            }
-        }
-        if let Err(e) = wisp_net::write_hosts(rootfs, container_id, ip) {
-            return Err(WispError::Lifecycle(format!("write_hosts: {e}")));
         }
 
         Ok(NetworkAttachmentRecord {
@@ -224,8 +232,8 @@ fn busybox_with_network_attaches_and_cleans_up() {
     assert_eq!(handle.state, ContainerState::Created);
     assert_eq!(
         handle
-            .network_spec
-            .as_ref()
+            .network_specs
+            .first()
             .map(|s| s.network_name.as_str()),
         Some("wispnetto")
     );
@@ -247,8 +255,11 @@ fn busybox_with_network_attaches_and_cleans_up() {
 
     // Confirm state.json carries the attachment record now.
     let live = runtime.state(id).expect("runtime.state");
-    assert!(live.network_attachment.is_some(), "no attachment recorded");
-    let rec = live.network_attachment.as_ref().unwrap();
+    assert!(
+        !live.network_attachments.is_empty(),
+        "no attachment recorded"
+    );
+    let rec = &live.network_attachments[0];
     assert_eq!(rec.network_name, "wispnetto");
     assert_eq!(rec.bridge, net.bridge);
     assert!(rec.ipv4.is_private(), "ipv4 not private: {}", rec.ipv4);
