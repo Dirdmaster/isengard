@@ -104,16 +104,21 @@ pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
         .collect()
 }
 
-/// Map the trait's typed state enum to the docker-compatible state
-/// string the controller's stacks/services projection expects.
+/// Map the trait's typed state enum into the wire-format state string the
+/// controller persists via `ServiceState::from_str`.
+///
+/// v0.5.3: `Created` now reports as `"creating"` (was `"created"`), so
+/// `ServiceState::from_str` lands on `ServiceState::Creating` rather than
+/// the pre-extension `Unknown` fallback. `from_str` still accepts the
+/// legacy `"created"` string so heartbeats from older agents stay green.
 fn state_to_str(state: ContainerState) -> &'static str {
     match state {
-        ContainerState::Created => "created",
+        ContainerState::Created => "creating",
         ContainerState::Running => "running",
         ContainerState::Restarting => "restarting",
         ContainerState::Paused => "paused",
-        ContainerState::Exited => "exited",
-        ContainerState::Dead => "dead",
+        ContainerState::Exited => "stopped",
+        ContainerState::Dead => "failed",
     }
 }
 
@@ -191,6 +196,44 @@ pub fn derive_stacks(containers: &[ContainerSnapshot]) -> Vec<StackInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.5.3: `state_to_str` now maps `Created` -> `"creating"` and
+    /// `Exited` / `Dead` -> `"stopped"` / `"failed"` so the controller's
+    /// `ServiceState::from_str` lands on the matching variant instead of
+    /// `Unknown`. Backstops the bug fix that surfaced live on the
+    /// lausanne v0.5.1 deploy (4/8 services rendering `unknown`).
+    #[test]
+    fn state_to_str_maps_wisp_created_to_creating() {
+        assert_eq!(state_to_str(ContainerState::Created), "creating");
+        assert_eq!(state_to_str(ContainerState::Running), "running");
+        assert_eq!(state_to_str(ContainerState::Restarting), "restarting");
+        assert_eq!(state_to_str(ContainerState::Paused), "paused");
+        assert_eq!(state_to_str(ContainerState::Exited), "stopped");
+        assert_eq!(state_to_str(ContainerState::Dead), "failed");
+    }
+
+    /// The runtime-level mapping must compose with the storage-level
+    /// `ServiceState::from_str` so that no runtime state ends up as
+    /// `Unknown` at the controller boundary.
+    #[test]
+    fn agent_state_str_decodes_into_concrete_service_state() {
+        use isengard_storage::ServiceState;
+        for cs in [
+            ContainerState::Created,
+            ContainerState::Running,
+            ContainerState::Restarting,
+            ContainerState::Exited,
+            ContainerState::Dead,
+        ] {
+            let s = state_to_str(cs);
+            let decoded = ServiceState::from_str(s);
+            assert_ne!(
+                decoded,
+                ServiceState::Unknown,
+                "ContainerState::{cs:?} -> {s:?} -> Unknown (regression)"
+            );
+        }
+    }
 
     fn snap(name: &str, labels: &[(&str, &str)]) -> ContainerSnapshot {
         ContainerSnapshot {
