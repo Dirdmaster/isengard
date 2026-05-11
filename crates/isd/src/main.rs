@@ -27,6 +27,7 @@ mod credentials;
 mod gateway;
 mod hosts_cmd;
 mod logs;
+mod manifest_cmd;
 mod open_cmd;
 mod ps;
 mod route;
@@ -99,6 +100,12 @@ enum Command {
     /// dumping the controller's SQLite by hand: wave 5.B polish.
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
+    /// View + edit a deployed stack's `stack.toml` from the controller.
+    /// `cat` prints the persisted body to stdout; `export` writes it to
+    /// a local file; `edit` opens it in `$EDITOR` and PUTs the result
+    /// back with optimistic concurrency (sha256 If-Match).
+    #[command(subcommand)]
+    Manifest(manifest_cmd::ManifestCommand),
 }
 
 #[tokio::main]
@@ -124,6 +131,13 @@ async fn main() {
         Command::Hosts(cmd) => {
             hosts_cmd::run(
                 hosts_cmd::HostsArgs { command: cmd },
+                cli.context.as_deref(),
+            )
+            .await
+        }
+        Command::Manifest(cmd) => {
+            manifest_cmd::run(
+                manifest_cmd::ManifestArgs { command: cmd },
                 cli.context.as_deref(),
             )
             .await
