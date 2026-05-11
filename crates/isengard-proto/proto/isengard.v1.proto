@@ -161,6 +161,12 @@ message Heartbeat {
   // agents is treated by the controller as `docker` (the only
   // backend prior to 0.5).
   string runtime_backend = 4;
+  // Phase 0.14: agent labels for placement selectors. The agent
+  // assembles this from `/etc/isengard/agent.toml` `[labels]` plus
+  // `ISENGARD_LABEL_*` env vars (env wins). Empty map from older
+  // agents is treated as "no labels" (matches unfiltered placements,
+  // does not match any `where:`-constrained one).
+  map<string, string> labels = 5;
 }
 
 message ControllerMessage {

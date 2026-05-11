@@ -1,6 +1,7 @@
 //! Agent-mode runtime: load plugins, run their lifecycle hooks, wait for
 //! shutdown. Phase 1 minimum — no gRPC client, no docker integration.
 
+pub mod agent_labels;
 pub mod agent_state;
 pub mod backoff;
 pub mod cert_renewal;
@@ -689,6 +690,21 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         host_id: agent_id.clone(),
         event_emitter: Some(emitter.clone()),
     });
+    // Phase 0.14: load agent labels once at boot. Re-read on SIGHUP is
+    // future work; for now the loader runs at agent start and the same
+    // map travels with every heartbeat. BTreeMap from the loader is
+    // converted to HashMap because the prost-generated `Heartbeat.labels`
+    // field is a HashMap.
+    let agent_label_map: std::collections::HashMap<String, String> =
+        agent_labels::load_agent_labels().into_iter().collect();
+    if !agent_label_map.is_empty() {
+        info!(
+            count = agent_label_map.len(),
+            "agent_labels: loaded from agent.toml + env",
+        );
+    }
+    let sync_agent_labels = agent_label_map;
+
     let sync_fut = async move {
         sync::run_sync_with_reconnect(
             sync_endpoint,
@@ -703,6 +719,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_mdns,
             sync_compose_ctx,
             sync_backend,
+            sync_agent_labels,
         )
         .await
     };

@@ -434,6 +434,24 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_services failed");
                         }
 
+                        // Phase 0.14: persist the heartbeat's agent
+                        // labels for the scheduler. Older agents send an
+                        // empty map; `replace_agent_labels` then leaves
+                        // the host's row set empty (or clears any stale
+                        // rows from a previous post-0.14 agent run).
+                        let label_map: std::collections::BTreeMap<String, String> = hb
+                            .labels
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        if let Err(e) = inventory.replace_agent_labels(host_id, &label_map).await {
+                            tracing::warn!(
+                                error = %e,
+                                agent = %agent_hostname,
+                                "replace_agent_labels failed",
+                            );
+                        }
+
                         let pending_actions = match crate::pending_actions::collect_pending_actions(
                             &inventory, host_id,
                         )
