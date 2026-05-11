@@ -30,7 +30,8 @@ use bollard::secret::ContainerInspectResponse;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
-use crate::placement::{LabelSelector, Placement};
+use isengard_core::placement::{LabelSelector, Placement};
+
 use crate::runtime::ContainerSnapshot;
 
 /// One service entry in `services:` after parsing. We keep the raw
@@ -1397,7 +1398,7 @@ spread = 3
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         match &parsed.services["web"].placement {
-            Some(crate::placement::Placement::Spread { count, selector }) => {
+            Some(isengard_core::placement::Placement::Spread { count, selector }) => {
                 assert_eq!(*count, 3);
                 assert!(selector.is_none());
             }
@@ -1415,7 +1416,7 @@ spread = 1
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         assert!(matches!(
             parsed.services["web"].placement,
-            Some(crate::placement::Placement::Singleton { .. })
+            Some(isengard_core::placement::Placement::Singleton { .. })
         ));
     }
 
@@ -1429,7 +1430,7 @@ global = true
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         assert!(matches!(
             parsed.services["node-exporter"].placement,
-            Some(crate::placement::Placement::Global { .. })
+            Some(isengard_core::placement::Placement::Global { .. })
         ));
     }
 
@@ -1442,7 +1443,7 @@ on = "alice"
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         match &parsed.services["postgres"].placement {
-            Some(crate::placement::Placement::On { host, selector }) => {
+            Some(isengard_core::placement::Placement::On { host, selector }) => {
                 assert_eq!(host, "alice");
                 assert!(selector.is_none());
             }
@@ -1459,7 +1460,7 @@ where = "role==monitoring"
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         match &parsed.services["prometheus"].placement {
-            Some(crate::placement::Placement::Singleton { selector }) => {
+            Some(isengard_core::placement::Placement::Singleton { selector }) => {
                 let sel = selector.as_ref().unwrap();
                 assert_eq!(sel.exprs.len(), 1);
             }
@@ -1477,7 +1478,7 @@ where = "tier==gpu, role!=control"
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         match &parsed.services["gpu-worker"].placement {
-            Some(crate::placement::Placement::Spread { count, selector }) => {
+            Some(isengard_core::placement::Placement::Spread { count, selector }) => {
                 assert_eq!(*count, 4);
                 let sel = selector.as_ref().unwrap();
                 assert_eq!(sel.exprs.len(), 2);
@@ -1522,7 +1523,7 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["web"].placement {
-            Some(crate::placement::Placement::Spread { count, selector }) => {
+            Some(isengard_core::placement::Placement::Spread { count, selector }) => {
                 assert_eq!(*count, 3);
                 assert_eq!(selector.as_ref().unwrap().exprs.len(), 2);
             }
@@ -1541,7 +1542,9 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["web"].placement {
-            Some(crate::placement::Placement::Spread { count, .. }) => assert_eq!(*count, 3),
+            Some(isengard_core::placement::Placement::Spread { count, .. }) => {
+                assert_eq!(*count, 3)
+            }
             other => panic!("expected Spread, got {other:?}"),
         }
     }
@@ -1558,7 +1561,7 @@ services:
         let parsed = parse_compose(yaml).unwrap();
         assert!(matches!(
             parsed.services["exporter"].placement,
-            Some(crate::placement::Placement::Global { .. })
+            Some(isengard_core::placement::Placement::Global { .. })
         ));
     }
 
@@ -1575,7 +1578,7 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["db"].placement {
-            Some(crate::placement::Placement::On { host, .. }) => assert_eq!(host, "alice"),
+            Some(isengard_core::placement::Placement::On { host, .. }) => assert_eq!(host, "alice"),
             other => panic!("expected On, got {other:?}"),
         }
     }
@@ -1594,7 +1597,7 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["worker"].placement {
-            Some(crate::placement::Placement::Spread { count, selector }) => {
+            Some(isengard_core::placement::Placement::Spread { count, selector }) => {
                 assert_eq!(*count, 3);
                 let sel = selector.as_ref().unwrap();
                 assert_eq!(sel.exprs.len(), 1);
@@ -1616,10 +1619,10 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["gpu"].placement {
-            Some(crate::placement::Placement::Singleton { selector }) => {
+            Some(isengard_core::placement::Placement::Singleton { selector }) => {
                 let sel = selector.as_ref().unwrap();
                 match &sel.exprs[0] {
-                    crate::placement::SelectorExpr::Eq { key, value } => {
+                    isengard_core::placement::SelectorExpr::Eq { key, value } => {
                         assert_eq!(key, "tier");
                         assert_eq!(value, "gpu");
                     }
@@ -1655,9 +1658,9 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["worker"].placement {
-            Some(crate::placement::Placement::Singleton { selector }) => {
+            Some(isengard_core::placement::Placement::Singleton { selector }) => {
                 match &selector.as_ref().unwrap().exprs[0] {
-                    crate::placement::SelectorExpr::In { values, .. } => {
+                    isengard_core::placement::SelectorExpr::In { values, .. } => {
                         assert_eq!(values.len(), 2);
                     }
                     _ => panic!("expected In"),
@@ -1677,10 +1680,10 @@ services:
 "#;
         let parsed = parse_compose(yaml).unwrap();
         match &parsed.services["worker"].placement {
-            Some(crate::placement::Placement::Singleton { selector }) => {
+            Some(isengard_core::placement::Placement::Singleton { selector }) => {
                 assert!(matches!(
                     selector.as_ref().unwrap().exprs[0],
-                    crate::placement::SelectorExpr::Exists { .. }
+                    isengard_core::placement::SelectorExpr::Exists { .. }
                 ));
             }
             other => panic!("expected Singleton, got {other:?}"),

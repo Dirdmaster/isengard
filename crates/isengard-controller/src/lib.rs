@@ -18,6 +18,7 @@ pub mod plugin_host;
 pub mod policy_ingest;
 pub mod revocation;
 pub mod routing;
+pub mod scheduler;
 pub mod secrets;
 pub mod stack_deploy_orchestrator;
 pub mod sync_services;
@@ -386,6 +387,27 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         ));
     let orchestrator_handle = orchestrator.clone().start_background();
 
+    // Phase 0.14: placement scheduler. Rebuilds in-memory state from the
+    // placements + agent_labels tables on boot (the migration backfilled
+    // pre-0.14 services), then ticks a 15s reconcile loop. Trigger
+    // methods are wired into the heartbeat / enroll / disconnect paths
+    // in later commits (step 7); step 3 stops at the inert skeleton so
+    // the rest of the controller can build against the new API.
+    //
+    // `PlacementSource` lookups land in step 6 / 7; the skeleton uses an
+    // empty source so reconcile_all is a no-op until then.
+    let scheduler = std::sync::Arc::new(
+        scheduler::Scheduler::new(
+            inventory.clone(),
+            bus.clone(),
+            std::time::Duration::from_secs(scheduler::DEFAULT_GRACE_SECS),
+            std::sync::Arc::new(scheduler::EmptyPlacementSource),
+        )
+        .await
+        .context("initialising placement scheduler")?,
+    );
+    let scheduler_handle = scheduler.clone().start();
+
     // Background task: subscribe to `deployment.*` events on the bus and mirror
     // the embedded Deployment row into the controller-local `deployments` table.
     // Agent-side is the source of truth; the controller's copy backs the UI list
@@ -551,6 +573,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     deployment_handle.abort();
     reaper_handle.abort();
     orchestrator_handle.abort();
+    scheduler_handle.abort();
     if let Some(h) = dns_handle {
         h.abort();
     }
