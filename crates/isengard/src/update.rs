@@ -9,7 +9,8 @@
 //! friendlier UX wrapper.
 //!
 //! Flow (zero args):
-//!   1. Read `env!("CARGO_PKG_VERSION")` baked at build time.
+//!   1. Read `env!("ISENGARD_BUILD_VERSION")` baked at build time (resolved
+//!      from CI tag, git describe, or `CARGO_PKG_VERSION` in that order).
 //!   2. GET `releases/latest` from the GitHub API to learn the latest
 //!      tag. On rate-limit (403 / 429) the error message tells the
 //!      operator to re-run with `--version vX.Y.Z` so they can bypass
@@ -58,7 +59,7 @@ pub const RESTART_UNITS: &[&str] = &["iso-controller.service", "iso-agent.servic
 /// User-agent used for GitHub API requests. GitHub requires a non-empty
 /// UA on API calls (returns 403 otherwise); the version string makes
 /// the request traceable in their server logs.
-const USER_AGENT: &str = concat!("isengard-update/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("isengard-update/", env!("ISENGARD_BUILD_VERSION"));
 
 /// HTTP timeout for every fetch in this module. Conservative: the
 /// sha256 file is < 100 bytes, the API response is < 50 KiB, and the
@@ -92,10 +93,10 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     let current = current_version();
     let target_version = resolve_target_version(args.version.as_deref()).await?;
 
-    // Equal-version short-circuit: friendly noop. The CARGO_PKG_VERSION
-    // value lives in `Cargo.toml`'s workspace.package.version; a dev
-    // checkout will read `0.1.0-alpha` here, which never matches a real
-    // tag so the noop only fires on tagged builds against the same tag.
+    // Equal-version short-circuit: friendly noop. `current_version()` is
+    // fed by the build script: real release tags get their tag string
+    // verbatim, dev builds get `git describe` output (e.g. `v0.5.2-3-gabc`)
+    // which `is_already_on_target` rejects by SemVer pre-release marker.
     if is_already_on_target(&current, &target_version) {
         println!("isengard {current} is already at {target_version}; nothing to do.");
         return Ok(());
@@ -140,9 +141,14 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-/// Current version baked at build time. Wrapped so tests can override.
+/// Current version baked at build time. Reads `ISENGARD_BUILD_VERSION`,
+/// which `build.rs` resolves from (in order) `ISENGARD_RELEASE_VERSION`,
+/// `GITHUB_REF_NAME`, `git describe --tags --always --dirty`, or
+/// `CARGO_PKG_VERSION`. Tagged release builds get e.g. `v0.5.2`; dev
+/// builds get `v0.5.2-3-gabc1234`. Wrapped in a function so future tests
+/// can monkey-patch via a `cfg(test)` shim.
 fn current_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    env!("ISENGARD_BUILD_VERSION").to_string()
 }
 
 /// Resolve the version the operator wants. `Some(v)` honours the flag
@@ -210,9 +216,11 @@ fn normalise_tag(raw: &str) -> String {
     }
 }
 
-/// Compare a tagged target (e.g. `v0.5.1`) against the current
-/// CARGO_PKG_VERSION baked at build time. Dev builds advertise
-/// `0.1.0-alpha`, which is never equal to a real release tag.
+/// Compare a tagged target (e.g. `v0.5.1`) against the current version
+/// baked at build time. Dev builds advertise either `0.1.0-alpha` (the
+/// CARGO_PKG_VERSION fallback) or `v0.5.2-3-gabc1234` (git describe),
+/// neither of which is ever equal to a real release tag: the
+/// pre-release / build-metadata markers ensure that.
 ///
 /// Returns `true` when the running binary's version equals the target
 /// version, ignoring the leading `v`.
@@ -410,7 +418,10 @@ fn print_plan(current: &str, target: &str, asset_name: &str) {
     // print under the bar with a ◇ glyph; `confirm` closes the step and
     // returns the operator's choice. The `outro` happens in `run` after
     // the self-update returns.
-    let _ = cliclack::intro(format!("isengard update  v{}", env!("CARGO_PKG_VERSION")));
+    let _ = cliclack::intro(format!(
+        "isengard update  {}",
+        env!("ISENGARD_BUILD_VERSION")
+    ));
     let body = format!(
         "  Current   {current}\n  Target    {target}\n  Asset     {asset_name}\n  Source    github.com/{RELEASES_REPO}\n\n  This will:\n    - Download the new binary\n    - Verify sha256 against the release manifest\n    - Atomic-rename onto /usr/local/bin/isengard\n    - Restart iso-controller.service\n    - Restart iso-agent.service"
     );
@@ -453,9 +464,8 @@ mod tests {
 
     #[test]
     fn is_already_on_target_alpha_never_matches_stable() {
-        // CARGO_PKG_VERSION on a dev checkout is `0.1.0-alpha`; even if
-        // a release tag happens to be `v0.1.0-alpha` (unlikely) the
-        // SemVer pre-release marker means we still want to update.
+        // Build-script CARGO_PKG_VERSION fallback (`0.1.0-alpha`) must
+        // never short-circuit against a stable release tag.
         assert!(!is_already_on_target("0.1.0-alpha", "v0.1.0"));
         // Pre-release-to-pre-release equal: stay put.
         assert!(is_already_on_target("0.1.0-alpha", "v0.1.0-alpha"));
@@ -465,6 +475,38 @@ mod tests {
     fn is_already_on_target_semver_equal_with_build_metadata() {
         // SemVer treats build metadata as informational only.
         assert!(is_already_on_target("0.5.1+abc", "v0.5.1+def"));
+    }
+
+    #[test]
+    fn is_already_on_target_git_describe_dev_build_never_matches_tag() {
+        // `git describe --tags --always --dirty` on a checkout three
+        // commits past v0.5.2 returns `v0.5.2-3-gabc1234`. SemVer parses
+        // `3-gabc1234` as the pre-release component, so it must NOT
+        // short-circuit against the bare tag.
+        assert!(!is_already_on_target("v0.5.2-3-gabc1234", "v0.5.2"));
+        assert!(!is_already_on_target("v0.5.2-3-gabc1234-dirty", "v0.5.2"));
+        // Same describe output, same describe target: equal.
+        assert!(is_already_on_target(
+            "v0.5.2-3-gabc1234",
+            "v0.5.2-3-gabc1234"
+        ));
+    }
+
+    #[test]
+    fn is_already_on_target_bare_sha_never_matches_tag() {
+        // No reachable tag (`git describe` falls back to `--always`),
+        // we get a bare commit SHA. Unparseable as SemVer; the function
+        // returns false so the update path always proceeds.
+        assert!(!is_already_on_target("abc1234", "v0.5.2"));
+        assert!(!is_already_on_target("abc1234", "v0.5.2-3-gabc1234"));
+    }
+
+    #[test]
+    fn is_already_on_target_tag_with_v_prefix_equal() {
+        // CI builds bake the tag verbatim, including the `v` prefix.
+        // The function must compare them equal regardless of prefix.
+        assert!(is_already_on_target("v0.5.2", "v0.5.2"));
+        assert!(is_already_on_target("v0.5.2", "0.5.2"));
     }
 
     #[test]

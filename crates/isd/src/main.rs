@@ -42,7 +42,12 @@ mod watch;
 #[derive(Parser, Debug)]
 #[command(
     name = "isd",
-    version,
+    // Overridden to use the build-script-resolved version (git tag for
+    // CI builds, `git describe` for dev). The default `version` macro
+    // reads CARGO_PKG_VERSION, which is pinned at `0.1.0-alpha` in the
+    // workspace manifest and never bumped on release; that meant every
+    // `isd --version` printed the wrong thing after `isd update`.
+    version = env!("ISENGARD_BUILD_VERSION"),
     about = "Isengard operator CLI",
     long_about = "Talk to an Isengard controller from your terminal: list \
                   stacks, open services in a browser, tail logs. Configure \

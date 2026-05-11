@@ -390,7 +390,7 @@ pub async fn run(args: InitArgs) -> Result<()> {
 
 /// Interactive flow: cliclack drives every prompt and every step glyph.
 async fn run_interactive(args: InitArgs, host_ip: String) -> Result<()> {
-    cliclack::intro(format!("isengard init  v{}", env!("CARGO_PKG_VERSION")))?;
+    cliclack::intro(format!("isengard init  {}", env!("ISENGARD_BUILD_VERSION")))?;
 
     let host = probe_host();
     // `cliclack::note` would render the body inside a rounded ASCII box;
@@ -436,7 +436,7 @@ async fn run_interactive(args: InitArgs, host_ip: String) -> Result<()> {
 
 /// Non-interactive flow: plain `[step]` lines, no `│` connector.
 async fn run_non_interactive(args: InitArgs, host_ip: String) -> Result<()> {
-    println!("isengard init v{}", env!("CARGO_PKG_VERSION"));
+    println!("isengard init {}", env!("ISENGARD_BUILD_VERSION"));
     println!("Using flag-driven config.");
     let plan = Plan::from_args(&args, host_ip)?;
     let token = plan.execute_plain().await?;
@@ -1108,7 +1108,7 @@ pub async fn run_join(args: JoinArgs) -> Result<()> {
 }
 
 async fn run_join_interactive(args: JoinArgs) -> Result<()> {
-    cliclack::intro(format!("isengard join  v{}", env!("CARGO_PKG_VERSION")))?;
+    cliclack::intro(format!("isengard join  {}", env!("ISENGARD_BUILD_VERSION")))?;
     let host = probe_host();
     // Same free-rows treatment as `init` (see comment there).
     cliclack::log::step("Detected host")?;
@@ -1138,7 +1138,7 @@ async fn run_join_interactive(args: JoinArgs) -> Result<()> {
 }
 
 async fn run_join_plain(args: JoinArgs) -> Result<()> {
-    println!("isengard join v{}", env!("CARGO_PKG_VERSION"));
+    println!("isengard join {}", env!("ISENGARD_BUILD_VERSION"));
     join_steps(&args).await?;
     println!();
     println!("agent enrolled.");

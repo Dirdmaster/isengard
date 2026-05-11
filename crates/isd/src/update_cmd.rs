@@ -13,7 +13,9 @@
 //!     binary would drag a transitive dep tree we don't otherwise want.
 //!
 //! Flow:
-//!   1. Read `env!("CARGO_PKG_VERSION")` baked at build time.
+//!   1. Read `env!("ISENGARD_BUILD_VERSION")` baked at build time (resolved
+//!      by `build.rs` from the CI release env, `git describe`, or the
+//!      static `CARGO_PKG_VERSION` fallback, in that order).
 //!   2. Resolve the target version: either the `--version` flag or
 //!      GitHub Releases' `releases/latest` endpoint.
 //!   3. Noop if current == target. SemVer-aware, so build metadata is
@@ -82,7 +84,7 @@ const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 /// API surface with a 403; embedding the package version makes the
 /// request traceable in their server logs and tells us which isd
 /// release any rate-limit spike came from.
-const USER_AGENT: &str = concat!("isd-update/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("isd-update/", env!("ISENGARD_BUILD_VERSION"));
 
 /// CLI flags for `isd update`.
 #[derive(Debug, Clone, Args)]
@@ -159,10 +161,14 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-/// Current package version baked at build time. Wrapped so future tests
-/// can swap it out (today they only assert on the constant).
+/// Current package version baked at build time. Reads `ISENGARD_BUILD_VERSION`,
+/// which `build.rs` resolves from (in order) `ISENGARD_RELEASE_VERSION`,
+/// `GITHUB_REF_NAME`, `git describe --tags --always --dirty`, or
+/// `CARGO_PKG_VERSION`. Tagged release builds get e.g. `v0.5.2`; dev
+/// builds get `v0.5.2-3-gabc1234` (which `is_already_on_target` rejects
+/// against any stable tag via the SemVer pre-release marker).
 fn current_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    env!("ISENGARD_BUILD_VERSION").to_string()
 }
 
 /// Resolve the target version from the operator's flag or the GitHub API.
@@ -499,9 +505,9 @@ pub(crate) fn install_atomic(staging: &Path, target: &Path) -> Result<()> {
 /// asks for. We render via `cliclack::note` so the connector glyphs
 /// line up with the confirm prompt below.
 fn print_plan(current: &str, target: &str, asset: &str, current_exe: &Path) {
-    let _ = cliclack::intro(format!("isd update  v{}", env!("CARGO_PKG_VERSION")));
+    let _ = cliclack::intro(format!("isd update  {}", env!("ISENGARD_BUILD_VERSION")));
     let body = format!(
-        "  Current   v{current}\n  Target    {target}\n  Asset     {asset}\n  Source    github.com/{RELEASES_REPO}\n\n  This will:\n    : Download the new binary\n    : Verify sha256 against the release manifest\n    : Atomic-rename onto {}",
+        "  Current   {current}\n  Target    {target}\n  Asset     {asset}\n  Source    github.com/{RELEASES_REPO}\n\n  This will:\n    : Download the new binary\n    : Verify sha256 against the release manifest\n    : Atomic-rename onto {}",
         current_exe.display(),
     );
     let _ = cliclack::note("Update plan", body);
@@ -543,9 +549,10 @@ mod tests {
 
     #[test]
     fn is_already_on_target_alpha_never_matches_stable() {
-        // The dev build's CARGO_PKG_VERSION is `0.1.0-alpha`. A real
-        // stable tag at `v0.1.0` (improbable but legal) must still
-        // trigger an update, because pre-release < stable per SemVer.
+        // The CARGO_PKG_VERSION fallback the build script emits when
+        // git is missing is `0.1.0-alpha`. A real stable tag at `v0.1.0`
+        // (improbable but legal) must still trigger an update because
+        // pre-release < stable per SemVer.
         assert!(!is_already_on_target("0.1.0-alpha", "v0.1.0"));
         // Pre-release-to-same-pre-release: equal, no-op.
         assert!(is_already_on_target("0.1.0-alpha", "v0.1.0-alpha"));
@@ -555,6 +562,41 @@ mod tests {
     fn is_already_on_target_ignores_build_metadata() {
         // SemVer treats `+build` as informational only.
         assert!(is_already_on_target("0.5.2+abc", "v0.5.2+def"));
+    }
+
+    #[test]
+    fn is_already_on_target_git_describe_dev_build_never_matches_tag() {
+        // `git describe --tags --always --dirty` on a checkout three
+        // commits past v0.5.2 returns `v0.5.2-3-gabc1234`. SemVer parses
+        // `3-gabc1234` as a pre-release component, so even though the
+        // major.minor.patch trio matches `v0.5.2` the function must
+        // still report "not on target" so the operator can re-install.
+        assert!(!is_already_on_target("v0.5.2-3-gabc1234", "v0.5.2"));
+        assert!(!is_already_on_target("v0.5.2-3-gabc1234-dirty", "v0.5.2"));
+        // Same describe-string on both sides: equal.
+        assert!(is_already_on_target(
+            "v0.5.2-3-gabc1234",
+            "v0.5.2-3-gabc1234"
+        ));
+    }
+
+    #[test]
+    fn is_already_on_target_bare_sha_never_matches_tag() {
+        // `git describe --always` without a reachable tag returns a bare
+        // commit SHA. Unparseable as SemVer; the function returns false
+        // so the update path always proceeds.
+        assert!(!is_already_on_target("abc1234", "v0.5.2"));
+        assert!(!is_already_on_target("abc1234", "v0.5.2-3-gabc1234"));
+    }
+
+    #[test]
+    fn is_already_on_target_tag_with_v_prefix_equal() {
+        // CI builds bake the tag verbatim, including the `v` prefix.
+        // The function strips the prefix before comparing so a leading
+        // `v` on either or both sides doesn't matter.
+        assert!(is_already_on_target("v0.5.2", "v0.5.2"));
+        assert!(is_already_on_target("v0.5.2", "0.5.2"));
+        assert!(is_already_on_target("0.5.2", "v0.5.2"));
     }
 
     #[test]
