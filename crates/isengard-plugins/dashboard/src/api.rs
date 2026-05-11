@@ -33,6 +33,10 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
             "/stacks/{id}/compose",
             get(get_stack_compose).put(put_stack_compose),
         )
+        .route(
+            "/stacks/{id}/manifest",
+            get(get_stack_manifest).put(put_stack_manifest),
+        )
         .route("/stacks/{id}/diff", post(post_stack_diff))
         .route(
             "/stacks/{id}/actions/force-update",
