@@ -15,21 +15,60 @@ impl std::fmt::Display for ServiceId {
     }
 }
 
+/// Lifecycle state for a service as observed by an agent's heartbeat.
+///
+/// v0.5.3: extended beyond `Running`/`Stopped`/`Restarting`/`Unknown` so
+/// mid-startup states surface correctly in `isd ps` and `isd deploy --watch`
+/// instead of collapsing to `Unknown`. Specifically, wisp's
+/// `ContainerState::Created` (bundle staged + cgroup ready, process not
+/// yet forked) used to map to `Unknown`; now it lands on `Creating`.
+///
+/// ## Wire format + back-compat
+///
+/// The on-disk representation is the lowercase variant name (`as_str`).
+/// Old binaries reading new strings fall through `from_str`'s default arm
+/// and decode as `Unknown` (forward-compatible by construction). New
+/// binaries reading old `"unknown"` rows preserve them as `Unknown`.
+///
+/// SQLite column type is TEXT, so no schema migration is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceState {
+    /// Image pull in progress. Reserved for the eventual Channel B
+    /// (runtime-event) integration; today no backend emits this directly.
+    Pulling,
+    /// Bundle staged and the runtime created the container but the
+    /// process is not yet forked. Maps from `wisp::ContainerState::Created`
+    /// and from `bollard::ContainerStateStatusEnum::CREATED`.
+    Creating,
+    /// Process is alive.
     Running,
-    Stopped,
+    /// Runtime is cycling the container (compose restart policy fired,
+    /// or wisp/bollard reported `Restarting`).
     Restarting,
+    /// Process exited (zero or non-zero) and the runtime has not been
+    /// asked to restart it.
+    Stopped,
+    /// Terminal error during creation or start. Reserved for the
+    /// runtime-event path; the polling-based reconciler today reports a
+    /// failed container as `Stopped` because it cannot distinguish the
+    /// "exited cleanly" case from the "never started" case without the
+    /// exit code.
+    Failed,
+    /// Fallback for unrecognised state strings (including states written
+    /// by future agent versions that this binary doesn't know about).
     Unknown,
 }
 
 impl ServiceState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Pulling => "pulling",
+            Self::Creating => "creating",
             Self::Running => "running",
-            Self::Stopped => "stopped",
             Self::Restarting => "restarting",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
             Self::Unknown => "unknown",
         }
     }
@@ -37,9 +76,15 @@ impl ServiceState {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
+            "pulling" => Self::Pulling,
+            // Accept both `creating` (the new canonical string) and the
+            // docker-compatible `created` that older agent heartbeats
+            // (and the legacy docker-socket snapshot path) still emit.
+            "creating" | "created" => Self::Creating,
             "running" => Self::Running,
-            "stopped" => Self::Stopped,
             "restarting" => Self::Restarting,
+            "stopped" | "exited" => Self::Stopped,
+            "failed" | "dead" => Self::Failed,
             _ => Self::Unknown,
         }
     }
@@ -129,6 +174,48 @@ mod tests {
             .unwrap();
         let svc = inv.get_service(svc_id).await.unwrap().unwrap();
         assert_eq!(svc.deploy_strategy_override, None);
+    }
+
+    /// v0.5.3: every variant round-trips through `as_str` / `from_str`.
+    /// Guards against the wire-format regression that surfaced as 4/8
+    /// services showing `unknown` in `isd ps` on the lausanne deploy:
+    /// adding a variant without wiring it through the string conversion
+    /// silently degraded back to `Unknown`.
+    #[test]
+    fn service_state_string_round_trip_for_every_variant() {
+        for state in [
+            ServiceState::Pulling,
+            ServiceState::Creating,
+            ServiceState::Running,
+            ServiceState::Restarting,
+            ServiceState::Stopped,
+            ServiceState::Failed,
+            ServiceState::Unknown,
+        ] {
+            let s = state.as_str();
+            let back = ServiceState::from_str(s);
+            assert_eq!(back, state, "{s} did not round-trip");
+        }
+    }
+
+    /// v0.5.3: pre-extension agents emit docker-compatible state strings
+    /// (`created`, `exited`, `dead`). They map into the v0.5.3 enum at
+    /// the controller boundary so heartbeats from old agents stop
+    /// landing on `Unknown`.
+    #[test]
+    fn service_state_accepts_docker_compatible_aliases() {
+        assert_eq!(ServiceState::from_str("created"), ServiceState::Creating);
+        assert_eq!(ServiceState::from_str("exited"), ServiceState::Stopped);
+        assert_eq!(ServiceState::from_str("dead"), ServiceState::Failed);
+        // Anything else still falls back to Unknown so future variants
+        // emitted by a newer agent don't crash an older controller.
+        assert_eq!(
+            ServiceState::from_str("paused"),
+            ServiceState::Unknown,
+            "paused has no v0.5.3 mapping yet",
+        );
+        assert_eq!(ServiceState::from_str(""), ServiceState::Unknown);
+        assert_eq!(ServiceState::from_str("garbage"), ServiceState::Unknown);
     }
 
     #[tokio::test]

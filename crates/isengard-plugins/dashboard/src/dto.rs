@@ -215,7 +215,11 @@ pub struct ServiceDto {
     pub stack_id: Option<String>,
     pub name: String,
     pub image: String,
-    /// One of "running", "stopped", "restarting", "unknown".
+    /// v0.5.3: one of `"pulling"`, `"creating"`, `"running"`,
+    /// `"restarting"`, `"stopped"`, `"failed"`, `"unknown"`. Older
+    /// agents may still emit pre-extension strings (`"created"`,
+    /// `"exited"`, `"dead"`); the controller normalises those via
+    /// `ServiceState::from_str` before persistence.
     pub state: String,
     pub last_seen_at: DateTime<Utc>,
     pub deploy_strategy_override: Option<String>,
