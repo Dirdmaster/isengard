@@ -1,11 +1,11 @@
 //! Phase 0.18 `isengard update` subcommand: zero-args wrapper around
 //! [`isengard_agent::self_update`] that auto-detects the latest GitHub
-//! Release, downloads + verifies + applies the binary, and restarts
-//! both the controller and the agent.
+//! Release, downloads + verifies + applies the binary, and cycles
+//! both the controller and the agent units.
 //!
 //! See `docs/RELEASES.md` for the artifact naming + verification flow
 //! this command mirrors. The plumbing (download, sha256, atomic rename,
-//! systemctl restart) lives in `isengard-agent`; this module is the
+//! graceful unit cycle) lives in `isengard-agent`; this module is the
 //! friendlier UX wrapper.
 //!
 //! Flow (zero args):
@@ -21,7 +21,12 @@
 //!   7. Fetch the sha256 manifest, parse the lowercase-hex digest.
 //!   8. Delegate to `isengard_agent::self_update::run_self_update` with
 //!      both `iso-controller.service` and `iso-agent.service` in the
-//!      restart list.
+//!      unit cycle list. Each unit is cycled via the explicit
+//!      `stop -> wait inactive -> wait port free -> start` sequence
+//!      defined in `self_update::graceful_replace`. We do NOT use
+//!      `systemctl restart`: that returned before the old Pingora
+//!      listener was released and made the new agent's bind panic
+//!      with `Address in use` (lausanne v0.5.2 deploy, 2026-05-10).
 
 use std::time::Duration;
 
@@ -48,11 +53,13 @@ fn github_download_base() -> String {
         .unwrap_or_else(|_| "https://github.com".to_string())
 }
 
-/// systemd unit names restarted by `isengard update`. Order matters:
-/// the controller is restarted before the agent so the operator's isd
+/// systemd unit names cycled by `isengard update`. Order matters: the
+/// controller is cycled before the agent so the operator's isd
 /// connection drops once and reconnects against the fresh binary, then
-/// the agent picks up its own new binary. Both are Type=simple units;
-/// systemd handles the re-exec correctly.
+/// the agent picks up its own new binary. Each cycle is the explicit
+/// `stop -> wait inactive -> wait ports free -> start` flow from
+/// [`isengard_agent::self_update::run_self_update`], not a `systemctl
+/// restart` shortcut.
 pub const RESTART_UNITS: &[&str] = &["iso-controller.service", "iso-agent.service"];
 
 /// User-agent used for GitHub API requests. GitHub requires a non-empty
@@ -412,7 +419,7 @@ fn print_plan(current: &str, target: &str, asset_name: &str) {
     // the self-update returns.
     let _ = cliclack::intro(format!("isengard update  v{}", env!("CARGO_PKG_VERSION")));
     let body = format!(
-        "  Current   {current}\n  Target    {target}\n  Asset     {asset_name}\n  Source    github.com/{RELEASES_REPO}\n\n  This will:\n    - Download the new binary\n    - Verify sha256 against the release manifest\n    - Atomic-rename onto /usr/local/bin/isengard\n    - Restart iso-controller.service\n    - Restart iso-agent.service"
+        "  Current   {current}\n  Target    {target}\n  Asset     {asset_name}\n  Source    github.com/{RELEASES_REPO}\n\n  This will:\n    - Download the new binary\n    - Verify sha256 against the release manifest\n    - Atomic-rename onto /usr/local/bin/isengard\n    - Cycle iso-controller.service (stop, wait, start)\n    - Cycle iso-agent.service (stop, wait, start)"
     );
     let _ = cliclack::note("Update plan", body);
 }

@@ -56,9 +56,24 @@ ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
 
-# Clean shutdown: the controller catches SIGTERM and flushes pending
-# writes. systemd sends SIGKILL after 30s if it hangs.
-TimeoutStopSec=30
+# Clean shutdown contract (paired with isengard update's graceful_replace
+# in crates/isengard-agent/src/self_update.rs):
+#
+#   1. systemctl stop sends SIGTERM (KillSignal=).
+#   2. Controller catches SIGTERM, flushes pending SQLite writes, drops
+#      its gRPC + HTTP listeners.
+#   3. If the process is still alive after TimeoutStopSec, KillMode=mixed
+#      sends SIGKILL to the main process plus everything in the cgroup.
+#   4. isengard update then waits for ActiveState=inactive and probes
+#      the listener ports before issuing the new systemctl start.
+#
+# 15s is short enough to keep `isengard update` snappy and long enough
+# for the controller's flush + tonic server shutdown. After
+# TimeoutStopSec, systemd's default SendSIGKILL=yes finishes the
+# job by sending SIGKILL to whatever remains in the cgroup.
+TimeoutStopSec=15s
+KillMode=mixed
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
