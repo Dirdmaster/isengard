@@ -982,7 +982,11 @@ async fn get_stack_manifest(
         Some(s) if !s.is_empty() => s,
         _ => return StatusCode::NO_CONTENT.into_response(),
     };
-    let hooks: Vec<ManifestHookDto> = bundle.hooks.into_iter().map(ManifestHookDto::from).collect();
+    let hooks: Vec<ManifestHookDto> = bundle
+        .hooks
+        .into_iter()
+        .map(ManifestHookDto::from)
+        .collect();
     Json(serde_json::json!({
         "stack_id": stack.id,
         "stack_name": stack.name,
