@@ -43,6 +43,16 @@ use crate::network_spec::{NetworkAttachmentRecord, NetworkSpec};
 /// (`tests/runtime_with_network.rs`). `&mut self` is the contract:
 /// implementations typically hold IPAM state and a state directory,
 /// both of which need exclusive access during attach / detach.
+///
+/// # Multi-network containers
+///
+/// A container may be attached to more than one network. The runtime
+/// invokes [`NetworkAttacher::attach`] once per declared network, in
+/// declaration order, threading a 0-based `eth_index` so each veth
+/// lands on a distinct interface name (`eth0`, `eth1`, ...). The
+/// attacher (or the network resolver it consults) is responsible for
+/// dispatching by `spec.network_name` when a container declares
+/// multiple networks with different bridges / subnets.
 pub trait NetworkAttacher {
     /// Attach the container to the network described by `spec`.
     ///
@@ -53,13 +63,16 @@ pub trait NetworkAttacher {
     /// 2. Allocate an IPv4 address for `container_id`.
     /// 3. Create a veth pair, enslave the host side to the bridge,
     ///    move the container side into `container_pid`'s netns,
-    ///    rename to `eth0`, configure addressing, route default via
-    ///    the gateway.
+    ///    rename to `eth<eth_index>`, configure addressing, and
+    ///    (for `eth_index == 0` only) route default via the gateway.
     /// 4. Apply the iptables rules for `spec.ports`.
     /// 5. (Optional) Write `<rootfs>/etc/resolv.conf` and
     ///    `<rootfs>/etc/hosts` per `spec.resolv_source`. The rootfs
     ///    is on the host filesystem at this point because the child
-    ///    has not yet `pivot_root`'d.
+    ///    has not yet `pivot_root`'d. Only the primary attach
+    ///    (`eth_index == 0`) should render these files; subsequent
+    ///    attaches must leave them alone or the second write clobbers
+    ///    the first.
     ///
     /// The returned [`NetworkAttachmentRecord`] is persisted into
     /// `state.json` so that `delete` can reverse the operation.
@@ -69,10 +82,12 @@ pub trait NetworkAttacher {
         container_id: &str,
         container_pid: u32,
         rootfs: &Path,
+        eth_index: u32,
     ) -> Result<NetworkAttachmentRecord, WispError>;
 
     /// Reverse [`attach`]: revoke iptables rules, delete the host
-    /// veth, release the IP. Called by `Runtime::delete_with_attacher`.
+    /// veth, release the IP. Called by `Runtime::delete_with_attacher`
+    /// once per recorded attachment.
     ///
     /// Should be tolerant of partial state (e.g. iptables rules
     /// already gone, veth already removed): a wisp container may have

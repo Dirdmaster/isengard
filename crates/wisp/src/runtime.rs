@@ -165,13 +165,15 @@ impl Runtime {
         }
     }
 
-    /// Create a container with a `NetworkSpec` attached.
+    /// Create a container with a single `NetworkSpec` attached.
     ///
-    /// Same persistence + cgroup setup as [`Runtime::create`]; the
-    /// resulting `state.json` carries the spec under
-    /// `network_spec`. The actual veth + IP attachment is deferred to
-    /// [`Runtime::start`], which reads the spec, allocates an IP, and
-    /// records a `NetworkAttachmentRecord` once the child PID exists.
+    /// Convenience wrapper around [`Runtime::create_with_networks`] for
+    /// the common one-network case. Same persistence + cgroup setup as
+    /// [`Runtime::create`]; the resulting `state.json` carries the spec
+    /// under `network_specs[0]`. The actual veth + IP attachment is
+    /// deferred to [`Runtime::start`], which reads the spec, allocates
+    /// an IP, and records a `NetworkAttachmentRecord` once the child
+    /// PID exists.
     ///
     /// Linux only. The Mac stub mirrors [`Runtime::create`].
     pub fn create_with_network(
@@ -180,17 +182,43 @@ impl Runtime {
         bundle: &Path,
         network: NetworkSpec,
     ) -> Result<ContainerHandle> {
+        self.create_with_networks(id, bundle, vec![network])
+    }
+
+    /// Create a container with one or more networks attached.
+    ///
+    /// `networks` are persisted in declaration order: the first entry
+    /// becomes the primary attachment (gets `eth0` + the default route
+    /// in the container's netns); subsequent entries get `eth1`,
+    /// `eth2`, ... See [`crate::NetworkAttacher::attach`] for the
+    /// per-attach contract.
+    ///
+    /// Compose-spec semantics: a service declaring `networks: [a, b]`
+    /// must be reachable on both `a` AND `b`; passing both here at
+    /// create time is the only path because wisp does not support live
+    /// network attach (no `Runtime::attach_network` after start).
+    ///
+    /// Passing an empty `networks` Vec is equivalent to
+    /// [`Runtime::create`] (no network namespace plumbing).
+    ///
+    /// Linux only. The Mac stub mirrors [`Runtime::create`].
+    pub fn create_with_networks(
+        &self,
+        id: &str,
+        bundle: &Path,
+        networks: Vec<NetworkSpec>,
+    ) -> Result<ContainerHandle> {
         #[cfg(target_os = "linux")]
         {
             let mut handle =
                 lifecycle::create_container(&self.state_dir, &self.cgroup, id, bundle)?;
-            handle.network_spec = Some(network);
+            handle.network_specs = networks;
             state::write(&self.state_dir, &handle)?;
             Ok(handle)
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (id, bundle, network);
+            let _ = (id, bundle, networks);
             Err(WispError::Lifecycle(
                 "wisp runtime requires linux".to_string(),
             ))
@@ -327,11 +355,13 @@ impl Runtime {
         Ok(())
     }
 
-    /// Like [`Runtime::delete`] but also detaches the network if the
-    /// container's `state.json` carries a `network_attachment`.
+    /// Like [`Runtime::delete`] but also detaches every recorded
+    /// network attachment.
     ///
-    /// Detach is best-effort: a failure logs via tracing but does not
-    /// stop the cgroup / state-dir cleanup. The wisp-cli uses this
+    /// Detach order is reverse-of-attach: the last network attached is
+    /// detached first. Each individual detach is best-effort: a failure
+    /// logs via tracing but does not stop the cgroup / state-dir
+    /// cleanup or the rest of the detach loop. The wisp-cli uses this
     /// for the operator-facing `wisp delete` flow; the integration
     /// test calls it directly.
     pub fn delete_with_attacher(
@@ -349,10 +379,11 @@ impl Runtime {
         // Detach BEFORE killing the cgroup: if the iptables revoke
         // raises an error we want it surfaced before we lose the
         // ability to introspect.
-        if let Some(record) = handle.network_attachment.as_ref() {
+        for record in handle.network_attachments.iter().rev() {
             if let Err(err) = attacher.detach(record) {
                 tracing::warn!(
                     container_id = %id,
+                    network_name = %record.network_name,
                     error = %err,
                     "network detach failed during delete; continuing with cgroup + state cleanup"
                 );
@@ -434,8 +465,8 @@ mod tests {
             state,
             pid,
             created_at: SystemTime::UNIX_EPOCH,
-            network_spec: None,
-            network_attachment: None,
+            network_specs: Vec::new(),
+            network_attachments: Vec::new(),
             stdout_log_path: None,
             stderr_log_path: None,
             exit_code: None,

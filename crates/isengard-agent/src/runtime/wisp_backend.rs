@@ -213,34 +213,61 @@ pub fn port_spec_to_wisp(p: &PortSpec) -> wisp::PortPublish {
     }
 }
 
-/// Translate the network bits of a [`ContainerCreateSpec`] into wisp's
-/// [`wisp::NetworkSpec`]. Returns `None` when the agent didn't ask for
-/// a network and didn't publish any ports: wisp treats those containers
-/// as "no network namespace plumbing" and `Runtime::create` (no
-/// `_with_network` variant) is what we want.
+/// Translate the network bits of a [`ContainerCreateSpec`] into a list
+/// of wisp [`wisp::NetworkSpec`]s, one per declared network, preserving
+/// declaration order. Returns an empty Vec when the agent didn't ask
+/// for a network and didn't publish any ports: wisp treats those
+/// containers as "no network namespace plumbing" and `Runtime::create`
+/// (no `_with_network` variant) is what we want.
 ///
-/// Multi-network handling: wisp's [`wisp::NetworkAttacher`] supports
-/// exactly one primary network at create-time. Secondary networks are
-/// deferred to dispatch B2's `connect_network`. Here we pick the first
-/// declared network as primary; the WispBackend impl iterates the rest
-/// and would call `connect_network` on each (which dispatch B2 stubs as
-/// "not supported in 0.4; recreate the container"; live network attach
-/// is a 0.5 stretch goal).
-pub fn spec_to_network_spec(spec: &ContainerCreateSpec) -> Option<wisp::NetworkSpec> {
+/// Compose-spec semantics: a service declaring `networks: [a, b]` must
+/// be attached to BOTH `a` and `b`. The runtime invokes the attacher
+/// once per spec at start time, threading `eth_index` so each veth
+/// lands on `eth0`, `eth1`, ... in declaration order.
+///
+/// Port publishing rule: all declared ports attach to the PRIMARY
+/// network only (index 0). Multi-network compose services that want
+/// per-network port publishing aren't expressible in compose's port
+/// shape anyway: ports default to the primary attachment in dockerd
+/// too. Secondary networks carry no `ports`.
+pub fn spec_to_network_specs(spec: &ContainerCreateSpec) -> Vec<wisp::NetworkSpec> {
     if spec.networks.is_empty() && spec.ports.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let network_name = spec
-        .networks
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "wisp-default".to_string());
-    let ports = spec.ports.iter().map(port_spec_to_wisp).collect();
-    Some(wisp::NetworkSpec {
-        network_name,
-        ports,
-        resolv_source: wisp::ResolvSource::HostCopy,
-    })
+
+    // Names to materialise. If no explicit networks but ports are
+    // declared, synthesise the default network so the operator's
+    // `--port` (or compose `ports:`) still publishes correctly.
+    let names: Vec<String> = if spec.networks.is_empty() {
+        vec!["wisp-default".to_string()]
+    } else {
+        spec.networks.clone()
+    };
+
+    let primary_ports: Vec<wisp::PortPublish> = spec.ports.iter().map(port_spec_to_wisp).collect();
+
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(idx, name)| wisp::NetworkSpec {
+            network_name: name,
+            ports: if idx == 0 {
+                primary_ports.clone()
+            } else {
+                Vec::new()
+            },
+            resolv_source: wisp::ResolvSource::HostCopy,
+        })
+        .collect()
+}
+
+/// Legacy helper: returns the primary [`wisp::NetworkSpec`], i.e. the
+/// first entry of [`spec_to_network_specs`], or `None` when the
+/// container needs no networking. Kept for callers that only need to
+/// answer "does this spec want a network namespace?" without
+/// materialising the full Vec.
+pub fn spec_to_network_spec(spec: &ContainerCreateSpec) -> Option<wisp::NetworkSpec> {
+    spec_to_network_specs(spec).into_iter().next()
 }
 
 /// Default subnet for the wisp default bridge. Operators can override
@@ -317,8 +344,18 @@ pub struct WispBackend {
     runtime: Arc<wisp::Runtime>,
     image_client: Arc<wisp_image::Client>,
     state_dir: PathBuf,
+    /// Multi-network attacher: holds a map of every network the agent
+    /// has ensured (`network_name -> wisp_net::Network`). Each compose
+    /// reconcile that mentions a new network calls
+    /// [`Self::ensure_bridge`] which registers the result here, so by
+    /// the time `start_container` runs every declared network is
+    /// resolvable from `spec.network_name`. Kept inside a `Mutex<Option<>>`
+    /// so we can `take()` it into `spawn_blocking` (the trait's
+    /// `&mut self` methods preclude shared `Arc` access) and put it
+    /// back when start returns.
     #[cfg(target_os = "linux")]
-    net_attacher: std::sync::Mutex<Option<Box<dyn wisp::NetworkAttacher + Send>>>,
+    net_attacher:
+        std::sync::Mutex<Option<Box<crate::runtime::wisp_backend_attacher::MultiNetAttacher>>>,
     event_tx: tokio::sync::broadcast::Sender<RuntimeEvent>,
 }
 
@@ -457,34 +494,36 @@ impl WispBackend {
     }
 
     #[cfg(target_os = "linux")]
-    fn build_default_attacher(state_dir: &Path) -> Option<Box<dyn wisp::NetworkAttacher + Send>> {
-        let subnet_str = std::env::var("WISP_DEFAULT_SUBNET")
-            .unwrap_or_else(|_| DEFAULT_NETWORK_SUBNET.to_string());
-        let subnet: ipnet::Ipv4Net = match subnet_str.parse() {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "WISP_DEFAULT_SUBNET parse failed, networking disabled"
-                );
-                return None;
-            }
-        };
-        let network = match wisp_net::Network::new(DEFAULT_NETWORK_NAME, subnet) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(error = %e, "wisp Network::new failed, networking disabled");
-                return None;
-            }
-        };
-        let ipam_dir = state_dir.join("networks").join(DEFAULT_NETWORK_NAME);
-        if let Err(e) = std::fs::create_dir_all(&ipam_dir) {
-            tracing::warn!(error = %e, "ipam dir create failed, networking disabled");
+    fn build_default_attacher(
+        state_dir: &Path,
+    ) -> Option<Box<crate::runtime::wisp_backend_attacher::MultiNetAttacher>> {
+        let ipam_root = state_dir.join("networks");
+        if let Err(e) = std::fs::create_dir_all(&ipam_root) {
+            tracing::warn!(error = %e, "ipam root create failed, networking disabled");
             return None;
         }
-        Some(Box::new(
-            crate::runtime::wisp_backend_attacher::WispNetAttacher::new(network, &ipam_dir),
-        ))
+        let mut attacher = crate::runtime::wisp_backend_attacher::MultiNetAttacher::new(&ipam_root);
+
+        // Pre-register the default network so the legacy "ports without
+        // an explicit network" path keeps working without an explicit
+        // `ensure_bridge` first.
+        let subnet_str = std::env::var("WISP_DEFAULT_SUBNET")
+            .unwrap_or_else(|_| DEFAULT_NETWORK_SUBNET.to_string());
+        if let Ok(subnet) = subnet_str.parse::<ipnet::Ipv4Net>() {
+            if let Ok(network) = wisp_net::Network::new(DEFAULT_NETWORK_NAME, subnet) {
+                attacher.register_network(network);
+            } else {
+                tracing::warn!(
+                    "wisp Network::new failed for default; default still resolvable when explicitly ensured"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "WISP_DEFAULT_SUBNET parse failed; default network resolution deferred to ensure_bridge"
+            );
+        }
+
+        Some(Box::new(attacher))
     }
 
     /// Auto-create the bridge + iptables rules for `network_name` when
@@ -570,6 +609,18 @@ impl WispBackend {
             write_network_registry(&registry_path, &entry)?;
         }
 
+        // 7. Register this network with the multi-net attacher so the
+        //    next `start_container` for any container declaring it can
+        //    dispatch `attach()` by name. Idempotent: re-registering
+        //    the same name overwrites the cached `wisp_net::Network`
+        //    (which has the same subnet by virtue of step 3's conflict
+        //    detection).
+        if let Ok(mut guard) = self.net_attacher.lock() {
+            if let Some(att) = guard.as_mut() {
+                att.register_network(network.clone());
+            }
+        }
+
         Ok(network)
     }
 
@@ -623,7 +674,7 @@ impl WispBackend {
             wisp::ContainerState::Stopped => ContainerState::Exited,
         };
         let mut network_settings = NetworkSettings::default();
-        if let Some(rec) = handle.network_attachment.as_ref() {
+        for rec in handle.network_attachments.iter() {
             network_settings
                 .ip_addresses
                 .insert(rec.network_name.clone(), std::net::IpAddr::V4(rec.ipv4));
@@ -768,37 +819,45 @@ impl RuntimeBackend for WispBackend {
         // synchronous. They don't fork the entrypoint (that's `start`),
         // so calling them on the tokio runtime thread is safe: no clone3
         // here.
-        let network_spec = spec_to_network_spec(spec);
+        //
+        // Multi-network: compose-spec `networks: [a, b]` lands in
+        // `spec.networks` and translates into one
+        // [`wisp::NetworkSpec`] per name. We pre-ensure every bridge
+        // before clone3 fires and pass the full Vec to
+        // `Runtime::create_with_networks`. The runtime persists the
+        // list under `state.json::network_specs` and the lifecycle
+        // attaches each (eth0, eth1, ...) during start.
+        let network_specs = spec_to_network_specs(spec);
         let runtime = self.runtime.clone();
         let id = spec.container_name.clone();
         let bundle_clone = bundle_dir.clone();
-        match network_spec {
-            Some(net) => {
-                // Phase 0.5: pre-flight ensure the bridge + iptables for
-                // this network exist on the host before clone3 fires.
-                // The persisted registry under
-                // `<state_dir>/networks/<name>/network.json` lets later
-                // ensures reuse the same subnet, and detects an
-                // operator picking a conflicting subnet for the same
-                // network name.
-                #[cfg(target_os = "linux")]
-                {
+        if network_specs.is_empty() {
+            runtime
+                .create(&id, &bundle_clone)
+                .map_err(|e| RuntimeError::Container(format!("{e}")))?;
+        } else {
+            // Phase 0.5: pre-flight ensure the bridge + iptables for
+            // each network exist on the host before clone3 fires. The
+            // persisted registry under
+            // `<state_dir>/networks/<name>/network.json` lets later
+            // ensures reuse the same subnet, and detects an operator
+            // picking a conflicting subnet for the same network name.
+            #[cfg(target_os = "linux")]
+            {
+                for net in &network_specs {
                     self.ensure_bridge(&net.network_name, None)?;
                 }
-                runtime
-                    .create_with_network(&id, &bundle_clone, net)
-                    .map_err(|e| RuntimeError::Container(format!("{e}")))?
             }
-            None => runtime
-                .create(&id, &bundle_clone)
-                .map_err(|e| RuntimeError::Container(format!("{e}")))?,
-        };
+            runtime
+                .create_with_networks(&id, &bundle_clone, network_specs)
+                .map_err(|e| RuntimeError::Container(format!("{e}")))?;
+        }
         Ok(spec.container_name.clone())
     }
 
     async fn start_container(&self, id: &str) -> Result<(), RuntimeError> {
         let spec = self.read_spec(id)?;
-        let needs_network = spec_to_network_spec(&spec).is_some();
+        let needs_network = !spec_to_network_specs(&spec).is_empty();
         let runtime = self.runtime.clone();
         let id_owned = id.to_string();
 
@@ -819,7 +878,13 @@ impl RuntimeBackend for WispBackend {
                     RuntimeError::Network("wisp default network attacher not available".to_string())
                 })?;
                 let join_result = tokio::task::spawn_blocking(move || {
-                    let res = runtime.start_with_attacher(&id_owned, attacher.as_mut());
+                    // Explicit coercion to `&mut dyn NetworkAttacher`:
+                    // attacher.as_mut() is `&mut MultiNetAttacher`; the
+                    // runtime API takes `&mut dyn wisp::NetworkAttacher`.
+                    let res = {
+                        let dyn_att: &mut dyn wisp::NetworkAttacher = attacher.as_mut();
+                        runtime.start_with_attacher(&id_owned, dyn_att)
+                    };
                     (attacher, res)
                 })
                 .await
@@ -905,7 +970,10 @@ impl RuntimeBackend for WispBackend {
                 .take();
             if let Some(mut attacher) = attacher_opt {
                 let join_result = tokio::task::spawn_blocking(move || {
-                    let res = runtime.delete_with_attacher(&id_owned, force, attacher.as_mut());
+                    let res = {
+                        let dyn_att: &mut dyn wisp::NetworkAttacher = attacher.as_mut();
+                        runtime.delete_with_attacher(&id_owned, force, dyn_att)
+                    };
                     (attacher, res)
                 })
                 .await
@@ -978,14 +1046,17 @@ impl RuntimeBackend for WispBackend {
     }
 
     async fn connect_network(&self, container_id: &str, network: &str) -> Result<(), RuntimeError> {
-        // wisp wires the primary network at create_container time via
-        // spec.networks[0]. The compose_apply path then loops the
-        // declared networks calling connect_network for each. Treat the
-        // already-attached primary as a no-op so the canonical
-        // single-network compose case succeeds. Live attach for
-        // additional networks remains unimplemented.
+        // Wisp attaches every declared network at create_container time
+        // (compose-spec `networks: [a, b]` -> Vec<NetworkSpec> passed to
+        // `Runtime::create_with_networks`). The compose_apply path then
+        // loops the declared networks calling connect_network for each;
+        // treat any name that's already on the recorded list as a no-op
+        // so the canonical multi-network compose case succeeds without
+        // a refactor of compose_apply's loop. Live attach for networks
+        // the spec didn't declare remains unimplemented because that
+        // would mean rebuilding the netns with a new veth post-start.
         let spec = self.read_spec(container_id)?;
-        if spec.networks.first().map(String::as_str) == Some(network) {
+        if spec.networks.iter().any(|n| n == network) {
             return Ok(());
         }
         Err(RuntimeError::Network(
@@ -1057,6 +1128,14 @@ impl RuntimeBackend for WispBackend {
 
     fn name(&self) -> &'static str {
         "wisp"
+    }
+
+    fn supports_live_network_attach(&self) -> bool {
+        // Wisp wires every declared network at create_container time
+        // (see `create_with_networks`); live attach would mean
+        // reconstructing the netns post-start. compose_apply checks
+        // this flag and skips its `connect_network` loop for wisp.
+        false
     }
 
     /// Wisp-specific orphan sweep. See
@@ -1854,6 +1933,71 @@ mod tests {
         assert_eq!(n.network_name, "wisp-default");
         assert_eq!(n.ports.len(), 1);
         assert_eq!(n.ports[0].host_port, 18080);
+    }
+
+    #[test]
+    fn spec_to_network_specs_emits_empty_when_no_network_or_ports() {
+        let s = empty_spec("c", "alpine:3.19");
+        let specs = spec_to_network_specs(&s);
+        assert!(
+            specs.is_empty(),
+            "no-network spec must yield zero NetworkSpecs"
+        );
+    }
+
+    #[test]
+    fn spec_to_network_specs_preserves_declaration_order() {
+        // Lausanne repro: a `servarr` service declares
+        // `networks: [isengard-proxy, servarr]`. The full Vec must come
+        // back in that exact order so eth0 lands on isengard-proxy
+        // (the network that carries the front-door traffic + ports).
+        let mut s = empty_spec("c", "linuxserver/overseerr");
+        s.networks = vec!["isengard-proxy".into(), "servarr".into()];
+        let specs = spec_to_network_specs(&s);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].network_name, "isengard-proxy");
+        assert_eq!(specs[1].network_name, "servarr");
+    }
+
+    #[test]
+    fn spec_to_network_specs_attaches_ports_only_to_primary() {
+        // Compose-spec doesn't carry per-network port lists; ports
+        // declared on the service publish via the primary attachment
+        // (eth0 / the first declared network) only.
+        let mut s = empty_spec("c", "linuxserver/overseerr");
+        s.networks = vec!["isengard-proxy".into(), "servarr".into()];
+        s.ports = vec![PortSpec {
+            host_ip: None,
+            host_port: 5055,
+            container_port: 5055,
+            protocol: SpecPortProtocol::Tcp,
+        }];
+        let specs = spec_to_network_specs(&s);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].network_name, "isengard-proxy");
+        assert_eq!(specs[0].ports.len(), 1);
+        assert_eq!(specs[0].ports[0].host_port, 5055);
+        // Secondary network carries no ports.
+        assert_eq!(specs[1].network_name, "servarr");
+        assert!(specs[1].ports.is_empty());
+    }
+
+    #[test]
+    fn spec_to_network_specs_synthesises_default_for_port_only_compose() {
+        // `ports: ['8080:80']` with no `networks:` block falls back to
+        // the wisp-default network just like the legacy single-spec
+        // translator.
+        let mut s = empty_spec("c", "alpine:3.19");
+        s.ports = vec![PortSpec {
+            host_ip: None,
+            host_port: 8080,
+            container_port: 80,
+            protocol: SpecPortProtocol::Tcp,
+        }];
+        let specs = spec_to_network_specs(&s);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].network_name, "wisp-default");
+        assert_eq!(specs[0].ports.len(), 1);
     }
 
     #[test]

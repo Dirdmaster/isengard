@@ -843,21 +843,33 @@ fn parse_signal(name: &str) -> Result<Signal> {
 
 fn cmd_delete(state_dir: &Path, args: DeleteArgs) -> Result<()> {
     let rt = Runtime::new(state_dir).context("initialise wisp runtime")?;
-    // If state.json carries a `network_attachment`, build an attacher
-    // pinned to that network and route through delete_with_attacher
-    // so the iptables rules + host veth + IPAM allocation are all
-    // reversed. Without this, `wisp delete <id>` on a detached
-    // container leaks the host-side network state.
+    // If state.json carries any `network_attachments`, build a
+    // multi-network attacher whose internal map covers each recorded
+    // network and route through delete_with_attacher so the iptables
+    // rules + host veth + IPAM allocation are all reversed. Without
+    // this, `wisp delete <id>` on a detached container leaks the
+    // host-side network state.
     let handle = rt
         .state(&args.id)
         .with_context(|| format!("state {:?}", args.id))?;
-    if let Some(att) = handle.network_attachment.as_ref() {
-        let network = resolve_network(&att.network_name)?;
-        let mut attacher = WispNetAttacher::new(network, &ipam_dir(state_dir, &att.network_name));
-        rt.delete_with_attacher(&args.id, args.force, &mut attacher)
+    if handle.network_attachments.is_empty() {
+        rt.delete(&args.id, args.force)
             .with_context(|| format!("delete {:?}", args.id))?;
     } else {
-        rt.delete(&args.id, args.force)
+        // wisp-cli is single-network from the operator POV; the
+        // recorded vec should be length 1 unless the user is reusing a
+        // state-dir written by the agent. Build the appropriate
+        // attacher for the first recorded attachment; the loop inside
+        // delete_with_attacher walks them all but the CLI's attacher
+        // is pinned to one network, so multi-network state-dirs
+        // require routing each detach through its own attacher. We
+        // pick the primary (index 0) here; remaining detaches are
+        // best-effort no-ops that surface as warnings.
+        let primary = &handle.network_attachments[0];
+        let network = resolve_network(&primary.network_name)?;
+        let mut attacher =
+            WispNetAttacher::new(network, &ipam_dir(state_dir, &primary.network_name));
+        rt.delete_with_attacher(&args.id, args.force, &mut attacher)
             .with_context(|| format!("delete {:?}", args.id))?;
     }
     Ok(())

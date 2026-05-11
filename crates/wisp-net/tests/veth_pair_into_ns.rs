@@ -59,6 +59,7 @@ fn veth_pair_moves_into_fresh_ns_with_addr() {
         ip,
         net.subnet.prefix_len(),
         net.gateway,
+        "eth0",
     );
 
     // Always tear down before unwrapping so a failure doesn't leak.

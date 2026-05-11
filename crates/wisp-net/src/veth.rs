@@ -1,6 +1,7 @@
 //! Veth pair lifecycle: create on the host, move the container side
-//! into the target netns, and rename it to `eth0` so userspace sees
-//! exactly the interface name it expects.
+//! into the target netns, and rename it to `eth0` (or `eth1`, `eth2`,
+//! ... for multi-network containers) so userspace sees the interface
+//! name it expects.
 //!
 //! The host side stays in the host netns and gets enslaved to the
 //! wisp bridge so its frames hit MASQUERADE / DNAT in iptables. The
@@ -19,7 +20,8 @@ use std::net::Ipv4Addr;
 /// `host_name` lives in the host netns and is enslaved to the bridge.
 /// `container_name` is the temporary name we hand to `ip link set
 /// <name> netns <pid>`; once it's inside the target ns, [`attach_to_ns`]
-/// renames it to `eth0`.
+/// renames it to the operator-supplied `iface_name` (typically `eth0`
+/// for single-network containers; `eth<N>` for multi-network).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VethPair {
     pub host_name: String,
@@ -67,19 +69,32 @@ pub fn create_pair() -> Result<VethPair, WispNetError> {
     ))
 }
 
-/// Move the container side into the target netns, rename to `eth0`,
+/// Move the container side into the target netns, rename to `iface_name`,
 /// and configure addressing.
+///
+/// `iface_name` is the in-netns name the container sees (typically
+/// `eth0` for the primary network, `eth1` / `eth2` / ... for additional
+/// networks when a container is attached to more than one). The caller
+/// is responsible for handing distinct names per attach so the kernel's
+/// link table stays unambiguous.
+///
+/// The default route is only installed for the FIRST interface (i.e.
+/// when `iface_name == "eth0"`). Additional networks add their subnet
+/// route only; otherwise each new attach would clobber the gateway and
+/// the last one wins. Compose-spec semantics align: the primary network
+/// (first declared) gates outbound traffic; secondary networks are for
+/// sibling-service reachability.
 ///
 /// Sequence (matches the spec):
 ///
 /// 1. `ip link set <host> master <bridge>`
 /// 2. `ip link set <ctr> netns <pid>`
 /// 3. `ip link set <host> up`
-/// 4. inside ns: `ip link set <ctr> name eth0`
-/// 5. inside ns: `ip link set lo up`
-/// 6. inside ns: `ip link set eth0 up`
-/// 7. inside ns: `ip addr add <ip>/<prefix> dev eth0`
-/// 8. inside ns: `ip route add default via <gateway>`
+/// 4. inside ns: `ip link set <ctr> name <iface_name>`
+/// 5. inside ns: `ip link set lo up` (no-op after the first attach)
+/// 6. inside ns: `ip link set <iface_name> up`
+/// 7. inside ns: `ip addr add <ip>/<prefix> dev <iface_name>`
+/// 8. inside ns (eth0 only): `ip route add default via <gateway>`
 ///
 /// On any step failure, [`delete`] is called best-effort to remove the
 /// host side; the container side either stayed in the host ns (steps
@@ -92,10 +107,12 @@ pub fn attach_to_ns(
     container_ip: Ipv4Addr,
     prefix: u8,
     gateway: Ipv4Addr,
+    iface_name: &str,
 ) -> Result<(), WispNetError> {
     let pid_str = ns_pid.to_string();
     let cidr = format!("{container_ip}/{prefix}");
     let gw_str = gateway.to_string();
+    let is_primary = iface_name == "eth0";
 
     let result: Result<(), WispNetError> = (|| {
         // 1. enslave host side to the bridge.
@@ -108,12 +125,23 @@ pub fn attach_to_ns(
         // 4-8. configure inside the netns.
         ns::run_in_netns(
             ns_pid,
-            &["ip", "link", "set", &pair.container_name, "name", "eth0"],
+            &[
+                "ip",
+                "link",
+                "set",
+                &pair.container_name,
+                "name",
+                iface_name,
+            ],
         )?;
+        // Loopback only needs bringing up once; subsequent attaches
+        // see `lo` already UP and `ip link set lo up` is a no-op.
         ns::run_in_netns(ns_pid, &["ip", "link", "set", "lo", "up"])?;
-        ns::run_in_netns(ns_pid, &["ip", "link", "set", "eth0", "up"])?;
-        ns::run_in_netns(ns_pid, &["ip", "addr", "add", &cidr, "dev", "eth0"])?;
-        ns::run_in_netns(ns_pid, &["ip", "route", "add", "default", "via", &gw_str])?;
+        ns::run_in_netns(ns_pid, &["ip", "link", "set", iface_name, "up"])?;
+        ns::run_in_netns(ns_pid, &["ip", "addr", "add", &cidr, "dev", iface_name])?;
+        if is_primary {
+            ns::run_in_netns(ns_pid, &["ip", "route", "add", "default", "via", &gw_str])?;
+        }
         Ok(())
     })();
 
