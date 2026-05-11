@@ -17,6 +17,7 @@ pub mod enroll;
 pub mod enroll_diagnosis;
 pub mod events;
 pub mod labels;
+pub mod lifecycle_hooks;
 pub mod logs;
 pub mod mdns;
 pub mod proxy;
