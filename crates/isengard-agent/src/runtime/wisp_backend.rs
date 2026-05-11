@@ -374,20 +374,29 @@ impl WispBackend {
 
         let (event_tx, _rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(1024);
 
-        // Phase 0.4 dispatch C3: spawn a poll-and-diff emitter loop so
-        // RuntimeBackend::stream_events fires Start / Stop / Die events
-        // even though wisp itself has no native event channel. The
-        // loop snapshots Runtime::list every 2s and diffs against the
-        // previous snapshot.
+        // Wave 3.B: replace the 2s poll-and-diff emitter loop with a
+        // notify-driven `cgroup.events` watcher. Kernel writes the
+        // `populated 0/1` line in `<cgroup_root>/<id>/cgroup.events`
+        // whenever the cgroup's process set goes empty / non-empty, so
+        // inotify fires within microseconds of a container start or
+        // die. Latency drops from ~1s avg (half the poll interval) to
+        // <100ms; fast-cycling containers that started + died inside a
+        // single 2s window are no longer invisible.
+        //
+        // Production wires the watcher to the real cgroup root + the
+        // wisp Runtime (for exit-code lookup on Die events). Tests
+        // substitute a tempdir-backed `CgroupRoot` + a fake exit-code
+        // source; see `cgroup_events_loop` and its unit tests.
         let runtime_arc = Arc::new(runtime);
         {
             let rt_for_loop = runtime_arc.clone();
             let tx_for_loop = event_tx.clone();
+            let cgroup_root_for_loop = PathBuf::from(&cgroup_root);
             tokio::spawn(async move {
-                event_emitter_loop(
-                    WispRuntimeListSource(rt_for_loop),
+                cgroup_events_loop(
+                    cgroup_root_for_loop,
+                    WispExitCodeSource(rt_for_loop),
                     tx_for_loop,
-                    std::time::Duration::from_secs(2),
                 )
                 .await;
             });
@@ -1256,140 +1265,262 @@ fn last_n_lines(bytes: &[u8], tail_lines: u32) -> Vec<u8> {
     bytes[cut..].to_vec()
 }
 
-/// Phase 0.4 dispatch C3: source of container snapshots that
-/// [`event_emitter_loop`] polls. A trait so tests can substitute a
-/// fake list without spinning up a real `wisp::Runtime`.
+/// Wave 3.B: source of per-container exit codes, used by
+/// [`cgroup_events_loop`] to enrich Die events.
 ///
-/// Phase 0.5: the snapshot tuple grows an `Option<i32>` exit code so
-/// the Die event can carry the captured status. Production callers
-/// run `Runtime::state(id)` for each running container so the lazy
-/// state-transition + exit_status read both fire on every tick.
-trait RuntimeListSource: Send + Sync + 'static {
-    /// Best-effort snapshot of every wisp container's id + state +
-    /// captured exit code (when known). Returns an empty Vec on
-    /// failure (the emitter shouldn't propagate transient list errors
-    /// as a stream of events).
-    fn snapshot(&self) -> Vec<(String, wisp::ContainerState, Option<i32>)>;
+/// A trait so tests can substitute a fake without spinning up a real
+/// `wisp::Runtime`. Production wires this to
+/// [`WispExitCodeSource`], which calls `Runtime::state(id)`: that's
+/// the call that triggers the lazy `/proc/<pid>` check + reads the
+/// per-container `exit_status` file the lifecycle reaper writes.
+trait ExitCodeSource: Send + Sync + 'static {
+    /// Best-effort lookup of `id`'s exit code. Returns `None` when:
+    /// - the runtime has no record of `id` (e.g. test fakes that
+    ///   don't model the container)
+    /// - the reaper hasn't written `exit_status` yet (race between
+    ///   `/proc/<pid>` going away and the reaper's tick)
+    /// - any IO / state read error: we'd rather emit a Die with
+    ///   `None` than block the event loop on a transient read.
+    fn exit_code(&self, id: &str) -> Option<i32>;
 }
 
-/// Production [`RuntimeListSource`] backed by the real wisp runtime.
-struct WispRuntimeListSource(Arc<wisp::Runtime>);
+/// Production [`ExitCodeSource`] backed by the real wisp runtime.
+struct WispExitCodeSource(Arc<wisp::Runtime>);
 
-impl RuntimeListSource for WispRuntimeListSource {
-    fn snapshot(&self) -> Vec<(String, wisp::ContainerState, Option<i32>)> {
-        // Use Runtime::state per id so the lazy Running -> Stopped
-        // transition fires AND the exit_status file is read back into
-        // the handle. Runtime::list alone wouldn't trigger the
-        // /proc/<pid> check or the exit_status read.
-        let ids: Vec<String> = match self.0.list() {
-            Ok(handles) => handles.into_iter().map(|h| h.id).collect(),
-            Err(_) => return Vec::new(),
-        };
-        ids.into_iter()
-            .filter_map(|id| match self.0.state(&id) {
-                Ok(h) => Some((h.id, h.state, h.exit_code)),
-                Err(_) => None,
-            })
-            .collect()
+impl ExitCodeSource for WispExitCodeSource {
+    fn exit_code(&self, id: &str) -> Option<i32> {
+        self.0.state(id).ok().and_then(|h| h.exit_code)
     }
 }
 
-/// Poll-and-diff emitter loop. Snapshots `source` on each tick, diffs
-/// against the previous snapshot, and broadcasts Start / Die / Stop
-/// events for every transition.
+/// Wave 3.B: parse the kernel's `cgroup.events` file content and
+/// return whether the cgroup is populated (has at least one process).
 ///
-/// Transitions emitted:
-/// - new id seen in `Running`: Start
-/// - id transitions Running -> Stopped: Die. Phase 0.5: the exit
-///   code is taken from the snapshot's `Option<i32>` (set by
-///   `Runtime::state` reading the per-container `exit_status` file
-///   the lifecycle reaper writes). It may be `None` if the reaper
-///   hasn't reaped yet (race between /proc/<pid> going away and the
-///   reaper's 500ms tick); the emitter doesn't try to backfill on
-///   later ticks because the diff has already moved on.
-/// - id disappears entirely: Stop
+/// Format (cgroup v2, kernel >= 4.15):
+/// ```text
+/// populated <0|1>
+/// frozen <0|1>          # kernel >= 5.2
+/// ```
+/// The fields are space-separated; any unknown lines are ignored.
+/// Returns `None` when the `populated` line is missing or unparseable
+/// (caller treats this as "no state change to emit").
+fn parse_cgroup_events(content: &str) -> Option<bool> {
+    for line in content.lines() {
+        let mut parts = line.split_ascii_whitespace();
+        match (parts.next(), parts.next()) {
+            (Some("populated"), Some("1")) => return Some(true),
+            (Some("populated"), Some("0")) => return Some(false),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Best-effort read + parse of `<dir>/cgroup.events`. Returns `None`
+/// when the file is missing (container dir was just removed) or
+/// unreadable (transient IO error: the next notify event will retry).
+fn read_cgroup_events(dir: &Path) -> Option<bool> {
+    let content = std::fs::read_to_string(dir.join("cgroup.events")).ok()?;
+    parse_cgroup_events(&content)
+}
+
+/// Wave 3.B: notify-driven event emitter. Replaces the Phase 0.4 2s
+/// poll loop with an inotify-backed watcher on `<cgroup_root>` so
+/// container state changes surface within ~milliseconds rather than
+/// up to 2s after the kernel saw them.
 ///
-/// All other transitions (Created -> Running for example) are
-/// uninteresting to the agent's deployment driver in 0.4 and stay
-/// silent. The emitter exits cleanly when the broadcast channel has
-/// no receivers AND no senders (drop of WispBackend); a missed receive
-/// (lagged) is fine, broadcast::send swallows it.
-async fn event_emitter_loop<S: RuntimeListSource>(
+/// Mechanics:
+/// 1. Initial sweep: walks `<cgroup_root>/*/cgroup.events`, records
+///    each container's last-seen populated bit, and emits a Start for
+///    every cgroup that's already populated (covers agent restart
+///    with running containers).
+/// 2. Recursive notify watcher on `<cgroup_root>` catches:
+///    - Modify events on `<id>/cgroup.events` -> re-read, compare,
+///      emit Start (populated 0 -> 1) or Die (populated 1 -> 0)
+///    - Remove events on `<id>` or `<id>/cgroup.events` -> emit Stop
+///      (the wisp lifecycle removes the cgroup dir after reap)
+/// 3. On Die: the exit code comes from `source.exit_code(id)`. The
+///    reaper writes `exit_status` shortly after PID 1 exits but it
+///    can lag the kernel's `populated 0` write by a few hundred ms;
+///    we retry the lookup up to `EXIT_CODE_BACKFILL_BUDGET` to give
+///    the reaper time to land the file before the Die event fires.
+///
+/// The loop runs forever; the spawned task is dropped when
+/// `WispBackend` itself drops (the broadcast Sender goes away).
+///
+/// Linux-only mechanics: cgroup.events is a kernel pseudo-file only
+/// on Linux. On Mac the cgroup root won't exist, so the watcher
+/// returns an error from notify::watch and the loop exits cleanly:
+/// the agent's wisp backend is itself linux-only past `create`, so
+/// the only state changes that could happen on Mac come from
+/// `start_container` / `stop_container` directly emitting events.
+async fn cgroup_events_loop<S: ExitCodeSource>(
+    cgroup_root: PathBuf,
     source: S,
     event_tx: tokio::sync::broadcast::Sender<RuntimeEvent>,
-    tick: std::time::Duration,
 ) {
-    let mut prev: std::collections::BTreeMap<String, wisp::ContainerState> =
-        std::collections::BTreeMap::new();
-    let mut interval = tokio::time::interval(tick);
-    // Skip the first immediate tick so the very first snapshot reflects
-    // a steady state, not an instantaneous post-construction blip.
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Canonicalize so paths returned by notify (which canonicalize on
+    // both inotify and FSEvents) line up with the prefix we strip when
+    // identifying the container id. Without this, macOS's
+    // `/var/folders/...` -> `/private/var/folders/...` symlink resolution
+    // makes `strip_prefix` fail and every event gets dropped.
+    let cgroup_root = std::fs::canonicalize(&cgroup_root).unwrap_or(cgroup_root);
 
-    loop {
-        interval.tick().await;
-
-        // No active subscribers AND we'd be sending into the void:
-        // exit. The broadcast Sender::receiver_count is 0 when nobody
-        // is listening; sending still works (returns Err(SendError)),
-        // but we save the snapshot work.
-        // We don't bail just because receiver_count is 0 right now,
-        // because subscribers may attach later; but if the channel is
-        // closed on the receive side (no senders elsewhere) the loop
-        // is moot. broadcast doesn't expose "closed" directly, so
-        // rely on send-failure as the close indicator: if send fails
-        // with no receivers and the count stays 0 across two ticks
-        // we'd still keep going. Acceptable: the loop is cheap.
-
-        let snapshot = source.snapshot();
-        let mut current: std::collections::BTreeMap<String, (wisp::ContainerState, Option<i32>)> =
-            std::collections::BTreeMap::new();
-        for (id, st, ex) in snapshot {
-            current.insert(id, (st, ex));
+    // 1. Initial sweep so a restart-with-running-containers agent
+    //    doesn't lose state. populated_state[id] = last-seen bool.
+    let mut populated_state: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&cgroup_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let id = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(populated) = read_cgroup_events(&path) {
+                populated_state.insert(id.clone(), populated);
+                if populated {
+                    let _ = event_tx.send(RuntimeEvent {
+                        container_id: id,
+                        event_type: RuntimeEventType::Start,
+                        timestamp: SystemTime::now(),
+                    });
+                }
+            }
         }
+    }
 
-        // New ids seen in Running: Start.
-        // Existing ids that transitioned Running -> Stopped: Die.
-        for (id, (state, exit_code)) in &current {
-            match prev.get(id) {
-                None if *state == wisp::ContainerState::Running => {
+    // 2. Set up the notify watcher. The mpsc channel bridges notify's
+    //    sync callback to our async loop. UnboundedSender::send never
+    //    blocks; events that arrive while we're processing a previous
+    //    one queue up cleanly.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                let _ = tx.send(event);
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "cgroup events watcher: failed to construct, falling back to no event stream"
+                );
+                return;
+            }
+        };
+    if let Err(e) =
+        notify::Watcher::watch(&mut watcher, &cgroup_root, notify::RecursiveMode::Recursive)
+    {
+        // On Mac the cgroup root doesn't exist; on Linux without
+        // cgroup v2 it might not either. Either way: nothing to
+        // watch, exit cleanly. The agent's lifecycle hooks still
+        // emit Start/Stop events directly.
+        tracing::debug!(
+            cgroup_root = %cgroup_root.display(),
+            error = %e,
+            "cgroup events watcher: watch failed, event loop exiting"
+        );
+        return;
+    }
+
+    // 3. Event-processing loop. Each notify event tells us a path
+    //    changed; we re-read that container's cgroup.events file and
+    //    compare populated against last seen.
+    while let Some(event) = rx.recv().await {
+        for path in &event.paths {
+            // Identify the container dir: skip events that don't fall
+            // under cgroup_root or aren't at depth 1 (cgroup.events
+            // lives at `<root>/<id>/cgroup.events`, so we care about
+            // depth-1 directories and their direct children).
+            let rel = match path.strip_prefix(&cgroup_root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let id = match rel.components().next() {
+                Some(std::path::Component::Normal(n)) => match n.to_str() {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let container_dir = cgroup_root.join(&id);
+
+            // Remove events: container dir going away. Emit Stop if
+            // we ever saw it populated; either way, forget it.
+            if matches!(event.kind, notify::EventKind::Remove(_)) && !container_dir.exists() {
+                if populated_state.remove(&id).is_some() {
+                    let _ = event_tx.send(RuntimeEvent {
+                        container_id: id.clone(),
+                        event_type: RuntimeEventType::Stop,
+                        timestamp: SystemTime::now(),
+                    });
+                }
+                continue;
+            }
+
+            // For Create/Modify, read the current populated bit.
+            let now_populated = match read_cgroup_events(&container_dir) {
+                Some(p) => p,
+                None => continue,
+            };
+            let was_populated = populated_state.get(&id).copied();
+            match (was_populated, now_populated) {
+                (None, true) | (Some(false), true) => {
+                    populated_state.insert(id.clone(), true);
                     let _ = event_tx.send(RuntimeEvent {
                         container_id: id.clone(),
                         event_type: RuntimeEventType::Start,
                         timestamp: SystemTime::now(),
                     });
                 }
-                Some(prev_state)
-                    if *prev_state == wisp::ContainerState::Running
-                        && *state == wisp::ContainerState::Stopped =>
-                {
+                (Some(true), false) => {
+                    populated_state.insert(id.clone(), false);
+                    // The reaper writes `exit_status` shortly after
+                    // PID 1 exits but the kernel's populated flip can
+                    // race ahead by a few hundred ms. Retry the
+                    // lookup briefly so the Die event carries the
+                    // code in the common case.
+                    let exit_code = wait_for_exit_code(&source, &id).await;
                     let _ = event_tx.send(RuntimeEvent {
                         container_id: id.clone(),
-                        event_type: RuntimeEventType::Die {
-                            exit_code: *exit_code,
-                        },
+                        event_type: RuntimeEventType::Die { exit_code },
                         timestamp: SystemTime::now(),
                     });
+                }
+                (None, false) => {
+                    // First sight of an empty cgroup: record state
+                    // but don't emit (no transition happened).
+                    populated_state.insert(id.clone(), false);
                 }
                 _ => {}
             }
         }
+    }
+}
 
-        // Disappeared ids: Stop.
-        for id in prev.keys() {
-            if !current.contains_key(id) {
-                let _ = event_tx.send(RuntimeEvent {
-                    container_id: id.clone(),
-                    event_type: RuntimeEventType::Stop,
-                    timestamp: SystemTime::now(),
-                });
-            }
+/// Maximum time `cgroup_events_loop` will wait for `exit_status` to
+/// land on disk before emitting a Die with `exit_code: None`. The
+/// reaper polls at 500ms so 600ms covers the worst case without
+/// holding the event loop hostage on a stuck reaper.
+const EXIT_CODE_BACKFILL_BUDGET: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Poll `source.exit_code(id)` up to [`EXIT_CODE_BACKFILL_BUDGET`],
+/// returning the first `Some` seen or `None` on timeout.
+async fn wait_for_exit_code<S: ExitCodeSource>(source: &S, id: &str) -> Option<i32> {
+    let deadline = tokio::time::Instant::now() + EXIT_CODE_BACKFILL_BUDGET;
+    loop {
+        if let Some(code) = source.exit_code(id) {
+            return Some(code);
         }
-
-        prev = current
-            .into_iter()
-            .map(|(id, (st, _ex))| (id, st))
-            .collect();
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -2234,180 +2365,264 @@ mod tests {
         assert_eq!(last_n_lines(b"a\nb\nc", 1), b"c".to_vec());
     }
 
-    /// Phase 0.4 dispatch C3: a fake [`RuntimeListSource`] backed by
-    /// an `Arc<Mutex<Vec<...>>>` so tests can mutate the snapshot
-    /// between ticks.
-    ///
-    /// Phase 0.5: tuples now include an optional exit code so the Die
-    /// event carries it.
-    type FakeSnapshot = Vec<(String, wisp::ContainerState, Option<i32>)>;
+    /// Wave 3.B: parse the kernel-format `cgroup.events` content.
+    /// Format is `populated <0|1>` followed by other key/value
+    /// pairs we ignore. Whitespace and unknown lines must not
+    /// confuse the parser.
+    #[test]
+    fn parse_cgroup_events_returns_populated_bit() {
+        assert_eq!(parse_cgroup_events("populated 1\nfrozen 0\n"), Some(true));
+        assert_eq!(parse_cgroup_events("populated 0\nfrozen 0\n"), Some(false));
+        // Just populated, no frozen line (kernel < 5.2).
+        assert_eq!(parse_cgroup_events("populated 1\n"), Some(true));
+        // Out-of-order; populated still wins.
+        assert_eq!(parse_cgroup_events("frozen 1\npopulated 0\n"), Some(false));
+        // Trailing whitespace, multiple spaces.
+        assert_eq!(parse_cgroup_events("populated  1  \n"), Some(true));
+        // Missing populated -> None.
+        assert_eq!(parse_cgroup_events("frozen 0\n"), None);
+        // Garbage -> None.
+        assert_eq!(parse_cgroup_events(""), None);
+        assert_eq!(parse_cgroup_events("populated yes\n"), None);
+    }
 
-    #[derive(Clone)]
-    struct FakeRuntimeList(std::sync::Arc<std::sync::Mutex<FakeSnapshot>>);
+    /// Wave 3.B: a fake [`ExitCodeSource`] backed by a `HashMap` so
+    /// tests can assert Die events carry the right exit code without
+    /// spinning up a real `wisp::Runtime`.
+    #[derive(Clone, Default)]
+    struct FakeExitCodes(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, i32>>>);
 
-    impl FakeRuntimeList {
-        fn new() -> Self {
-            Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
-        }
-        fn set(&self, items: FakeSnapshot) {
-            *self.0.lock().unwrap() = items;
+    impl FakeExitCodes {
+        fn set(&self, id: &str, code: i32) {
+            self.0.lock().unwrap().insert(id.to_string(), code);
         }
     }
 
-    impl RuntimeListSource for FakeRuntimeList {
-        fn snapshot(&self) -> FakeSnapshot {
-            self.0.lock().unwrap().clone()
+    impl ExitCodeSource for FakeExitCodes {
+        fn exit_code(&self, id: &str) -> Option<i32> {
+            self.0.lock().unwrap().get(id).copied()
         }
     }
 
-    /// Phase 0.4 dispatch C3: a brand-new container in Running state
-    /// triggers a Start event on the very first tick.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn event_emitter_detects_start() {
-        let fake = FakeRuntimeList::new();
-        fake.set(vec![(
-            "ctr-a".to_string(),
-            wisp::ContainerState::Running,
-            None,
-        )]);
+    /// Helper: write a `cgroup.events` file under
+    /// `<root>/<id>/cgroup.events` with the given populated bit.
+    fn write_cgroup_events(root: &Path, id: &str, populated: bool) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("cgroup.events"),
+            format!("populated {}\nfrozen 0\n", if populated { 1 } else { 0 }),
+        )
+        .unwrap();
+    }
+
+    /// Wave 3.B: a populated cgroup that already exists at startup
+    /// produces a Start event during the initial sweep. Mirrors the
+    /// "agent restart with running containers" case.
+    #[tokio::test]
+    async fn cgroup_events_initial_sweep_emits_start_for_populated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        write_cgroup_events(&root, "ctr-a", true);
+
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let _loop = tokio::spawn(cgroup_events_loop(root, FakeExitCodes::default(), tx));
 
-        let fake_for_loop = fake.clone();
-        let _loop_handle = tokio::spawn(async move {
-            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
-        });
-
-        // Advance virtual time to fire the first tick.
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("recv timed out")
             .expect("recv");
         assert_eq!(event.container_id, "ctr-a");
-        matches!(event.event_type, RuntimeEventType::Start);
+        assert!(matches!(event.event_type, RuntimeEventType::Start));
     }
 
-    /// Phase 0.4 dispatch C3: a Running container that flips to
-    /// Stopped triggers a Die event.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn event_emitter_detects_die() {
-        let fake = FakeRuntimeList::new();
-        fake.set(vec![(
-            "ctr-b".to_string(),
-            wisp::ContainerState::Running,
-            None,
-        )]);
+    /// Wave 3.B: creating a new `<root>/<id>/cgroup.events` with
+    /// populated=1 after the loop is running fires a Start event via
+    /// the notify watcher. This is the fast-cycling-container case
+    /// the old 2s poll loop would miss.
+    #[tokio::test]
+    async fn cgroup_events_detects_start_on_populated_flip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let root_for_loop = root.clone();
+        let _loop = tokio::spawn(cgroup_events_loop(
+            root_for_loop,
+            FakeExitCodes::default(),
+            tx,
+        ));
 
-        let fake_for_loop = fake.clone();
-        let _loop_handle = tokio::spawn(async move {
-            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
-        });
+        // Give notify a beat to install the inotify/FSEvents watch.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // First tick: Start.
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        write_cgroup_events(&root, "ctr-b", true);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
-            .expect("recv timed out")
-            .expect("recv");
-        matches!(event.event_type, RuntimeEventType::Start);
+            .expect("recv timed out (Start)")
+            .expect("recv (Start)");
+        assert_eq!(event.container_id, "ctr-b");
+        assert!(matches!(event.event_type, RuntimeEventType::Start));
+    }
 
-        // Flip to Stopped with a captured exit code, advance to the
-        // next tick. The Die event must carry the same code.
-        fake.set(vec![(
-            "ctr-b".to_string(),
-            wisp::ContainerState::Stopped,
-            Some(42),
-        )]);
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+    /// Wave 3.B: flipping `populated 1` -> `populated 0` in an
+    /// existing file produces a Die event carrying the exit code
+    /// the source returns.
+    #[tokio::test]
+    async fn cgroup_events_detects_die_with_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        write_cgroup_events(&root, "ctr-c", true);
+
+        let exits = FakeExitCodes::default();
+        exits.set("ctr-c", 42);
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let root_for_loop = root.clone();
+        let _loop = tokio::spawn(cgroup_events_loop(root_for_loop, exits, tx));
+
+        // Drain the initial Start emitted by the sweep.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv timed out (initial Start)")
+            .expect("recv (initial Start)");
+        assert!(matches!(first.event_type, RuntimeEventType::Start));
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        write_cgroup_events(&root, "ctr-c", false);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("recv timed out (Die)")
             .expect("recv (Die)");
-        assert_eq!(event.container_id, "ctr-b");
+        assert_eq!(event.container_id, "ctr-c");
         match event.event_type {
             RuntimeEventType::Die { exit_code } => assert_eq!(exit_code, Some(42)),
             other => panic!("expected Die, got {other:?}"),
         }
     }
 
-    /// Phase 0.5: when wisp's per-container reaper hasn't reaped yet
-    /// (race between /proc/<pid> going away and the reaper's 500ms
-    /// tick), the Die event still fires but with `exit_code: None`.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn wisp_backend_die_event_carries_exit_code() {
-        let fake = FakeRuntimeList::new();
-        fake.set(vec![(
-            "ctr-x".to_string(),
-            wisp::ContainerState::Running,
-            None,
-        )]);
+    /// Wave 3.B: when the reaper hasn't written `exit_status` yet
+    /// (source returns `None` throughout the backfill budget), the
+    /// Die event still fires but with `exit_code: None`. Documents
+    /// the SIGKILL race the old loop also surfaced.
+    #[tokio::test]
+    async fn cgroup_events_die_carries_none_when_exit_code_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        write_cgroup_events(&root, "ctr-d", true);
+
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let root_for_loop = root.clone();
+        let _loop = tokio::spawn(cgroup_events_loop(
+            root_for_loop,
+            FakeExitCodes::default(),
+            tx,
+        ));
 
-        let fake_for_loop = fake.clone();
-        let _loop_handle = tokio::spawn(async move {
-            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
-        });
+        // Drain Start.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
 
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        // Drain the Start event.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        write_cgroup_events(&root, "ctr-d", false);
 
-        // SIGKILL: encoded as -9 in the runtime, surfaces as Some(-9)
-        // in the Die event so the agent can distinguish a clean
-        // exit(0) from a signal kill.
-        fake.set(vec![(
-            "ctr-x".to_string(),
-            wisp::ContainerState::Stopped,
-            Some(-9),
-        )]);
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("recv timed out (Die)")
             .expect("recv (Die)");
         match event.event_type {
-            RuntimeEventType::Die { exit_code } => assert_eq!(exit_code, Some(-9)),
-            other => panic!("expected Die with negative code, got {other:?}"),
+            RuntimeEventType::Die { exit_code } => assert_eq!(exit_code, None),
+            other => panic!("expected Die, got {other:?}"),
         }
     }
 
-    /// Phase 0.4 dispatch C3: when an id disappears from the list
-    /// entirely (e.g. `remove_container` cleared its state-dir entry)
-    /// we emit Stop.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn event_emitter_detects_stop_when_removed() {
-        let fake = FakeRuntimeList::new();
-        fake.set(vec![(
-            "ctr-c".to_string(),
-            wisp::ContainerState::Running,
-            None,
-        )]);
+    /// Wave 3.B: removing the container's cgroup dir after the
+    /// kernel saw it populated emits Stop. Mirrors
+    /// `remove_container` cleanup.
+    #[tokio::test]
+    async fn cgroup_events_detects_stop_when_dir_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        write_cgroup_events(&root, "ctr-e", true);
+
         let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let root_for_loop = root.clone();
+        let _loop = tokio::spawn(cgroup_events_loop(
+            root_for_loop,
+            FakeExitCodes::default(),
+            tx,
+        ));
 
-        let fake_for_loop = fake.clone();
-        let _loop_handle = tokio::spawn(async move {
-            event_emitter_loop(fake_for_loop, tx, std::time::Duration::from_millis(100)).await;
-        });
+        // Drain initial Start.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
 
-        // First tick: Start.
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("recv timed out")
-            .expect("recv");
-        matches!(event.event_type, RuntimeEventType::Start);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        std::fs::remove_dir_all(root.join("ctr-e")).unwrap();
 
-        // Remove from snapshot, advance.
-        fake.set(Vec::new());
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        // We expect Stop within a few hundred ms (notify+fsync) but
+        // give the test a generous timeout to account for slower CI
+        // FS event backends.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("recv timed out (Stop)")
             .expect("recv (Stop)");
-        assert_eq!(event.container_id, "ctr-c");
-        matches!(event.event_type, RuntimeEventType::Stop);
+        assert_eq!(event.container_id, "ctr-e");
+        assert!(matches!(event.event_type, RuntimeEventType::Stop));
+    }
+
+    /// Wave 3.B: fast-cycling container: start and die both happen
+    /// inside a single 100ms window. The old 2s poll loop would
+    /// observe only one of the two transitions; the notify-driven
+    /// loop captures both. Asserts:
+    /// 1. A Start event fires.
+    /// 2. A Die event fires.
+    /// 3. The total latency for both is well under 2s (the old
+    ///    poll interval), proving the new loop is sub-poll-latency.
+    #[tokio::test]
+    async fn cgroup_events_catches_fast_cycle_both_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let exits = FakeExitCodes::default();
+        exits.set("ctr-fast", 0);
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let root_for_loop = root.clone();
+        let _loop = tokio::spawn(cgroup_events_loop(root_for_loop, exits, tx));
+
+        // Let notify install the watcher.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let started_at = std::time::Instant::now();
+        write_cgroup_events(&root, "ctr-fast", true);
+        // Sleep < 100ms then flip to populated 0. The old 2s poll
+        // would see only the final state on its next tick (~2s
+        // later); this test asserts both events come out fast.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        write_cgroup_events(&root, "ctr-fast", false);
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("recv timed out (Start)")
+            .expect("recv (Start)");
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("recv timed out (Die)")
+            .expect("recv (Die)");
+
+        assert!(matches!(first.event_type, RuntimeEventType::Start));
+        assert!(matches!(second.event_type, RuntimeEventType::Die { .. }));
+
+        // Both events landed well inside the old 2s poll window.
+        // The exit-code backfill adds up to ~600ms but the kernel
+        // populated=0 already happened, so the test ceiling is
+        // tighter than the old loop would manage.
+        let elapsed = started_at.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(2000),
+            "fast-cycle events should land in <2s (was {elapsed:?})"
+        );
     }
 
     /// Phase 0.4 dispatch C2: `read_tail` advances offsets and is
