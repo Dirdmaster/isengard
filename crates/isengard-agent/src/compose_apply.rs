@@ -350,6 +350,16 @@ pub fn desired_service_to_create_spec(
     );
     labels.insert("com.docker.compose.service".to_string(), svc.name.clone());
     labels.insert("isengard.stack".to_string(), stack_name.to_string());
+    // Phase 0.17: compose `cap_add:` flows through to wisp via the
+    // `isengard.cap.add` label. WispBackend::spec_to_config_overrides
+    // reads the same label and converts it into a
+    // [`wisp_image::CapabilityOverride`] that lands in all five OCI
+    // capability sets. We use a label hop (rather than a typed field
+    // on ContainerCreateSpec) to keep the persisted spec.json shape
+    // unchanged: a typed field would need a versioned migration.
+    if !svc.cap_add.is_empty() {
+        labels.insert("isengard.cap.add".to_string(), svc.cap_add.join(","));
+    }
 
     // Port mappings.
     let mut ports: Vec<PortSpec> = Vec::new();
@@ -824,6 +834,43 @@ mod tests {
         svc.networks.push("hello_default".into());
         let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
         assert_eq!(spec.networks, svc.networks);
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_lifts_cap_add_into_label() {
+        // Phase 0.17: compose `cap_add:` flows into the
+        // `isengard.cap.add` label. WispBackend's reader splits the
+        // comma list back into a CapabilityOverride applied to all
+        // five OCI sets.
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx:alpine".into()),
+            cap_add: vec![
+                "CHOWN".into(),
+                "SETUID".into(),
+                "SETGID".into(),
+                "DAC_OVERRIDE".into(),
+                "FOWNER".into(),
+                "SETPCAP".into(),
+            ],
+            ..Default::default()
+        };
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert_eq!(
+            spec.labels.get("isengard.cap.add").map(String::as_str),
+            Some("CHOWN,SETUID,SETGID,DAC_OVERRIDE,FOWNER,SETPCAP"),
+        );
+    }
+
+    #[test]
+    fn desired_service_to_create_spec_omits_cap_label_when_cap_add_empty() {
+        let svc = DesiredService {
+            name: "web".into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        let spec = desired_service_to_create_spec("hello", &svc, &[], Vec::new());
+        assert!(!spec.labels.contains_key("isengard.cap.add"));
     }
 
     #[test]

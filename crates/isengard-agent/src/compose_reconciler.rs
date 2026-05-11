@@ -58,6 +58,14 @@ pub struct DesiredService {
     /// by `compose_apply` to attach the container to each network at
     /// create time. Empty = docker default bridge.
     pub networks: Vec<String>,
+    /// Phase 0.17: per-service `cap_add:` list. Each entry is a Linux
+    /// capability name (with or without the `CAP_` prefix, e.g.
+    /// `CHOWN`, `CAP_NET_BIND_SERVICE`). The compose path forwards the
+    /// raw strings unchanged; `compose_apply` joins them into the
+    /// `isengard.cap.add` label that the WispBackend reader consumes
+    /// to populate all five OCI capability sets. Empty = wisp's
+    /// default `CAP_KILL` + `CAP_NET_BIND_SERVICE` allow-list applies.
+    pub cap_add: Vec<String>,
 }
 
 /// One entry in a service's `secrets:` list.
@@ -546,6 +554,20 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
             _ => {}
         }
     }
+    // Phase 0.17: per-service `cap_add:` list. Compose accepts the
+    // list form (`cap_add: [CHOWN, SETUID]` or `cap_add: ["CAP_CHOWN"]`).
+    // We forward each entry as-given; `bundle::parse_caps` downstream
+    // accepts both `CHOWN` and `CAP_CHOWN` forms, so no normalisation
+    // is needed here. Non-string entries are skipped quietly: that
+    // mirrors the parser's stance on every other list-shaped field
+    // (ports, environment, networks).
+    if let Some(Value::Sequence(seq)) = m.get(Value::String("cap_add".into())) {
+        for entry in seq {
+            if let Value::String(s) = entry {
+                svc.cap_add.push(s.clone());
+            }
+        }
+    }
     // v0.3.6: per-service `secrets:` list. Both short and long form
     // resolve to a `ServiceSecretRef` with `source` plus optional
     // `target`. The actual fetch + tmpfs mount happens in compose_apply
@@ -981,6 +1003,66 @@ mod tests {
         let nets = &parsed.services["web"].networks;
         assert!(nets.contains(&"servarr".to_string()));
         assert!(nets.contains(&"isengard-proxy".to_string()));
+    }
+
+    #[test]
+    fn parse_compose_with_cap_add_bare_form() {
+        // Phase 0.17: compose `cap_add:` list using the bare form
+        // (no `CAP_` prefix). nginx:alpine needs this exact set to
+        // bootstrap the master + worker handover.
+        let yaml = r#"services:
+  web:
+    image: nginx:alpine
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETPCAP
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        let caps = &parsed.services["web"].cap_add;
+        assert_eq!(
+            caps,
+            &vec![
+                "CHOWN".to_string(),
+                "SETUID".to_string(),
+                "SETGID".to_string(),
+                "DAC_OVERRIDE".to_string(),
+                "FOWNER".to_string(),
+                "SETPCAP".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_compose_with_cap_add_prefixed_form() {
+        // The downstream `bundle::parse_caps` accepts both `CHOWN` and
+        // `CAP_CHOWN`. The parser stores them unchanged.
+        let yaml = r#"services:
+  web:
+    image: nginx
+    cap_add:
+      - CAP_CHOWN
+      - CAP_SETUID
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        let caps = &parsed.services["web"].cap_add;
+        assert_eq!(
+            caps,
+            &vec!["CAP_CHOWN".to_string(), "CAP_SETUID".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_compose_omits_cap_add_when_absent() {
+        let yaml = r#"services:
+  web:
+    image: nginx
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        assert!(parsed.services["web"].cap_add.is_empty());
     }
 
     #[test]
