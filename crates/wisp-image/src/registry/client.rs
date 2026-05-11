@@ -402,11 +402,15 @@ impl Client {
                 "registry {base} returned a non-Bearer challenge: {challenge_header}"
             ))
         })?;
-        // If the realm didn't echo a scope, derive one from the image
-        // ref so the token has permission for manifest + blob reads.
-        if challenge.scope.is_none() {
-            challenge.scope = Some(format!("repository:{}:pull", r.repo));
-        }
+        // Always override the scope with the actual image-ref-derived
+        // value. The `/v2/` probe is generic: it doesn't know which repo
+        // we're about to request, so registries (notably GHCR / lscr.io)
+        // echo a placeholder like `repository:user/image:pull` in the
+        // challenge. Using that placeholder verbatim makes the token
+        // endpoint return 403 DENIED because it doesn't refer to a real
+        // repo. The scope for manifest + blob reads on this specific
+        // image is always `repository:<repo>:pull`.
+        challenge.scope = Some(format!("repository:{}:pull", r.repo));
         let token = auth::obtain_token(&self.http, &challenge)?;
         Ok(Some(token))
     }
