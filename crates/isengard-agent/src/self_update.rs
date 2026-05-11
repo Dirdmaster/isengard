@@ -12,10 +12,12 @@
 //!   3. `chmod 0755` and atomic-rename onto the running binary's path.
 //!      On the same filesystem, `rename(2)` is atomic: readers either
 //!      see the old inode or the new one, never a partial.
-//!   4. Optionally trigger `systemctl restart iso-agent` (for the
-//!      agent self-updating itself; the controller would be
-//!      `iso-controller`). systemd's Type=simple unit re-execs the new
-//!      binary on the next ExecStart.
+//!   4. Optionally trigger `systemctl restart <unit>` for one or more
+//!      units (e.g. `iso-controller.service` then `iso-agent.service`).
+//!      systemd's Type=simple unit re-execs the new binary on the next
+//!      ExecStart. Restarting the controller before the agent means the
+//!      operator's isd connection drops once (controller restart) and
+//!      the agent picks up the new binary on its own restart cycle.
 //!
 //! Why this is safe:
 //!   - The atomic rename happens BEFORE the restart. If the rename
@@ -47,24 +49,30 @@ const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 /// `url` is the public download URL (typically a GitHub Releases asset).
 /// `expected_sha256` is the lowercase-hex sha256 of the expected bytes,
 /// matching the format the release pipeline writes to `<asset>.sha256`.
-/// `restart_unit` is the systemd unit name to restart on success
-/// (typically `iso-agent.service` for the agent updating itself, or
-/// empty / `None` to skip the restart and let the caller orchestrate).
+/// `restart_units` is the list of systemd unit names to restart on
+/// success. Pass `&["iso-agent.service"]` for the agent updating itself,
+/// `&["iso-controller.service", "iso-agent.service"]` for the operator
+/// driving `isengard update`, or `&[]` to skip the restart and let the
+/// caller orchestrate.
 ///
-/// Returns `Ok(())` after the rename and (best-effort) restart.
+/// Units are restarted in order. Each restart is best-effort: a failure
+/// on one unit is logged but does not abort the remaining restarts (and
+/// does not unwind the rename, which has already happened).
+///
+/// Returns `Ok(())` after the rename and (best-effort) restarts.
 /// Returns `Err` and changes nothing on disk if any step before the
-/// rename fails. After the rename, restart errors are logged but
-/// do not unwind the rename.
+/// rename fails.
 pub async fn run_self_update(
     url: &str,
     expected_sha256: &str,
-    restart_unit: Option<&str>,
+    restart_units: &[&str],
 ) -> Result<()> {
     let target = current_exe_path()?;
     info!(
         url,
         target = %target.display(),
         expected_sha256 = %expected_sha256,
+        units = ?restart_units,
         "self-update: starting"
     );
 
@@ -76,7 +84,10 @@ pub async fn run_self_update(
         .with_context(|| format!("renaming {staging:?} -> {target:?}"))?;
     info!(target = %target.display(), "self-update: binary replaced");
 
-    if let Some(unit) = restart_unit {
+    for unit in restart_units {
+        if unit.is_empty() {
+            continue;
+        }
         if let Err(e) = trigger_systemctl_restart(unit) {
             warn!(unit, error = %e, "self-update: systemctl restart failed (binary already replaced; manual restart required)");
         } else {

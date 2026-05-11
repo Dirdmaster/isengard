@@ -410,12 +410,13 @@ async fn run_self_update(
     unit: String,
     no_restart: bool,
 ) -> Result<()> {
-    let restart_unit = if no_restart || unit.is_empty() {
-        None
+    let unit_ref = unit.as_str();
+    let units: &[&str] = if no_restart || unit_ref.is_empty() {
+        &[]
     } else {
-        Some(unit.as_str())
+        std::slice::from_ref(&unit_ref)
     };
-    isengard_agent::self_update::run_self_update(&url, &sha256, restart_unit).await
+    isengard_agent::self_update::run_self_update(&url, &sha256, units).await
 }
 
 /// Read the master key from `master_key_file`, open the controller's
