@@ -1,0 +1,38 @@
+# Isengard agent configuration.
+#
+# Default location: /etc/isengard/agent.toml. Override the path with the
+# ISENGARD_AGENT_TOML env var (used by tests + the docker-compose
+# install path that mounts the file from elsewhere).
+#
+# This file is read once at agent boot. SIGHUP re-read is future work
+# (0.15+); for now any change requires `systemctl restart iso-agent`.
+
+# ---------------------------------------------------------------------------
+# Phase 0.14: agent labels for placement selectors.
+# ---------------------------------------------------------------------------
+# Labels are key/value pairs the agent advertises in every heartbeat.
+# The controller's scheduler matches them against `where:` selectors in
+# compose files (`spread:`, `global:`, `on:`, `where:` verbs). The
+# scheduler reads only labels that come from the agent; the controller
+# does not synthesize labels.
+#
+# Key rules: ASCII `[a-z0-9._-]+`, max 63 chars, lowercased on ingest.
+# Value rules: any UTF-8 except `=` and `,` (selector grammar safety).
+# Reserved keys (`host`, `hostname`, `id`) are dropped with a warning;
+# the controller already derives host identity.
+#
+# Override per-host via env vars (later writes win):
+#   Environment=ISENGARD_LABEL_ROLE=worker
+#   Environment=ISENGARD_LABEL_TIER=gpu
+#
+# A heartbeat that brings new labels triggers the scheduler's
+# auto-place path (operator decision 2026-05-11 locked option B):
+# any service with a `where:` selector that this host now satisfies
+# auto-places onto this host.
+#
+# See docs/PLACEMENT.md for selector grammar and end-to-end examples.
+
+# [labels]
+# role = "worker"
+# tier = "gpu"
+# zone = "eu-west"
