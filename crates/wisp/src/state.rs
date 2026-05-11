@@ -46,11 +46,14 @@ pub enum ContainerState {
 /// `wisp` from a different cwd later (e.g. via `wisp ps`), and the bundle
 /// path needs to round-trip.
 ///
-/// `network_spec` is the operator-supplied input (set by
-/// `Runtime::create_with_network`); `network_attachment` is what the
-/// runtime actually attached at start time. Both default to `None` for
-/// the no-network path so existing `state.json` files (Phase 0.1)
-/// deserialize unchanged.
+/// `network_specs` is the operator-supplied input (set by
+/// `Runtime::create_with_network` / `create_with_networks`);
+/// `network_attachments` is what the runtime actually attached at start
+/// time. Both default to empty vecs for the no-network path so existing
+/// `state.json` files (Phase 0.1) deserialize unchanged. They also accept
+/// the legacy singular fields (`network_spec` / `network_attachment`) via
+/// custom deserialize so state files written before Phase 0.18 round-trip
+/// into the new shape transparently.
 ///
 /// `stdout_log_path` / `stderr_log_path` point at the per-container
 /// log files written by [`crate::lifecycle::start_container`] (the
@@ -63,23 +66,78 @@ pub enum ContainerState {
 /// `_exit(N)`; negative `-N` when PID 1 was killed by signal `N` (so
 /// `Some(-9)` is SIGKILL, `Some(-15)` is SIGTERM). `None` until reap
 /// lands on disk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContainerHandle {
     pub id: String,
     pub bundle: PathBuf,
     pub state: ContainerState,
     pub pid: Option<u32>,
     pub created_at: SystemTime,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_spec: Option<NetworkSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_attachment: Option<NetworkAttachmentRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_specs: Vec<NetworkSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_attachments: Vec<NetworkAttachmentRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout_log_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_log_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+}
+
+/// Manual Deserialize: accepts both the new `network_specs` /
+/// `network_attachments` plural form AND the legacy
+/// `network_spec` / `network_attachment` singular form written by
+/// pre-0.18 agents. On collision the plural form wins.
+impl<'de> Deserialize<'de> for ContainerHandle {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: String,
+            bundle: PathBuf,
+            state: ContainerState,
+            pid: Option<u32>,
+            created_at: SystemTime,
+            #[serde(default)]
+            network_spec: Option<NetworkSpec>,
+            #[serde(default)]
+            network_specs: Option<Vec<NetworkSpec>>,
+            #[serde(default)]
+            network_attachment: Option<NetworkAttachmentRecord>,
+            #[serde(default)]
+            network_attachments: Option<Vec<NetworkAttachmentRecord>>,
+            #[serde(default)]
+            stdout_log_path: Option<PathBuf>,
+            #[serde(default)]
+            stderr_log_path: Option<PathBuf>,
+            #[serde(default)]
+            exit_code: Option<i32>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        // Plural wins. Fall back to singular when plural is absent.
+        let network_specs = raw
+            .network_specs
+            .unwrap_or_else(|| raw.network_spec.into_iter().collect());
+        let network_attachments = raw
+            .network_attachments
+            .unwrap_or_else(|| raw.network_attachment.into_iter().collect());
+        Ok(ContainerHandle {
+            id: raw.id,
+            bundle: raw.bundle,
+            state: raw.state,
+            pid: raw.pid,
+            created_at: raw.created_at,
+            network_specs,
+            network_attachments,
+            stdout_log_path: raw.stdout_log_path,
+            stderr_log_path: raw.stderr_log_path,
+            exit_code: raw.exit_code,
+        })
+    }
 }
 
 /// Compute the per-container directory: `<state_dir>/containers/<id>/`.
@@ -191,8 +249,8 @@ mod tests {
             // SystemTime serialised as a (sec, nsec) pair; pin to a known
             // offset so round-trip equality is deterministic.
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            network_spec: None,
-            network_attachment: None,
+            network_specs: Vec::new(),
+            network_attachments: Vec::new(),
             stdout_log_path: None,
             stderr_log_path: None,
             exit_code: None,
@@ -295,19 +353,45 @@ mod tests {
     }
 
     #[test]
-    fn handle_with_network_spec_round_trips() {
+    fn handle_with_network_specs_round_trips() {
         use crate::network_spec::{NetworkSpec, PortProtocol, PortPublish, ResolvSource};
         let dir = TempDir::new().unwrap();
         let mut h = make_handle("net");
-        h.network_spec = Some(NetworkSpec {
+        h.network_specs = vec![NetworkSpec {
             network_name: "app".into(),
             ports: vec![PortPublish::v4_any(18080, 80, PortProtocol::Tcp)],
             resolv_source: ResolvSource::HostCopy,
-        });
+        }];
         write(dir.path(), &h).unwrap();
         let back = read(dir.path(), "net").unwrap();
-        assert_eq!(back.network_spec, h.network_spec);
-        assert!(back.network_attachment.is_none());
+        assert_eq!(back.network_specs, h.network_specs);
+        assert!(back.network_attachments.is_empty());
+    }
+
+    #[test]
+    fn handle_with_multiple_network_specs_preserves_declaration_order() {
+        use crate::network_spec::{NetworkSpec, PortProtocol, PortPublish, ResolvSource};
+        let dir = TempDir::new().unwrap();
+        let mut h = make_handle("multi");
+        h.network_specs = vec![
+            NetworkSpec {
+                network_name: "isengard-proxy".into(),
+                ports: vec![PortPublish::v4_any(80, 80, PortProtocol::Tcp)],
+                resolv_source: ResolvSource::HostCopy,
+            },
+            NetworkSpec {
+                network_name: "servarr".into(),
+                ports: vec![],
+                resolv_source: ResolvSource::HostCopy,
+            },
+        ];
+        write(dir.path(), &h).unwrap();
+        let back = read(dir.path(), "multi").unwrap();
+        assert_eq!(back.network_specs.len(), 2);
+        // Declaration order must round-trip: it picks the primary
+        // network (eth0) for the attached container.
+        assert_eq!(back.network_specs[0].network_name, "isengard-proxy");
+        assert_eq!(back.network_specs[1].network_name, "servarr");
     }
 
     #[test]
@@ -330,7 +414,45 @@ mod tests {
 
         let h = read(dir.path(), "legacy").unwrap();
         assert_eq!(h.id, "legacy");
-        assert!(h.network_spec.is_none());
-        assert!(h.network_attachment.is_none());
+        assert!(h.network_specs.is_empty());
+        assert!(h.network_attachments.is_empty());
+    }
+
+    #[test]
+    fn legacy_singular_network_fields_migrate_into_plural() {
+        // Pre-0.18 agents wrote `network_spec` / `network_attachment`
+        // singular. Reading such a file must surface them as the first
+        // entry of the new plural Vec fields.
+        use std::net::Ipv4Addr;
+        let dir = TempDir::new().unwrap();
+        let cdir = dir.path().join("containers/old");
+        std::fs::create_dir_all(&cdir).unwrap();
+        let json = r#"{
+  "id": "old",
+  "bundle": "/tmp/bundle-old",
+  "state": "Running",
+  "pid": 42,
+  "created_at": { "secs_since_epoch": 1700000000, "nanos_since_epoch": 0 },
+  "network_spec": {
+    "network_name": "isengard-proxy",
+    "ports": []
+  },
+  "network_attachment": {
+    "container_id": "old",
+    "network_name": "isengard-proxy",
+    "bridge": "wbr-isengard-proxy",
+    "ipv4": "10.83.0.5",
+    "veth_host": "wveth-h-abc123",
+    "veth_container": "wveth-c-abc123",
+    "ports": []
+  }
+}"#;
+        std::fs::write(cdir.join("state.json"), json).unwrap();
+
+        let h = read(dir.path(), "old").unwrap();
+        assert_eq!(h.network_specs.len(), 1);
+        assert_eq!(h.network_specs[0].network_name, "isengard-proxy");
+        assert_eq!(h.network_attachments.len(), 1);
+        assert_eq!(h.network_attachments[0].ipv4, Ipv4Addr::new(10, 83, 0, 5));
     }
 }

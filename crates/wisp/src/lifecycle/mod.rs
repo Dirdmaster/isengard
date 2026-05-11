@@ -166,8 +166,8 @@ fn create_container_inner<F: CgroupFs>(
         state: ContainerState::Created,
         pid: None,
         created_at: SystemTime::now(),
-        network_spec: None,
-        network_attachment: None,
+        network_specs: Vec::new(),
+        network_attachments: Vec::new(),
         stdout_log_path: None,
         stderr_log_path: None,
         exit_code: None,
@@ -520,8 +520,19 @@ pub fn start_container<F: CgroupFs>(
             // If attach fails we kill + reap the child before
             // returning. The GoPipe writer is dropped first so the
             // child's wait_go observes EOF instead of hanging.
+            //
+            // Multi-network: invoke `attach()` once per persisted
+            // `NetworkSpec`, in declaration order. The 0-based
+            // `eth_index` lets the attacher route each veth to a
+            // distinct `eth<N>` inside the netns; index 0 is the
+            // primary network (gets the default route + writes
+            // resolv.conf / hosts). On any single attach failure we
+            // best-effort detach the records we already collected
+            // before killing the child, so iptables / IPAM don't
+            // leak.
+            let specs = handle.network_specs.clone();
             let mut attacher = attacher;
-            if let Some(spec) = handle.network_spec.clone() {
+            if !specs.is_empty() {
                 let att = match attacher.as_deref_mut() {
                     Some(a) => a,
                     None => {
@@ -534,28 +545,46 @@ pub fn start_container<F: CgroupFs>(
                             libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
                         }
                         return Err(WispError::Lifecycle(
-                            "container has network_spec but no NetworkAttacher was provided".into(),
+                            "container has network_specs but no NetworkAttacher was provided"
+                                .into(),
                         ));
                     }
                 };
-                match att.attach(&spec, id, child_pid, &rootfs) {
-                    Ok(record) => {
-                        handle.network_attachment = Some(record);
-                    }
-                    Err(err) => {
-                        drop(go_writer);
-                        unsafe {
-                            libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                let mut records: Vec<crate::network_spec::NetworkAttachmentRecord> = Vec::new();
+                let mut attach_err: Option<(usize, String)> = None;
+                for (idx, spec) in specs.iter().enumerate() {
+                    match att.attach(spec, id, child_pid, &rootfs, idx as u32) {
+                        Ok(record) => records.push(record),
+                        Err(err) => {
+                            attach_err = Some((idx, err.to_string()));
+                            break;
                         }
-                        let mut status: libc::c_int = 0;
-                        unsafe {
-                            libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
-                        }
-                        return Err(WispError::Lifecycle(format!(
-                            "network attach failed for {id:?}: {err}"
-                        )));
                     }
                 }
+                if let Some((failed_idx, msg)) = attach_err {
+                    // Best-effort rollback of partial attachments so
+                    // the container doesn't leave stray veths / iptables
+                    // / IP allocations behind.
+                    for rec in records.iter().rev() {
+                        let _ = att.detach(rec);
+                    }
+                    drop(go_writer);
+                    unsafe {
+                        libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                    }
+                    let mut status: libc::c_int = 0;
+                    unsafe {
+                        libc::waitpid(child_pid as libc::pid_t, &mut status, 0);
+                    }
+                    let net_name = specs
+                        .get(failed_idx)
+                        .map(|s| s.network_name.as_str())
+                        .unwrap_or("?");
+                    return Err(WispError::Lifecycle(format!(
+                        "network attach failed for {id:?} on {net_name:?} (index {failed_idx}): {msg}"
+                    )));
+                }
+                handle.network_attachments = records;
             }
 
             // Phase 0.17: release the child from its pre-exec hold.
@@ -569,8 +598,10 @@ pub fn start_container<F: CgroupFs>(
                 unsafe {
                     libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
                 }
-                if let (Some(record), Some(att)) = (handle.network_attachment.as_ref(), attacher) {
-                    let _ = att.detach(record);
+                if let Some(att) = attacher {
+                    for rec in handle.network_attachments.iter().rev() {
+                        let _ = att.detach(rec);
+                    }
                 }
                 return Err(WispError::Lifecycle(format!(
                     "failed to signal go to child {child_pid}: {err}"
