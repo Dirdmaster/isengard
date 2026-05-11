@@ -2881,4 +2881,279 @@ mod tests {
         // despite the charset suffix.
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
+
+    /// Phase 0.13 follow-up: `GET /stacks/{id}/manifest` returns the
+    /// persisted manifest body when one was deployed.
+    #[tokio::test]
+    async fn get_manifest_returns_persisted_bundle() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+        let manifest_toml =
+            "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
+        phase_0_13_persist_manifest_bundle(
+            &handles,
+            stack_id,
+            "blog",
+            Some(manifest_toml),
+            None,
+            None,
+        )
+        .await
+        .expect("seed manifest");
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/stacks/{}/manifest", stack_id.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["stack_name"], "blog");
+        assert_eq!(parsed["manifest_toml"], manifest_toml);
+        assert!(parsed["manifest_sha256"].is_string());
+        assert_eq!(parsed["manifest_fleet"], "test");
+    }
+
+    /// Phase 0.13 follow-up: legacy compose-only stacks (no manifest ever
+    /// deployed) return 204, not an empty 200 that would look editable.
+    #[tokio::test]
+    async fn get_manifest_returns_no_content_for_legacy_stack() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "legacy".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/stacks/{}/manifest", stack_id.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Phase 0.13 follow-up: unknown stack id yields 404 with a JSON error.
+    #[tokio::test]
+    async fn get_manifest_returns_404_for_unknown_stack() {
+        let handles = test_handles().await;
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/stacks/9999/manifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Phase 0.13 follow-up: `PUT /stacks/{id}/manifest` rewrites the
+    /// persisted manifest. The first PUT skips optimistic concurrency
+    /// (empty If-Match) and lands the body verbatim.
+    #[tokio::test]
+    async fn put_manifest_persists_first_write_without_if_match() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles.clone());
+        let manifest_toml =
+            "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
+        let body = serde_json::json!({
+            "manifest_toml": manifest_toml,
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/manifest", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            parsed["manifest_sha256"].is_string(),
+            "expected sha256, got {parsed:?}"
+        );
+
+        let bundle = handles
+            .inventory
+            .get_stack_manifest_bundle(stack_id)
+            .await
+            .unwrap();
+        assert_eq!(bundle.manifest_toml.as_deref(), Some(manifest_toml));
+    }
+
+    /// Phase 0.13 follow-up: `If-Match` mismatch yields 409 with the
+    /// current sha + body so the caller can diff and re-edit.
+    #[tokio::test]
+    async fn put_manifest_conflict_on_stale_if_match() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+        let original = "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
+        phase_0_13_persist_manifest_bundle(&handles, stack_id, "blog", Some(original), None, None)
+            .await
+            .expect("seed manifest");
+
+        let app = router(handles);
+        let body = serde_json::json!({
+            "manifest_toml": "name = \"blog\"\nfleet = \"test\"\ncompose = [\"v2.yaml\"]\n",
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/manifest", stack_id.0))
+                    .header("content-type", "application/json")
+                    .header("if-match", "deadbeef")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(parsed["current_sha256"].is_string());
+        assert_eq!(parsed["current_toml"], original);
+    }
+
+    /// Phase 0.13 follow-up: empty `manifest_toml` body is rejected with
+    /// 400 so operators don't accidentally wipe their manifest by saving
+    /// an empty editor buffer.
+    #[tokio::test]
+    async fn put_manifest_rejects_empty_body() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let body = serde_json::json!({ "manifest_toml": "" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/manifest", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Phase 0.13 follow-up: name mismatch (body says `blog`, manifest
+    /// says `notblog`) is a 400 from `phase_0_13_persist_manifest_bundle`.
+    /// Exercises the validation pass through the PUT path end-to-end.
+    #[tokio::test]
+    async fn put_manifest_rejects_name_mismatch() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let body = serde_json::json!({
+            "manifest_toml": "name = \"notblog\"\nfleet = \"test\"\ncompose = [\"c.yaml\"]\n",
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/manifest", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }
