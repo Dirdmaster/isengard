@@ -1,6 +1,10 @@
 name: Docker
 
 on:
+  # Pushes to `next` build the dev image used by install/compose.yaml
+  # (operators still on the legacy docker-compose path). Tag-push triggering
+  # was removed 2026-05-11: release.yml now drives docker.yml on tag, after
+  # creating the release object, so this avoids racing.
   push:
     branches: ["next"]
     paths:
@@ -10,7 +14,6 @@ on:
       - "Cargo.toml"
       - "crates/**"
       - ".github/workflows/docker.yml"
-    tags: ["v*"]
   workflow_call:
     inputs:
       version:

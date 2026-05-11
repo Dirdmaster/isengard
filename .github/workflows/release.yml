@@ -1,5 +1,21 @@
 name: Release
 
+# Two trigger paths:
+#
+# 1. `workflow_dispatch` with a bump=patch|minor|major input. Computes the
+#    next version from the latest tag, creates + pushes the tag, then drives
+#    the rest. Use this when you want CI to invent the version number.
+#
+# 2. `push: tags: ['v*']`. Used when you tag manually (`git tag v0.5.1 &&
+#    git push origin v0.5.1`). Skips version computation and uses the tag
+#    name directly. Pre-2026-05-11 this path was missing: a tag push fired
+#    binaries.yml + docker.yml independently, but the release object never
+#    got created, so every `gh release upload` failed. Fixed by routing
+#    everything through this workflow.
+#
+# Both paths converge on: create-release-if-not-exists, then call
+# binaries.yml + docker.yml as reusable workflows (sequential, no race).
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +27,9 @@ on:
           - patch
           - minor
           - major
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -20,48 +39,55 @@ jobs:
   release:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.next.outputs.version }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Get latest tag
-        id: latest
-        run: |
-          tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Latest tag: $tag"
-
-      - name: Compute next version
-        id: next
-        run: |
-          current="${{ steps.latest.outputs.tag }}"
-          current="${current#v}"
-          IFS='.' read -r major minor patch <<< "$current"
-
-          case "${{ inputs.bump }}" in
-            patch) patch=$((patch + 1)) ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-          esac
-
-          version="v${major}.${minor}.${patch}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Next version: $version"
-
-      - name: Create tag
-        run: |
-          git tag "${{ steps.next.outputs.version }}"
-          git push origin "${{ steps.next.outputs.version }}"
-
-      - name: Create GitHub Release
+      - name: Resolve version
+        id: version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.next.outputs.version }}" \
-            --title "${{ steps.next.outputs.version }}" \
-            --generate-notes
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag-push path: use the tag name verbatim.
+            version="${{ github.ref_name }}"
+            echo "Resolved (push) version: $version"
+          else
+            # workflow_dispatch path: compute next from the latest tag.
+            tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            current="${tag#v}"
+            IFS='.' read -r major minor patch <<< "$current"
+            case "${{ inputs.bump }}" in
+              patch) patch=$((patch + 1)) ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+            esac
+            version="v${major}.${minor}.${patch}"
+            echo "Computed (dispatch) version: $version (was: $tag)"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$version"
+            git push origin "$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "Release $version already exists; not recreating"
+          else
+            gh release create "$version" \
+              --title "$version" \
+              --generate-notes
+            echo "Created release $version"
+          fi
 
   docker:
     needs: release

@@ -14,14 +14,17 @@ name: Binaries
 #     handles it cleanly, including the aarch64 cross via gcc-aarch64-linux-gnu.
 
 on:
+  # Driven by release.yml on tag pushes and manual dispatches. The direct
+  # `push: tags: ['v*']` trigger was removed 2026-05-11 because it raced
+  # release.yml: binaries built + tried to upload before the release object
+  # existed, every job failed `gh release upload`. Now release.yml creates
+  # the release first, then calls this workflow via workflow_call.
   workflow_call:
     inputs:
       version:
         description: Version tag (e.g. v0.2.0)
         required: true
         type: string
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
