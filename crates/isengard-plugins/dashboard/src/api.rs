@@ -843,6 +843,23 @@ async fn phase_0_13_persist_manifest_bundle(
         } else {
             Some(parsed.strategy.as_str())
         };
+        // Wave 5.B: auto-create the manifest's fleet if it doesn't already
+        // exist. Before this, only the enroll path created fleets, so a
+        // stack.toml declaring `fleet = "local"` was silently captured as
+        // a dangling reference (no row in `fleets`); `isd ps --fleet local`
+        // returned empty and operators had to POST /fleets by hand.
+        // `create_fleet` uses INSERT OR IGNORE, so this is idempotent and
+        // a no-op when the fleet already exists. The fleet is a logical
+        // grouping; nothing in the schema prevents an empty fleet.
+        if let Some(fleet_name) = parsed.fleet.as_deref()
+            && !fleet_name.trim().is_empty()
+            && let Err(e) = handles.inventory.create_fleet(fleet_name).await
+        {
+            return Err(json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("create_fleet: {e}"),
+            ));
+        }
         if let Err(e) = handles
             .inventory
             .update_stack_manifest(
@@ -2101,5 +2118,77 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["name"], "prom");
         assert_eq!(parsed[0]["hostname"], "host-b");
+    }
+
+    /// Wave 5.B: a stack.toml that declares `fleet = "<name>"` for a
+    /// fleet the controller doesn't know about must auto-create that
+    /// fleet row before the manifest persists. Before this fix, only
+    /// the enroll path created fleets, so manifest-only deploys (no
+    /// fresh host) left the fleet field dangling.
+    ///
+    /// We exercise `phase_0_13_persist_manifest_bundle` directly because
+    /// the full POST /stacks path also dispatches a WriteCompose RPC to
+    /// an agent connection that doesn't exist in the in-memory test
+    /// harness; the auto-create runs strictly before that dispatch and
+    /// is the only behaviour we care about here.
+    #[tokio::test]
+    async fn manifest_with_unknown_fleet_auto_creates_fleet_row() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        // Pre-condition: no fleet named "local" exists yet (the enroll
+        // above pinned the host to "test").
+        let before = handles.inventory.list_fleets().await.unwrap();
+        assert!(
+            !before.iter().any(|f| f.name == "local"),
+            "test harness setup leaked a 'local' fleet"
+        );
+
+        let manifest_toml = "name = \"blog\"\nfleet = \"local\"\ncompose = [\"compose.yaml\"]\n";
+        phase_0_13_persist_manifest_bundle(
+            &handles,
+            stack_id,
+            "blog",
+            Some(manifest_toml),
+            None,
+            None,
+        )
+        .await
+        .expect("manifest with unknown fleet should auto-create the fleet row");
+
+        // Post-condition: the fleet row exists.
+        let after = handles.inventory.list_fleets().await.unwrap();
+        assert!(
+            after.iter().any(|f| f.name == "local"),
+            "expected `local` fleet auto-created by manifest persist; got {:?}",
+            after.iter().map(|f| &f.name).collect::<Vec<_>>(),
+        );
+
+        // Idempotency: re-running the same persist call must not error
+        // and must not duplicate the row.
+        phase_0_13_persist_manifest_bundle(
+            &handles,
+            stack_id,
+            "blog",
+            Some(manifest_toml),
+            None,
+            None,
+        )
+        .await
+        .expect("second persist call should be a no-op for the fleet");
+        let after_twice = handles.inventory.list_fleets().await.unwrap();
+        let count = after_twice.iter().filter(|f| f.name == "local").count();
+        assert_eq!(count, 1, "no duplicate fleet rows on repeated persist");
     }
 }

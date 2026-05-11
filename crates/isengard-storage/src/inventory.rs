@@ -1359,6 +1359,24 @@ mod tests {
         assert!(err.is_err(), "fleet with hosts should not be deletable");
     }
 
+    /// Wave 5.B: `create_fleet` is idempotent. The dashboard's manifest
+    /// persist path calls it every time a stack.toml declares a fleet,
+    /// so calling twice (or against an existing fleet) must not error
+    /// and must not duplicate the row.
+    #[tokio::test]
+    async fn create_fleet_is_idempotent() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+
+        inv.create_fleet("local").await.unwrap();
+        // Second create is a no-op (INSERT OR IGNORE).
+        inv.create_fleet("local").await.unwrap();
+        inv.create_fleet("local").await.unwrap();
+
+        let fleets = inv.list_fleets().await.unwrap();
+        let matches: Vec<_> = fleets.iter().filter(|f| f.name == "local").collect();
+        assert_eq!(matches.len(), 1, "no duplicate rows on repeated create");
+    }
+
     #[tokio::test]
     async fn settings_round_trip() {
         let inv = Inventory::open_in_memory().await.unwrap();
