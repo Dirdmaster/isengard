@@ -1,7 +1,7 @@
 //! Pingora server bootstrap.
 //!
 //! `run` is the production entrypoint (binds the HTTP and HTTPS listeners).
-//! `run_for_test` binds only the HTTP listener on a caller-supplied port —
+//! `run_for_test` binds only the HTTP listener on a caller-supplied port:
 //! used by integration tests.
 //!
 //! Pingora 0.8 supports programmatic shutdown via `RunArgs::shutdown_signal:
@@ -10,6 +10,27 @@
 //! their assertions are done. This avoids both the test-process hang we hit
 //! on 0.4 (where `run_forever` called `std::process::exit`) and the SIGINT
 //! workaround alternatives.
+//!
+//! Shutdown timing (Pingora 0.8 source, server/mod.rs `run` + `main_loop`):
+//!   - SIGTERM arrives. The main loop broadcasts shutdown to every
+//!     `run_endpoint` accept-loop task. Each task selects against its
+//!     `accept()` future and breaks out of the loop. The `TransportStack`
+//!     drops at end of scope, which drops the `Arc<Listener>`; once all
+//!     clones are dropped, the underlying `TcpListener` closes and the
+//!     port returns to the free pool. In practice this happens within
+//!     milliseconds.
+//!   - The main loop then `thread::sleep(grace_period_seconds)`. The
+//!     DEFAULT is `EXIT_TIMEOUT` = 300 seconds (5 minutes). During this
+//!     window the listener has been released but the process is still
+//!     alive holding tokio runtime state for in-flight connections.
+//!   - After the grace, the runtime shuts down with
+//!     `graceful_shutdown_timeout_seconds` (default 5s).
+//!
+//! Our tune: 10s grace, 30s runtime shutdown. The Phase 0.8 agent's only
+//! long-lived connections are operator-proxied HTTP requests; 10s is
+//! more than enough for any reasonable request to finish. systemd's
+//! TimeoutStopSec=15s on the unit will SIGKILL the process if it
+//! over-runs the cycle anyway.
 
 use crate::proxy::ProxyState;
 use crate::proxy::router::IsengardProxy;
@@ -47,6 +68,31 @@ impl ShutdownSignalWatch for OneshotShutdown {
     }
 }
 
+/// Build a [`ServerConf`] with the project's tuned shutdown windows.
+///
+/// Pingora's defaults (300s grace, 5s runtime shutdown) were the
+/// proximate cause of the `isengard update` bind failure on lausanne
+/// v0.5.2: the old process held cleanup state for 5 minutes after
+/// SIGTERM, which interacted badly with `systemctl restart`'s "start
+/// the new ExecStart immediately" semantics.
+///
+/// The new windows:
+///   - `grace_period_seconds = 10`. After the listener drops we give
+///     in-flight requests 10s to finish. The Phase 0.8 proxy only
+///     handles HTTP requests for stack workloads; 10s is the upper
+///     bound on any sensible request.
+///   - `graceful_shutdown_timeout_seconds = 30`. Tokio runtime
+///     shutdown window. 30s is the cap before systemd's
+///     TimeoutStopSec=15s (set on iso-agent.service in this commit)
+///     escalates to SIGKILL, so the SIGKILL is the actual ceiling.
+fn server_conf() -> ServerConf {
+    ServerConf {
+        grace_period_seconds: Some(10),
+        graceful_shutdown_timeout_seconds: Some(30),
+        ..ServerConf::default()
+    }
+}
+
 /// Run the proxy on a single HTTP port (test-only entrypoint).
 ///
 /// If `shutdown_rx` is `Some`, signalling on it triggers Pingora's
@@ -56,7 +102,7 @@ pub async fn run_for_test(
     port: u16,
     shutdown_rx: Option<oneshot::Receiver<()>>,
 ) {
-    let mut server = Server::new_with_opt_and_conf(None, ServerConf::default());
+    let mut server = Server::new_with_opt_and_conf(None, server_conf());
     server.bootstrap();
 
     let mut svc = http_proxy_service(&server.configuration, IsengardProxy::new(state));
@@ -82,7 +128,7 @@ pub async fn run_for_test(
 pub async fn run(state: ProxyState, http_port: u16, https_port: u16) {
     let cert_store_opt = state.cert_store.read().await.clone();
 
-    let mut server = Server::new_with_opt_and_conf(None, ServerConf::default());
+    let mut server = Server::new_with_opt_and_conf(None, server_conf());
     server.bootstrap();
 
     let mut svc = http_proxy_service(&server.configuration, IsengardProxy::new(state.clone()));
