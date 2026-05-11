@@ -633,19 +633,42 @@ async fn get_stack_compose(
     }
 }
 
-/// `PUT /api/v1/stacks/:id/compose` (v0.3d).
+/// `PUT /api/v1/stacks/:id/compose` (v0.3d + Phase 0.13 wave 2.A follow-up).
 ///
-/// Body: raw YAML text (Content-Type: application/yaml or text/plain).
-/// Header: `If-Match: <sha256>` carrying the hash the dashboard saw on
-/// load. The agent compares against the on-disk hash before writing;
-/// mismatch yields 409 with `{ current_sha256, current_yaml }`.
+/// Two body shapes, selected by `Content-Type`:
 ///
-/// Optional query: `?force=true` to skip the conflict check (the
-/// dashboard's "Force overwrite" CTA uses it). `false` by default.
+/// - `application/yaml` or `text/yaml`: raw YAML body (legacy v0.3d shape).
+///   The compose is written; manifest / secrets / hooks state is left
+///   unchanged. `If-Match: <sha256>` provides optimistic concurrency.
+///
+/// - `application/json` (Phase 0.13 follow-up to wave 2.A): structured
+///   body that mirrors `POST /api/v1/stacks`:
+///   ```json
+///   {
+///     "compose": "<raw yaml>",
+///     "manifest_toml": "<optional stack.toml body>",
+///     "secrets": ["..."],
+///     "hooks": [{"on": "...", "cmd": [...], "timeout_ms": 60000, "on_error": "abort"}],
+///     "force": false,
+///     "compose_sha256": "<optional, for optimistic concurrency>",
+///     "manifest_sha256": "<optional, advisory>"
+///   }
+///   ```
+///   This is the path operators use to push manifest-only updates to an
+///   existing stack (compose unchanged, but secret bindings or hooks
+///   change). Before this variant, manifest changes on existing stacks
+///   were a no-op via PUT (compose-only) and required rerouting through
+///   `POST /stacks`, which is the wrong verb and creates ID churn.
+///
+/// Optional query: `?force=true` to skip the conflict check. When the
+/// JSON body carries `force: true`, that wins too. `false` by default.
 ///
 /// Status codes:
 /// - 200: file written; body echoes `{ written_sha256 }`.
+/// - 400: hook validation failure, manifest parse error, or invalid JSON.
 /// - 409: hash mismatch; body has `current_sha256` + `current_yaml`.
+/// - 415: missing or unsupported Content-Type.
+/// - 422: unknown secret name (JSON variant).
 /// - 503: agent for the stack's host is not currently connected.
 /// - 504: agent connected but didn't reply within the timeout.
 async fn put_stack_compose(
@@ -653,7 +676,7 @@ async fn put_stack_compose(
     Path(id): Path<i64>,
     headers: HeaderMap,
     Query(q): Query<PutComposeQuery>,
-    body: String,
+    body: axum::body::Bytes,
 ) -> Response {
     let stack = match handles.inventory.get_stack(StackId(id)).await {
         Ok(Some(s)) => s,
@@ -663,13 +686,120 @@ async fn put_stack_compose(
         }
     };
 
-    // Optimistic concurrency: prefer `If-Match` (HTTP idiom) and fall
-    // back to a body-less first save (`expected_sha256 = ""`).
-    let expected = headers
-        .get("if-match")
+    // Negotiate body shape on Content-Type. Strip any `; charset=...`
+    // suffix and lowercase the type so callers can send the canonical
+    // forms verbatim. Unknown / missing -> 415 with a hint listing
+    // accepted types.
+    let ctype = headers
+        .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string())
+        .map(|s| s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase())
         .unwrap_or_default();
+
+    let input = match ctype.as_str() {
+        "application/yaml" | "text/yaml" => {
+            // Legacy v0.3d shape: raw YAML body. If-Match header carries
+            // the expected sha256; compose-only PUT leaves manifest
+            // state unchanged on the agent.
+            let yaml = match std::str::from_utf8(&body) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    return json_err(StatusCode::BAD_REQUEST, "compose body is not valid UTF-8");
+                }
+            };
+            let expected = headers
+                .get("if-match")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim_matches('"').to_string())
+                .unwrap_or_default();
+            PutComposeInput {
+                compose_yaml: yaml,
+                expected_sha256: expected,
+                force: q.force.unwrap_or(false),
+                manifest_toml: None,
+                secrets: None,
+                hooks: None,
+            }
+        }
+        "application/json" => {
+            let parsed: PutComposeJsonBody = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_err(StatusCode::BAD_REQUEST, format!("invalid json body: {e}"));
+                }
+            };
+            if parsed.compose.trim().is_empty() {
+                return json_err(StatusCode::BAD_REQUEST, "compose is empty");
+            }
+            // `If-Match` header still wins when present; the body's
+            // `compose_sha256` is the JSON-native fallback. Keeps HTTP
+            // idioms working for JSON callers that don't set headers
+            // (e.g. browser fetch() with a minimal init).
+            let expected = headers
+                .get("if-match")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim_matches('"').to_string())
+                .or(parsed.compose_sha256.clone())
+                .unwrap_or_default();
+            // Query `?force=true` OR body `"force": true` wins.
+            let force = q.force.unwrap_or(false) || parsed.force.unwrap_or(false);
+            PutComposeInput {
+                compose_yaml: parsed.compose,
+                expected_sha256: expected,
+                force,
+                manifest_toml: parsed.manifest_toml,
+                secrets: parsed.secrets,
+                hooks: parsed.hooks,
+            }
+        }
+        "" => {
+            return json_err(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "missing Content-Type; accepted: application/yaml, application/json",
+            );
+        }
+        other => {
+            return json_err(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!(
+                    "unsupported Content-Type {other:?}; accepted: application/yaml, application/json",
+                ),
+            );
+        }
+    };
+
+    // JSON variant: validate + persist manifest bundle BEFORE shipping
+    // WriteCompose. If anything bounces (400 / 422), the operator gets
+    // a clean error and the agent is never asked to write.
+    let manifest_for_agent = match phase_0_13_persist_manifest_bundle(
+        &handles,
+        stack.id,
+        &stack.name,
+        input.manifest_toml.as_deref(),
+        input.secrets.as_deref(),
+        input.hooks.as_deref(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
+    let proto_hooks: Vec<isengard_proto::pb::LifecycleHook> = input
+        .hooks
+        .as_deref()
+        .map(|hs| {
+            hs.iter()
+                .map(|h| isengard_proto::pb::LifecycleHook {
+                    on: h.on.clone(),
+                    cmd: h.cmd.clone(),
+                    timeout_ms: h.timeout_ms,
+                    on_error: h.on_error.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let proto_secrets: Vec<String> = input.secrets.clone().unwrap_or_default();
 
     let request_id = ulid::Ulid::new().to_string();
     let rx = handles.compose_broker.register(request_id.clone()).await;
@@ -680,15 +810,12 @@ async fn put_stack_compose(
                 isengard_proto::pb::WriteCompose {
                     request_id: request_id.clone(),
                     stack_name: stack.name.clone(),
-                    compose_yaml: body,
-                    expected_sha256: expected,
-                    force: q.force.unwrap_or(false),
-                    // Phase 0.13: compose-only PUT (YAML content-type)
-                    // preserves manifest state unchanged. Empty fields
-                    // signal "don't touch" to the agent.
-                    manifest_toml: String::new(),
-                    secrets: Vec::new(),
-                    hooks: Vec::new(),
+                    compose_yaml: input.compose_yaml,
+                    expected_sha256: input.expected_sha256,
+                    force: input.force,
+                    manifest_toml: manifest_for_agent,
+                    secrets: proto_secrets,
+                    hooks: proto_hooks,
                     deployment_id: ulid::Ulid::new().to_string(),
                 },
             ),
@@ -744,10 +871,236 @@ async fn put_stack_compose(
     }
 }
 
+/// Phase 0.13 (wave 2.A follow-up): JSON body for `PUT /stacks/:id/compose`.
+/// Same shape as the manifest fields on `POST /stacks` plus a renamed
+/// `compose` (no `_yaml` suffix; the field is the YAML body verbatim).
+#[derive(Debug, Deserialize)]
+struct PutComposeJsonBody {
+    /// Raw compose.yaml content. Required.
+    compose: String,
+    /// Verbatim stack.toml. Empty / missing leaves the manifest unchanged.
+    #[serde(default)]
+    manifest_toml: Option<String>,
+    /// Per-fleet secret names to bind to this stack. Unknown names yield 422.
+    #[serde(default)]
+    secrets: Option<Vec<String>>,
+    /// Lifecycle hooks. Same shape as `POST /stacks`.
+    #[serde(default)]
+    hooks: Option<Vec<HookBody>>,
+    /// Skip the optimistic concurrency check. Body-level alternative to
+    /// the `?force=true` query string. They OR together.
+    #[serde(default)]
+    force: Option<bool>,
+    /// JSON-native alternative to the `If-Match` header. Header wins
+    /// when both are present.
+    #[serde(default)]
+    compose_sha256: Option<String>,
+    /// Advisory only: lets callers assert what manifest body they
+    /// believe they're overwriting. Not enforced today (manifest
+    /// concurrency is server-side last-write-wins); accepted for
+    /// forward compatibility with a future manifest-level check.
+    #[serde(default, rename = "manifest_sha256")]
+    _manifest_sha256: Option<String>,
+}
+
+/// Internal shape carrying either the YAML-body or JSON-body PUT input
+/// through to the WriteCompose dispatch. Keeps the dispatch single-pass.
+struct PutComposeInput {
+    compose_yaml: String,
+    expected_sha256: String,
+    force: bool,
+    manifest_toml: Option<String>,
+    secrets: Option<Vec<String>>,
+    hooks: Option<Vec<HookBody>>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PutComposeQuery {
     /// Skip the optimistic concurrency check. False / absent by default.
     force: Option<bool>,
+}
+
+/// Phase 0.13 follow-up: hook shape in `GET /stacks/{id}/manifest` responses.
+/// Mirrors the request-body shape on POST /stacks (`HookBody`) so the client
+/// can round-trip a manifest cleanly. `on` and `on_event` track the same
+/// field; we expose `on` here to match the manifest TOML schema operators see.
+#[derive(Debug, Serialize)]
+struct ManifestHookDto {
+    on: String,
+    cmd: Vec<String>,
+    timeout_ms: i64,
+    on_error: String,
+}
+
+impl From<isengard_storage::StackHook> for ManifestHookDto {
+    fn from(h: isengard_storage::StackHook) -> Self {
+        Self {
+            on: h.on_event,
+            cmd: h.cmd,
+            timeout_ms: h.timeout_ms,
+            on_error: h.on_error,
+        }
+    }
+}
+
+/// `GET /api/v1/stacks/:id/manifest` (Phase 0.13 follow-up).
+///
+/// Returns the persisted `stack.toml` body for `stack_id`, plus the
+/// secrets + hooks bound at deploy time. The operator-side `isd manifest
+/// cat / export / edit` chain consumes this surface; the dashboard's
+/// "view manifest" affordance will share it.
+///
+/// Status codes:
+/// - 200: stack has a manifest; body has the full bundle.
+/// - 204: stack exists but no manifest was ever deployed (legacy
+///   compose-only stacks). Empty body.
+/// - 404: stack id doesn't exist.
+async fn get_stack_manifest(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
+        }
+    };
+    let bundle = match handles.inventory.get_stack_manifest_bundle(stack.id).await {
+        Ok(b) => b,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("get_stack_manifest_bundle: {e}"),
+            );
+        }
+    };
+    // Legacy compose-only stacks return 204 so the operator gets a clear
+    // signal ("nothing to edit") instead of an empty-string manifest that
+    // looks deployable.
+    let toml = match bundle.manifest_toml {
+        Some(s) if !s.is_empty() => s,
+        _ => return StatusCode::NO_CONTENT.into_response(),
+    };
+    let hooks: Vec<ManifestHookDto> = bundle.hooks.into_iter().map(ManifestHookDto::from).collect();
+    Json(serde_json::json!({
+        "stack_id": stack.id,
+        "stack_name": stack.name,
+        "manifest_toml": toml,
+        "manifest_sha256": bundle.manifest_sha256,
+        "manifest_imported_at": bundle.manifest_imported_at,
+        "deploy_strategy": bundle.deploy_strategy,
+        "manifest_fleet": bundle.manifest_fleet,
+        "secrets": bundle.secrets,
+        "hooks": hooks,
+    }))
+    .into_response()
+}
+
+/// Body for `PUT /api/v1/stacks/:id/manifest`.
+///
+/// `manifest_toml` is required (empty body is rejected with 400 so a
+/// fat-fingered editor save doesn't wipe the persisted manifest).
+/// `secrets` and `hooks` are optional; when present they replace the
+/// persisted set. When absent, the existing bindings stay untouched.
+#[derive(Debug, Deserialize)]
+struct PutManifestBody {
+    manifest_toml: String,
+    #[serde(default)]
+    secrets: Option<Vec<String>>,
+    #[serde(default)]
+    hooks: Option<Vec<HookBody>>,
+}
+
+/// `PUT /api/v1/stacks/:id/manifest` (Phase 0.13 follow-up).
+///
+/// Replaces the persisted manifest body (and optionally secrets + hooks)
+/// for `stack_id`. Optimistic concurrency: the `If-Match` header carries
+/// the sha256 the caller saw on GET. Mismatch yields 409 with the
+/// current sha + body so the caller can show a diff and ask the operator
+/// to re-edit.
+///
+/// This endpoint does NOT push compose to the agent: the manifest is the
+/// orchestration sidecar (secrets, hooks, fleet, strategy). The on-host
+/// compose.yaml is unchanged by this call. A subsequent `isd deploy`
+/// re-resolves the merged compose using the new manifest.
+///
+/// Status codes:
+/// - 200: manifest updated; body has `{ manifest_sha256 }`.
+/// - 400: manifest parse error, name mismatch, hook validation failure,
+///   or empty `manifest_toml`.
+/// - 404: stack id doesn't exist.
+/// - 409: If-Match mismatch; body has `{ current_sha256, current_toml }`.
+/// - 422: unknown secret name(s).
+async fn put_stack_manifest(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(body): Json<PutManifestBody>,
+) -> Response {
+    let stack = match handles.inventory.get_stack(StackId(id)).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
+        Err(e) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
+        }
+    };
+    if body.manifest_toml.trim().is_empty() {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "manifest_toml is empty; PUT requires a non-empty manifest body",
+        );
+    }
+
+    // Optimistic concurrency. Empty / absent header means "first write".
+    let expected = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_default();
+    if !expected.is_empty() {
+        let current = match handles.inventory.get_stack_manifest_bundle(stack.id).await {
+            Ok(b) => b,
+            Err(e) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("get_stack_manifest_bundle: {e}"),
+                );
+            }
+        };
+        let current_sha = current.manifest_sha256.unwrap_or_default();
+        if current_sha != expected {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "manifest hash mismatch; reload before saving",
+                    "current_sha256": current_sha,
+                    "current_toml": current.manifest_toml.unwrap_or_default(),
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    match phase_0_13_persist_manifest_bundle(
+        &handles,
+        stack.id,
+        &stack.name,
+        Some(&body.manifest_toml),
+        body.secrets.as_deref(),
+        body.hooks.as_deref(),
+    )
+    .await
+    {
+        Ok(_) => {
+            let sha = sha256_hex_of(&body.manifest_toml);
+            Json(serde_json::json!({
+                "manifest_sha256": sha,
+            }))
+            .into_response()
+        }
+        Err(resp) => resp,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2194,5 +2547,334 @@ mod tests {
         let after_twice = handles.inventory.list_fleets().await.unwrap();
         let count = after_twice.iter().filter(|f| f.name == "local").count();
         assert_eq!(count, 1, "no duplicate fleet rows on repeated persist");
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: `PUT /stacks/{id}/compose` with no
+    /// Content-Type returns 415 with the accepted types listed. Operators
+    /// shouldn't ever land here in practice (curl/reqwest set the header
+    /// when given a body), but a tight 415 keeps the failure mode legible.
+    #[tokio::test]
+    async fn put_compose_missing_content_type_returns_415() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .body(Body::from("services:\n  web:\n    image: nginx\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = parsed["error"].as_str().unwrap_or("");
+        assert!(err.contains("Content-Type"), "got: {err}");
+        assert!(err.contains("application/yaml"), "got: {err}");
+        assert!(err.contains("application/json"), "got: {err}");
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: unknown content-type (e.g. plain
+    /// text) is 415 with the same error shape.
+    #[tokio::test]
+    async fn put_compose_unknown_content_type_returns_415() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "text/plain")
+                    .body(Body::from("services:\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: YAML content-type (legacy v0.3d
+    /// shape) still routes through. Without an agent attached, the
+    /// dispatch reaches the routing layer and bounces with 503: that's
+    /// the proof the body shape was accepted and the YAML branch ran.
+    #[tokio::test]
+    async fn put_compose_yaml_content_type_still_works() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "application/yaml")
+                    .body(Body::from("services:\n  web:\n    image: nginx\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // No agent connected in the test harness: the routing layer
+        // returns 503. The crucial bit is that the request was accepted
+        // (not 415), proving the YAML branch ran. text/yaml + charset
+        // suffix variants share this code path.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: JSON variant with manifest body +
+    /// secrets + hooks is accepted. Reaches the routing layer (503 here)
+    /// only after the manifest bundle has been validated and persisted;
+    /// post-condition: the manifest_toml row is set on the stack.
+    #[tokio::test]
+    async fn put_compose_json_persists_manifest_then_dispatches() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles.clone());
+        let manifest = "name = \"blog\"\nfleet = \"test\"\ncompose = [\"compose.yaml\"]\n";
+        let body = serde_json::json!({
+            "compose": "services:\n  web:\n    image: nginx\n",
+            "manifest_toml": manifest,
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Same 503 ceiling as the YAML test (no agent). Below the
+        // ceiling we expect the manifest to have been persisted before
+        // the routing layer was reached.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let s = handles
+            .inventory
+            .get_stack(stack_id)
+            .await
+            .unwrap()
+            .expect("stack present");
+        assert_eq!(s.manifest_toml.as_deref(), Some(manifest));
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: 422 with `missing: [...]` when the
+    /// JSON body's `secrets` references a name the controller doesn't
+    /// know about. Validation runs before the WriteCompose dispatch so
+    /// no agent traffic is generated.
+    #[tokio::test]
+    async fn put_compose_json_unknown_secret_returns_422() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let body = serde_json::json!({
+            "compose": "services:\n  web:\n    image: nginx\n",
+            "secrets": ["nonexistent_secret"],
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["error"], "unknown secrets");
+        assert_eq!(parsed["missing"][0], "nonexistent_secret");
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: 400 when the JSON body's hook has
+    /// an invalid `on_error` value. The validation runs through the
+    /// shared `phase_0_13_persist_manifest_bundle` helper.
+    #[tokio::test]
+    async fn put_compose_json_invalid_hook_returns_400() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let body = serde_json::json!({
+            "compose": "services:\n  web:\n    image: nginx\n",
+            "hooks": [{
+                "on": "pre-deploy",
+                "cmd": ["echo", "hi"],
+                "timeout_ms": 60000,
+                "on_error": "explode",
+            }],
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: JSON body with an empty `compose`
+    /// field is 400 (the field is required and non-empty).
+    #[tokio::test]
+    async fn put_compose_json_empty_compose_returns_400() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let body = serde_json::json!({ "compose": "   " }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Phase 0.13 wave 2.A follow-up: content-type with a charset suffix
+    /// (`application/json; charset=utf-8`) still routes to the JSON
+    /// branch. Browsers and many HTTP clients add the suffix by default.
+    #[tokio::test]
+    async fn put_compose_json_with_charset_suffix_still_dispatches() {
+        use isengard_storage::{InsertStack, StackSource};
+
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let body = serde_json::json!({
+            "compose": "services:\n  web:\n    image: nginx\n",
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/stacks/{}/compose", stack_id.0))
+                    .header("content-type", "application/json; charset=utf-8")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Reached routing layer (no agent): proves the JSON branch ran
+        // despite the charset suffix.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
