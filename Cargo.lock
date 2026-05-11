@@ -2718,14 +2718,19 @@ dependencies = [
  "isengard-storage",
  "predicates",
  "rand 0.8.6",
+ "reqwest",
  "rustls",
+ "semver",
+ "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "ulid",
  "which",
+ "wiremock",
 ]
 
 [[package]]

@@ -18,6 +18,7 @@ use isengard_storage::host::HostId;
 mod dev_plugin;
 mod init;
 mod tracing_init;
+mod update;
 
 // Force-link the notifier plugin so its `inventory::submit!` registration is
 // picked up at controller startup. The `as _` import keeps the symbol live
@@ -120,6 +121,29 @@ enum Command {
         #[command(subcommand)]
         op: SecretOp,
     },
+    /// Phase 0.18 friendly auto-update. Zero-args: queries GitHub
+    /// Releases for the latest tag, downloads + verifies the binary
+    /// for this host's target triple, atomic-renames onto
+    /// `/usr/local/bin/isengard`, and restarts both
+    /// `iso-controller.service` and `iso-agent.service`.
+    ///
+    /// For scripted / pinned upgrades use `--version vX.Y.Z`. For
+    /// dry-run discovery use `--check`. For unattended use `--yes`.
+    /// The low-level `self-update` subcommand is still available for
+    /// callers that already know the URL + sha256.
+    Update {
+        /// Dry-run mode: print "current vX, latest vY" and exit
+        /// without downloading or restarting anything.
+        #[arg(long)]
+        check: bool,
+        /// Pin to a specific release tag (e.g. `v0.5.1`). When unset
+        /// the latest release is resolved from the GitHub API.
+        #[arg(long)]
+        version: Option<String>,
+        /// Skip the y/N confirmation prompt. Useful for cron / CI.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Phase 0.8 binary self-update. Downloads a new isengard binary,
     /// verifies its sha256 against `--sha256`, atomically replaces the
     /// running binary on disk, and triggers `systemctl restart` on the
@@ -129,6 +153,7 @@ enum Command {
     /// Designed for the systemd-native install. The legacy
     /// docker-compose path uses the rename-and-recreate flow in
     /// `crates/isengard-plugins/updater/src/self_update.rs` instead.
+    /// For zero-args operator UX use the `update` subcommand instead.
     SelfUpdate {
         /// HTTPS URL of the new binary. Typically a GitHub Releases
         /// asset URL (e.g.
@@ -307,6 +332,7 @@ async fn main() {
         Command::Agent { .. } => "agent",
         Command::Secret { .. } => "secret",
         Command::SelfUpdate { .. } => "self-update",
+        Command::Update { .. } => "update",
         Command::Init(_) => "init",
         Command::Join(_) => "join",
     };
@@ -396,6 +422,18 @@ async fn dispatch(command: Command) -> Result<()> {
             unit,
             no_restart,
         } => run_self_update(url, sha256, unit, no_restart).await,
+        Command::Update {
+            check,
+            version,
+            yes,
+        } => {
+            update::run(update::UpdateArgs {
+                check,
+                version,
+                yes,
+            })
+            .await
+        }
         Command::Init(args) => init::run(args).await,
         Command::Join(args) => init::run_join(args).await,
     }
@@ -410,12 +448,13 @@ async fn run_self_update(
     unit: String,
     no_restart: bool,
 ) -> Result<()> {
-    let restart_unit = if no_restart || unit.is_empty() {
-        None
+    let unit_ref = unit.as_str();
+    let units: &[&str] = if no_restart || unit_ref.is_empty() {
+        &[]
     } else {
-        Some(unit.as_str())
+        std::slice::from_ref(&unit_ref)
     };
-    isengard_agent::self_update::run_self_update(&url, &sha256, restart_unit).await
+    isengard_agent::self_update::run_self_update(&url, &sha256, units).await
 }
 
 /// Read the master key from `master_key_file`, open the controller's
