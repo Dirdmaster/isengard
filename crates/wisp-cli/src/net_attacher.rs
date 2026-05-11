@@ -46,8 +46,12 @@ impl NetworkAttacher for WispNetAttacher {
         container_id: &str,
         container_pid: u32,
         rootfs: &Path,
+        eth_index: u32,
     ) -> Result<NetworkAttachmentRecord, WispError> {
         use wisp_net::Ipam as _;
+
+        let iface_name = format!("eth{eth_index}");
+        let is_primary = eth_index == 0;
 
         // 1. Lazily ensure the bridge exists. Operator may have done it
         //    via `wisp net create`; if not, this creates it on demand
@@ -74,7 +78,9 @@ impl NetworkAttacher for WispNetAttacher {
             )
             .map_err(|e| WispError::Lifecycle(format!("ipam::alloc: {e}")))?;
 
-        // 4. Create + attach veth pair.
+        // 4. Create + attach veth pair. The container side is renamed
+        //    to `eth<eth_index>` so additional network attachments land
+        //    on `eth1`, `eth2`, ... without colliding with the primary.
         let pair = wisp_net::veth::create_pair()
             .map_err(|e| WispError::Lifecycle(format!("veth::create_pair: {e}")))?;
         if let Err(e) = wisp_net::veth::attach_to_ns(
@@ -84,6 +90,7 @@ impl NetworkAttacher for WispNetAttacher {
             ip,
             self.network.subnet.prefix_len(),
             self.network.gateway,
+            &iface_name,
         ) {
             // veth::attach_to_ns rolls back the host side itself on
             // failure; release the IP so the next start can reuse it.
@@ -102,31 +109,35 @@ impl NetworkAttacher for WispNetAttacher {
             )));
         }
 
-        // 6. Render /etc/resolv.conf + /etc/hosts into the rootfs. The
-        //    child has not yet pivot_root'd, so writes to
+        // 6. Render /etc/resolv.conf + /etc/hosts into the rootfs (primary
+        //    attach only; subsequent attaches would clobber the first
+        //    write and the result would be the second network's view).
+        //    The child has not yet pivot_root'd, so writes to
         //    `<rootfs>/etc/...` show up as `/etc/...` once it has.
-        match &spec.resolv_source {
-            ResolvSource::HostCopy => {
-                let nameservers = wisp_net::host_nameservers().unwrap_or_default();
-                if let Err(e) = wisp_net::write_resolv_conf(rootfs, &nameservers) {
-                    return Err(WispError::Lifecycle(format!(
-                        "write_resolv_conf (host copy): {e}"
-                    )));
+        if is_primary {
+            match &spec.resolv_source {
+                ResolvSource::HostCopy => {
+                    let nameservers = wisp_net::host_nameservers().unwrap_or_default();
+                    if let Err(e) = wisp_net::write_resolv_conf(rootfs, &nameservers) {
+                        return Err(WispError::Lifecycle(format!(
+                            "write_resolv_conf (host copy): {e}"
+                        )));
+                    }
+                }
+                ResolvSource::Static(addrs) => {
+                    if let Err(e) = wisp_net::write_resolv_conf(rootfs, addrs) {
+                        return Err(WispError::Lifecycle(format!(
+                            "write_resolv_conf (static): {e}"
+                        )));
+                    }
+                }
+                ResolvSource::None => {
+                    // Operator opted out; bundle ships its own resolv.conf.
                 }
             }
-            ResolvSource::Static(addrs) => {
-                if let Err(e) = wisp_net::write_resolv_conf(rootfs, addrs) {
-                    return Err(WispError::Lifecycle(format!(
-                        "write_resolv_conf (static): {e}"
-                    )));
-                }
+            if let Err(e) = wisp_net::write_hosts(rootfs, container_id, ip) {
+                return Err(WispError::Lifecycle(format!("write_hosts: {e}")));
             }
-            ResolvSource::None => {
-                // Operator opted out; bundle ships its own resolv.conf.
-            }
-        }
-        if let Err(e) = wisp_net::write_hosts(rootfs, container_id, ip) {
-            return Err(WispError::Lifecycle(format!("write_hosts: {e}")));
         }
 
         Ok(NetworkAttachmentRecord {
