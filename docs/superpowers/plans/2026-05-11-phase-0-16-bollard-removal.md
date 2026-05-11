@@ -1,6 +1,8 @@
-# Phase 0.16 Bollard Removal: Implementation Plan
+# Phase 0.16 Bollard Removal: Implementation Plan (SUPERSEDED)
 
-> Spec: [`2026-05-11-phase-0-16-bollard-removal-design.md`](../specs/2026-05-11-phase-0-16-bollard-removal-design.md). Branch target: `phase/0-16-bollard-removal` (stacks on `next`).
+> **STATUS: SUPERSEDED 2026-05-11.** Operator decision: bollard stays first-class. The `RuntimeBackend` trait is permanent; future backends (podman, containerd, k8s) get the same treatment. Do NOT implement this plan.
+>
+> Spec: [`2026-05-11-phase-0-16-bollard-removal-design.md`](../specs/2026-05-11-phase-0-16-bollard-removal-design.md). Branch target: `phase/0-16-bollard-removal` (would have stacked on `next`).
 
 ## Scope
 

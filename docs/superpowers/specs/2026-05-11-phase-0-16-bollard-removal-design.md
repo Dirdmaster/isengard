@@ -1,15 +1,22 @@
-# Phase 0.16: Bollard Removal Design
+# Phase 0.16: Bollard Removal Design (SUPERSEDED)
 
-**Status:** spec (no implementation in this phase)
-**Phase:** 0.16
+**Status:** SUPERSEDED 2026-05-11 by operator decision. Bollard stays first-class. Do not implement the plan below.
+**Phase:** 0.16 (obsolete)
 **Date:** 2026-05-11
-**Stacks on:** `next` after Phase 0.8 (#135, systemd-native install) shipped.
 
-## What this phase scopes
+## Pivot (2026-05-11 operator decision)
 
-A staged removal of the `bollard` Rust docker SDK from every crate in the workspace. The agent's `RuntimeBackend` trait (Phase 0.4) and the wisp backend (Phases 0.1 to 0.6) already cover every container concern. Phase 0.8 (#135) shipped systemd-native install: a fresh Phase 0.8 host has no docker installed, so `BollardBackend` is dead code on those hosts. This phase is the cleanup arc: delete `BollardBackend`, the bollard-direct call sites that still bypass the trait, and the deny.toml exceptions that exist only because of bollard's transitive deps.
+Operator framing: the `RuntimeBackend` trait IS the design value. Killing one backend kills the abstraction's point. Bollard stays first-class as the docker adapter; wisp is the default for new (Phase 0.8+) installs; future backends (podman, containerd, k8s) get the same treatment under the trait. No removal. No deprecation. The trait is permanent.
 
-This phase is **scoping only**. Implementation lands in a follow-up arc once the operator has reviewed and signed off.
+The 8-step plan in the companion plan doc is OBSOLETE. Do not dispatch its implementation.
+
+If the operator changes their mind later (e.g., bollard's maintenance burden grows beyond the trait's value), revisit this spec then.
+
+## Original intent (pre-pivot, kept for historical context)
+
+A staged removal of the `bollard` Rust docker SDK from every crate in the workspace. The agent's `RuntimeBackend` trait (Phase 0.4) and the wisp backend (Phases 0.1 to 0.6) already cover every container concern. Phase 0.8 (#135) shipped systemd-native install: a fresh Phase 0.8 host has no docker installed, so `BollardBackend` is dead code on those hosts. This phase was the cleanup arc: delete `BollardBackend`, the bollard-direct call sites that still bypass the trait, and the deny.toml exceptions that exist only because of bollard's transitive deps.
+
+This phase was **scoping only**. Implementation has been cancelled.
 
 ## Goal + done bar
 
