@@ -18,6 +18,7 @@
 //!  - `isd secret put | list | rm`: managed-secret CRUD
 //!  - `isd route create | list | rm`: routing-rule CRUD
 //!  - `isd hosts list`: enumerate enrolled hosts (ULID, hostname, fleet)
+//!  - `isd update`: self-replace the operator binary from a GitHub Release
 
 use clap::{Parser, Subcommand};
 
@@ -35,6 +36,7 @@ mod secret;
 mod session;
 mod ssh_tunnel;
 mod table;
+mod update_cmd;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -106,6 +108,13 @@ enum Command {
     /// back with optimistic concurrency (sha256 If-Match).
     #[command(subcommand)]
     Manifest(manifest_cmd::ManifestCommand),
+    /// v0.5.2: self-update the operator CLI. Detects the latest GitHub
+    /// release for the host triple (macOS aarch64/x86_64, Linux musl
+    /// x86_64/aarch64), verifies sha256 against the release manifest,
+    /// and atomic-renames the new binary onto the running executable.
+    /// Doesn't restart anything: isd is one-shot, the next invocation
+    /// picks up the new binary.
+    Update(update_cmd::UpdateArgs),
 }
 
 #[tokio::main]
@@ -142,6 +151,7 @@ async fn main() {
             )
             .await
         }
+        Command::Update(args) => update_cmd::run(args).await,
     };
 
     if let Err(e) = result {
