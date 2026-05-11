@@ -74,3 +74,11 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=docker-${{ matrix.target.suffix }}
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.target.suffix }}
+          # Drives the `ISENGARD_RELEASE_VERSION` ARG in the Dockerfile,
+          # which in turn lets the per-crate build.rs bake the right tag
+          # into the binary. `inputs.version` is set on tag-triggered
+          # release builds; branch pushes get the branch name (e.g.
+          # `next`) which the build script still surfaces verbatim so
+          # operators can tell which branch their dev image came from.
+          build-args: |
+            ISENGARD_RELEASE_VERSION=${{ inputs.version || github.ref_name }}

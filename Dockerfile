@@ -69,6 +69,14 @@ RUN cargo chef cook --release --recipe-path recipe.json \
         --bin isengard --bin isd
 
 COPY . .
+# `ISENGARD_RELEASE_VERSION` feeds `crates/{isengard,isd}/build.rs` so the
+# baked binary version matches the release tag (or `dev` for branch builds).
+# `.git/` is in `.dockerignore`, so `git describe` would otherwise fail
+# inside the container and the build script would fall back to the static
+# workspace `0.1.0-alpha`. Default to `dev` for branch builds; release.yml
+# overrides this with the tag via docker.yml's build-args.
+ARG ISENGARD_RELEASE_VERSION=dev
+ENV ISENGARD_RELEASE_VERSION=${ISENGARD_RELEASE_VERSION}
 RUN cargo build --release \
         --target x86_64-unknown-linux-musl \
         --bin isengard --bin isd \
