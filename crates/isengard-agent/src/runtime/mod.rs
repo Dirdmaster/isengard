@@ -95,6 +95,24 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     /// Backend identity for diagnostics (`"docker"` or `"wisp"`).
     fn name(&self) -> &'static str;
 
+    /// Does this backend support attaching additional networks to a
+    /// container after `create_container` has returned?
+    ///
+    /// Bollard / dockerd: yes (returns `true`). The compose reconciler
+    /// calls `connect_network` once per declared network because
+    /// dockerd's `Create` only takes the primary network at create
+    /// time. See `compose_apply::ensure_container_started`.
+    ///
+    /// Wisp: no (returns `false`). The full list of networks is passed
+    /// at `create_container` time and the runtime wires every veth /
+    /// IP / iptables rule during the pre-exec window. A subsequent
+    /// `connect_network` would mean reconstructing the netns and is
+    /// out of scope for 0.5. Compose can skip the per-network
+    /// `connect_network` loop for backends that report `false` here.
+    fn supports_live_network_attach(&self) -> bool {
+        true
+    }
+
     /// Boot-time orphan cleanup hook. Wisp's impl walks kernel network
     /// state (bridges + veths + iptables) against the on-disk registry
     /// and the live container list, removing anything not accounted

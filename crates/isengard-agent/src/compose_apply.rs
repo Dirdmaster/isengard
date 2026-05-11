@@ -541,20 +541,22 @@ async fn ensure_container_started(
 
     // Attach to declared networks. Compose-spec semantics: when a
     // service declares `networks: [a, b]`, the container should be on
-    // `a` AND `b` (not the docker default bridge). bollard's
-    // create_container only takes one network at create-time via
-    // NetworkingConfig; for multi-network containers the convention is
-    // to connect each one explicitly afterward. Disconnecting from
-    // `bridge` matches `docker compose up` (containers with explicit
-    // `networks:` aren't on the default bridge).
+    // `a` AND `b` (not the docker default bridge). The two backends
+    // route this differently:
     //
-    // For wisp the trait routes the primary network through
-    // create_container; connect_network for additional networks
-    // currently errors out (live attach is a 0.5 stretch). For bollard
-    // it's a noop dance for stack-only networks.
-    if !svc.networks.is_empty() {
+    // - Bollard / dockerd: `create_container` only accepts one network
+    //   via NetworkingConfig at create time; secondary networks need
+    //   an explicit `connect_network` afterward. Disconnecting from
+    //   `bridge` matches `docker compose up` (containers with explicit
+    //   `networks:` aren't on the default bridge).
+    // - Wisp: every declared network is passed to `create_container`
+    //   via `spec.networks` and attached during the pre-exec window.
+    //   `connect_network` is not supported post-start (would mean
+    //   rebuilding the netns), so we skip the loop entirely when the
+    //   backend reports `supports_live_network_attach() == false`.
+    if !svc.networks.is_empty() && backend.supports_live_network_attach() {
         // best-effort: swallow disconnect failures (already off / not
-        // applicable to wisp).
+        // applicable here).
         let _ = backend.disconnect_network(&id, "bridge").await;
         for net in &svc.networks {
             backend.connect_network(&id, net).await.map_err(|e| {
