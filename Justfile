@@ -152,6 +152,20 @@ prod:
     docker compose -f docker/compose.yaml pull controller agent
     docker compose -f docker/compose.yaml up -d --no-build
 
+# === Examples (stack.toml fixture) ===
+
+# Deploy just the `hello` stack from examples/stack-toml/. Assumes a
+# controller is reachable and an `isd context` is selected.
+example-deploy-hello:
+    cd examples/stack-toml && isd deploy ./hello
+
+# Deploy every stack in examples/stack-toml/ (currently hello + monitoring).
+# Note: the monitoring stack binds `grafana_admin_password`; create it
+# first with `isd secret put grafana_admin_password` or POST /stacks
+# returns 422.
+example-deploy:
+    cd examples/stack-toml && isd deploy --all
+
 # === Smoke / demo (full controller + agent end-to-end on Docker) ===
 
 ctrl := "isengard-controller"

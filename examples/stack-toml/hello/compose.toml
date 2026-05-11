@@ -1,0 +1,15 @@
+# Flat-shape compose.toml. Every top-level table is a service. The
+# operator-side `isd deploy` converts this to YAML before shipping to
+# the agent (agent never sees TOML).
+#
+# Equivalent docker-compose YAML:
+#   services:
+#     web:
+#       image: nginx:alpine
+#       ports: ["18080:80"]
+#       labels: { isengard.expose: "hello.example.com" }
+
+[web]
+image = "nginx:alpine"
+ports = ["18080:80"]
+labels = { "isengard.expose" = "hello.example.com" }

@@ -1,0 +1,10 @@
+# Optional fleet manifest. `isd deploy` walks up from a stack directory
+# looking for this file (stopping at the nearest `.git` boundary). When
+# present, it provides a default fleet binding for stacks that don't
+# pin one in their own `stack.toml`.
+#
+# Phase 0.13 captures + persists `fleet`; resolution against saved
+# contexts lands in Phase 0.14+.
+
+fleet = "default"
+context = "local"

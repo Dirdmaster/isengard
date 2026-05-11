@@ -1,0 +1,24 @@
+# Minimal Phase 0.13 stack manifest. Required keys are `name` and a
+# non-empty `compose` list. Everything else is optional.
+#
+# See `docs/RELEASE_NOTES_PHASE_0_13.md` for the full schema.
+
+name = "hello"
+fleet = "default"
+compose = ["compose.toml"]
+
+# strategy: auto | blue-green | rolling | recreate. Default: auto.
+strategy = "recreate"
+
+# Lifecycle hooks. cwd at /etc/isengard/stacks/<name>/ on the agent.
+# Env is deny-by-default (PATH, HOME, USER, LANG, LC_ALL, TZ + ISENGARD_*).
+# Pre-deploy failures abort. Post-deploy failures log a warning.
+[[hooks]]
+on = "pre-deploy"
+cmd = ["sh", "-c", "echo 'pre-deploy fired for hello'"]
+timeout = "30s"
+
+[[hooks]]
+on = "post-deploy"
+cmd = ["sh", "-c", "echo 'post-deploy fired for hello'"]
+timeout = "30s"
