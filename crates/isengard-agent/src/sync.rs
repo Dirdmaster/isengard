@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use isengard_core::Event as CoreEvent;
+use isengard_core::{Event as CoreEvent, EventEmitter};
 use isengard_proto::pb::controller_client::ControllerClient;
 use isengard_proto::pb::{AgentMessage, Event as ProtoEvent, Heartbeat, SyncHello, agent_message};
 use tokio::sync::mpsc;
@@ -27,6 +27,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::Result;
 use crate::backoff::Backoff;
 use crate::deployment::DeploymentSupervisor;
+use crate::lifecycle_hooks::{self, HookContext, HookOutcome, HookPhase, HookSpec};
 use crate::logs::LogSource;
 use crate::mdns::MdnsResponder;
 use crate::proxy::ProxyState;
@@ -41,10 +42,49 @@ pub type MdnsHandle = Arc<tokio::sync::Mutex<MdnsResponder>>;
 /// ControllerMessages by writing to the agent's compose root and replying
 /// with a `WriteComposeAck`. `None` makes the agent ignore WriteCompose
 /// messages with a warn (used in tests / docker-less envs).
+///
+/// Phase 0.13 (wave 3.D): also carries an [`EventEmitter`] handle so
+/// lifecycle-hook execution can surface `lifecycle_hook.*` audit
+/// events back to the controller via the existing outbound event
+/// channel.
 #[derive(Clone)]
 pub struct ComposeContext {
     pub root: std::path::PathBuf,
     pub host_id: String,
+    /// Outbound event sink for hook audit events. Optional: tests that
+    /// don't care about hooks can pass `None` and the WriteCompose
+    /// handler will fall back to a no-op emitter so hooks still run
+    /// but their audit trail goes only to tracing logs.
+    pub event_emitter: Option<Arc<dyn EventEmitter>>,
+}
+
+/// Phase 0.13 wave 3.D: split the proto's [`isengard_proto::pb::LifecycleHook`]
+/// list (which carries every phase mixed together) into per-phase
+/// [`HookSpec`] vectors. Unknown `on` values are silently dropped: the
+/// dashboard validates the manifest on submit, so an unknown phase on
+/// the wire is almost certainly a future-version controller talking to
+/// a current agent. Drop-and-log keeps the agent forward-compatible.
+fn split_hooks_by_phase(
+    raw: &[isengard_proto::pb::LifecycleHook],
+) -> (Vec<HookSpec>, Vec<HookSpec>, Vec<HookSpec>) {
+    let mut pre = Vec::new();
+    let mut post = Vec::new();
+    let mut failure = Vec::new();
+    for h in raw {
+        let spec = HookSpec::from_argv(&h.cmd, h.timeout_ms, &h.on_error);
+        match h.on.as_str() {
+            "pre-deploy" => pre.push(spec),
+            "post-deploy" => post.push(spec),
+            "failure" => failure.push(spec),
+            other => {
+                tracing::debug!(
+                    on = other,
+                    "WriteCompose: skipping hook with unknown phase",
+                );
+            }
+        }
+    }
+    (pre, post, failure)
 }
 
 /// Phase 13B: in-process registry of active log subscriptions on this agent.
@@ -333,6 +373,67 @@ pub async fn run_sync_loop<S: LogSource>(
                         continue;
                     };
                     let stack_dir = ctx.root.join(&req.stack_name);
+
+                    // Phase 0.13 wave 3.D: split hooks by phase, build
+                    // the per-deploy [`HookContext`], and run pre-deploy
+                    // hooks BEFORE the compose write. Pre-deploy hook
+                    // failure aborts the deploy: WriteComposeAck =
+                    // ERROR, no compose written.
+                    let (pre_hooks, post_hooks, failure_hooks) =
+                        split_hooks_by_phase(&req.hooks);
+                    let hook_ctx = HookContext {
+                        stack: req.stack_name.clone(),
+                        host_id: ctx.host_id.clone(),
+                        deployment_id: req.deployment_id.clone(),
+                        stack_dir: stack_dir.clone(),
+                        failure_reason: None,
+                        failure_detail: None,
+                    };
+                    let noop_emitter: Arc<dyn EventEmitter> =
+                        Arc::new(isengard_core::NoopEmitter);
+                    let emitter: Arc<dyn EventEmitter> = ctx
+                        .event_emitter
+                        .clone()
+                        .unwrap_or_else(|| noop_emitter.clone());
+
+                    let pre_outcome = lifecycle_hooks::run_hooks(
+                        HookPhase::PreDeploy,
+                        &pre_hooks,
+                        &hook_ctx,
+                        emitter.as_ref(),
+                    )
+                    .await;
+                    if let HookOutcome::Aborted { reason, .. } = &pre_outcome {
+                        warn!(
+                            request_id = %req.request_id,
+                            stack = %req.stack_name,
+                            reason = %reason,
+                            "WriteCompose: pre-deploy hook aborted; refusing compose write",
+                        );
+                        let mut fail_ctx = hook_ctx.clone();
+                        fail_ctx.failure_reason = Some("pre-deploy hook aborted".into());
+                        fail_ctx.failure_detail = Some(reason.clone());
+                        let _ = lifecycle_hooks::run_hooks(
+                            HookPhase::Failure,
+                            &failure_hooks,
+                            &fail_ctx,
+                            emitter.as_ref(),
+                        )
+                        .await;
+                        let ack = isengard_proto::pb::WriteComposeAck {
+                            request_id: req.request_id.clone(),
+                            kind: isengard_proto::pb::write_compose_ack::Kind::Error as i32,
+                            error: format!("pre-deploy hook aborted: {reason}"),
+                            ..Default::default()
+                        };
+                        let _ = read_log_tx
+                            .send(AgentMessage {
+                                payload: Some(agent_message::Payload::WriteComposeAck(ack)),
+                            })
+                            .await;
+                        continue;
+                    }
+
                     let outcome = crate::compose_writer::apply_controller_write(
                         &stack_dir,
                         &req.compose_yaml,
@@ -340,11 +441,70 @@ pub async fn run_sync_loop<S: LogSource>(
                         &ctx.host_id,
                         req.force,
                         // Phase 0.13: persist verbatim stack.toml beside
-                        // compose.yml. Hook execution + secret threading
-                        // are deferred to a follow-up; the manifest body
-                        // is preserved so operators can inspect it.
+                        // compose.yml. The agent does NOT parse it; the
+                        // hook + secrets behavior is driven by the
+                        // explicit proto fields.
                         &req.manifest_toml,
                     );
+
+                    // ---- post-deploy OR failure hooks ----------------
+                    // Compose write failure -> fire failure hooks.
+                    // Compose write success -> fire post-deploy hooks.
+                    // Post-deploy failure does NOT roll back the deploy
+                    // (the compose already wrote); it logs a warning and
+                    // also fires failure hooks for symmetry.
+                    let write_failed: Option<(String, String)> = match &outcome {
+                        crate::compose_writer::ApplyWriteOutcome::Ok { .. } => None,
+                        crate::compose_writer::ApplyWriteOutcome::Conflict {
+                            current_sha256, ..
+                        } => Some((
+                            "compose write conflict".into(),
+                            format!("on-disk sha256 = {current_sha256}"),
+                        )),
+                        crate::compose_writer::ApplyWriteOutcome::Error(e) => {
+                            Some(("compose write error".into(), e.clone()))
+                        }
+                    };
+
+                    if let Some((reason, detail)) = &write_failed {
+                        let mut fail_ctx = hook_ctx.clone();
+                        fail_ctx.failure_reason = Some(reason.clone());
+                        fail_ctx.failure_detail = Some(detail.clone());
+                        let _ = lifecycle_hooks::run_hooks(
+                            HookPhase::Failure,
+                            &failure_hooks,
+                            &fail_ctx,
+                            emitter.as_ref(),
+                        )
+                        .await;
+                    } else {
+                        let post = lifecycle_hooks::run_hooks(
+                            HookPhase::PostDeploy,
+                            &post_hooks,
+                            &hook_ctx,
+                            emitter.as_ref(),
+                        )
+                        .await;
+                        if let HookOutcome::Aborted { reason, .. } = &post {
+                            warn!(
+                                request_id = %req.request_id,
+                                stack = %req.stack_name,
+                                reason = %reason,
+                                "WriteCompose: post-deploy hook failed (compose write succeeded; not rolling back)",
+                            );
+                            let mut fail_ctx = hook_ctx.clone();
+                            fail_ctx.failure_reason = Some("post-deploy hook aborted".into());
+                            fail_ctx.failure_detail = Some(reason.clone());
+                            let _ = lifecycle_hooks::run_hooks(
+                                HookPhase::Failure,
+                                &failure_hooks,
+                                &fail_ctx,
+                                emitter.as_ref(),
+                            )
+                            .await;
+                        }
+                    }
+
                     let ack = match outcome {
                         crate::compose_writer::ApplyWriteOutcome::Ok { written_sha256 } => {
                             isengard_proto::pb::WriteComposeAck {
