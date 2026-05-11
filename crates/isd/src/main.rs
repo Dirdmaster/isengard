@@ -17,6 +17,7 @@
 //!  - `isd gateway`: dev DNS + reverse proxy bridging the operator's Mac
 //!  - `isd secret put | list | rm`: managed-secret CRUD
 //!  - `isd route create | list | rm`: routing-rule CRUD
+//!  - `isd hosts list`: enumerate enrolled hosts (ULID, hostname, fleet)
 
 use clap::{Parser, Subcommand};
 
@@ -24,6 +25,7 @@ mod compose_cmd;
 mod context;
 mod credentials;
 mod gateway;
+mod hosts_cmd;
 mod logs;
 mod open_cmd;
 mod ps;
@@ -91,6 +93,12 @@ enum Command {
     /// non-stack routes (e.g., the controller dashboard) and ad-hoc edits.
     #[command(subcommand)]
     Route(route::RouteCommand),
+    /// Inspect enrolled hosts. `list` prints a kubectl-style table with
+    /// host ULID, hostname, enrolled timestamp, and fleet. Without this
+    /// the canonical Crockford ULID for a host was only recoverable by
+    /// dumping the controller's SQLite by hand: wave 5.B polish.
+    #[command(subcommand)]
+    Hosts(hosts_cmd::HostsCommand),
 }
 
 #[tokio::main]
@@ -112,6 +120,13 @@ async fn main() {
         }
         Command::Route(cmd) => {
             route::run(route::RouteArgs { command: cmd }, cli.context.as_deref()).await
+        }
+        Command::Hosts(cmd) => {
+            hosts_cmd::run(
+                hosts_cmd::HostsArgs { command: cmd },
+                cli.context.as_deref(),
+            )
+            .await
         }
     };
 
