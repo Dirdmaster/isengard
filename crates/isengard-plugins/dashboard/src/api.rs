@@ -53,6 +53,11 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/fleets", get(list_fleets).post(create_fleet))
         .route("/fleets/{name}", delete(delete_fleet))
         .route("/settings", get(get_settings).patch(patch_settings))
+        // Phase 0.14: placement scheduler readback. Returns every
+        // placement row plus the host hostname so the CLI / dashboard
+        // can render the grid without a second hosts call.
+        .route("/placements", get(list_placements))
+        .route("/placements/by-stack/{stack_id}", get(list_placements_by_stack))
         .with_state(handles)
 }
 
@@ -1958,6 +1963,86 @@ pub async fn install_sh(
         .into_response()
 }
 
+// ============== Phase 0.14: placement scheduler endpoints ==============
+
+#[derive(Debug, Clone, Serialize)]
+struct PlacementRowDto {
+    service_id: i64,
+    service_name: Option<String>,
+    stack_id: Option<i64>,
+    host_id: String,
+    hostname: Option<String>,
+    replica_index: u32,
+    state: String,
+    assigned_at: chrono::DateTime<chrono::Utc>,
+    last_event: Option<String>,
+}
+
+async fn list_placements(State(handles): State<Arc<ControllerHandles>>) -> Response {
+    placement_rows_response(&handles, None).await
+}
+
+async fn list_placements_by_stack(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(stack_id): Path<i64>,
+) -> Response {
+    placement_rows_response(&handles, Some(stack_id)).await
+}
+
+async fn placement_rows_response(
+    handles: &ControllerHandles,
+    filter_stack: Option<i64>,
+) -> Response {
+    let rows = match handles.inventory.list_all_placements().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_all_placements: {e}"),
+            );
+        }
+    };
+    let hosts = match handles.inventory.list_hosts().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list_hosts: {e}"),
+            );
+        }
+    };
+    let mut hostname_by_id: std::collections::HashMap<HostId, String> =
+        std::collections::HashMap::new();
+    for h in hosts {
+        hostname_by_id.insert(h.id, h.hostname);
+    }
+    let mut dtos = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Optional stack filter: look up service to find its stack_id.
+        let (service_name, stack_id) = match handles.inventory.get_service(row.service_id).await {
+            Ok(Some(s)) => (Some(s.name), s.stack_id.map(|s| s.0)),
+            _ => (None, None),
+        };
+        if let Some(want_stack) = filter_stack
+            && stack_id != Some(want_stack)
+        {
+            continue;
+        }
+        dtos.push(PlacementRowDto {
+            service_id: row.service_id.0,
+            service_name,
+            stack_id,
+            host_id: row.host_id.to_string(),
+            hostname: hostname_by_id.get(&row.host_id).cloned(),
+            replica_index: row.replica_index,
+            state: row.state.as_str().to_string(),
+            assigned_at: row.assigned_at,
+            last_event: row.last_event,
+        });
+    }
+    Json(dtos).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3153,5 +3238,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_placements_empty_returns_empty_array() {
+        let app = router(test_handles().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/placements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_placements_returns_active_rows_with_hostname() {
+        use isengard_storage::PlacementState;
+        use isengard_storage::service::ServiceState;
+        let handles = test_handles().await;
+        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
+        let stack_id = handles
+            .inventory
+            .insert_stack(InsertStack {
+                host_id,
+                name: "blog".into(),
+                source: StackSource::Compose,
+            })
+            .await
+            .unwrap();
+        let svc = handles
+            .inventory
+            .insert_service(isengard_storage::service::InsertService {
+                host_id,
+                stack_id: Some(stack_id),
+                name: "web".into(),
+                image: "nginx".into(),
+                state: ServiceState::Running,
+            })
+            .await
+            .unwrap();
+        handles
+            .inventory
+            .upsert_placement(isengard_storage::UpsertPlacement {
+                service_id: svc,
+                host_id,
+                replica_index: 0,
+                state: PlacementState::Active,
+                last_event: None,
+            })
+            .await
+            .unwrap();
+
+        let app = router(handles);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/placements")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let arr: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["service_name"], "web");
+        assert_eq!(arr[0]["hostname"], "h");
+        assert_eq!(arr[0]["state"], "active");
+        assert_eq!(arr[0]["replica_index"], 0);
     }
 }

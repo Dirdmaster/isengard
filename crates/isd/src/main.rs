@@ -29,6 +29,7 @@ mod hosts_cmd;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
+mod placement_cmd;
 mod ps;
 mod route;
 mod secret;
@@ -106,6 +107,12 @@ enum Command {
     /// back with optimistic concurrency (sha256 If-Match).
     #[command(subcommand)]
     Manifest(manifest_cmd::ManifestCommand),
+    /// Phase 0.14: view the controller's placement grid. `show` prints
+    /// a kubectl-style table of (service, host, replica, state). The
+    /// scheduler is the planner for 0.14; the row state tells you the
+    /// scheduler's decision even before the dispatch path consumes it.
+    #[command(subcommand)]
+    Placement(placement_cmd::PlacementCommand),
 }
 
 #[tokio::main]
@@ -138,6 +145,13 @@ async fn main() {
         Command::Manifest(cmd) => {
             manifest_cmd::run(
                 manifest_cmd::ManifestArgs { command: cmd },
+                cli.context.as_deref(),
+            )
+            .await
+        }
+        Command::Placement(cmd) => {
+            placement_cmd::run(
+                placement_cmd::PlacementArgs { command: cmd },
                 cli.context.as_deref(),
             )
             .await
