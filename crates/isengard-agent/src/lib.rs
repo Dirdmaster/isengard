@@ -24,6 +24,7 @@ pub mod proxy;
 pub mod runtime;
 pub mod secret_fetch;
 pub mod self_update;
+pub mod stack_secrets;
 pub mod sync;
 pub mod tls;
 
@@ -543,12 +544,35 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                         // fetches + tmpfs-mounts them. We always pass the
                         // endpoint; the variant only contacts the
                         // controller when at least one service has
-                        // `secrets:` set.
-                        match compose_apply::reconcile_stack_with_secrets(
+                        // `secrets:` set OR the stack.toml declares
+                        // `secrets = [...]` at fleet level (Phase 0.13
+                        // follow-up).
+                        //
+                        // Stack-level secrets are read off the persisted
+                        // `<stack_dir>/stack.toml`. A read failure
+                        // (malformed array, IO error) aborts the
+                        // reconcile rather than mounting an ambiguous
+                        // set: the operator's intent isn't clear enough
+                        // to deploy safely.
+                        let stack_level_secrets = match stack_secrets::read_stack_secrets(
+                            &stack_dir,
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    stack = %evt.stack_name,
+                                    "compose_watcher: failed to read stack-level secrets; skipping reconcile",
+                                );
+                                continue;
+                            }
+                        };
+                        match compose_apply::reconcile_stack_with_stack_secrets(
                             watcher_backend.as_ref(),
                             &evt.stack_name,
                             &yaml,
                             watcher_endpoint.clone(),
+                            &stack_level_secrets,
                         )
                         .await
                         {

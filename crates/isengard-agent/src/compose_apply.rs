@@ -54,7 +54,7 @@ pub async fn reconcile_stack(
     let desired = parse_compose(compose_yaml)?;
     let running = list_running_for_stack(backend, stack_name).await?;
     let plan = build_plan(stack_name, &desired, &running);
-    let outcomes = apply_plan(backend, stack_name, &desired, &plan, None).await;
+    let outcomes = apply_plan(backend, stack_name, &desired, &plan, None, &[]).await;
     Ok((plan, outcomes))
 }
 
@@ -74,6 +74,27 @@ pub async fn reconcile_stack_with_secrets(
     compose_yaml: &str,
     controller_endpoint: Arc<RwLock<Endpoint>>,
 ) -> anyhow::Result<(ReconcilePlan, Vec<ApplyOutcome>)> {
+    reconcile_stack_with_stack_secrets(backend, stack_name, compose_yaml, controller_endpoint, &[])
+        .await
+}
+
+/// Phase 0.13 follow-up: same as [`reconcile_stack_with_secrets`] but
+/// also mounts the supplied stack-level secret names into every service
+/// of the stack. Stack-level secrets come from `secrets = [...]` in the
+/// operator's `stack.toml` and always mount at `/run/secrets/<name>`
+/// (Swarm-compatible default path).
+///
+/// When the same secret name appears both at stack level and in a
+/// service's per-service `secrets:` list, the per-service entry wins
+/// (so a long-form `target:` override is honoured); the value is
+/// fetched + materialised + mounted exactly once per service.
+pub async fn reconcile_stack_with_stack_secrets(
+    backend: &dyn RuntimeBackend,
+    stack_name: &str,
+    compose_yaml: &str,
+    controller_endpoint: Arc<RwLock<Endpoint>>,
+    stack_level_secrets: &[String],
+) -> anyhow::Result<(ReconcilePlan, Vec<ApplyOutcome>)> {
     let desired = parse_compose(compose_yaml)?;
     // Fail loud at parse time if a service references an undeclared
     // top-level secret. The dashboard / `isd diff` already caught this
@@ -88,6 +109,7 @@ pub async fn reconcile_stack_with_secrets(
         &desired,
         &plan,
         Some(controller_endpoint),
+        stack_level_secrets,
     )
     .await;
     Ok((plan, outcomes))
@@ -147,12 +169,19 @@ pub async fn list_running_for_stack(
 /// fetch each value over the controller's FetchSecret RPC, materialise
 /// it on tmpfs, and bind-mount the directory into the container. When
 /// `None`, secrets are silently dropped (matches the v0.3d call site).
+///
+/// `stack_level_secrets`: Phase 0.13 follow-up. Names declared via
+/// `secrets = [...]` in the operator's `stack.toml`. Each name is
+/// fetched + mounted at `/run/secrets/<name>` in every service of the
+/// stack. Empty when the stack has no manifest or no stack-level
+/// secrets declared.
 pub async fn apply_plan(
     backend: &dyn RuntimeBackend,
     stack_name: &str,
     desired: &DesiredCompose,
     plan: &ReconcilePlan,
     controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
+    stack_level_secrets: &[String],
 ) -> Vec<ApplyOutcome> {
     let mut outcomes = Vec::with_capacity(plan.ops.len());
     for op in &plan.ops {
@@ -173,6 +202,7 @@ pub async fn apply_plan(
                     None,
                     desired,
                     controller_endpoint.clone(),
+                    stack_level_secrets,
                 )
                 .await
             }
@@ -205,6 +235,7 @@ pub async fn apply_plan(
                     prior.map(|r| r.container_id.as_str()),
                     desired,
                     controller_endpoint.clone(),
+                    stack_level_secrets,
                 )
                 .await
             }
@@ -240,6 +271,40 @@ fn container_name_for(stack_name: &str, service: &str, svc: &DesiredService) -> 
     svc.container_name
         .clone()
         .unwrap_or_else(|| format!("{stack_name}-{service}"))
+}
+
+/// Phase 0.13 follow-up: build the ordered `(name, container_path)`
+/// list of secrets the agent should fetch + mount for one service.
+///
+/// Order: per-service `secrets:` (in declaration order, with their
+/// `target:` overrides) first; then stack-level `secrets = [...]` names
+/// not already covered, each mounted at the Swarm-compatible default
+/// `/run/secrets/<name>`. Same-name collisions resolve in favour of
+/// the per-service entry: the value is fetched + mounted exactly once.
+///
+/// Returns an error when a per-service reference points at a top-level
+/// secret that isn't declared external (the existing v0.3.6 invariant).
+fn merge_secret_targets(
+    desired: &DesiredCompose,
+    service: &str,
+    stack_level_secrets: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
+    // Per-service first so its `target:` wins on collision.
+    let per_service = desired.service_secret_targets(service)?;
+    let mut out: Vec<(String, String)> =
+        Vec::with_capacity(per_service.len() + stack_level_secrets.len());
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (n, t) in per_service {
+        if seen.insert(n.clone()) {
+            out.push((n, t));
+        }
+    }
+    for name in stack_level_secrets {
+        if seen.insert(name.clone()) {
+            out.push((name.clone(), format!("/run/secrets/{name}")));
+        }
+    }
+    Ok(out)
 }
 
 /// Translate a parsed compose [`DesiredService`] into the
@@ -388,6 +453,7 @@ fn parse_bind_string(bind: &str) -> Option<MountSpec> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_container_started(
     backend: &dyn RuntimeBackend,
     stack_name: &str,
@@ -395,19 +461,22 @@ async fn ensure_container_started(
     _prior_container: Option<&str>,
     desired: &DesiredCompose,
     controller_endpoint: Option<Arc<RwLock<Endpoint>>>,
+    stack_level_secrets: &[String],
 ) -> anyhow::Result<()> {
     if svc.image.is_none() {
         return Err(anyhow::anyhow!("service {} has no image", svc.name));
     }
     let container_name = container_name_for(stack_name, &svc.name, svc);
 
-    // v0.3.6: fetch + materialise external secrets BEFORE creating the
-    // container so the bind-mount source paths exist when the backend
-    // wires them in. On any failure we abort the start; the operator
-    // gets the error in the apply outcome.
+    // v0.3.6 + Phase 0.13 follow-up: union of per-service `secrets:`
+    // and stack-level `secrets = [...]` (the latter mounts into every
+    // service of the stack at the default `/run/secrets/<name>` path).
+    // Per-service entries win on collision so `target:` overrides are
+    // honoured; each name is fetched + mounted exactly once.
+    let merged_targets = merge_secret_targets(desired, &svc.name, stack_level_secrets)?;
     let mut binds: Vec<String> = Vec::new();
     let mut secret_mounts: Vec<SecretMount> = Vec::new();
-    if !svc.secrets.is_empty() {
+    if !merged_targets.is_empty() {
         let Some(endpoint) = controller_endpoint.clone() else {
             return Err(anyhow::anyhow!(
                 "service {} references secrets but the agent has no \
@@ -417,15 +486,14 @@ async fn ensure_container_started(
         };
         // Cleanup any leftover host directory before we re-fetch.
         let _ = secret_fetch::cleanup_for_container(&container_name);
-        let targets = desired.service_secret_targets(&svc.name)?;
-        let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
+        let names: Vec<String> = merged_targets.iter().map(|(n, _)| n.clone()).collect();
         let materialised = secret_fetch::fetch_and_materialise(endpoint, &container_name, &names)
             .await
             .map_err(|e| anyhow::anyhow!("fetch + materialise secrets for {}: {e}", svc.name))?;
-        // Compose target paths from the long-form `target:` (or default
-        // `/run/secrets/<name>`) and pair them up with the materialised
-        // host paths. The order is stable: `service_secret_targets` and
-        // `fetch_and_materialise` both walk the same `svc.secrets` list.
+        // Compose target paths come from the merged list (per-service
+        // long-form `target:` overrides, or `/run/secrets/<name>` for
+        // stack-level entries). The order is stable: merge_secret_targets
+        // and fetch_and_materialise both walk the same merged list.
         //
         // Two parallel collections: `binds` are kept for backward
         // compatibility with the bollard call shape (the legacy
@@ -433,7 +501,7 @@ async fn ensure_container_started(
         // `secret_mounts` carries the structured form the trait
         // surface uses. BollardBackend's spec_to_config consumes
         // SecretMount entries directly.
-        for (m, (_, target)) in materialised.iter().zip(targets.iter()) {
+        for (m, (_, target)) in materialised.iter().zip(merged_targets.iter()) {
             binds.push(format!("{}:{}:ro", m.host_path.to_string_lossy(), target));
             secret_mounts.push(SecretMount {
                 source: m.host_path.to_string_lossy().to_string(),
@@ -776,5 +844,157 @@ mod tests {
     fn parse_bind_string_invalid_returns_none() {
         assert!(parse_bind_string("/srv").is_none());
         assert!(parse_bind_string("a:b:c:d").is_none());
+    }
+
+    // ----- Phase 0.13 follow-up: merge_secret_targets -----
+
+    /// Build a [`DesiredCompose`] with one service and an optional set
+    /// of top-level external secrets + per-service refs.
+    fn desired_with_service_secrets(
+        service: &str,
+        top_level: &[&str],
+        per_service: &[(&str, Option<&str>)],
+    ) -> DesiredCompose {
+        use crate::compose_reconciler::{ServiceSecretRef, TopLevelSecret};
+        let mut d = DesiredCompose::default();
+        let mut svc = DesiredService {
+            name: service.into(),
+            image: Some("nginx".into()),
+            ..Default::default()
+        };
+        for (src, tgt) in per_service {
+            svc.secrets.push(ServiceSecretRef {
+                source: (*src).to_string(),
+                target: tgt.map(|s| s.to_string()),
+            });
+        }
+        d.services.insert(service.into(), svc);
+        for name in top_level {
+            d.secrets
+                .insert((*name).to_string(), TopLevelSecret::External);
+        }
+        d
+    }
+
+    #[test]
+    fn merge_secret_targets_only_stack_level_when_service_has_no_secrets() {
+        let d = desired_with_service_secrets("web", &[], &[]);
+        let stack = vec!["cf_dns_token".to_string(), "github_token".to_string()];
+        let out = merge_secret_targets(&d, "web", &stack).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                (
+                    "cf_dns_token".to_string(),
+                    "/run/secrets/cf_dns_token".to_string()
+                ),
+                (
+                    "github_token".to_string(),
+                    "/run/secrets/github_token".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_secret_targets_only_per_service_when_stack_empty() {
+        // Service `web` references `db_pass` with a custom target.
+        let d =
+            desired_with_service_secrets("web", &["db_pass"], &[("db_pass", Some("/etc/db.pass"))]);
+        let out = merge_secret_targets(&d, "web", &[]).unwrap();
+        assert_eq!(
+            out,
+            vec![("db_pass".to_string(), "/etc/db.pass".to_string())]
+        );
+    }
+
+    #[test]
+    fn merge_secret_targets_unions_disjoint_lists() {
+        // Service has `a` per-service; stack has `b`. Both should mount.
+        let d = desired_with_service_secrets("web", &["a"], &[("a", None)]);
+        let stack = vec!["b".to_string()];
+        let out = merge_secret_targets(&d, "web", &stack).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("a".to_string(), "/run/secrets/a".to_string()),
+                ("b".to_string(), "/run/secrets/b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_secret_targets_dedups_same_name_per_service_wins() {
+        // Per-service entry for `foo` declares a custom `target:`;
+        // stack-level also lists `foo`. Result: one entry, custom target.
+        let d = desired_with_service_secrets("web", &["foo"], &[("foo", Some("/etc/foo"))]);
+        let stack = vec!["foo".to_string()];
+        let out = merge_secret_targets(&d, "web", &stack).unwrap();
+        assert_eq!(out, vec![("foo".to_string(), "/etc/foo".to_string())]);
+    }
+
+    #[test]
+    fn merge_secret_targets_dedups_same_name_default_target() {
+        // Per-service entry without `target:` for `foo`, plus stack-level
+        // `foo`. Still one entry, default `/run/secrets/foo`.
+        let d = desired_with_service_secrets("web", &["foo"], &[("foo", None)]);
+        let stack = vec!["foo".to_string()];
+        let out = merge_secret_targets(&d, "web", &stack).unwrap();
+        assert_eq!(
+            out,
+            vec![("foo".to_string(), "/run/secrets/foo".to_string())]
+        );
+    }
+
+    #[test]
+    fn merge_secret_targets_empty_returns_empty() {
+        let d = desired_with_service_secrets("web", &[], &[]);
+        let out = merge_secret_targets(&d, "web", &[]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_secret_targets_stack_only_does_not_require_top_level_secrets_block() {
+        // The compose YAML may have NO top-level `secrets:` (no
+        // per-service refs). Stack-level `secrets = [...]` should still
+        // produce mount entries: service_secret_targets returns empty
+        // when the service has no `secrets:` of its own.
+        let d = DesiredCompose {
+            services: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "web".to_string(),
+                    DesiredService {
+                        name: "web".into(),
+                        image: Some("nginx".into()),
+                        ..Default::default()
+                    },
+                );
+                m
+            },
+            secrets: std::collections::BTreeMap::new(),
+        };
+        let stack = vec!["fleet_secret".to_string()];
+        let out = merge_secret_targets(&d, "web", &stack).unwrap();
+        assert_eq!(
+            out,
+            vec![(
+                "fleet_secret".to_string(),
+                "/run/secrets/fleet_secret".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn merge_secret_targets_preserves_per_service_order_then_stack_order() {
+        let d = desired_with_service_secrets(
+            "web",
+            &["alpha", "beta"],
+            &[("alpha", None), ("beta", None)],
+        );
+        let stack = vec!["gamma".to_string(), "delta".to_string()];
+        let out = merge_secret_targets(&d, "web", &stack).unwrap();
+        let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma", "delta"]);
     }
 }
