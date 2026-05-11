@@ -196,11 +196,24 @@ pub enum DeployPlan {
 
 /// Phase 0.13: classify the args. Precedence:
 ///   1. `--all` set: All { root: cwd or `--root` }
-///   2. positional path is a `stack.toml` file: Manifest { it }
-///   3. positional path is a directory containing `stack.toml`: Manifest
-///   4. positional path is a compose file: Single
-///   5. no positional path and `./stack.toml` exists: Manifest { cwd/stack.toml }
-///   6. no positional path and no `./stack.toml`: error
+///   2. positional `-`: Single { compose_path: "-" } (stdin)
+///   3. positional is an existing directory: probe for `stack.toml`,
+///      `compose.toml`, `compose.yml`, `compose.yaml` in that order;
+///      first match wins. Dir exists but no manifest -> explicit error.
+///   4. positional is an existing file named `stack.toml`: Manifest
+///   5. positional is some other existing file: Single (legacy compose)
+///   6. positional has a path separator or `.`/`/` prefix but does NOT
+///      exist: explicit error (treated as path, not stack name)
+///   7. positional is a bare name (no separator) that does NOT exist:
+///      explicit error suggesting `./<name>` or stack-name lookup
+///   8. no positional and `./stack.toml` exists: Manifest { cwd/stack.toml }
+///   9. no positional and no `./stack.toml`: error
+///
+/// Wave 5.A: bare names that match no on-disk file or dir now error
+/// explicitly instead of silently falling through to the legacy Single
+/// compose path with a "No such file or directory" message. Operator
+/// either passes `./<name>` (the path-resolver does the right thing) or
+/// gets a clear hint to do so.
 pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
     if args.all {
         let root = args
@@ -213,30 +226,7 @@ pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
         Some(p) if p == std::path::Path::new("-") => Ok(DeployPlan::Single {
             compose_path: PathBuf::from("-"),
         }),
-        Some(p) => {
-            if p.is_dir() {
-                let manifest = p.join("stack.toml");
-                if manifest.exists() {
-                    Ok(DeployPlan::Manifest {
-                        manifest_path: manifest,
-                    })
-                } else {
-                    Err(anyhow!(
-                        "{} is a directory but contains no stack.toml; \
-                         pass a compose file path or add a stack.toml",
-                        p.display()
-                    ))
-                }
-            } else if p.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
-                Ok(DeployPlan::Manifest {
-                    manifest_path: p.to_path_buf(),
-                })
-            } else {
-                Ok(DeployPlan::Single {
-                    compose_path: p.to_path_buf(),
-                })
-            }
-        }
+        Some(p) => resolve_positional_arg(p),
         None => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let manifest = cwd.join("stack.toml");
@@ -252,6 +242,80 @@ pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
             }
         }
     }
+}
+
+/// Wave 5.A: resolve a positional `<path>` arg with explicit error
+/// messages for the bare-name + non-existent cases. Splits out of
+/// [`resolve_deploy_plan`] to keep the table-of-precedence readable.
+fn resolve_positional_arg(p: &std::path::Path) -> Result<DeployPlan> {
+    // Directory case: probe for stack.toml, then compose.{toml,yml,yaml}.
+    if p.is_dir() {
+        let manifest = p.join("stack.toml");
+        if manifest.exists() {
+            return Ok(DeployPlan::Manifest {
+                manifest_path: manifest,
+            });
+        }
+        for filename in ["compose.toml", "compose.yml", "compose.yaml"] {
+            let candidate = p.join(filename);
+            if candidate.exists() {
+                return Ok(DeployPlan::Single {
+                    compose_path: candidate,
+                });
+            }
+        }
+        return Err(anyhow!(
+            "{} is a directory but contains no stack.toml or compose.{{toml,yml,yaml}}; \
+             add a stack.toml or pass an explicit compose file path",
+            p.display()
+        ));
+    }
+
+    // Existing file case.
+    if p.exists() {
+        if p.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
+            return Ok(DeployPlan::Manifest {
+                manifest_path: p.to_path_buf(),
+            });
+        }
+        return Ok(DeployPlan::Single {
+            compose_path: p.to_path_buf(),
+        });
+    }
+
+    // Path does not exist. Two diagnostics depending on whether the
+    // operator clearly intended a path (has a separator or `.`/`/`
+    // prefix) or a bare name (likely meant as a stack name or a
+    // subdir-of-cwd lookup).
+    if looks_like_explicit_path(p) {
+        return Err(anyhow!(
+            "{} does not exist; pass a path to a stack.toml, a compose file, \
+             or a directory containing one",
+            p.display()
+        ));
+    }
+    let display = p.display();
+    Err(anyhow!(
+        "no file or directory named {display:?} in cwd; \
+         did you mean `isd deploy ./{display}`? \
+         (bare names are not yet looked up as stack names by `isd deploy`; \
+         the path resolver expects a stack.toml, a compose file, or a \
+         directory containing one)"
+    ))
+}
+
+/// Wave 5.A: a path "looks like an explicit path" when it has any
+/// component separator or starts with `.` / `..` / `/`. Used to pick
+/// between the two non-existent-path error messages.
+fn looks_like_explicit_path(p: &std::path::Path) -> bool {
+    let s = match p.to_str() {
+        Some(s) => s,
+        None => return true, // non-UTF8: treat as a path, not a name
+    };
+    s.contains('/')
+        || s.contains(std::path::MAIN_SEPARATOR)
+        || s.starts_with('.')
+        || std::path::Path::new(s).is_absolute()
 }
 
 /// Phase 0.13: deploy from a `stack.toml`. Merges overlays, builds the
@@ -979,6 +1043,117 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("stack.toml"), "got: {err}");
+    }
+
+    /// Wave 5.A: bare name that matches no on-disk file or directory
+    /// must error with a clear hint, not silently drop into the legacy
+    /// Single compose path.
+    #[test]
+    fn resolve_plan_with_bare_name_no_match_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Use cwd inside tmp so the name resolves relative to a known-
+        // empty directory. We don't actually chdir here: we construct
+        // the path with an obviously-not-present bare basename and let
+        // PathBuf::from("nope").is_dir() report false from cwd.
+        let _guard = tmp;
+        let nope = PathBuf::from("isd-deploy-bare-name-test-nope-XYZ123");
+        let err = resolve_deploy_plan(&args_with_path(Some(nope)))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("did you mean") || err.contains("does not exist"),
+            "got: {err}"
+        );
+    }
+
+    /// Wave 5.A: an explicit path (with `./` prefix) that doesn't
+    /// exist gets the "path does not exist" diagnostic, not the
+    /// "did you mean ./<name>" hint.
+    #[test]
+    fn resolve_plan_with_explicit_path_no_match_errors() {
+        let nope = PathBuf::from("./isd-deploy-explicit-test-nope-XYZ123");
+        let err = resolve_deploy_plan(&args_with_path(Some(nope)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not exist"), "got: {err}");
+        // The bare-name hint should NOT appear when the operator
+        // already used `./`.
+        assert!(!err.contains("did you mean"), "got: {err}");
+    }
+
+    /// Wave 5.A: a bare name that matches a subdir with stack.toml
+    /// resolves to Manifest (the operator-facing path-first case).
+    #[test]
+    fn resolve_plan_with_bare_name_matching_subdir_returns_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_dir = tmp.path().join("hello");
+        std::fs::create_dir_all(&stack_dir).unwrap();
+        std::fs::write(
+            stack_dir.join("stack.toml"),
+            "name = \"hello\"\ncompose = [\"compose.yaml\"]\n",
+        )
+        .unwrap();
+        // Pass the directory path (not a bare-name resolved from cwd,
+        // since cwd shouldn't be mutated in unit tests). The dir-probe
+        // path is what `isd deploy hello` exercises when `hello` is in
+        // cwd: PathBuf::from("hello").is_dir() takes the same branch.
+        let plan = resolve_deploy_plan(&args_with_path(Some(stack_dir))).unwrap();
+        assert!(matches!(plan, DeployPlan::Manifest { .. }));
+    }
+
+    /// Wave 5.A: a directory with a compose file but no stack.toml
+    /// resolves to Single (legacy compose path) via the new probe
+    /// order (stack.toml -> compose.toml -> compose.yml -> compose.yaml).
+    #[test]
+    fn resolve_plan_with_directory_containing_compose_yaml_returns_single() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_dir = tmp.path().join("legacy");
+        std::fs::create_dir_all(&stack_dir).unwrap();
+        let compose = stack_dir.join("compose.yaml");
+        std::fs::write(&compose, "services:\n  web:\n    image: nginx\n").unwrap();
+        let plan = resolve_deploy_plan(&args_with_path(Some(stack_dir))).unwrap();
+        match plan {
+            DeployPlan::Single { compose_path } => assert_eq!(compose_path, compose),
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    /// Wave 5.A: a directory with both stack.toml and compose.yaml
+    /// prefers stack.toml (precedence ordering documented in
+    /// `resolve_positional_arg`).
+    #[test]
+    fn resolve_plan_dir_with_both_prefers_stack_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_dir = tmp.path().join("both");
+        std::fs::create_dir_all(&stack_dir).unwrap();
+        std::fs::write(
+            stack_dir.join("stack.toml"),
+            "name = \"both\"\ncompose = [\"compose.yaml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(stack_dir.join("compose.yaml"), "services:\n").unwrap();
+        let plan = resolve_deploy_plan(&args_with_path(Some(stack_dir.clone()))).unwrap();
+        match plan {
+            DeployPlan::Manifest { manifest_path } => {
+                assert_eq!(manifest_path, stack_dir.join("stack.toml"))
+            }
+            other => panic!("expected Manifest, got {other:?}"),
+        }
+    }
+
+    /// Wave 5.A: `looks_like_explicit_path` classifier.
+    #[test]
+    fn looks_like_explicit_path_classifier() {
+        assert!(looks_like_explicit_path(std::path::Path::new("./hello")));
+        assert!(looks_like_explicit_path(std::path::Path::new("../hello")));
+        assert!(looks_like_explicit_path(std::path::Path::new("/abs/hello")));
+        assert!(looks_like_explicit_path(std::path::Path::new(
+            "hello/stack.toml"
+        )));
+        assert!(!looks_like_explicit_path(std::path::Path::new("hello")));
+        assert!(!looks_like_explicit_path(std::path::Path::new(
+            "stack-name"
+        )));
     }
 
     #[test]
