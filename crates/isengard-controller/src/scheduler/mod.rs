@@ -217,9 +217,10 @@ impl Scheduler {
             // event triggers carry the in-flight reconciles between
             // ticks.
             ticker.tick().await;
+
             loop {
                 ticker.tick().await;
-                if let Err(e) = me.reconcile_all().await {
+                if let Err(e) = me.reconcile_all_inner().await {
                     warn!(error = %e, "scheduler: reconcile_all failed");
                 }
             }
@@ -228,52 +229,75 @@ impl Scheduler {
 
     // === trigger surface ====================================================
     //
-    // These are the entry points the rest of the controller calls into.
-    // Step 3 wires them as stubs; step 6 makes them do real work.
+    // Entry points the rest of the controller calls. Each mutates the
+    // in-memory state then (when relevant) triggers a reconcile pass.
+    // The reconcile pass is the auto-place hook for operator decision
+    // #3 (where: zero match auto-places on the first eligible host).
 
-    /// Reconcile a single service. Stubbed until step 6.
+    /// Reconcile a single service. Public alias for the inner impl.
     pub async fn reconcile_service(&self, service_id: ServiceId) -> anyhow::Result<()> {
-        debug!(service = %service_id, "scheduler: reconcile_service (stub)");
-        Ok(())
+        self.reconcile_service_inner(service_id).await
     }
 
-    /// Walk every service and reconcile. Stubbed until step 6.
+    /// Walk every service in the inventory and reconcile.
     pub async fn reconcile_all(&self) -> anyhow::Result<()> {
-        debug!("scheduler: reconcile_all (stub)");
-        Ok(())
+        self.reconcile_all_inner().await
     }
 
     /// Heartbeat label update. Cached label set is replaced; reconcile
     /// is triggered only when the new set differs from the previous
-    /// (hash-compare to skip noisy agents). Stubbed until step 6.
+    /// (hash-compare skips noisy agents). When labels change, every
+    /// service is re-evaluated so previously-Pending services with
+    /// `where:` selectors get auto-placed onto the newly-eligible host
+    /// (operator decision #3, locked 2026-05-11).
     pub async fn on_heartbeat_labels(&self, host_id: HostId, new_labels: BTreeMap<String, String>) {
         let new_hash = label_hash(&new_labels);
         let changed = {
             let mut state = self.state.lock().await;
             let prev = state.label_hash.insert(host_id, new_hash);
             state.labels.insert(host_id, new_labels);
+            // Also bump the host to Healthy on heartbeat: receiving a
+            // heartbeat is exactly the signal that flips a previously-
+            // Disconnected host back to live.
+            state.health.insert(host_id, HostHealth::Healthy);
             prev != Some(new_hash)
         };
         if changed {
-            debug!(host = %host_id, "scheduler: labels changed (no reconcile yet, step 6)");
+            debug!(host = %host_id, "scheduler: labels changed, triggering auto-place");
+            if let Err(e) = self.reconcile_all_inner().await {
+                warn!(error = %e, "scheduler: auto-place reconcile failed");
+            }
         }
     }
 
-    /// Host enrolled. Stubbed until step 6.
+    /// Host enrolled. Marks the host Healthy and re-evaluates all
+    /// services so any `where:`-pending placement that this host
+    /// satisfies gets auto-placed (operator decision #3).
     pub async fn on_host_enroll(&self, host_id: HostId) {
-        let mut state = self.state.lock().await;
-        state.health.insert(host_id, HostHealth::Healthy);
-        info!(host = %host_id, "scheduler: host enrolled (stub)");
+        {
+            let mut state = self.state.lock().await;
+            state.health.insert(host_id, HostHealth::Healthy);
+        }
+        info!(host = %host_id, "scheduler: host enrolled, triggering auto-place");
+        if let Err(e) = self.reconcile_all_inner().await {
+            warn!(error = %e, "scheduler: enroll reconcile failed");
+        }
     }
 
-    /// Host disconnected past the long-grace threshold. Stubbed until
-    /// step 6.
+    /// Host disconnected past the long-grace threshold. Marks the host
+    /// Disconnected and re-evaluates services that had placements on
+    /// it so the wanted set re-routes to the remaining eligible hosts.
     pub async fn on_host_disconnect_long(&self, host_id: HostId) {
-        let mut state = self.state.lock().await;
-        state
-            .health
-            .insert(host_id, HostHealth::Disconnected { since: Utc::now() });
-        info!(host = %host_id, "scheduler: host disconnect_long (stub)");
+        {
+            let mut state = self.state.lock().await;
+            state
+                .health
+                .insert(host_id, HostHealth::Disconnected { since: Utc::now() });
+        }
+        info!(host = %host_id, "scheduler: host disconnect_long, reconciling affected services");
+        if let Err(e) = self.reconcile_all_inner().await {
+            warn!(error = %e, "scheduler: disconnect reconcile failed");
+        }
     }
 
     // === test seams ==========================================================
