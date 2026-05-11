@@ -54,6 +54,11 @@ pub struct ControllerService {
     /// through this; the auth interceptor already gated the connection
     /// behind a valid client cert.
     pub secrets: Arc<SecretsStore>,
+    /// Phase 0.14: placement scheduler. Optional so the `new_for_test`
+    /// constructors don't need to construct one. The Sync handler calls
+    /// `on_heartbeat_labels` here; `enrollment.rs` calls `on_host_enroll`;
+    /// `disconnect_monitor.rs` calls `on_host_disconnect_long`.
+    pub scheduler: Option<Arc<crate::scheduler::Scheduler>>,
 }
 
 impl ControllerService {
@@ -71,6 +76,7 @@ impl ControllerService {
         log_fanout: Arc<LogFanout>,
         compose_broker: Arc<ComposeBroker>,
         secrets: Arc<SecretsStore>,
+        scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     ) -> Self {
         Self {
             inventory,
@@ -85,6 +91,7 @@ impl ControllerService {
             log_fanout,
             compose_broker,
             secrets,
+            scheduler,
         }
     }
 
@@ -126,6 +133,7 @@ impl ControllerService {
             log_fanout,
             compose_broker,
             secrets,
+            scheduler: None,
         }
     }
 }
@@ -180,6 +188,14 @@ impl Controller for ControllerService {
             ..Default::default()
         };
         crate::persist_and_broadcast(&self.journal, &self.bus, event).await;
+
+        // Phase 0.14: notify the scheduler the host enrolled. The
+        // trigger marks the host Healthy and re-evaluates every
+        // Pending placement (operator decision #3: auto-place onto
+        // the new host when it satisfies a where: selector).
+        if let Some(sched) = self.scheduler.as_ref() {
+            sched.on_host_enroll(resp.host_id).await;
+        }
 
         Ok(Response::new(EnrollResponse {
             host_id: resp.host_id.to_bytes().to_vec(),
@@ -380,6 +396,7 @@ impl Controller for ControllerService {
         let hook_ingest = self.hook_ingest.clone();
         let log_fanout = self.log_fanout.clone();
         let compose_broker = self.compose_broker.clone();
+        let scheduler = self.scheduler.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -435,10 +452,10 @@ impl Controller for ControllerService {
                         }
 
                         // Phase 0.14: persist the heartbeat's agent
-                        // labels for the scheduler. Older agents send an
-                        // empty map; `replace_agent_labels` then leaves
-                        // the host's row set empty (or clears any stale
-                        // rows from a previous post-0.14 agent run).
+                        // labels and feed the scheduler. Older agents
+                        // send an empty map; replace_agent_labels then
+                        // leaves the row set empty (or clears any stale
+                        // rows from a previous post-0.14 run).
                         let label_map: std::collections::BTreeMap<String, String> = hb
                             .labels
                             .iter()
@@ -450,6 +467,14 @@ impl Controller for ControllerService {
                                 agent = %agent_hostname,
                                 "replace_agent_labels failed",
                             );
+                        }
+                        // Feed the scheduler. Cheap when labels haven't
+                        // changed (hash-compare skips the reconcile
+                        // inside on_heartbeat_labels). When they have
+                        // changed, the auto-place path (decision #3)
+                        // re-evaluates every Pending placement.
+                        if let Some(sched) = scheduler.as_ref() {
+                            sched.on_heartbeat_labels(host_id, label_map).await;
                         }
 
                         let pending_actions = match crate::pending_actions::collect_pending_actions(
