@@ -158,14 +158,20 @@ fn apply_entry<R: Read>(
         EntryType::Symlink => extract_symlink(entry, &dest, target),
         EntryType::Link => extract_hardlink(entry, &dest, target),
         // GNU long-name / long-link headers are consumed by the tar
-        // crate transparently; we should not see them here. Any other
-        // shape (block device, character device, fifo, etc.) is not
-        // representable in a rootfs we'd actually run unprivileged
-        // and is refused to keep the surface small.
+        // crate transparently; we should not see them here.
         EntryType::GNULongName
         | EntryType::GNULongLink
         | EntryType::XGlobalHeader
         | EntryType::XHeader => Ok(()),
+        // Char / block / fifo device entries: skip silently. The
+        // container runtime creates /dev/console, /dev/null, /dev/zero,
+        // and other dev nodes at start time as part of the rootfs
+        // mount setup (see crates/wisp/src/lifecycle/mod.rs). Images
+        // that ship dev node entries (LinuxServer.io base, alpine, etc.)
+        // are common; rejecting them blocks any such image.
+        // Surfaced live 2026-05-11 on lausanne v0.5.0 deploy with
+        // lscr.io/linuxserver/{bazarr,prowlarr,qbittorrent,radarr,sonarr}.
+        EntryType::Char | EntryType::Block | EntryType::Fifo => Ok(()),
         other => Err(WispImageError::Tar(format!(
             "unsupported tar entry type {:?} at {entry_path:?}",
             other
