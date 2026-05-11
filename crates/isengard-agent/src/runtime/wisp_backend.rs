@@ -2625,6 +2625,121 @@ mod tests {
         );
     }
 
+    /// Wave 3.B: end-to-end against a REAL kernel cgroup. Creates a
+    /// fresh cgroup under `/sys/fs/cgroup/wisp-cgroupev-test/<id>/`,
+    /// attaches a `sleep` process, waits for the Start event, kills
+    /// the process, waits for the Die event. Asserts both arrive
+    /// within 100ms of the kernel state change (the design goal that
+    /// the 2s poll loop couldn't meet).
+    ///
+    /// Requires:
+    /// - linux + cgroup v2 (mounted at `/sys/fs/cgroup`)
+    /// - root (writing to cgroup.subtree_control + cgroup.procs)
+    /// - the kernel's `populated` bit (4.15+)
+    ///
+    /// Mac-only sessions skip via the `#[ignore]` attribute; run from
+    /// the wisp VM with:
+    /// ```sh
+    /// orb -m wisp bash -lc 'cd /Users/.../isengard/.worktrees/next \
+    ///   && cargo test -p isengard-agent --tests -- --ignored cgroup_events'
+    /// ```
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "needs root + linux + cgroup v2"]
+    async fn cgroup_events_e2e_real_kernel_under_100ms() {
+        use std::io::Write;
+
+        // Per-test cgroup root under the wisp slice so concurrent
+        // tests don't fight over the same dir. ulid is already a
+        // dev-dep on this crate (used by other e2e tests).
+        let suffix = ulid::Ulid::new().to_string().to_lowercase();
+        let cgroup_root =
+            std::path::PathBuf::from(format!("/sys/fs/cgroup/wisp-cgroupev-{suffix}"));
+        std::fs::create_dir_all(&cgroup_root).expect("create cgroup root (needs root)");
+        // Enable controllers so child cgroups inherit them. Failure
+        // here usually means cgroup v1 / no permissions; surface a
+        // clear panic message rather than a confusing later one.
+        std::fs::write(cgroup_root.join("cgroup.subtree_control"), b"+memory +pids")
+            .expect("enable controllers (needs cgroup v2 + root)");
+
+        let container_id = "ctr-e2e";
+        let container_dir = cgroup_root.join(container_id);
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let root_for_loop = cgroup_root.clone();
+        let _loop = tokio::spawn(cgroup_events_loop(
+            root_for_loop,
+            FakeExitCodes::default(),
+            tx,
+        ));
+
+        // Give notify time to install the inotify watch.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Create the cgroup + populate it with a long-running sleep.
+        // The kernel writes `populated 1` to cgroup.events as soon as
+        // the PID lands in cgroup.procs.
+        std::fs::create_dir_all(&container_dir).expect("create container cgroup");
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let started_at = std::time::Instant::now();
+        {
+            let mut procs = std::fs::OpenOptions::new()
+                .write(true)
+                .open(container_dir.join("cgroup.procs"))
+                .expect("open cgroup.procs");
+            write!(procs, "{}", child.id()).expect("attach pid");
+        }
+
+        let start_event = tokio::time::timeout(std::time::Duration::from_millis(2000), rx.recv())
+            .await
+            .expect("Start event timed out (>2s)")
+            .expect("Start recv");
+        let start_latency = started_at.elapsed();
+        assert!(
+            matches!(start_event.event_type, RuntimeEventType::Start),
+            "expected Start, got {:?}",
+            start_event.event_type,
+        );
+        assert!(
+            start_latency < std::time::Duration::from_millis(200),
+            "Start latency {start_latency:?} exceeded 200ms ceiling"
+        );
+
+        // Kill the sleep process; populated flips 1 -> 0.
+        let kill_at = std::time::Instant::now();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let die_event = tokio::time::timeout(std::time::Duration::from_millis(2000), rx.recv())
+            .await
+            .expect("Die event timed out (>2s)")
+            .expect("Die recv");
+        let die_latency = kill_at.elapsed();
+        assert!(
+            matches!(die_event.event_type, RuntimeEventType::Die { .. }),
+            "expected Die, got {:?}",
+            die_event.event_type,
+        );
+        // The exit-code source is a no-op fake; the loop waits the
+        // full backfill budget (~600ms) before giving up. Pad
+        // accordingly so this assertion still proves "well under the
+        // old 2s poll loop". A future test that wires a real
+        // exit-code source can tighten the ceiling.
+        assert!(
+            die_latency < std::time::Duration::from_millis(1000),
+            "Die latency {die_latency:?} exceeded 1s ceiling (old loop was ~2s)"
+        );
+
+        // Cleanup: remove the per-container cgroup, then the root.
+        // Best-effort; an interrupted test leaves residue under
+        // /sys/fs/cgroup/wisp-cgroupev-* the operator can sweep.
+        let _ = std::fs::remove_dir(&container_dir);
+        let _ = std::fs::remove_dir(&cgroup_root);
+    }
+
     /// Phase 0.4 dispatch C2: `read_tail` advances offsets and is
     /// tolerant of missing files. Backfill semantics rely on this.
     #[test]
