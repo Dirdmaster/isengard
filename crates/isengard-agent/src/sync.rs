@@ -77,10 +77,7 @@ fn split_hooks_by_phase(
             "post-deploy" => post.push(spec),
             "failure" => failure.push(spec),
             other => {
-                tracing::debug!(
-                    on = other,
-                    "WriteCompose: skipping hook with unknown phase",
-                );
+                tracing::debug!(on = other, "WriteCompose: skipping hook with unknown phase",);
             }
         }
     }
@@ -379,8 +376,7 @@ pub async fn run_sync_loop<S: LogSource>(
                     // hooks BEFORE the compose write. Pre-deploy hook
                     // failure aborts the deploy: WriteComposeAck =
                     // ERROR, no compose written.
-                    let (pre_hooks, post_hooks, failure_hooks) =
-                        split_hooks_by_phase(&req.hooks);
+                    let (pre_hooks, post_hooks, failure_hooks) = split_hooks_by_phase(&req.hooks);
                     let hook_ctx = HookContext {
                         stack: req.stack_name.clone(),
                         host_id: ctx.host_id.clone(),
@@ -389,8 +385,7 @@ pub async fn run_sync_loop<S: LogSource>(
                         failure_reason: None,
                         failure_detail: None,
                     };
-                    let noop_emitter: Arc<dyn EventEmitter> =
-                        Arc::new(isengard_core::NoopEmitter);
+                    let noop_emitter: Arc<dyn EventEmitter> = Arc::new(isengard_core::NoopEmitter);
                     let emitter: Arc<dyn EventEmitter> = ctx
                         .event_emitter
                         .clone()
@@ -456,7 +451,8 @@ pub async fn run_sync_loop<S: LogSource>(
                     let write_failed: Option<(String, String)> = match &outcome {
                         crate::compose_writer::ApplyWriteOutcome::Ok { .. } => None,
                         crate::compose_writer::ApplyWriteOutcome::Conflict {
-                            current_sha256, ..
+                            current_sha256,
+                            ..
                         } => Some((
                             "compose write conflict".into(),
                             format!("on-disk sha256 = {current_sha256}"),

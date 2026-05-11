@@ -10,27 +10,31 @@
 //!
 //! ## Execution semantics (matching the spec)
 //!
-//! - **cwd**: `<stack_dir>` (the directory holding `compose.yaml` +
-//!   `stack.toml` for this stack on disk, typically
-//!   `/etc/isengard/stacks/<name>/`).
-//! - **env**: starts EMPTY (deny-by-default) and is then layered with
-//!   the whitelisted parent variables ([`AGENT_ENV_WHITELIST`]) plus
-//!   the [`HookContext`] vars (`ISENGARD_STACK`, `ISENGARD_HOST_ID`,
-//!   `ISENGARD_DEPLOYMENT_ID`, `ISENGARD_HOOK_EVENT`,
-//!   `ISENGARD_MANIFEST_PATH`; failure adds `ISENGARD_FAILURE_REASON`
-//!   + `ISENGARD_FAILURE_DETAIL`), and finally the hook spec's own
-//!   `env` map (last writer wins on collision so hook authors can
-//!   override anything the agent set).
-//! - **timeout**: per-hook, default 60s. Enforced via
-//!   `tokio::time::timeout` around `child.wait_with_output()`. On
-//!   expiry we SIGTERM the child and, after 5s, SIGKILL.
-//! - **failure**: [`OnFailure::Abort`] (default) returns
-//!   [`HookOutcome::Aborted`] to the caller, which the WriteCompose
-//!   handler turns into a deploy abort. [`OnFailure::Warn`] /
-//!   [`OnFailure::Ignore`] keep going.
-//! - **audit**: every hook execution emits a structured tracing event
-//!   AND a `lifecycle_hook.*` [`isengard_core::Event`] over the
-//!   emitter so the controller's event stream captures the run.
+//! **cwd** is `<stack_dir>` (the directory holding `compose.yaml` +
+//! `stack.toml` for this stack on disk, typically
+//! `/etc/isengard/stacks/<name>/`).
+//!
+//! **env** starts EMPTY (deny-by-default) and is then layered with the
+//! whitelisted parent variables ([`AGENT_ENV_WHITELIST`]) plus the
+//! [`HookContext`] vars (`ISENGARD_STACK`, `ISENGARD_HOST_ID`,
+//! `ISENGARD_DEPLOYMENT_ID`, `ISENGARD_HOOK_EVENT`,
+//! `ISENGARD_MANIFEST_PATH`; failure adds `ISENGARD_FAILURE_REASON` +
+//! `ISENGARD_FAILURE_DETAIL`), and finally the hook spec's own `env`
+//! map (last writer wins on collision so hook authors can override
+//! anything the agent set).
+//!
+//! **timeout** is per-hook, default 60s. Enforced via
+//! `tokio::time::timeout` around `child.wait_with_output()`. On
+//! expiry we SIGTERM the child and, after 5s, SIGKILL.
+//!
+//! **failure**: [`OnFailure::Abort`] (default) returns
+//! [`HookOutcome::Aborted`] to the caller, which the WriteCompose
+//! handler turns into a deploy abort. [`OnFailure::Warn`] /
+//! [`OnFailure::Ignore`] keep going.
+//!
+//! **audit**: every hook execution emits a structured tracing event
+//! AND a `lifecycle_hook.*` [`isengard_core::Event`] over the emitter
+//! so the controller's event stream captures the run.
 //!
 //! ## Security
 //!
@@ -71,10 +75,10 @@ pub const AGENT_ENV_WHITELIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_A
 ///
 /// `pre-deploy` and `post-deploy` map 1:1 to the spec's manifest enum.
 /// `failure` (the spec's third event) fires when the deploy itself
-/// fails (e.g. WriteCompose conflicts, reconcile errors). `PreStop`
-/// + `PostStop` are reserved for the future `isd stack stop` path;
-/// not yet wired into [`crate::sync`] but the executor handles them
-/// the same way so the proto can grow without an executor rewrite.
+/// fails (e.g. WriteCompose conflicts, reconcile errors). `PreStop` +
+/// `PostStop` are reserved for the future `isd stack stop` path; not
+/// yet wired into [`crate::sync`] but the executor handles them the
+/// same way so the proto can grow without an executor rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPhase {
     PreDeploy,
@@ -100,21 +104,16 @@ impl HookPhase {
 }
 
 /// What to do when a hook exits non-zero (or times out).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum OnFailure {
     /// Stop running further hooks; signal abort to the caller.
     /// This is the default per the manifest spec.
+    #[default]
     Abort,
     /// Log a WARN, continue with the next hook.
     Warn,
     /// Log a DEBUG, continue with the next hook.
     Ignore,
-}
-
-impl Default for OnFailure {
-    fn default() -> Self {
-        Self::Abort
-    }
 }
 
 impl OnFailure {
@@ -478,7 +477,7 @@ async fn run_single_hook(hook: &HookSpec, phase: HookPhase, ctx: &HookContext) -
             }
             let _ = tokio::time::timeout(HOOK_TERM_GRACE, async {
                 // best-effort wait for graceful exit
-                let _ = (&mut child).wait().await;
+                let _ = child.wait().await;
             })
             .await;
             // Hard kill if still alive. tokio's `start_kill` sends SIGKILL.
