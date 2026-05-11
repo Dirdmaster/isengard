@@ -130,7 +130,7 @@ pub fn init(mode: &str, cli_filter: Option<&str>) {
 /// Long-running daemon modes (`controller`, `agent`) keep the banner so
 /// it shows up in journalctl right next to the boot sequence.
 fn ready_banner(mode: &str, format: LogFormat, ansi: bool) {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = env!("ISENGARD_BUILD_VERSION");
     if matches!(format, LogFormat::Json) {
         tracing::info!(version, mode, "isengard ready");
         return;

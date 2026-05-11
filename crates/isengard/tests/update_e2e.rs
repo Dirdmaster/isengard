@@ -64,9 +64,10 @@ async fn update_check_prints_current_and_latest() {
         .mount(&server)
         .await;
 
-    // The `--check` flow does the version compare then exits. We're on
-    // `0.1.0-alpha` per workspace.package.version, the mocked latest is
-    // `v99.0.0`: stdout must mention both, and exit 0.
+    // The `--check` flow does the version compare then exits. The dev
+    // build's version (from `build.rs`: git describe or the CARGO_PKG_VERSION
+    // fallback) is never going to be `v99.0.0`, so the mocked latest wins
+    // and stdout must mention both, with exit 0.
     //
     // Skip root + skip target-triple problems by exiting before either
     // check fires. `--check` returns ahead of `require_root` in the
@@ -107,12 +108,35 @@ async fn update_check_with_pinned_version_skips_api_call() {
     // No mock for /repos/...: the test would fail if --version still
     // hit the API. Pinning means we trust the operator's version and
     // skip the lookup entirely.
+    //
+    // Pre-2026-05: pinned `v0.1.0-alpha` because that's what
+    // `env!("CARGO_PKG_VERSION")` returned. Post-build-script the dev
+    // build's version is whatever `git describe --tags --always --dirty`
+    // emits (e.g. `v0.5.2-3-gabc1234`). Read it back from
+    // `isengard --version` to keep the test valid as we move past tags.
+    let version_out = Command::cargo_bin("isengard")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .expect("run isengard --version");
+    let stdout = String::from_utf8_lossy(&version_out.stdout).to_string();
+    // `isengard --version` prints `isengard <version>\n`. Strip the prefix.
+    let pinned = stdout
+        .trim()
+        .strip_prefix("isengard ")
+        .unwrap_or_else(|| stdout.trim())
+        .to_string();
+    assert!(
+        !pinned.is_empty(),
+        "isengard --version printed unexpected output: {stdout:?}"
+    );
+
     let assert = Command::cargo_bin("isengard")
         .unwrap()
         // Deliberately point at an unreachable port so a stray API
         // call would error visibly.
         .env("ISENGARD_UPDATE_GITHUB_API", "http://127.0.0.1:1")
-        .args(["update", "--check", "--version", "v0.1.0-alpha"])
+        .args(["update", "--check", "--version", &pinned])
         .assert()
         .success();
     // Equal version → "already on latest" branch fires; check that
@@ -135,7 +159,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[ignore]
 async fn update_yes_aborts_on_sha_mismatch() {
     // The flow is:
-    //   1. Mock /repos/.../releases/latest → tag_name v0.1.0-alpha+e2e
+    //   1. Mock /repos/.../releases/latest → tag_name v999.0.0 (fictional)
     //   2. Mock the .sha256 manifest → digest of "expected" bytes
     //   3. Mock the binary → "tampered" bytes (different digest)
     //   4. Run `isengard update --yes` and assert it fails with a

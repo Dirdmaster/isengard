@@ -121,14 +121,38 @@ async fn update_check_rate_limit_surfaces_friendly_error() {
 
 #[tokio::test]
 async fn update_check_with_pinned_dev_version_short_circuits() {
-    // The dev build advertises CARGO_PKG_VERSION = "0.1.0-alpha".
-    // Pinning to that same tag must short-circuit on the equal-version
-    // check, without hitting the network. We point the API URL at an
-    // unreachable port to prove the API isn't queried.
+    // Pinning `--version` to the exact string this binary advertises
+    // must short-circuit on the equal-version check, without hitting
+    // the network. We point the API URL at an unreachable port to
+    // prove the API isn't queried.
+    //
+    // Pre-2026-05: this test hard-coded `v0.1.0-alpha` because that was
+    // what `env!("CARGO_PKG_VERSION")` returned. Post-build-script we
+    // can't hard-code anymore: the dev build's version is whatever
+    // `git describe --tags --always --dirty` printed at build time
+    // (e.g. `v0.5.2-3-gabc1234`). Read it back from `isd --version`
+    // so the test stays valid across release tags.
+    let version_out = Command::cargo_bin("isd")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .expect("run isd --version");
+    let stdout = String::from_utf8_lossy(&version_out.stdout).to_string();
+    // `isd --version` prints `isd <version>\n`. Strip the prefix.
+    let pinned = stdout
+        .trim()
+        .strip_prefix("isd ")
+        .unwrap_or_else(|| stdout.trim())
+        .to_string();
+    assert!(
+        !pinned.is_empty(),
+        "isd --version printed unexpected output: {stdout:?}"
+    );
+
     let assert = Command::cargo_bin("isd")
         .unwrap()
         .env("ISD_UPDATE_GITHUB_API", "http://127.0.0.1:1")
-        .args(["update", "--check", "--version", "v0.1.0-alpha"])
+        .args(["update", "--check", "--version", &pinned])
         .assert()
         .success();
     assert.stdout(predicate::str::contains("already at"));

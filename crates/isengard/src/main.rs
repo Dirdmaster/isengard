@@ -43,7 +43,12 @@ use isengard_plugin_webhooks as _;
 #[derive(Debug, Parser)]
 #[command(
     name = "isengard",
-    version,
+    // `version = env!("ISENGARD_BUILD_VERSION")` overrides clap's default
+    // which would otherwise pick up CARGO_PKG_VERSION (a stale workspace
+    // value the release pipeline never bumps). The build script bakes in
+    // the git tag for CI builds and `git describe` output for dev builds,
+    // so `isengard --version` matches the binary that's actually running.
+    version = env!("ISENGARD_BUILD_VERSION"),
     about = "Isengard container management platform"
 )]
 struct Cli {
