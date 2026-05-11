@@ -484,29 +484,42 @@ pub fn start_container<F: CgroupFs>(
                 return Err(err);
             }
 
-            // Network attach (parent-side) BEFORE the child's
-            // wait_ready. Sequence rationale:
+            // Phase 0.17 (Bug B fix): wait for the child's `ready`
+            // signal BEFORE network attach.
             //
-            //   - The child has CLONE_NEWNET so its netns exists
-            //     immediately after clone3; we can move a veth into
-            //     it via `ip link set ... netns <child_pid>`.
-            //   - The child's setup_rootfs / pivot_root only touch
-            //     the mount namespace, so they run concurrently with
-            //     the parent's network setup without conflict.
-            //   - The child blocks on signal_ready until AFTER it
-            //     pivots, so by the time the parent reads
-            //     wait_ready, the entrypoint has not yet exec'd.
+            // The child writes `ready` after pivot_root + caps and
+            // then blocks on wait_go. Once we observe ready the
+            // child is pinned in pre-exec hold; the entrypoint has
+            // NOT exec'd. That guarantees `/proc/<child_pid>/ns/net`
+            // is stable for the duration of attach: a short-lived
+            // workload (e.g. `sh -c 'exit 0'`) can no longer race
+            // the parent's `nsenter -t <pid> -n ip ...` calls.
             //
-            // NOTE: this sequence is the pre-Phase-0.17 shape and
-            // leaves the nsenter race against short-lived workloads
-            // in place. The follow-up commit moves attach to AFTER
-            // wait_ready, leaning on the new GoPipe to keep the
-            // child pinned through attach.
+            // Pre-0.17 the attach ran concurrently with the child's
+            // pivot, leaning on the entrypoint outliving nsenter.
+            // For long-lived workloads that held; for short-lived
+            // and EPERM-flaking ones (e.g. nginx hitting chown
+            // EPERM) the race surfaced as
+            // "veth::attach_to_ns: No such file or directory".
+            if let Err(err) = pipe::wait_ready(&reader) {
+                drop(go_writer);
+                let mut status: libc::c_int = 0;
+                unsafe {
+                    libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
+                }
+                return Err(WispError::Lifecycle(format!(
+                    "child {child_pid} did not signal ready: {err}"
+                )));
+            }
+
+            // Network attach (parent-side) AFTER wait_ready and
+            // BEFORE signal_go. With the child blocked in wait_go
+            // the netns referenced by `/proc/<pid>/ns/net` cannot
+            // disappear mid-attach.
             //
             // If attach fails we kill + reap the child before
-            // returning, same shape as cgroup.add_pid above. The
-            // GoPipe writer is dropped first so any racing wait_go
-            // observes EOF.
+            // returning. The GoPipe writer is dropped first so the
+            // child's wait_go observes EOF instead of hanging.
             let mut attacher = attacher;
             if let Some(spec) = handle.network_spec.clone() {
                 let att = match attacher.as_deref_mut() {
@@ -545,30 +558,11 @@ pub fn start_container<F: CgroupFs>(
                 }
             }
 
-            // wait for the child's "ready" signal. If the child
-            // died before signalling we get a clear EOF error.
-            if let Err(err) = pipe::wait_ready(&reader) {
-                drop(go_writer);
-                let mut status: libc::c_int = 0;
-                unsafe {
-                    libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG);
-                }
-                // If we attached a network and now the child died,
-                // best-effort detach so we don't leak iptables / veth
-                // state on the host.
-                if let (Some(record), Some(att)) = (handle.network_attachment.as_ref(), attacher) {
-                    let _ = att.detach(record);
-                }
-                return Err(WispError::Lifecycle(format!(
-                    "child {child_pid} did not signal ready: {err}"
-                )));
-            }
-
             // Phase 0.17: release the child from its pre-exec hold.
-            // For this step the call sits immediately after
-            // wait_ready (no functional change vs. pre-0.17). The
-            // follow-up commit moves attach above wait_ready so
-            // signal_go genuinely gates exec on attach completion.
+            // After signal_go the child raises ambient + execvpe.
+            // Now that attach has run to completion, the entrypoint
+            // is free to exit immediately if it wants to without
+            // racing any in-flight nsenter calls.
             if let Err(err) = pipe::signal_go(&go_writer) {
                 drop(go_writer);
                 let mut status: libc::c_int = 0;
