@@ -310,7 +310,7 @@ Scenarios:
 2. Deploy `global: true`: both get a replica. Enroll carol. After next reconcile, carol gets a replica.
 3. Deploy `spread: 3` with 2 hosts: alice and bob get replicas 0 and 1; one of them gets replica 2 round-robin.
 4. Deploy `spread: 3` with 3 hosts; disconnect bob for 90s; replica reschedules to a remaining host. Bob reconnects; the freshly placed replica stays (default policy in spec), bob's old replica drained.
-5. Deploy `where: "role==worker"` when no host has `role=worker`: stays Pending. Then update alice's labels via mock heartbeat; reconcile picks up. **(operator review confirmed: this scenario verifies the "do not auto-deploy on enroll/label change" default the spec calls out: if the operator picks B during review, this test changes.)**
+5. Deploy `where: "role==worker"` when no host has `role=worker`: stays Pending and emits `placement.no_eligible_hosts`. Then update alice's labels via mock heartbeat to `role=worker`; reconcile picks up and **auto-places** the service onto alice. **(OPERATOR DECISION 2026-05-11 locked: option B (auto-place) selected; this test verifies the auto-place path. The earlier "stay Pending until manual redeploy" default is overridden.)**
 6. Pinned `on: alice` -> alice gets it; alice disconnects -> service Unavailable; NO relocation.
 
 Optional manual test on real OrbStack VMs (iso-alice + iso-bob): document the steps in `docs/PLACEMENT.md`'s test plan, but don't gate the commit on it.
@@ -451,14 +451,14 @@ Per `feedback_implementer_opus`, implementers run on Opus. Reviewers (post-step)
 - **`placement explain` exclusion reasoning ordering.** First match wins or all-clauses-listed? Spec example shows first-clause; if implementation finds it confusing, switch to all-clauses.
 - **Heartbeat label hash storage.** In-memory only, lost on controller restart. First post-restart heartbeat triggers a reconcile regardless. Acceptable churn.
 
-## Default-and-document calls baked into this plan
+## Default-and-document calls locked by operator decision 2026-05-11
 
-The spec flags five places where operator review may change a default. The plan ships the spec defaults and includes a marker (see step 8 scenario 5) where a flipped default would change a test. Each call:
+The spec flagged five places where operator review may change a default. All five are now LOCKED:
 
-1. `spread: 1` normalized to `Singleton` (parse step).
-2. `placements` rows backfilled at migration (step 1).
-3. `where:` zero match stays Pending (step 6 + step 8 scenario 5).
-4. Disconnect rejoin prefers fresh-host replica (step 6).
-5. Per-service grace period deferred to 0.15+; fleet-wide only (step 3).
+1. `spread: 1` normalized to `Singleton` (parse step). LOCKED, spec default kept.
+2. `placements` rows backfilled at migration (step 1). LOCKED, spec default kept.
+3. `where:` zero match **auto-places on first eligible host** (step 6 + step 8 scenario 5). LOCKED, **OVERRIDES** the original "stay Pending" draft. Scheduler subscribes to host enroll + heartbeat label-change to detect eligibility.
+4. Disconnect rejoin prefers fresh-host replica (step 6). LOCKED, spec default kept.
+5. Per-service grace period deferred to 0.15+; fleet-wide only. LOCKED, spec default kept.
 
-If operator review flips any of these, the spec gets a note + the corresponding test gets rewritten. None of them affect the data model or migration shape.
+Item 3 is the only one that changed from the spec's original draft. Spec text + step 8 scenario 5 have been updated inline.

@@ -68,7 +68,7 @@ We deliberately skip the more ornate parts of the k8s grammar (set-based with pa
 ### Default-and-document calls flagged for operator review
 
 - `spread: 1` is identical to singleton (no key). Allowed: the explicit form is more readable when a config is templated. **(operator review: should we reject `spread: 1` to keep one canonical form, or normalize at parse time?)** Default in this spec: normalize at parse time.
-- `where:` matches zero hosts: the stack stays `Pending` with a `placement.no_eligible_hosts` event. Default: do NOT auto-deploy when a matching host enrolls; require operator re-deploy. **(operator review: A: stay Pending until manual redeploy; B: poll-and-auto-deploy when a matching host appears.)** This spec defaults to A. Aut-place on enroll is a nice surprise the first time and a Bad Surprise the tenth; B is the more dangerous default.
+- `where:` matches zero hosts: the stack stays `Pending` with a `placement.no_eligible_hosts` event. **OPERATOR DECISION 2026-05-11 (locked, overrides earlier draft default):** option B (auto-place on first eligible enroll/label-change). The scheduler subscribes to host-enroll and heartbeat label-change events and re-evaluates `Pending` services; when a host becomes eligible the service is auto-placed onto it. The earlier draft default (A: stay Pending until manual redeploy) is overridden. Rationale: pending-forever was confusing in the brainstorm walkthrough; auto-placement matches the implicit promise of declarative placement verbs.
 
 ## TOML and YAML examples
 
@@ -439,7 +439,7 @@ Threshold default: 60s. Configurable via controller flag `--placement-grace-secs
 | Mode | Behavior |
 |---|---|
 | `spread: N` but `eligible_hosts.len() < N` | Place onto all available, emit `placement.degraded { wanted: N, got: M, missing: N-M }` once. Service state: `DegradedPlacement` (new variant on the service state machine). Banner in dashboard later. |
-| `where:` matches zero hosts | Service stays `Pending`. Emit `placement.no_eligible_hosts { selector, fleet_size }`. No automatic redeploy on enroll. |
+| `where:` matches zero hosts | Service stays `Pending` and emits `placement.no_eligible_hosts { selector, fleet_size }` once. Scheduler watches host-enroll + label-change events and auto-places on the first eligible host (operator decision 2026-05-11). |
 | Pinned host disappears | Service becomes `Unavailable` (new state variant). Emit `placement.host_gone { host }`. No relocation. Operator changes the compose to a different host or restores the original. |
 | Selector grammar error | Hard parse error at `isd deploy`. Stack is not deployed. |
 | Mixed verb+swarm in same service | Hard parse error. |
@@ -514,11 +514,13 @@ Implementation: both subcommands hit a new gRPC method `PlacementShow(StackId) -
 
 ### Risks flagged for explicit operator review
 
-- **Per-service vs fleet-wide grace period** (per-service in 0.15+ unless reviewer pushes for it now).
-- **`where:` zero-match behavior: stay Pending vs auto-deploy on enroll** (default Pending).
-- **Disconnect grace tie-break: prefer new host vs original host on rejoin** (default new host).
-- **`spread: 1` form: reject or normalize** (default normalize).
-- **Backfill of `placements` rows at migration** (default backfill).
+Resolved 2026-05-11 (locked):
+
+- **Per-service vs fleet-wide grace period** -> fleet-wide only in 0.14; per-service deferred to 0.15+.
+- **`where:` zero-match behavior: stay Pending vs auto-deploy on enroll** -> **auto-place on first eligible enroll/label-change** (overrides earlier "stay Pending" draft).
+- **Disconnect grace tie-break: prefer new host vs original host on rejoin** -> prefer new host (drain the original on return).
+- **`spread: 1` form: reject or normalize** -> normalize to `Singleton` at parse time.
+- **Backfill of `placements` rows at migration** -> backfill rows for every existing service (state='active', replica_index=0).
 
 ## Out of scope, explicitly
 
