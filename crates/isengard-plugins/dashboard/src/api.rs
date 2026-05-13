@@ -44,6 +44,16 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         )
         .route("/services", get(list_services))
         .route("/services/{id}", get(get_service))
+        // Phase 0.18: container-first projection of the agent heartbeat.
+        // `isd ps` and the dashboard container view both read from here.
+        .route(
+            "/containers",
+            get(crate::containers::list_containers_handler),
+        )
+        .route(
+            "/containers/{id}",
+            get(crate::containers::get_container_handler),
+        )
         .route(
             "/services/{stack_id}/{service_name}",
             get(get_service_detail),

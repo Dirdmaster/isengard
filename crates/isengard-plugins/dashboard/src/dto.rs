@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use isengard_core::Event;
 use isengard_core::policy::ResolvedPolicy;
-use isengard_storage::{EventRow, Host, RoutingRule, Service, Stack};
+use isengard_storage::{ContainerRow, EventRow, Host, RoutingRule, Service, Stack};
 use serde::{Deserialize, Serialize};
 
 use crate::deployments::DeploymentDto;
@@ -409,5 +409,78 @@ mod tests {
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.runtime_backend, "docker");
+    }
+}
+
+/// Phase 0.18: container list / get response shape.
+///
+/// `host_offline` and `host_offline_secs` are derived at the API
+/// boundary by joining containers to hosts and comparing
+/// `hosts.last_seen_at` to a configured threshold (see
+/// [`HOST_OFFLINE_THRESHOLD_SECS`] in `containers.rs`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ContainerDto {
+    /// 16-char hex digest. The default `isd ps` column shows the first
+    /// 12 chars; `--no-trunc` shows the full value.
+    pub id: String,
+    pub runtime_container_id: String,
+    pub image: String,
+    pub command: Option<String>,
+    pub state: String,
+    pub status_message: Option<String>,
+    pub names: String,
+    pub stack: Option<String>,
+    pub service: Option<String>,
+    pub host_id: String,
+    pub host_name: Option<String>,
+    /// True when the host's last heartbeat is older than the
+    /// configured threshold. `state` is left as last reported; the
+    /// client renders a `(host offline 30s)` qualifier in STATUS.
+    pub host_offline: bool,
+    /// Seconds since the host's last heartbeat. 0 when the host is
+    /// currently considered online.
+    pub host_offline_secs: i64,
+    pub created_at: Option<DateTime<Utc>>,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub removed_at: Option<DateTime<Utc>>,
+}
+
+impl ContainerDto {
+    /// Project a storage `ContainerRow` to its wire DTO. `host_name`
+    /// and `host_offline*` come from a host lookup at the handler
+    /// level (the DAO does not join, so the dashboard handler computes
+    /// these once per request).
+    pub fn from_row(
+        row: ContainerRow,
+        host_name: Option<String>,
+        host_offline: bool,
+        host_offline_secs: i64,
+    ) -> Self {
+        Self {
+            id: row.id,
+            runtime_container_id: row.runtime_container_id,
+            image: row.image,
+            command: row.command,
+            state: row.state,
+            status_message: row.status_message,
+            names: row.names,
+            stack: row.stack,
+            service: row.service,
+            host_id: ulid::Ulid::from(row.host_id).to_string(),
+            host_name,
+            host_offline,
+            host_offline_secs,
+            created_at: row
+                .created_at
+                .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
+            first_seen_at: DateTime::<Utc>::from_timestamp(row.first_seen_at, 0)
+                .unwrap_or_else(Utc::now),
+            last_seen_at: DateTime::<Utc>::from_timestamp(row.last_seen_at, 0)
+                .unwrap_or_else(Utc::now),
+            removed_at: row
+                .removed_at
+                .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
+        }
     }
 }
