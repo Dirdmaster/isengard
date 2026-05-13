@@ -191,7 +191,11 @@ async fn main() {
         }
         Command::Update(args) => update_cmd::run(args).await,
         Command::Stack(cmd) => {
-            stack_cmd::run(stack_cmd::StackArgs { command: cmd }, cli.context.as_deref()).await
+            stack_cmd::run(
+                stack_cmd::StackArgs { command: cmd },
+                cli.context.as_deref(),
+            )
+            .await
         }
         Command::Service(cmd) => {
             service_cmd::run(

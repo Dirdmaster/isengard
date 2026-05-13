@@ -144,11 +144,8 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
         StackCommand::Manifest(cmd) => {
-            crate::manifest_cmd::run(
-                crate::manifest_cmd::ManifestArgs { command: cmd },
-                context,
-            )
-            .await
+            crate::manifest_cmd::run(crate::manifest_cmd::ManifestArgs { command: cmd }, context)
+                .await
         }
     }
 }
@@ -158,14 +155,22 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
     let stacks: Vec<StackApiRow> = fetch_json(
         &session,
-        &build_url(session.controller_url(), "/api/v1/stacks", args.fleet.as_deref()),
+        &build_url(
+            session.controller_url(),
+            "/api/v1/stacks",
+            args.fleet.as_deref(),
+        ),
     )
     .await?;
 
     // Services for aggregation. Same fleet filter applied client-side.
     let services: Vec<ServiceApiRow> = fetch_json(
         &session,
-        &build_url(session.controller_url(), "/api/v1/services", args.fleet.as_deref()),
+        &build_url(
+            session.controller_url(),
+            "/api/v1/services",
+            args.fleet.as_deref(),
+        ),
     )
     .await?;
 
@@ -251,7 +256,10 @@ pub fn build_ls_rows(stacks: &[StackApiRow], services: &[ServiceApiRow]) -> Vec<
                 .iter()
                 .filter(|sv| sv.stack_id.as_deref() == Some(s.id.as_str()))
                 .collect();
-            let hosts: HashSet<&str> = services_in_stack.iter().map(|sv| sv.host_id.as_str()).collect();
+            let hosts: HashSet<&str> = services_in_stack
+                .iter()
+                .map(|sv| sv.host_id.as_str())
+                .collect();
             StackLsRow {
                 name: s.name.clone(),
                 services: services_in_stack.len(),
@@ -297,7 +305,14 @@ fn render_ls_table(rows: &[StackLsRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["NAME", "SERVICES", "HOSTS", "STATE", "SOURCE", "DISCOVERED"]);
+        .set_header(vec![
+            "NAME",
+            "SERVICES",
+            "HOSTS",
+            "STATE",
+            "SOURCE",
+            "DISCOVERED",
+        ]);
     for row in rows {
         t.add_row(vec![
             row.name.clone(),
@@ -396,10 +411,7 @@ mod tests {
             aggregate_state(&[&s_pend, &s_pend]),
             StackAggregateState::Pending
         ));
-        assert!(matches!(
-            aggregate_state(&[]),
-            StackAggregateState::Stopped
-        ));
+        assert!(matches!(aggregate_state(&[]), StackAggregateState::Stopped));
     }
 
     #[test]
@@ -438,7 +450,11 @@ mod tests {
 
     #[test]
     fn ls_rows_sorted_alphabetically_by_name() {
-        let stacks = vec![stack("1", "zebra"), stack("2", "alpha"), stack("3", "mango")];
+        let stacks = vec![
+            stack("1", "zebra"),
+            stack("2", "alpha"),
+            stack("3", "mango"),
+        ];
         let services = vec![];
         let rows = build_ls_rows(&stacks, &services);
         assert_eq!(rows[0].name, "alpha");

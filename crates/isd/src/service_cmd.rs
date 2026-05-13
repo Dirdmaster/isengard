@@ -58,12 +58,20 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
     let stacks: Vec<StackApiRow> = fetch(
         &session,
-        &build_url(session.controller_url(), "/api/v1/stacks", args.fleet.as_deref()),
+        &build_url(
+            session.controller_url(),
+            "/api/v1/stacks",
+            args.fleet.as_deref(),
+        ),
     )
     .await?;
     let services: Vec<ServiceApiRow> = fetch(
         &session,
-        &build_url(session.controller_url(), "/api/v1/services", args.fleet.as_deref()),
+        &build_url(
+            session.controller_url(),
+            "/api/v1/services",
+            args.fleet.as_deref(),
+        ),
     )
     .await?;
 
@@ -132,7 +140,14 @@ fn render_table(rows: &[ServiceLsRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["STACK", "SERVICE", "HOST", "STATE", "IMAGE", "LAST SEEN"]);
+        .set_header(vec![
+            "STACK",
+            "SERVICE",
+            "HOST",
+            "STATE",
+            "IMAGE",
+            "LAST SEEN",
+        ]);
     for row in rows {
         t.add_row(vec![
             row.stack.clone().unwrap_or_else(|| "-".into()),
