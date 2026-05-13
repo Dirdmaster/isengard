@@ -235,7 +235,6 @@ fn default_command() -> Command {
         legacy: false,
         json: false,
         fleet: None,
-        backend: ps::PsBackend::Controller,
     })
 }
 
