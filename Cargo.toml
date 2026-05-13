@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/isengard",
     "crates/isd",
+    "crates/isd-runtime",
     "crates/isengard-core",
     "crates/isengard-controller",
     "crates/isengard-agent",

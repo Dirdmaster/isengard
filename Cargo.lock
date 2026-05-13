@@ -2706,6 +2706,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "isd-runtime"
+version = "0.1.0-alpha"
+dependencies = [
+ "anyhow",
+ "bollard",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "isengard"
 version = "0.1.0-alpha"
 dependencies = [

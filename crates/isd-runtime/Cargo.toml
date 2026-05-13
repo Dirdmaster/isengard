@@ -1,0 +1,22 @@
+[package]
+name = "isd-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Direct Docker Engine API access for the isd CLI: bollard wrapped with SSH tunnel lifecycle for talking to remote daemons."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+bollard.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
