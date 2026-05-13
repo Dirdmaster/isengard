@@ -202,6 +202,15 @@ pub async fn run_sync_loop<S: LogSource>(
                     .await;
                     let stacks = crate::container_snapshot::derive_stacks(&snapshots);
                     let services = crate::container_snapshot::derive_services(&snapshots);
+                    // Phase 0.18: ship one ContainerInfo per runtime
+                    // container alongside the legacy services array.
+                    // observed_at_ms uses the same agent-side `ts_ms`
+                    // so the controller's last_seen clamp sees a
+                    // consistent clock.
+                    let containers = crate::container_snapshot::derive_containers(
+                        &snapshots,
+                        ts_ms as i64,
+                    );
                     let msg = AgentMessage {
                         payload: Some(isengard_proto::pb::agent_message::Payload::Heartbeat(
                             Heartbeat {
@@ -209,6 +218,7 @@ pub async fn run_sync_loop<S: LogSource>(
                                 stacks,
                                 services,
                                 runtime_backend: runtime_backend.clone(),
+                                containers,
                             },
                         )),
                     };
