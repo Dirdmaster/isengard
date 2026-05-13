@@ -18,7 +18,6 @@ members = [
     "crates/isengard-plugins/networking-tailscale",
     "crates/isengard-plugins/networking-cf-tunnel",
     "crates/wisp",
-    "crates/wisp-cli",
     "crates/wisp-image",
     "crates/wisp-net",
 ]
