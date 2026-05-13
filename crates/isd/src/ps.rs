@@ -63,6 +63,24 @@ pub struct PsArgs {
     /// `--filter host=<id>` instead.
     #[arg(long, hide = true)]
     pub fleet: Option<String>,
+
+    /// Phase 0.20: which transport to use. `controller` talks to the
+    /// Isengard controller via REST; `docker` talks to the host's
+    /// Docker daemon directly via the isd-runtime crate, which
+    /// requires `docker = "..."` set on the context (see `isd context
+    /// create --docker <uri>`). Defaults to `controller`; Phase 0.21
+    /// swaps the default to `docker` when the resolved context carries
+    /// a docker URI.
+    #[arg(long, value_enum, default_value_t = PsBackend::Controller)]
+    pub backend: PsBackend,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "lower")]
+pub enum PsBackend {
+    #[default]
+    Controller,
+    Docker,
 }
 
 /// One row from `GET /api/v1/containers`.
@@ -90,6 +108,10 @@ pub struct ContainerApiDto {
 pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
     if args.legacy {
         return run_legacy(args, context).await;
+    }
+
+    if args.backend == PsBackend::Docker {
+        return run_docker_backend(args, context).await;
     }
 
     let session = Session::open(context).await?;
@@ -268,6 +290,42 @@ struct LegacyHostBackendDto {
 
 fn default_backend() -> String {
     "docker".to_string()
+}
+
+// ----- direct-bollard path (Phase 0.20) -----
+
+async fn run_docker_backend(_args: PsArgs, context: Option<&str>) -> Result<()> {
+    use isd_runtime::DockerBackend;
+
+    let path = crate::credentials::default_credentials_path()?;
+    let file = crate::credentials::load(&path)?;
+    let target_name = context
+        .map(str::to_string)
+        .or_else(|| file.default_context.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!("no context selected (pass --context <name> or set default_context)")
+        })?;
+    let ctx = file
+        .contexts
+        .iter()
+        .find(|c| c.name == target_name)
+        .ok_or_else(|| anyhow::anyhow!("context {target_name:?} not found"))?;
+    let docker_uri = ctx.docker.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "context {:?} has no docker endpoint set; add one via `isd context create --docker <uri>` or re-create with --docker",
+            ctx.name
+        )
+    })?;
+
+    let backend = DockerBackend::from_uri(docker_uri)
+        .await
+        .with_context(|| format!("opening docker backend at {docker_uri}"))?;
+
+    // Phase 0.20 placeholder: prove the connection works. Phase 0.21
+    // replaces this with the real container listing + table render.
+    let banner = backend.ping().await.context("ping docker daemon")?;
+    println!("docker backend reachable: {banner}");
+    Ok(())
 }
 
 async fn run_legacy(args: PsArgs, context: Option<&str>) -> Result<()> {
