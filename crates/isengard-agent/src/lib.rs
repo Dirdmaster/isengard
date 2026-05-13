@@ -237,20 +237,20 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    Best-effort: if backend construction fails the supervisor + labels
     //    watcher are disabled (matches pre-0.4 behavior when docker.sock
     //    was unreachable).
-    let backend: Option<Arc<dyn runtime::RuntimeBackend>> = match runtime::select_backend(
-        &opts.state_dir,
-    )
-    .await
-    {
-        Ok(b) => Some(b),
-        Err(e) => {
-            warn!(
-                error = %e,
-                "runtime: backend selection failed, deployment supervisor + labels watcher disabled",
-            );
-            None
-        }
-    };
+    let backend: Option<Arc<dyn runtime::RuntimeBackend>> =
+        match runtime::bollard_backend::BollardBackend::from_env(&opts.state_dir).await {
+            Ok(b) => {
+                tracing::info!("runtime backend: docker (bollard)");
+                Some(Arc::new(b) as Arc<dyn runtime::RuntimeBackend>)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "runtime: bollard backend init failed, deployment supervisor + labels watcher disabled",
+                );
+                None
+            }
+        };
 
     // Boot-time wisp-net orphan sweep. After Phase 0.7+0.8 (systemd-native
     // install) every kernel-update reboot lands the agent on a clean re-exec

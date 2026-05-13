@@ -18,14 +18,9 @@
 
 pub mod bollard_backend;
 mod error;
-pub mod select;
 mod spec;
-pub mod wisp_backend;
-#[cfg(target_os = "linux")]
-pub(crate) mod wisp_backend_attacher;
 
 pub use error::RuntimeError;
-pub use select::{BackendChoice, select_backend};
 pub use spec::{
     ContainerCreateSpec, ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec, HostPort,
     LinuxResources, ListFilter, LogChunk, LogOptions, LogSource, MountKind, MountSpec,
