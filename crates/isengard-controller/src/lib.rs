@@ -8,6 +8,7 @@ pub mod auth;
 pub mod bus;
 pub mod ca;
 pub mod compose_broker;
+pub mod container_id;
 pub mod disconnect_monitor;
 pub mod dns;
 pub mod enrollment;
@@ -20,6 +21,7 @@ pub mod revocation;
 pub mod routing;
 pub mod secrets;
 pub mod stack_deploy_orchestrator;
+pub mod sync_containers;
 pub mod sync_services;
 pub mod sync_stacks;
 

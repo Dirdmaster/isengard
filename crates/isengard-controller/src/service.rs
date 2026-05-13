@@ -434,6 +434,30 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_services failed");
                         }
 
+                        // Phase 0.18: ingest the per-container snapshot
+                        // alongside services. Empty array (older agent)
+                        // is handled by mark_containers_removed marking
+                        // every prior row for this host as removed,
+                        // which is the correct behaviour: an agent that
+                        // stops reporting containers IS reporting that
+                        // no containers are alive.
+                        //
+                        // TODO(phase-0.18 followup): wire a janitor
+                        // task at controller startup that calls
+                        // `containers::reap_removed_before(pool, now -
+                        // 3600)` hourly. Deferred to keep this commit
+                        // focused; the spec retention default is 1h.
+                        if let Err(e) = crate::sync_containers::process_heartbeat_containers(
+                            inventory.pool(),
+                            host_id,
+                            &hb.containers,
+                            server_ts,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_containers failed");
+                        }
+
                         let pending_actions = match crate::pending_actions::collect_pending_actions(
                             &inventory, host_id,
                         )
