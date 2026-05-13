@@ -29,6 +29,9 @@ secrecy = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Phase 0.18: container heartbeat ingest hands a SqlitePool to the
+# DAO functions exported by isengard-storage::containers.
+sqlx = { workspace = true }
 thiserror = { workspace = true }
 time.workspace = true
 tokio = { workspace = true }

@@ -161,6 +161,34 @@ message Heartbeat {
   // agents is treated by the controller as `docker` (the only
   // backend prior to 0.5).
   string runtime_backend = 4;
+  // Phase 0.18: one entry per runtime container observed on this host
+  // during this tick. Containers ride alongside `services` for one
+  // release; once the controller's container-first projection covers
+  // every dashboard surface the `services` array can be retired.
+  // Older agents that don't ship containers send an empty repeated;
+  // older controllers that don't read containers ignore the field.
+  repeated ContainerInfo containers = 5;
+}
+
+// Phase 0.18: per-container snapshot the agent stamps once per
+// heartbeat. State vocabulary the agent emits is fixed: `running`,
+// `restarting`, `paused`, `created`, `exited`, `dead`, `removing`.
+// `unknown` is never emitted; if the agent can't read state it omits
+// the container from the snapshot.
+message ContainerInfo {
+  string runtime_container_id = 1;
+  string image                = 2;
+  string command              = 3;
+  string state                = 4;
+  string status_message       = 5;
+  string names                = 6;
+  string stack                = 7;
+  string service              = 8;
+  int64  created_at_ms        = 9;
+  // Agent's clock at the moment the snapshot was captured. The
+  // controller uses min(server_now, observed_at_ms / 1000) for
+  // last_seen_at so we don't trust a wildly skewed agent clock.
+  int64  observed_at_ms       = 10;
 }
 
 message ControllerMessage {

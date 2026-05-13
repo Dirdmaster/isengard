@@ -279,10 +279,12 @@ impl Inventory {
         rows.into_iter().map(decode_host).collect()
     }
 
-    /// Borrow the underlying pool. Used by inventory methods (and tests that
-    /// want to peek at table state).
-    #[allow(dead_code)] // only consumed by tests; lib build sees it as unused
-    pub(crate) fn pool(&self) -> &SqlitePool {
+    /// Borrow the underlying pool. Phase 0.18 widened this from
+    /// `pub(crate)` to `pub` so the controller's container-ingest path
+    /// can call into the standalone DAO functions
+    /// (`upsert_container`, `mark_containers_removed`, ...) without a
+    /// round-trip through a separately-opened pool.
+    pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
