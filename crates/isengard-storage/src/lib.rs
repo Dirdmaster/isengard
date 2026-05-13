@@ -10,6 +10,7 @@ pub mod approval_store;
 pub mod backup_run;
 pub mod ca;
 pub mod container_hooks;
+pub mod containers;
 pub mod deployment;
 pub mod deployment_group;
 pub mod enrollment_token;
@@ -38,6 +39,10 @@ pub use approval_store::InventoryApprovalStore;
 pub use backup_run::{BackupRun, BackupRunId, BackupRunStatus};
 pub use ca::CaRow;
 pub use container_hooks::{ContainerHooks, UpsertContainerHooks};
+pub use containers::{
+    ContainerListFilter, ContainerRow, get_container, list_containers, mark_containers_removed,
+    reap_removed_before, upsert_container,
+};
 pub use deployment_group::{DeploymentGroup, DeploymentGroupState, InsertDeploymentGroup};
 pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};
 pub use error::{Error, Result};
