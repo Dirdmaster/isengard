@@ -65,8 +65,12 @@ struct Cli {
     #[arg(long, global = true)]
     context: Option<String>,
 
+    /// Subcommand. Optional in Phase 0.18: bare `isd` invokes
+    /// `Ps` with default flags so the operator gets a docker-style
+    /// container list with zero ceremony. Override default-and-document
+    /// table entry in the spec.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -128,7 +132,13 @@ async fn main() {
     let cli = Cli::parse();
     init_tracing(cli.log.as_deref());
 
-    let result = match cli.command {
+    // Phase 0.18: bare `isd` (no subcommand) defaults to `isd ps`
+    // with the clap-resolved arg defaults. This matches docker's
+    // `docker ps` convenience and replaces the pre-0.18 behaviour of
+    // erroring with the help text.
+    let command = cli.command.unwrap_or_else(default_command);
+
+    let result = match command {
         Command::Context(cmd) => context::run(context::ContextArgs { command: cmd }).await,
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
@@ -164,6 +174,21 @@ async fn main() {
         eprintln!("isd: {e:#}");
         std::process::exit(1);
     }
+}
+
+/// Phase 0.18: when the operator runs bare `isd` with no subcommand,
+/// route through `Ps` with the same defaults clap would pick for an
+/// explicit `isd ps`. Spec entry: bare-isd default-and-document.
+fn default_command() -> Command {
+    Command::Ps(ps::PsArgs {
+        all: false,
+        no_trunc: false,
+        filters: Vec::new(),
+        format: "table".into(),
+        legacy: false,
+        json: false,
+        fleet: None,
+    })
 }
 
 fn init_tracing(filter: Option<&str>) {

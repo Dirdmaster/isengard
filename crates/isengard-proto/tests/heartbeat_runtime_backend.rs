@@ -13,6 +13,7 @@ fn agent_reports_backend_in_heartbeat() {
         stacks: Vec::new(),
         services: Vec::new(),
         runtime_backend: "wisp".into(),
+        containers: Vec::new(),
     };
     let bytes = hb.encode_to_vec();
     let back = Heartbeat::decode(&*bytes).unwrap();
@@ -32,6 +33,7 @@ fn heartbeat_runtime_backend_default_empty_for_legacy_blob() {
         stacks: Vec::new(),
         services: Vec::new(),
         runtime_backend: String::new(),
+        containers: Vec::new(),
     };
     let bytes = hb_old.encode_to_vec();
     let back = Heartbeat::decode(&*bytes).unwrap();

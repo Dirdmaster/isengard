@@ -222,6 +222,11 @@ pub fn state_label(state: &str) -> &'static str {
 /// Inverse of [`is_terminal`] for the v0.5.3 mid-startup states.
 /// The indicatif MultiProgress renderer uses this to label "still
 /// working" rows without re-encoding the classification rule.
+///
+/// Lib-build sees this as dead because the renderer's call site is
+/// currently inlined; keeping the helper as the documented contract
+/// keeps the classification logic in one place.
+#[allow(dead_code)]
 pub fn is_intermediate(state: &str) -> bool {
     matches!(
         state,
@@ -874,9 +879,15 @@ mod tests {
         assert_eq!(state_label("failed"), "Failed");
         assert_eq!(state_label("restarting"), "Restarting");
         assert_eq!(state_label("unknown"), "Pending");
-        // Any unknown value (forward-compat with new agent states) falls
-        // back to "Pending" so it renders as an intermediate row.
-        assert_eq!(state_label("pulling"), "Pending");
+        // v0.5.3 extended the agent vocabulary with mid-startup states.
+        // Each gets its own label; the watch renderer groups them as
+        // intermediate via `is_intermediate`, not via this label.
+        assert_eq!(state_label("pulling"), "Pulling");
+        assert_eq!(state_label("creating"), "Creating");
+        assert_eq!(state_label("starting"), "Starting");
+        // Truly unknown values still fall back to "Pending" so a
+        // future agent state renders as an intermediate row.
+        assert_eq!(state_label("blorp"), "Pending");
     }
 
     #[test]
