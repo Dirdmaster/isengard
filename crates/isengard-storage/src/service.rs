@@ -38,8 +38,8 @@ pub enum ServiceState {
     /// (runtime-event) integration; today no backend emits this directly.
     Pulling,
     /// Bundle staged and the runtime created the container but the
-    /// process is not yet forked. Maps from `wisp::ContainerState::Created`
-    /// and from `bollard::ContainerStateStatusEnum::CREATED`.
+    /// process is not yet forked. Maps from
+    /// `bollard::ContainerStateStatusEnum::CREATED`.
     Creating,
     /// Process is alive.
     Running,

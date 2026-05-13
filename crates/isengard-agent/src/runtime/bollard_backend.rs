@@ -8,11 +8,9 @@
 //!
 //! Existing helpers in `compose_apply.rs`, `deployment/driver.rs`, etc.
 //! are NOT moved into this file: they remain the canonical implementation
-//! of their respective behaviors. A4 keeps those callers using the raw
-//! `Arc<bollard::Docker>` (accessible via [`BollardBackend::docker`]) until
-//! WispBackend forces them onto the trait in dispatch B. The methods
-//! defined here are the surface used by lib.rs / sync.rs and by the
-//! WispBackend translation that dispatch B will mirror.
+//! of their respective behaviors and call bollard directly via the raw
+//! `Arc<bollard::Docker>` (accessible through [`BollardBackend::docker`]).
+//! The methods defined here are the surface used by lib.rs / sync.rs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -745,8 +743,7 @@ impl RuntimeBackend for BollardBackend {
         _hc: &HealthcheckSpec,
     ) -> Result<HealthState, RuntimeError> {
         // Bollard impl: docker runs the healthcheck in-container; we just
-        // read whatever state docker has recorded. WispBackend (dispatch
-        // C) will run the probe externally.
+        // read whatever state docker has recorded.
         let inspect = self
             .docker
             .inspect_container(id, None::<InspectContainerOptions>)

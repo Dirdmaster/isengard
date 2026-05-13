@@ -1,20 +1,6 @@
-//! Phase 0.4: backend-agnostic runtime surface.
-//!
-//! The agent's compose / logs / deploy paths historically called bollard
-//! directly. Phase 0.4 lifts those calls behind the [`RuntimeBackend`] trait
-//! so a second backend (wisp, dispatch B) can slot in without touching the
-//! callers. Bollard remains the default; selection is via the
-//! `ISENGARD_RUNTIME` env var (see [`select::select_backend`]).
-//!
-//! Dispatch A (this commit set):
-//! - A1 (this file): trait + types + RuntimeError.
-//! - A2: env-driven `select_backend()` factory.
-//! - A3: BollardBackend extracts the existing bollard call surface.
-//! - A4: refactor existing call sites to construct + thread the trait.
-//!
-//! The trait shape is the agent's slice of bollard, plus a `run_healthcheck`
-//! abstraction (bollard runs healthchecks in-container; wisp will run them
-//! externally via nsenter / HTTP probes).
+//! Backend-agnostic runtime surface. Phase 0.4 introduced the trait so
+//! the agent's compose / logs / deploy paths speak one shape; today
+//! Bollard is the only implementor.
 
 pub mod bollard_backend;
 mod error;
@@ -34,8 +20,7 @@ use async_trait::async_trait;
 use futures_util::Stream;
 
 /// Backend-agnostic surface the agent uses to drive a container runtime.
-/// Implemented today by `BollardBackend` (Phase 0.4 dispatch A) and, after
-/// dispatch B, by `WispBackend`.
+/// Implemented today by `BollardBackend`.
 #[async_trait]
 pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     /// Pull `reference` if missing. Returns the manifest digest the runtime
@@ -43,8 +28,8 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     async fn ensure_image(&self, reference: &str) -> Result<String, RuntimeError>;
 
     /// Create a container from `spec`. Returns the runtime's opaque handle
-    /// (bollard returns the container ID; wisp will return the container
-    /// name). Callers treat the handle as a String.
+    /// (bollard returns the container ID). Callers treat the handle as a
+    /// String.
     async fn create_container(&self, spec: &ContainerCreateSpec) -> Result<String, RuntimeError>;
 
     async fn start_container(&self, id: &str) -> Result<(), RuntimeError>;
@@ -66,9 +51,7 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
 
     /// Idempotently ensure a named network exists on the host before any
     /// container is asked to attach to it. Bollard / dockerd manages
-    /// network lifetime itself, so the default is a no-op. WispBackend
-    /// overrides this to call `ensure_bridge` (bridge + iptables + on-disk
-    /// registry).
+    /// network lifetime itself, so the default is a no-op.
     ///
     /// Phase 0.18: compose_apply's parallel container creates would race
     /// each other on the per-container `ensure_bridge` call (concurrent
@@ -124,28 +107,12 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
         true
     }
 
-    /// Boot-time orphan cleanup hook. Wisp's impl walks kernel network
-    /// state (bridges + veths + iptables) against the on-disk registry
-    /// and the live container list, removing anything not accounted
-    /// for. Bollard's impl returns 0 (docker daemon owns its own
-    /// reconcile). Called once from `run_agent` before the first
-    /// compose reconcile fires, so a fresh container start doesn't
-    /// race a stale bridge from a previous boot.
-    ///
-    /// Returns the number of cleanup actions taken. Non-fatal: errors
-    /// are logged at the call site; the agent keeps booting.
-    async fn reconcile_network_orphans(&self) -> Result<usize, RuntimeError> {
-        Ok(0)
-    }
-
-    /// Borrow the underlying bollard handle when this backend is the
-    /// bollard one. Returns `None` for non-bollard backends (today: wisp,
-    /// once dispatch B lands). Phase 0.4 dispatch A keeps a handful of
-    /// internal helpers (compose_apply, deployment/driver, labels, the
-    /// log decoder, proxy IP discovery) calling bollard directly; this
-    /// escape hatch lets them keep working without poisoning the public
-    /// surface. Dispatch B replaces those callers with trait-driven
-    /// equivalents and removes the accessor.
+    /// Borrow the underlying bollard handle. Docker is now the only
+    /// backend, so this always returns `Some`. Kept as a trait method
+    /// because several internal helpers (compose_apply,
+    /// deployment/driver, labels, the log decoder, proxy IP discovery)
+    /// still call bollard directly; rewriting them onto the trait is a
+    /// later cleanup.
     fn as_bollard(&self) -> Option<std::sync::Arc<bollard::Docker>> {
         None
     }

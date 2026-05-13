@@ -1,7 +1,6 @@
-//! Error type returned by every [`super::RuntimeBackend`] method. Phase 0.4
-//! introduces this as the backend-agnostic surface; concrete impls
-//! (BollardBackend, WispBackend) translate their native errors into one of
-//! these variants.
+//! Error type returned by every [`super::RuntimeBackend`] method. The
+//! BollardBackend translates bollard's native errors into one of these
+//! variants.
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {

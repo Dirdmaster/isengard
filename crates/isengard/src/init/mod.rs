@@ -92,9 +92,6 @@ pub struct InitArgs {
     /// flag; missing values fail loudly. Implied when stdin is not a TTY.
     #[arg(long, alias = "yes")]
     pub non_interactive: bool,
-    /// Container runtime backend. `wisp` is the systemd-native default.
-    #[arg(long, default_value = "wisp")]
-    pub runtime: String,
     /// Overwrite an existing master key without prompting. Required when
     /// running non-interactively against a host that already has one.
     #[arg(long)]
@@ -120,7 +117,6 @@ pub(crate) struct Plan {
     listen_dashboard: String,
     pub(crate) state_dir: PathBuf,
     pub(crate) etc_dir: PathBuf,
-    runtime: String,
     force: bool,
     pub(crate) host_ip: String,
 }
@@ -153,7 +149,6 @@ impl Plan {
             listen_dashboard: args.listen_dashboard.clone(),
             state_dir: args.state_dir.clone(),
             etc_dir: args.etc_dir.clone(),
-            runtime: args.runtime.clone(),
             force: args.force,
             host_ip,
         })
@@ -285,7 +280,6 @@ impl Plan {
             listen_dashboard: args.listen_dashboard.clone(),
             state_dir: args.state_dir.clone(),
             etc_dir: args.etc_dir.clone(),
-            runtime: args.runtime.clone(),
             force: args.force,
             host_ip,
         })
@@ -839,8 +833,6 @@ impl Plan {
              \n\
              ISENGARD_EXTRA_SANS={extra_sans}\n\
              \n\
-             ISENGARD_RUNTIME={runtime}\n\
-             \n\
              RUST_LOG=info\n",
             acme_email = self.acme_email,
             acme_domains = self.acme_domains,
@@ -848,7 +840,6 @@ impl Plan {
             listen_grpc = self.listen_grpc,
             listen_dashboard = self.listen_dashboard,
             extra_sans = extra_sans,
-            runtime = self.runtime,
         );
         write_secret(&path, body.as_bytes(), 0o644).with_context(|| format!("write {path:?}"))?;
         Ok(())
@@ -1084,8 +1075,6 @@ pub struct JoinArgs {
     pub state_dir: PathBuf,
     #[arg(long, default_value = "/etc/isengard")]
     pub etc_dir: PathBuf,
-    #[arg(long, default_value = "wisp")]
-    pub runtime: String,
     #[arg(long, alias = "yes")]
     pub non_interactive: bool,
 }
@@ -1218,10 +1207,8 @@ async fn join_steps(args: &JoinArgs) -> Result<()> {
     let env_body = format!(
         "# Isengard agent-only join (Phase 0.12). Sourced by iso-agent.service.\n\
          ISENGARD_CONTROLLER={controller}\n\
-         ISENGARD_RUNTIME={runtime}\n\
          RUST_LOG=info\n",
         controller = args.controller,
-        runtime = args.runtime,
     );
     write_secret(&env_path, env_body.as_bytes(), 0o644)?;
     emit("Wrote env file", &env_path.display().to_string())?;

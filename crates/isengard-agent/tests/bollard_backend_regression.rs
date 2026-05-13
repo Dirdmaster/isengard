@@ -1,9 +1,6 @@
-//! Phase 0.4 dispatch D2: regression test for [`BollardBackend`].
-//!
-//! Mirrors `tests/wisp_backend_smoke.rs` for the default backend so we can
-//! prove the trait wiring did not regress the bollard path. Same hello-world
-//! semantics: pull busybox, run `echo`, exit 0, assert the snapshot reaches
-//! Exited.
+//! Regression test for [`BollardBackend`]: proves the trait wiring did
+//! not regress the bollard path. Pulls busybox, runs `echo`, exits 0,
+//! asserts the snapshot reaches Exited.
 //!
 //! `#[ignore]` because the test needs:
 //!   * a reachable docker socket (Docker Desktop / dockerd / orbstack),

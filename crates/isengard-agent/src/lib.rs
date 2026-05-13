@@ -228,12 +228,12 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let proxy_state = proxy::ProxyState::new();
     proxy_state.set_event_sink(proxy_event_tx);
 
-    // -- shared runtime backend (Phase 0.4 dispatch A). ISENGARD_RUNTIME
-    //    selects bollard (default) vs wisp (dispatch B). The trait is the
-    //    public seam; deeply-bollard helpers (compose_apply,
-    //    deployment/driver, labels, proxy/discovery) reach for the
-    //    underlying bollard handle via [`runtime::RuntimeBackend::as_bollard`]
-    //    until dispatch B replaces them with trait-driven equivalents.
+    // -- shared runtime backend. Docker is the only choice; the trait
+    //    is kept as the public seam (deeply-bollard helpers in
+    //    compose_apply, deployment/driver, labels, proxy/discovery still
+    //    reach for the underlying bollard handle via
+    //    [`runtime::RuntimeBackend::as_bollard`]; lifting them onto the
+    //    trait is a follow-up cleanup).
     //    Best-effort: if backend construction fails the supervisor + labels
     //    watcher are disabled (matches pre-0.4 behavior when docker.sock
     //    was unreachable).
@@ -252,25 +252,12 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             }
         };
 
-    // Boot-time wisp-net orphan sweep. After Phase 0.7+0.8 (systemd-native
-    // install) every kernel-update reboot lands the agent on a clean re-exec
-    // with stale wbr-* / wveth-* / iptables rules from the previous boot. The
-    // wisp backend reconciles them against the on-disk network registry +
-    // live runtime; the bollard backend's trait default is a noop (docker
-    // daemon owns its own state). Non-fatal: errors get logged, boot
-    // continues.
-    if let Some(b) = backend.as_ref() {
-        match b.reconcile_network_orphans().await {
-            Ok(0) => {}
-            Ok(n) => info!(orphans = n, "reconcile: cleaned wisp network orphans"),
-            Err(e) => warn!(error = %e, "reconcile: wisp network orphan sweep failed"),
-        }
-    }
-
-    // Legacy bollard-typed handle for callers that haven't moved to the
-    // trait yet (compose_apply, deployment/driver::RealDriverDeps, the
-    // labels watcher, the bollard log source, proxy/discovery). Dispatch B
-    // replaces these callers and removes the accessor.
+    // Legacy bollard-typed handle for callers that haven't been fully
+    // ported to the RuntimeBackend trait (compose_apply,
+    // deployment/driver::RealDriverDeps, the labels watcher, the bollard
+    // log source, proxy/discovery). Docker is now the only backend so
+    // the accessor is effectively an identity; kept until the call sites
+    // get rewritten.
     let docker = backend.as_ref().and_then(|b| b.as_bollard());
 
     // -- DeploymentSupervisor (Phase 10 Task 7). Build it BEFORE plugins so
