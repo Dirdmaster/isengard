@@ -51,9 +51,235 @@ pub fn classify_status(status: &str) -> StatusColor {
     }
 }
 
+/// Horizontal alignment of a column's cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Right,
+}
+
+/// Visual treatment of a column's cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellStyle {
+    /// Dim grey: `#` and `CONTAINER ID`.
+    Dim,
+    /// Default foreground: `IMAGE`, `PORTS`.
+    Plain,
+    /// Bright + bold: `NAMES`.
+    Emphasis,
+    /// Colored by `classify_status` of the cell text: `STATUS`.
+    State,
+}
+
+/// A column definition. `shrink_priority`: higher shrinks last when the
+/// table is wider than the terminal. `min_width`: the content width
+/// this column will not shrink below before truncation begins.
+#[derive(Debug, Clone)]
+pub struct Column {
+    pub header: &'static str,
+    pub align: Align,
+    pub style: CellStyle,
+    pub shrink_priority: u8,
+    pub min_width: usize,
+}
+
+impl Column {
+    pub fn new(
+        header: &'static str,
+        align: Align,
+        style: CellStyle,
+        shrink_priority: u8,
+        min_width: usize,
+    ) -> Self {
+        Self {
+            header,
+            align,
+            style,
+            shrink_priority,
+            min_width,
+        }
+    }
+}
+
+/// A table: column definitions plus rows of pre-stringified cells.
+/// `rows[i].len()` must equal `columns.len()`.
+#[derive(Debug, Clone)]
+pub struct Table {
+    pub columns: Vec<Column>,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// Box-drawing glyphs for the nushell `rounded` style.
+const TL: char = '╭';
+const TR: char = '╮';
+const BL: char = '╰';
+const BR: char = '╯';
+const H: char = '─';
+const V: char = '│';
+const T_DOWN: char = '┬';
+const T_UP: char = '┴';
+const T_RIGHT: char = '├';
+const T_LEFT: char = '┤';
+const CROSS: char = '┼';
+
+/// Natural display width of each column: the max of the header and
+/// every cell, ignoring terminal width.
+fn natural_widths(table: &Table) -> Vec<usize> {
+    table
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, col)| {
+            let header_w = console::measure_text_width(col.header);
+            let cell_w = table
+                .rows
+                .iter()
+                .map(|r| console::measure_text_width(&r[i]))
+                .max()
+                .unwrap_or(0);
+            header_w.max(cell_w)
+        })
+        .collect()
+}
+
+/// Build one horizontal border line with the given corner/join glyphs.
+fn border_line(widths: &[usize], left: char, mid: char, right: char) -> String {
+    let mut s = String::new();
+    s.push(left);
+    for (i, w) in widths.iter().enumerate() {
+        // +2 for the one-space cell padding on each side.
+        for _ in 0..(w + 2) {
+            s.push(H);
+        }
+        s.push(if i + 1 == widths.len() { right } else { mid });
+    }
+    s
+}
+
+/// Pad `text` to `width` display columns with the given alignment.
+/// Assumes `measure_text_width(text) <= width` (the caller truncates
+/// first).
+fn pad(text: &str, width: usize, align: Align) -> String {
+    let used = console::measure_text_width(text);
+    let gap = width.saturating_sub(used);
+    match align {
+        Align::Left => format!("{text}{}", " ".repeat(gap)),
+        Align::Right => format!("{}{text}", " ".repeat(gap)),
+    }
+}
+
+/// Render the table as a boxed string. `term_width` caps the total
+/// width (see Task 5 for shrink/truncate); `color` toggles ANSI
+/// styling (see Task 4). This task implements layout only: `color` is
+/// accepted but ignored until Task 4, and `term_width` is accepted but
+/// not yet enforced until Task 5.
+pub fn render(table: &Table, _term_width: usize, _color: bool) -> String {
+    let widths = natural_widths(table);
+    let mut out = String::new();
+
+    // Top border.
+    out.push_str(&border_line(&widths, TL, T_DOWN, TR));
+    out.push('\n');
+
+    // Header row.
+    out.push(V);
+    for (i, col) in table.columns.iter().enumerate() {
+        out.push(' ');
+        out.push_str(&pad(col.header, widths[i], col.align));
+        out.push(' ');
+        out.push(V);
+    }
+    out.push('\n');
+
+    // Header rule.
+    out.push_str(&border_line(&widths, T_RIGHT, CROSS, T_LEFT));
+    out.push('\n');
+
+    // Data rows.
+    for row in &table.rows {
+        out.push(V);
+        for (i, col) in table.columns.iter().enumerate() {
+            out.push(' ');
+            out.push_str(&pad(&row[i], widths[i], col.align));
+            out.push(' ');
+            out.push(V);
+        }
+        out.push('\n');
+    }
+
+    // Bottom border.
+    out.push_str(&border_line(&widths, BL, T_UP, BR));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ps_columns() -> Vec<Column> {
+        vec![
+            Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+            Column::new("CONTAINER ID", Align::Left, CellStyle::Dim, 7, 12),
+            Column::new("IMAGE", Align::Left, CellStyle::Plain, 2, 10),
+            Column::new("STATUS", Align::Left, CellStyle::State, 8, 10),
+            Column::new("PORTS", Align::Left, CellStyle::Plain, 1, 6),
+            Column::new("NAMES", Align::Left, CellStyle::Emphasis, 6, 8),
+        ]
+    }
+
+    fn ps_rows() -> Vec<Vec<String>> {
+        vec![
+            vec![
+                "0".into(),
+                "a1b2c3d4e5f6".into(),
+                "nginx:1.27".into(),
+                "Up 2 hours".into(),
+                ":80->80".into(),
+                "web-proxy".into(),
+            ],
+            vec![
+                "1".into(),
+                "7f8e9d0c1b2a".into(),
+                "postgres:16".into(),
+                "Up 5 days".into(),
+                "5432".into(),
+                "app-db".into(),
+            ],
+        ]
+    }
+
+    #[test]
+    fn render_draws_rounded_box_with_caps_headers() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let out = render(&table, 200, false);
+        // Rounded corners and joins.
+        assert!(out.contains('╭'), "top-left rounded corner");
+        assert!(out.contains('╮'), "top-right rounded corner");
+        assert!(out.contains('╰'), "bottom-left rounded corner");
+        assert!(out.contains('╯'), "bottom-right rounded corner");
+        assert!(out.contains('┼'), "header-rule cross join");
+        // ALL CAPS headers (input is already caps; assert they survive).
+        assert!(out.contains("CONTAINER ID"));
+        assert!(out.contains("NAMES"));
+        // Content present.
+        assert!(out.contains("web-proxy"));
+        assert!(out.contains("postgres:16"));
+        // Exactly one header rule: count lines starting with ├.
+        let rule_lines = out.lines().filter(|l| l.starts_with('├')).count();
+        assert_eq!(rule_lines, 1, "exactly one header rule, no inter-row rules");
+        // Every data + border line is the same display width.
+        let widths: Vec<usize> = out
+            .lines()
+            .map(console::measure_text_width)
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "all rendered lines share one width: {widths:?}"
+        );
+    }
 
     #[test]
     fn classify_status_buckets() {
