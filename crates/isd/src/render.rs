@@ -326,7 +326,10 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
     }
     out.push('\n');
 
-    out.push_str(&dim_border(&border_line(&widths, T_RIGHT, CROSS, T_LEFT), color));
+    out.push_str(&dim_border(
+        &border_line(&widths, T_RIGHT, CROSS, T_LEFT),
+        color,
+    ));
     out.push('\n');
 
     for row in &table.rows {
@@ -429,10 +432,7 @@ mod tests {
         let rule_lines = out.lines().filter(|l| l.starts_with('├')).count();
         assert_eq!(rule_lines, 1, "exactly one header rule, no inter-row rules");
         // Every data + border line is the same display width.
-        let widths: Vec<usize> = out
-            .lines()
-            .map(console::measure_text_width)
-            .collect();
+        let widths: Vec<usize> = out.lines().map(console::measure_text_width).collect();
         assert!(
             widths.windows(2).all(|w| w[0] == w[1]),
             "all rendered lines share one width: {widths:?}"
@@ -532,8 +532,14 @@ mod tests {
             classify_status("Up 5 minutes (unhealthy)"),
             StatusColor::Red
         );
-        assert_eq!(classify_status("Restarting (1) 4 seconds ago"), StatusColor::Yellow);
-        assert_eq!(classify_status("Exited (0) 12 minutes ago"), StatusColor::Grey);
+        assert_eq!(
+            classify_status("Restarting (1) 4 seconds ago"),
+            StatusColor::Yellow
+        );
+        assert_eq!(
+            classify_status("Exited (0) 12 minutes ago"),
+            StatusColor::Grey
+        );
         assert_eq!(classify_status("Exited (137) 1 hour ago"), StatusColor::Red);
         assert_eq!(classify_status("Dead"), StatusColor::Red);
         assert_eq!(classify_status("Created"), StatusColor::Grey);
