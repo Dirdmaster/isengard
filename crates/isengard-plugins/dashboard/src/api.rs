@@ -726,9 +726,7 @@ async fn put_stack_compose(
                 compose_yaml: yaml,
                 expected_sha256: expected,
                 force: q.force.unwrap_or(false),
-                manifest_toml: None,
                 secrets: None,
-                hooks: None,
             }
         }
         "application/json" => {
@@ -757,9 +755,7 @@ async fn put_stack_compose(
                 compose_yaml: parsed.compose,
                 expected_sha256: expected,
                 force,
-                manifest_toml: parsed.manifest_toml,
                 secrets: parsed.secrets,
-                hooks: parsed.hooks,
             }
         }
         "" => {
@@ -778,37 +774,17 @@ async fn put_stack_compose(
         }
     };
 
-    // JSON variant: validate + persist manifest bundle BEFORE shipping
-    // WriteCompose. If anything bounces (400 / 422), the operator gets
-    // a clean error and the agent is never asked to write.
-    let manifest_for_agent = match phase_0_13_persist_manifest_bundle(
-        &handles,
-        stack.id,
-        &stack.name,
-        input.manifest_toml.as_deref(),
-        input.secrets.as_deref(),
-        input.hooks.as_deref(),
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(resp) => return resp,
-    };
+    // Track A teardown (2026-05-15): the manifest bundle is gone. Only
+    // the secrets binding survives; it lands in `stack_secrets` via
+    // `set_stack_secrets`. Manifest TOML / fleet / strategy / hooks no
+    // longer round-trip through the controller. The proto's manifest
+    // and hooks fields ship empty until Task 7 drops them entirely.
+    if let Err(resp) = persist_stack_secrets(&handles, stack.id, input.secrets.as_deref()).await {
+        return resp;
+    }
 
-    let proto_hooks: Vec<isengard_proto::pb::LifecycleHook> = input
-        .hooks
-        .as_deref()
-        .map(|hs| {
-            hs.iter()
-                .map(|h| isengard_proto::pb::LifecycleHook {
-                    on: h.on.clone(),
-                    cmd: h.cmd.clone(),
-                    timeout_ms: h.timeout_ms,
-                    on_error: h.on_error.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let manifest_for_agent = String::new();
+    let proto_hooks: Vec<isengard_proto::pb::LifecycleHook> = Vec::new();
     let proto_secrets: Vec<String> = input.secrets.clone().unwrap_or_default();
 
     let request_id = ulid::Ulid::new().to_string();
@@ -881,22 +857,27 @@ async fn put_stack_compose(
     }
 }
 
-/// Phase 0.13 (wave 2.A follow-up): JSON body for `PUT /stacks/:id/compose`.
-/// Same shape as the manifest fields on `POST /stacks` plus a renamed
-/// `compose` (no `_yaml` suffix; the field is the YAML body verbatim).
+/// JSON body for `PUT /stacks/:id/compose`. Renamed `compose` (no
+/// `_yaml` suffix; the field is the YAML body verbatim).
+///
+/// The Track A teardown (2026-05-15) dropped the manifest layer; the
+/// `manifest_toml`, `hooks`, and `manifest_sha256` fields are accepted
+/// for one release so older isd clients keep working but read into
+/// underscore-prefixed `serde_json::Value` and are dropped on the
+/// floor. Task 7 of the teardown removes them entirely.
 #[derive(Debug, Deserialize)]
 struct PutComposeJsonBody {
     /// Raw compose.yaml content. Required.
     compose: String,
-    /// Verbatim stack.toml. Empty / missing leaves the manifest unchanged.
-    #[serde(default)]
-    manifest_toml: Option<String>,
+    /// Compat surface: ignored. Older clients still send this.
+    #[serde(default, rename = "manifest_toml")]
+    _manifest_toml: serde_json::Value,
     /// Per-fleet secret names to bind to this stack. Unknown names yield 422.
     #[serde(default)]
     secrets: Option<Vec<String>>,
-    /// Lifecycle hooks. Same shape as `POST /stacks`.
-    #[serde(default)]
-    hooks: Option<Vec<HookBody>>,
+    /// Compat surface: ignored. Older clients still send this.
+    #[serde(default, rename = "hooks")]
+    _hooks: serde_json::Value,
     /// Skip the optimistic concurrency check. Body-level alternative to
     /// the `?force=true` query string. They OR together.
     #[serde(default)]
@@ -905,12 +886,9 @@ struct PutComposeJsonBody {
     /// when both are present.
     #[serde(default)]
     compose_sha256: Option<String>,
-    /// Advisory only: lets callers assert what manifest body they
-    /// believe they're overwriting. Not enforced today (manifest
-    /// concurrency is server-side last-write-wins); accepted for
-    /// forward compatibility with a future manifest-level check.
+    /// Compat surface: ignored.
     #[serde(default, rename = "manifest_sha256")]
-    _manifest_sha256: Option<String>,
+    _manifest_sha256: serde_json::Value,
 }
 
 /// Internal shape carrying either the YAML-body or JSON-body PUT input
@@ -919,9 +897,7 @@ struct PutComposeInput {
     compose_yaml: String,
     expected_sha256: String,
     force: bool,
-    manifest_toml: Option<String>,
     secrets: Option<Vec<String>>,
-    hooks: Option<Vec<HookBody>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1130,18 +1106,17 @@ struct CreateStackBody {
     /// auto-selected. With multiple hosts, the operator must specify.
     #[serde(default)]
     host_id: Option<String>,
-    /// Phase 0.13: verbatim `stack.toml` body. When present, the
-    /// controller asserts manifest.name == body.name and stores it
-    /// alongside the compose.
-    #[serde(default)]
-    manifest_toml: Option<String>,
-    /// Phase 0.13: per-fleet secret names to bind to this stack. Unknown
-    /// names yield 422 with the missing list.
+    /// Compat surface: ignored after the Track A teardown (2026-05-15).
+    /// Older isd clients still send this; accepted to avoid a 400 spike.
+    #[serde(default, rename = "manifest_toml")]
+    _manifest_toml: serde_json::Value,
+    /// Per-fleet secret names to bind to this stack. Unknown names yield
+    /// 422 with the missing list. Survives the teardown.
     #[serde(default)]
     secrets: Option<Vec<String>>,
-    /// Phase 0.13: lifecycle hooks shaped like the manifest.
-    #[serde(default)]
-    hooks: Option<Vec<HookBody>>,
+    /// Compat surface: ignored after the Track A teardown.
+    #[serde(default, rename = "hooks")]
+    _hooks: serde_json::Value,
 }
 
 /// Phase 0.13: hook shape on POST /stacks. Mirrors the TOML manifest.
@@ -1170,11 +1145,54 @@ struct CreateStackResponse {
     written_sha256: String,
 }
 
+/// Track A teardown (2026-05-15): persist the secrets binding for a
+/// stack. The old `phase_0_13_persist_manifest_bundle` also handled
+/// the manifest TOML and lifecycle hooks; those are gone. Only the
+/// secrets binding survives because the agent's FetchSecret RPC still
+/// needs to know which compose secrets a service may bind.
+async fn persist_stack_secrets(
+    handles: &Arc<ControllerHandles>,
+    stack_id: StackId,
+    secrets: Option<&[String]>,
+) -> std::result::Result<(), Response> {
+    let Some(names) = secrets else {
+        return Ok(());
+    };
+    if names.is_empty() {
+        return Ok(());
+    }
+    let names_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    match handles
+        .inventory
+        .set_stack_secrets(stack_id, &names_refs)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(isengard_storage::Error::UnknownSecrets(missing)) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "unknown secrets",
+                "missing": missing,
+            })),
+        )
+            .into_response()),
+        Err(e) => Err(json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("set_stack_secrets: {e}"),
+        )),
+    }
+}
+
 /// Phase 0.13: validate + persist a manifest bundle for `stack_id`.
 /// Returns the verbatim manifest_toml the controller should ship to the
 /// agent in the WriteCompose payload (empty when no manifest was sent).
 /// Errors return a fully-formed HTTP response (400 / 422 / 500) the
 /// caller can return verbatim.
+///
+/// Track A teardown (2026-05-15): only called by the
+/// `PUT /stacks/:id/manifest` endpoint (which Task 4 deletes). The
+/// POST /stacks and PUT /stacks/:id/compose handlers now go through
+/// `persist_stack_secrets` instead.
 async fn phase_0_13_persist_manifest_bundle(
     handles: &Arc<ControllerHandles>,
     stack_id: StackId,
@@ -1432,44 +1450,18 @@ async fn create_stack(
         }
     };
 
-    // Phase 0.13: persist manifest body + secrets + hooks BEFORE the
-    // WriteCompose goes out. This keeps the controller's view consistent
-    // with what we're about to ship: if the manifest persist fails the
-    // operator gets the error and no WriteCompose is dispatched.
-    let manifest_toml_for_agent = match phase_0_13_persist_manifest_bundle(
-        &handles,
-        stack_id,
-        &body.name,
-        body.manifest_toml.as_deref(),
-        body.secrets.as_deref(),
-        body.hooks.as_deref(),
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(resp) => return resp,
-    };
+    // Track A teardown (2026-05-15): persist only the secrets binding.
+    // Manifest TOML / fleet / strategy / hooks are gone; the proto's
+    // manifest_toml + hooks fields ship empty until Task 7 drops them.
+    if let Err(resp) = persist_stack_secrets(&handles, stack_id, body.secrets.as_deref()).await {
+        return resp;
+    }
 
     // Same WriteCompose path as `put_stack_compose`. force=true because
     // there's nothing on disk to optimistic-conflict against on a fresh
     // stack; expected_sha256="" for the same reason.
     let request_id = ulid::Ulid::new().to_string();
     let rx = handles.compose_broker.register(request_id.clone()).await;
-
-    let proto_hooks = body
-        .hooks
-        .as_deref()
-        .map(|hs| {
-            hs.iter()
-                .map(|h| isengard_proto::pb::LifecycleHook {
-                    on: h.on.clone(),
-                    cmd: h.cmd.clone(),
-                    timeout_ms: h.timeout_ms,
-                    on_error: h.on_error.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
 
     let deployment_id = ulid::Ulid::new().to_string();
     let msg = isengard_proto::pb::ControllerMessage {
@@ -1481,9 +1473,9 @@ async fn create_stack(
                     compose_yaml: body.compose_yaml,
                     expected_sha256: String::new(),
                     force: true,
-                    manifest_toml: manifest_toml_for_agent,
+                    manifest_toml: String::new(),
                     secrets: body.secrets.clone().unwrap_or_default(),
-                    hooks: proto_hooks,
+                    hooks: Vec::new(),
                     deployment_id,
                 },
             ),
@@ -2677,12 +2669,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    /// Phase 0.13 wave 2.A follow-up: JSON variant with manifest body +
-    /// secrets + hooks is accepted. Reaches the routing layer (503 here)
-    /// only after the manifest bundle has been validated and persisted;
-    /// post-condition: the manifest_toml row is set on the stack.
+    /// Track A teardown (2026-05-15): the JSON variant accepts a
+    /// `manifest_toml` body field from older clients but drops it on the
+    /// floor. The stack's `manifest_toml` column stays NULL even after
+    /// the request reaches the routing layer.
     #[tokio::test]
-    async fn put_compose_json_persists_manifest_then_dispatches() {
+    async fn put_compose_json_manifest_field_is_ignored() {
         use isengard_storage::{InsertStack, StackSource};
 
         let handles = test_handles().await;
@@ -2715,9 +2707,8 @@ mod tests {
             )
             .await
             .unwrap();
-        // Same 503 ceiling as the YAML test (no agent). Below the
-        // ceiling we expect the manifest to have been persisted before
-        // the routing layer was reached.
+        // Same 503 ceiling as the YAML test (no agent). The manifest
+        // field is accepted (no 400) but never persisted.
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let s = handles
             .inventory
@@ -2725,7 +2716,7 @@ mod tests {
             .await
             .unwrap()
             .expect("stack present");
-        assert_eq!(s.manifest_toml.as_deref(), Some(manifest));
+        assert_eq!(s.manifest_toml, None);
     }
 
     /// Phase 0.13 wave 2.A follow-up: 422 with `missing: [...]` when the
@@ -2774,11 +2765,12 @@ mod tests {
         assert_eq!(parsed["missing"][0], "nonexistent_secret");
     }
 
-    /// Phase 0.13 wave 2.A follow-up: 400 when the JSON body's hook has
-    /// an invalid `on_error` value. The validation runs through the
-    /// shared `phase_0_13_persist_manifest_bundle` helper.
+    /// Track A teardown (2026-05-15): the JSON variant accepts a
+    /// `hooks` body field from older clients but drops it on the floor.
+    /// Even a structurally garbage hook entry no longer trips a 400; we
+    /// pass straight through to the routing layer (503, no agent).
     #[tokio::test]
-    async fn put_compose_json_invalid_hook_returns_400() {
+    async fn put_compose_json_hooks_field_is_ignored() {
         use isengard_storage::{InsertStack, StackSource};
 
         let handles = test_handles().await;
@@ -2815,7 +2807,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Phase 0.13 wave 2.A follow-up: JSON body with an empty `compose`
