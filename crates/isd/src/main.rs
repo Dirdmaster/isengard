@@ -32,6 +32,7 @@ mod logs;
 mod manifest_cmd;
 mod open_cmd;
 mod output;
+mod placement_cmd;
 mod ps;
 mod render;
 mod route;
@@ -91,6 +92,9 @@ enum Command {
     /// List services across stacks.
     #[command(subcommand)]
     Service(service_cmd::ServiceCommand),
+    /// Phase 0.14: show the placement scheduler's grid (one row per
+    /// replica). `--stack-id N` filters; `--json` emits raw rows.
+    Placement(placement_cmd::PlacementArgs),
 }
 
 #[tokio::main]
@@ -150,6 +154,7 @@ async fn main() {
             )
             .await
         }
+        Command::Placement(args) => placement_cmd::run(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {
