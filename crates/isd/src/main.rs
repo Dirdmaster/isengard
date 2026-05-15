@@ -23,6 +23,7 @@
 use clap::{Parser, Subcommand};
 
 mod compose_cmd;
+mod confirm;
 mod context;
 mod credentials;
 mod help_render;
