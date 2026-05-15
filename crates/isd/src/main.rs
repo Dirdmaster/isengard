@@ -30,6 +30,7 @@ mod hosts_cmd;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
+mod placement_cmd;
 mod ps;
 mod route;
 mod secret;
@@ -137,6 +138,9 @@ enum Command {
     /// every service across every stack. Mirrors `docker service`.
     #[command(subcommand)]
     Service(service_cmd::ServiceCommand),
+    /// Phase 0.14: show the placement scheduler's grid (one row per
+    /// replica). `--stack-id N` filters; `--json` emits raw rows.
+    Placement(placement_cmd::PlacementArgs),
 }
 
 #[tokio::main]
@@ -204,6 +208,7 @@ async fn main() {
             )
             .await
         }
+        Command::Placement(args) => placement_cmd::run(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {
