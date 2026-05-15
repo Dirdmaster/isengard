@@ -25,6 +25,46 @@
 
 use std::fmt;
 
+/// Per-service deploy strategy. Maps to the controller's rollout
+/// behavior. `Auto` lets the controller pick per-service heuristically.
+///
+/// Parsed from the stack file's per-service `strategy:` key. See the
+/// 2026-05-15 one-file stack model design spec (Track A) for the
+/// rationale of pushing strategy choice into the stack file itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Strategy {
+    #[default]
+    Auto,
+    BlueGreen,
+    Rolling,
+    Recreate,
+}
+
+impl Strategy {
+    /// Parse a strategy keyword. Accepts exactly the four kebab-case
+    /// forms; anything else is an error naming the allowed set.
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "blue-green" => Ok(Self::BlueGreen),
+            "rolling" => Ok(Self::Rolling),
+            "recreate" => Ok(Self::Recreate),
+            other => Err(anyhow::anyhow!(
+                "unknown strategy {other:?}; allowed: auto, blue-green, rolling, recreate"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::BlueGreen => "blue-green",
+            Self::Rolling => "rolling",
+            Self::Recreate => "recreate",
+        }
+    }
+}
+
 /// Where to place a service's replicas. Set by the compose parser; read
 /// by the scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +89,16 @@ pub enum Placement {
         host: String,
         selector: Option<LabelSelector>,
     },
+}
+
+impl Default for Placement {
+    /// `Singleton { selector: None }` is the scheduler-side default when
+    /// the stack file declares no placement verb. Keeping the default
+    /// explicit lets callers (the scheduler, tests) materialise an
+    /// "implicit placement" without juggling `Option<Placement>` shapes.
+    fn default() -> Self {
+        Self::Singleton { selector: None }
+    }
 }
 
 /// A parsed label selector with its canonical re-emitted source. The
@@ -512,5 +562,31 @@ mod tests {
         assert!(s.matches(&lbl(&[("role", "worker"), ("tier", "gpu")])));
         assert!(!s.matches(&lbl(&[("role", "worker"), ("tier", "slow")])));
         assert!(!s.matches(&lbl(&[("role", "control"), ("tier", "gpu")])));
+    }
+
+    #[test]
+    fn strategy_parses_known_values() {
+        assert_eq!(Strategy::parse("auto").unwrap(), Strategy::Auto);
+        assert_eq!(Strategy::parse("blue-green").unwrap(), Strategy::BlueGreen);
+        assert_eq!(Strategy::parse("rolling").unwrap(), Strategy::Rolling);
+        assert_eq!(Strategy::parse("recreate").unwrap(), Strategy::Recreate);
+        assert!(Strategy::parse("sideways").is_err());
+    }
+
+    #[test]
+    fn strategy_default_is_auto() {
+        assert_eq!(Strategy::default(), Strategy::Auto);
+    }
+
+    #[test]
+    fn strategy_as_str_roundtrip() {
+        for kw in ["auto", "blue-green", "rolling", "recreate"] {
+            assert_eq!(Strategy::parse(kw).unwrap().as_str(), kw);
+        }
+    }
+
+    #[test]
+    fn placement_default_is_singleton_no_selector() {
+        assert_eq!(Placement::default(), Placement::Singleton { selector: None });
     }
 }
