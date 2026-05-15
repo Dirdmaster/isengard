@@ -1,6 +1,7 @@
 //! Agent-mode runtime: load plugins, run their lifecycle hooks, wait for
 //! shutdown. Phase 1 minimum — no gRPC client, no docker integration.
 
+pub mod agent_labels;
 pub mod agent_state;
 pub mod backoff;
 pub mod cert_renewal;
@@ -664,6 +665,20 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_log_source = log_source.clone();
     let sync_mdns = mdns_handle.clone();
     let sync_backend = backend.clone();
+    // Phase 0.14: load agent labels once at boot. SIGHUP re-read is
+    // future work; for now the loader runs at agent start and the same
+    // map travels with every heartbeat. BTreeMap from the loader is
+    // converted to HashMap because the prost-generated `Heartbeat.labels`
+    // field is a HashMap.
+    let agent_label_map: std::collections::HashMap<String, String> =
+        agent_labels::load_agent_labels().into_iter().collect();
+    if !agent_label_map.is_empty() {
+        tracing::info!(
+            count = agent_label_map.len(),
+            "agent_labels: loaded from agent.toml + env",
+        );
+    }
+    let sync_agent_labels = agent_label_map;
     // v0.3d: surface the compose root + host id to the sync loop so it
     // can service `WriteCompose` ControllerMessages from the dashboard.
     // Phase 0.13 wave 3.D: also surface the EventEmitter so the
@@ -691,6 +706,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             sync_mdns,
             sync_compose_ctx,
             sync_backend,
+            sync_agent_labels,
         )
         .await
     };

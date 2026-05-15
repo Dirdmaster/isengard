@@ -125,6 +125,12 @@ pub async fn run_sync_loop<S: LogSource>(
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
     backend: Option<Arc<dyn RuntimeBackend>>,
+    // Phase 0.14: agent labels for placement selectors. Loaded once at
+    // agent start; same value attached to every heartbeat. Empty map
+    // means "no labels," which the controller treats as no `where:`
+    // selectors will match (singletons / spreads with no selector still
+    // place onto this host).
+    agent_labels: std::collections::HashMap<String, String>,
 ) -> Result<()> {
     // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
@@ -180,6 +186,11 @@ pub async fn run_sync_loop<S: LogSource>(
     // docker.sock once per heartbeat). Falls back to the legacy
     // bollard probe when backend selection failed at boot.
     let heartbeat_backend = backend.clone();
+    // Phase 0.14: snapshot agent labels for this stream lifetime. The
+    // controller's scheduler reads these on every heartbeat to keep its
+    // `agent_labels` table fresh. A fresh sync stream (post-reconnect)
+    // re-uses the same in-memory snapshot the parent passed in.
+    let heartbeat_labels = agent_labels.clone();
     let mut heartbeat_task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         // Skip the first immediate tick; we want the first heartbeat one
@@ -219,6 +230,7 @@ pub async fn run_sync_loop<S: LogSource>(
                                 services,
                                 runtime_backend: runtime_backend.clone(),
                                 containers,
+                                labels: heartbeat_labels.clone(),
                             },
                         )),
                     };
@@ -679,6 +691,9 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
     backend: Option<Arc<dyn RuntimeBackend>>,
+    // Phase 0.14: see run_sync_loop. Same value is reused across reconnect
+    // attempts.
+    agent_labels: std::collections::HashMap<String, String>,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -718,6 +733,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
             mdns.clone(),
             compose_ctx.clone(),
             backend.clone(),
+            agent_labels.clone(),
         )
         .await;
 

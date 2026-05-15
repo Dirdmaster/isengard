@@ -16,7 +16,10 @@ pub const GROUPS: &[(&str, &[&str])] = &[
         &["ps", "logs", "stop", "start", "restart", "rm", "kill"],
     ),
     ("Stacks", &["stack", "open"]),
-    ("Fleet", &["hosts", "service", "route", "secret"]),
+    (
+        "Fleet",
+        &["hosts", "service", "route", "secret", "placement"],
+    ),
     ("Setup", &["context", "update"]),
 ];
 
