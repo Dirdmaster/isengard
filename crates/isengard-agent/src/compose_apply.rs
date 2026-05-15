@@ -12,8 +12,7 @@
 //! trait instead of bollard directly. Bollard remains the default
 //! backend; the byte-level Config the bollard backend hands to dockerd
 //! still flows through `BollardBackend::spec_to_config`, so the v0.3d
-//! reconcile bytes are unchanged. WispBackend gets the same trait
-//! surface, which is what makes engine-end-to-end deploys work.
+//! reconcile bytes are unchanged.
 
 use std::sync::Arc;
 
@@ -120,8 +119,7 @@ pub async fn reconcile_stack_with_stack_secrets(
 /// `com.docker.compose.project=<stack>` and
 /// `isengard.stack=<stack>` for the bollard backend), then inspects
 /// each handle to fill in env / ports / restart so the diff path has
-/// what it needs. WispBackend's list response already carries those
-/// fields from the persisted spec, so the inspect round-trip is cheap.
+/// what it needs.
 pub async fn list_running_for_stack(
     backend: &dyn RuntimeBackend,
     stack_name: &str,
@@ -189,11 +187,8 @@ const APPLY_PLAN_CONCURRENCY: usize = 8;
 ///    create still re-checks the registry, but at that point each
 ///    bridge already exists and iptables is already applied, so the
 ///    work is a fast no-op.
-/// 3. iptables: WispBackend wraps every `ensure_bridge` call with an
-///    internal `tokio::sync::Mutex` so concurrent `iptables-restore`
-///    invocations can't race. Per-container DNAT rules (in
-///    `start_container`) already serialise through the existing
-///    `net_attacher` mutex.
+/// 3. iptables / DNAT: dockerd serialises its own iptables writes, so
+///    the agent does not need a per-process mutex here.
 ///
 /// Logging: each ensure / create / start call line carries
 /// `service=<name>`, so interleaved completion order is still
@@ -460,13 +455,11 @@ pub fn desired_service_to_create_spec(
     );
     labels.insert("com.docker.compose.service".to_string(), svc.name.clone());
     labels.insert("isengard.stack".to_string(), stack_name.to_string());
-    // Phase 0.17: compose `cap_add:` flows through to wisp via the
-    // `isengard.cap.add` label. WispBackend::spec_to_config_overrides
-    // reads the same label and converts it into a
-    // [`wisp_image::CapabilityOverride`] that lands in all five OCI
-    // capability sets. We use a label hop (rather than a typed field
-    // on ContainerCreateSpec) to keep the persisted spec.json shape
-    // unchanged: a typed field would need a versioned migration.
+    // compose `cap_add:` flows through the `isengard.cap.add` label.
+    // The bollard backend reads it back and threads the entries into
+    // `HostConfig.CapAdd` when creating the container. Carried as a
+    // label rather than a typed field on `ContainerCreateSpec` to keep
+    // the persisted spec.json shape unchanged across upgrades.
     if !svc.cap_add.is_empty() {
         labels.insert("isengard.cap.add".to_string(), svc.cap_add.join(","));
     }
@@ -950,10 +943,9 @@ mod tests {
 
     #[test]
     fn desired_service_to_create_spec_lifts_cap_add_into_label() {
-        // Phase 0.17: compose `cap_add:` flows into the
-        // `isengard.cap.add` label. WispBackend's reader splits the
-        // comma list back into a CapabilityOverride applied to all
-        // five OCI sets.
+        // compose `cap_add:` flows into the `isengard.cap.add` label;
+        // the bollard backend later reads it back into HostConfig.CapAdd
+        // at container-create time.
         let svc = DesiredService {
             name: "web".into(),
             image: Some("nginx:alpine".into()),

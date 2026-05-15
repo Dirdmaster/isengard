@@ -62,9 +62,9 @@ pub struct DesiredService {
     /// capability name (with or without the `CAP_` prefix, e.g.
     /// `CHOWN`, `CAP_NET_BIND_SERVICE`). The compose path forwards the
     /// raw strings unchanged; `compose_apply` joins them into the
-    /// `isengard.cap.add` label that the WispBackend reader consumes
-    /// to populate all five OCI capability sets. Empty = wisp's
-    /// default `CAP_KILL` + `CAP_NET_BIND_SERVICE` allow-list applies.
+    /// `isengard.cap.add` label that the bollard backend reads back at
+    /// container-create time. Empty = docker's default capability set
+    /// applies.
     pub cap_add: Vec<String>,
 }
 

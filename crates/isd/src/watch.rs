@@ -1274,6 +1274,7 @@ mod tests {
         let ctx = ContextEntry {
             name: "test".into(),
             backend: Backend::Http { url: server.uri() },
+            docker: None,
         };
         let session = Session::from_context(ctx).await.unwrap();
 

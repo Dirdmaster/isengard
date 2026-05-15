@@ -92,6 +92,14 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         return run_legacy(args, context).await;
     }
 
+    // Phase 0.20: container-level commands route by context shape, not
+    // by a CLI flag. If the resolved context carries a `docker = "..."`
+    // endpoint, `isd ps` is a docker-daemon round-trip; otherwise we
+    // fall back to the Isengard controller's REST surface.
+    if let Some(docker_uri) = resolve_docker_uri(context)? {
+        return run_docker_backend(args, docker_uri).await;
+    }
+
     let session = Session::open(context).await?;
     let url = build_url(session.controller_url(), &args)?;
 
@@ -268,6 +276,46 @@ struct LegacyHostBackendDto {
 
 fn default_backend() -> String {
     "docker".to_string()
+}
+
+// ----- direct-bollard path (Phase 0.20) -----
+
+/// Resolve the current context (default or `--context <name>` override)
+/// and return its `docker = "..."` URI when set. Returns `Ok(None)` if
+/// the context has no docker endpoint; the caller falls back to the
+/// controller path. Returns `Ok(None)` for "no context selected at
+/// all" too, so the controller path can produce its own canonical
+/// "no context" error.
+fn resolve_docker_uri(context: Option<&str>) -> Result<Option<String>> {
+    let path = crate::credentials::default_credentials_path()?;
+    let file = crate::credentials::load(&path)?;
+    let target_name = context
+        .map(str::to_string)
+        .or_else(|| file.default_context.clone());
+    let Some(name) = target_name else {
+        return Ok(None);
+    };
+    let ctx = file
+        .contexts
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| anyhow::anyhow!("context {name:?} not found"))?;
+    Ok(ctx.docker.clone())
+}
+
+async fn run_docker_backend(_args: PsArgs, docker_uri: String) -> Result<()> {
+    use isd_runtime::DockerBackend;
+
+    let backend = DockerBackend::from_uri(&docker_uri)
+        .await
+        .with_context(|| format!("opening docker backend at {docker_uri}"))?;
+
+    // Phase 0.20 placeholder: prove the connection works. Phase 0.21
+    // replaces this with the real container listing + table render
+    // (CONTAINER ID, IMAGE, COMMAND, STATUS, HOST, STACK, NAMES).
+    let banner = backend.ping().await.context("ping docker daemon")?;
+    println!("docker backend reachable: {banner}");
+    Ok(())
 }
 
 async fn run_legacy(args: PsArgs, context: Option<&str>) -> Result<()> {

@@ -17,8 +17,7 @@
 //! Phase 0.5: rewritten to drive off [`crate::runtime::RuntimeBackend`]
 //! instead of bollard directly. The dockerd code path is unchanged in
 //! shape (BollardBackend wraps `Docker::events` + `inspect_container`); the
-//! wisp path now flows through the same surface so Pingora label
-//! discovery works under `ISENGARD_RUNTIME=wisp`.
+//! watcher feeds Pingora's label-derived routing through that.
 //!
 //! Behavioral deltas vs the pre-0.5 bollard-direct watcher (documented for
 //! follow-up):

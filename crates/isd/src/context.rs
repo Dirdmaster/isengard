@@ -82,6 +82,14 @@ pub struct CreateArgs {
     /// context. Errors if it matches the new context or doesn't exist.
     #[arg(long, requires = "sync_secrets")]
     pub sync_from: Option<String>,
+
+    /// Phase 0.20: Docker endpoint for direct-bollard access. Accepts
+    /// `ssh://user@host`, `tcp://host:port`, or `unix:///path`. When
+    /// set, `isd ps --backend docker` (Phase 0.20) and the default
+    /// container surface (Phase 0.21) use this instead of going through
+    /// the Isengard controller's REST API.
+    #[arg(long)]
+    pub docker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -131,6 +139,11 @@ fn validate_name(name: &str) -> Result<()> {
 async fn run_create(args: CreateArgs) -> Result<()> {
     validate_name(&args.name)?;
 
+    // Phase 0.20: a docker-only context (no controller) is valid for the
+    // direct-bollard path. When `--docker` is the only transport given,
+    // we still need a Backend value to satisfy ContextEntry's shape; we
+    // pick an Http placeholder that the controller-using verbs will
+    // reject explicitly when invoked against a no-controller context.
     let backend = match (args.ssh.as_deref(), args.http.as_deref()) {
         (Some(target), None) => Backend::Ssh {
             target: target.to_string(),
@@ -150,9 +163,17 @@ async fn run_create(args: CreateArgs) -> Result<()> {
             return Err(anyhow!("--ssh and --http are mutually exclusive"));
         }
         (None, None) => {
-            return Err(anyhow!(
-                "exactly one of --ssh <target> or --http <url> is required"
-            ));
+            if args.docker.is_none() {
+                return Err(anyhow!(
+                    "exactly one of --ssh <target>, --http <url>, or --docker <uri> is required"
+                ));
+            }
+            // Docker-only context. Placeholder Http URL so the existing
+            // controller-using code paths fail loudly rather than reach
+            // a partial backend; Phase 0.21 will lift the requirement.
+            Backend::Http {
+                url: "http://no-controller.invalid".to_string(),
+            }
         }
     };
 
@@ -161,6 +182,7 @@ async fn run_create(args: CreateArgs) -> Result<()> {
     let ctx = ContextEntry {
         name: args.name.clone(),
         backend,
+        docker: args.docker.clone(),
     };
     let was_first = file.contexts.is_empty();
 

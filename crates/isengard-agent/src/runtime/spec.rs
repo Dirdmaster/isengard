@@ -1,12 +1,8 @@
 //! Backend-agnostic types describing what to run, what's running, and what
-//! the runtime tells us about it. Phase 0.4 introduces these so the agent's
-//! compose / logs / deploy paths can speak one shape regardless of whether
-//! the host's runtime is dockerd (bollard) or wisp.
-//!
-//! The design tries to be a least-common-denominator: every field is either
-//! universal across both backends, or trivially translatable. Bollard fills
-//! these in via mapping helpers in `bollard_backend.rs`; WispBackend (Phase
-//! 0.4 dispatch B) does the same against wisp's own state-dir.
+//! the runtime tells us about it. Phase 0.4 introduced these so the agent's
+//! compose / logs / deploy paths speak one shape. Bollard is the only
+//! backend today; fields are filled in by mapping helpers in
+//! `bollard_backend.rs`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

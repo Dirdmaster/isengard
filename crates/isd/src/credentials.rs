@@ -68,6 +68,13 @@ pub struct ContextEntry {
     pub name: String,
     #[serde(flatten)]
     pub backend: Backend,
+    /// Phase 0.20: optional Docker Engine endpoint for direct-bollard
+    /// access. Accepts `ssh://user@host`, `tcp://host:port`, or
+    /// `unix:///path`. Coexists with the controller-backed `kind`/`url`
+    /// / `target` fields; one or both may be set. When present, `isd ps
+    /// --backend docker` uses this instead of the controller round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<String>,
 }
 
 /// Custom deserialize so legacy entries (with `controller_url` + `token` +
@@ -97,6 +104,9 @@ impl<'de> Deserialize<'de> for ContextEntry {
             #[serde(default)]
             #[allow(dead_code)]
             ca_fingerprint_sha256: Option<String>,
+            // Phase 0.20: direct-bollard endpoint (independent of kind).
+            #[serde(default)]
+            docker: Option<String>,
         }
         let raw = Raw::deserialize(de)?;
         let backend = match raw.kind.as_deref() {
@@ -129,6 +139,7 @@ impl<'de> Deserialize<'de> for ContextEntry {
         Ok(ContextEntry {
             name: raw.name,
             backend,
+            docker: raw.docker,
         })
     }
 }
@@ -270,6 +281,7 @@ mod tests {
             backend: Backend::Http {
                 url: "http://127.0.0.1:9418".into(),
             },
+            docker: None,
         }
     }
 
@@ -280,6 +292,7 @@ mod tests {
                 target: target.into(),
                 dashboard_port: 9418,
             },
+            docker: None,
         }
     }
 
@@ -392,5 +405,38 @@ target = "dirdmaster@10.17.0.125"
         save(&path, &file).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn context_entry_with_docker_field_roundtrips() {
+        let entry = ContextEntry {
+            name: "lausanne".into(),
+            backend: Backend::Ssh {
+                target: "dirdmaster@10.17.0.125".into(),
+                dashboard_port: 9418,
+            },
+            docker: Some("ssh://dirdmaster@10.17.0.125".into()),
+        };
+        let mut file = CredentialsFile::default();
+        file.upsert(entry.clone());
+        let toml = toml::to_string(&file).expect("encode");
+        assert!(
+            toml.contains("docker = \"ssh://dirdmaster@10.17.0.125\""),
+            "docker field should serialize to TOML: {toml}"
+        );
+        let back: CredentialsFile = toml::from_str(&toml).expect("decode");
+        assert_eq!(back.contexts[0].docker, entry.docker);
+    }
+
+    #[test]
+    fn context_entry_without_docker_field_does_not_serialize_it() {
+        let entry = http_entry("plain");
+        let mut file = CredentialsFile::default();
+        file.upsert(entry);
+        let toml = toml::to_string(&file).expect("encode");
+        assert!(
+            !toml.contains("docker ="),
+            "docker key should be omitted when None: {toml}"
+        );
     }
 }
