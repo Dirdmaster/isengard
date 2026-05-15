@@ -68,21 +68,6 @@ pub struct CreateArgs {
     #[arg(long)]
     pub r#use: bool,
 
-    /// Phase 0.15: after creating the context, list every secret name in
-    /// `--sync-from` that is missing from the newly-added fleet so the
-    /// operator can backfill them. Names only: the operator-side CLI
-    /// cannot read plaintext (secrets are write-only) so this prints a
-    /// to-do list rather than copying values automatically. Pair with
-    /// `isd secret put NAME --scope global` to apply each one.
-    #[arg(long)]
-    pub sync_secrets: bool,
-
-    /// Phase 0.15: source context to compare against when
-    /// `--sync-secrets` is set. Defaults to the file's current default
-    /// context. Errors if it matches the new context or doesn't exist.
-    #[arg(long, requires = "sync_secrets")]
-    pub sync_from: Option<String>,
-
     /// Phase 0.20: Docker endpoint for direct-bollard access. Accepts
     /// `ssh://user@host`, `tcp://host:port`, or `unix:///path`. When
     /// set, `isd ps --backend docker` (Phase 0.20) and the default
@@ -186,31 +171,7 @@ async fn run_create(args: CreateArgs) -> Result<()> {
     };
     let was_first = file.contexts.is_empty();
 
-    // Resolve sync source BEFORE upsert so the "default" is the
-    // pre-existing default, not the newly-created context.
-    let sync_source = if args.sync_secrets {
-        let source_name = match args.sync_from.as_deref() {
-            Some(s) => s.to_string(),
-            None => file
-                .default_context
-                .clone()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "--sync-secrets needs a source context: pass --sync-from <name> or set a default context first"
-                    )
-                })?,
-        };
-        if source_name == args.name {
-            return Err(anyhow!(
-                "--sync-from {source_name:?} matches the new context; pick a different source"
-            ));
-        }
-        Some(file.default_or_named(Some(&source_name))?.clone())
-    } else {
-        None
-    };
-
-    file.upsert(ctx.clone());
+    file.upsert(ctx);
     if args.r#use {
         file.set_default(&args.name)?;
     }
@@ -222,83 +183,7 @@ async fn run_create(args: CreateArgs) -> Result<()> {
         ""
     };
     println!("Saved context {:?}{suffix}.", args.name);
-
-    if let Some(source_ctx) = sync_source {
-        report_sync_secrets(&source_ctx, &ctx).await?;
-    }
     Ok(())
-}
-
-/// Phase 0.15: list secrets present in `source` but missing from `dest`
-/// so the operator can `isd secret put NAME --scope global` for each.
-/// Name-only by design: the operator-side CLI cannot read plaintext from
-/// either fleet (secrets are write-only over the dashboard API; the
-/// agent's FetchSecret mTLS RPC is the only consumer that ever sees
-/// plaintext). Auto-copy is intentionally not supported.
-async fn report_sync_secrets(source: &ContextEntry, dest: &ContextEntry) -> Result<()> {
-    use crate::session::Session;
-    let source_session = Session::from_context(source.clone())
-        .await
-        .with_context(|| format!("opening session for sync-from context {:?}", source.name))?;
-    let dest_session = Session::from_context(dest.clone())
-        .await
-        .with_context(|| format!("opening session for new context {:?}", dest.name))?;
-
-    let source_entries = fetch_secret_names(&source_session)
-        .await
-        .with_context(|| format!("listing secrets in {:?}", source.name))?;
-    let dest_entries = fetch_secret_names(&dest_session)
-        .await
-        .with_context(|| format!("listing secrets in {:?}", dest.name))?;
-
-    let dest_set: std::collections::BTreeSet<&str> =
-        dest_entries.iter().map(String::as_str).collect();
-    let missing: Vec<&String> = source_entries
-        .iter()
-        .filter(|name| !dest_set.contains(name.as_str()))
-        .collect();
-
-    if missing.is_empty() {
-        println!(
-            "Sync check: every secret in {:?} is already present in {:?}.",
-            source.name, dest.name
-        );
-        return Ok(());
-    }
-
-    println!();
-    println!(
-        "Sync check: {} secret(s) in {:?} not yet in {:?}:",
-        missing.len(),
-        source.name,
-        dest.name
-    );
-    for name in &missing {
-        println!("  - {name}");
-    }
-    println!();
-    println!(
-        "To backfill, re-run `isd secret put <name> --scope global` for each (the operator-side CLI can't read plaintext, so we list names only)."
-    );
-    Ok(())
-}
-
-async fn fetch_secret_names(session: &crate::session::Session) -> Result<Vec<String>> {
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        name: String,
-    }
-    let url = format!("{}/api/v1/secrets", session.controller_url());
-    let resp = session
-        .client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("GET {url}"))?;
-    let entries: Vec<Entry> = resp.json().await.with_context(|| format!("decode {url}"))?;
-    Ok(entries.into_iter().map(|e| e.name).collect())
 }
 
 async fn run_use(args: UseArgs) -> Result<()> {
@@ -460,71 +345,4 @@ mod tests {
         assert!(validate_name(&"x".repeat(65)).is_err());
     }
 
-    #[test]
-    fn create_args_sync_secrets_parses() {
-        #[derive(Parser, Debug)]
-        struct Wrap {
-            #[command(subcommand)]
-            c: ContextCommand,
-        }
-        let w = Wrap::try_parse_from([
-            "x",
-            "create",
-            "bob",
-            "--ssh",
-            "user@bob",
-            "--sync-secrets",
-            "--sync-from",
-            "alice",
-        ])
-        .unwrap();
-        match w.c {
-            ContextCommand::Create(a) => {
-                assert!(a.sync_secrets);
-                assert_eq!(a.sync_from.as_deref(), Some("alice"));
-            }
-            other => panic!("expected Create, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn create_args_sync_from_alone_is_rejected() {
-        // --sync-from without --sync-secrets is meaningless; clap should
-        // refuse via `requires`.
-        #[derive(Parser, Debug)]
-        struct Wrap {
-            #[command(subcommand)]
-            c: ContextCommand,
-        }
-        let res = Wrap::try_parse_from([
-            "x",
-            "create",
-            "bob",
-            "--ssh",
-            "user@bob",
-            "--sync-from",
-            "alice",
-        ]);
-        assert!(res.is_err(), "--sync-from requires --sync-secrets");
-    }
-
-    #[test]
-    fn create_args_sync_secrets_alone_parses_with_implicit_default_source() {
-        // --sync-secrets without --sync-from is allowed: run_create
-        // falls back to the file's default context as the source.
-        #[derive(Parser, Debug)]
-        struct Wrap {
-            #[command(subcommand)]
-            c: ContextCommand,
-        }
-        let w = Wrap::try_parse_from(["x", "create", "bob", "--ssh", "user@bob", "--sync-secrets"])
-            .unwrap();
-        match w.c {
-            ContextCommand::Create(a) => {
-                assert!(a.sync_secrets);
-                assert!(a.sync_from.is_none());
-            }
-            other => panic!("expected Create, got {other:?}"),
-        }
-    }
 }
