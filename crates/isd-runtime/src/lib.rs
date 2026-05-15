@@ -17,6 +17,6 @@ mod docker;
 mod error;
 mod ssh_tunnel;
 
-pub use docker::DockerBackend;
+pub use docker::{ContainerSummary, DockerBackend};
 pub use error::{Error, Result};
 pub use ssh_tunnel::SshTunnel;
