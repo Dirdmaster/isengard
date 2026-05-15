@@ -20,6 +20,7 @@ pub mod host;
 pub mod host_action;
 pub mod inventory;
 pub mod journal;
+pub mod placements;
 pub mod policy;
 pub mod restore_run;
 pub mod routing_rule;
@@ -55,6 +56,7 @@ pub use host_action::{
 };
 pub use inventory::Inventory;
 pub use journal::{EventRow, InsertEvent, Journal};
+pub use placements::{PlacementRow, PlacementState, UpsertPlacement};
 pub use policy::{InsertPolicy, InventoryPolicyLoader, PolicyRow, PolicyScopeType};
 pub use restore_run::{RestoreRun, RestoreRunId, RestoreRunStatus};
 pub use routing_rule::{
