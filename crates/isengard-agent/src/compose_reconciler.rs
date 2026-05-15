@@ -629,6 +629,21 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
     // hard error at `isd deploy` rather than a silent default.
     svc.placement = compose_placement_for_service(name, m)?;
 
+    // 2026-05-15 stack file model: per-service `strategy:` selects the
+    // deploy rollout behavior. Only the four kebab-case keywords are
+    // allowed; anything else is a hard parse error so typos surface at
+    // `isd deploy` instead of silently defaulting.
+    if let Some(value) = m.get(Value::String("strategy".into())) {
+        let Value::String(s) = value else {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: `strategy:` must be a string"
+            ));
+        };
+        svc.strategy = Some(
+            Strategy::parse(s).map_err(|e| anyhow::anyhow!("service {name:?}: {e}"))?,
+        );
+    }
+
     Ok(svc)
 }
 
@@ -1225,6 +1240,61 @@ mod tests {
     fn desired_compose_carries_optional_name() {
         let dc = DesiredCompose::default();
         assert_eq!(dc.name, None);
+    }
+
+    #[test]
+    fn parse_service_reads_strategy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:alpine
+    strategy: blue-green
+  db:
+    image: postgres:16
+"#;
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.services["web"].strategy, Some(Strategy::BlueGreen));
+        assert_eq!(dc.services["db"].strategy, None);
+    }
+
+    #[test]
+    fn parse_service_reads_each_strategy_value() {
+        for (kw, expected) in [
+            ("auto", Strategy::Auto),
+            ("blue-green", Strategy::BlueGreen),
+            ("rolling", Strategy::Rolling),
+            ("recreate", Strategy::Recreate),
+        ] {
+            let yaml = format!(
+                "services:\n  web:\n    image: nginx\n    strategy: {kw}\n"
+            );
+            let dc = parse_compose(&yaml).unwrap();
+            assert_eq!(dc.services["web"].strategy, Some(expected), "kw={kw}");
+        }
+    }
+
+    #[test]
+    fn parse_service_rejects_unknown_strategy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:alpine
+    strategy: sideways
+"#;
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("unknown strategy"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_service_rejects_non_string_strategy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    strategy: 42
+"#;
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("strategy"), "got: {err}");
     }
 
     #[test]
