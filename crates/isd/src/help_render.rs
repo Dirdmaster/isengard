@@ -13,9 +13,7 @@ use console::Style;
 pub const GROUPS: &[(&str, &[&str])] = &[
     (
         "Containers",
-        &[
-            "ps", "logs", "stop", "start", "restart", "rm", "kill",
-        ],
+        &["ps", "logs", "stop", "start", "restart", "rm", "kill"],
     ),
     ("Stacks", &["stack", "open"]),
     ("Fleet", &["hosts", "service", "route", "secret"]),
