@@ -17,7 +17,6 @@ pub mod enroll;
 pub mod enroll_diagnosis;
 pub mod events;
 pub mod labels;
-pub mod lifecycle_hooks;
 pub mod logs;
 pub mod mdns;
 pub mod placement;
@@ -666,16 +665,12 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_backend = backend.clone();
     // v0.3d: surface the compose root + host id to the sync loop so it
     // can service `WriteCompose` ControllerMessages from the dashboard.
-    // Phase 0.13 wave 3.D: also surface the EventEmitter so the
-    // lifecycle-hook executor can publish `lifecycle_hook.*` audit
-    // events back to the controller via the existing outbound channel.
     let sync_compose_ctx = Some(sync::ComposeContext {
         root: std::path::PathBuf::from(
             std::env::var("ISENGARD_COMPOSE_IMPORT_ROOT")
                 .unwrap_or_else(|_| compose_import::DEFAULT_IMPORT_ROOT.to_string()),
         ),
         host_id: agent_id.clone(),
-        event_emitter: Some(emitter.clone()),
     });
     let sync_fut = async move {
         sync::run_sync_with_reconnect(

@@ -249,18 +249,14 @@ pub enum ApplyWriteOutcome {
 /// concurrency check (`expected_sha256` matches what's on disk) unless
 /// `force = true`, then atomically writes the new YAML + meta.toml.
 ///
-/// Phase 0.13: when `manifest_toml` is non-empty, also persists it at
-/// `dir/stack.toml` (atomic write). The agent does NOT parse it; it's
-/// kept for operator inspection + `isd manifest cat` (future). Hook
-/// execution + secret threading live elsewhere; this function only
-/// owns the disk surface.
+/// Track A teardown (2026-05-15): the Phase 0.13 stack.toml persistence
+/// is gone; the agent no longer writes a manifest sidecar.
 pub fn apply_controller_write(
     dir: &Path,
     new_yaml: &str,
     expected_sha256: &str,
     host_id: &str,
     force: bool,
-    manifest_toml: &str,
 ) -> ApplyWriteOutcome {
     // Conflict check: only if a file exists. First-time writes from the
     // dashboard pass `expected_sha256 = ""`, which we accept.
@@ -282,44 +278,9 @@ pub fn apply_controller_write(
         return ApplyWriteOutcome::Error(format!("{e:#}"));
     }
 
-    // Phase 0.13 manifest persistence. Non-fatal: a manifest write
-    // failure logs but does NOT roll back the compose write (the deploy
-    // already happened; the operator can re-deploy to retry the manifest).
-    if !manifest_toml.is_empty() {
-        if let Err(e) = write_manifest_atomic(dir, manifest_toml) {
-            tracing::warn!(
-                error = %e,
-                dir = %dir.display(),
-                "failed to persist stack.toml; compose write succeeded",
-            );
-        }
-    }
-
     ApplyWriteOutcome::Ok {
         written_sha256: sha256_hex(new_yaml),
     }
-}
-
-/// Atomic write of `dir/stack.toml`. Phase 0.13.
-fn write_manifest_atomic(dir: &Path, manifest_toml: &str) -> Result<(), anyhow::Error> {
-    std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("mkdir {}: {e}", dir.display()))?;
-    let path = dir.join("stack.toml");
-    let tmp = path.with_extension("toml.tmp");
-    {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|e| anyhow::anyhow!("open {}: {e}", tmp.display()))?;
-        f.write_all(manifest_toml.as_bytes())
-            .map_err(|e| anyhow::anyhow!("write {}: {e}", tmp.display()))?;
-        f.sync_all()
-            .map_err(|e| anyhow::anyhow!("fsync {}: {e}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
-    Ok(())
 }
 
 fn write_meta(path: &Path, meta: &ComposeMeta) -> Result<(), anyhow::Error> {
