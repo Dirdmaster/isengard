@@ -48,30 +48,6 @@ pub struct DeployArgs {
     /// concurrent operator edits.
     #[arg(long)]
     pub force: bool,
-    /// Manifest-era flags. Hidden from clap while the teardown is in
-    /// flight (Task 10 deletes them entirely). Kept as struct fields so
-    /// the surrounding code compiles unchanged this commit.
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub stack: Option<String>,
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub all: bool,
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub root: Option<PathBuf>,
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub overlay: Option<String>,
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub strategy: Option<String>,
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub fail_fast: bool,
-    #[arg(skip)]
-    #[allow(dead_code)]
-    pub diff: bool,
     /// v0.5.2: stream per-service state transitions until every service
     /// reaches a terminal state. ON by default. Pass `--detach` to
     /// revert to the pre-v0.5.2 fire-and-forget shape. Polls
