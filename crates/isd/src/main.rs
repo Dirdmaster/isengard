@@ -31,6 +31,7 @@ mod logs;
 mod manifest_cmd;
 mod open_cmd;
 mod ps;
+mod render;
 mod route;
 mod secret;
 mod service_cmd;
