@@ -226,12 +226,17 @@ impl PolicyLoader for InventoryPolicyLoader {
         &self,
         host_id: isengard_core::HostId,
     ) -> std::result::Result<Option<String>, PolicyLoaderError> {
-        let host = self
+        // The fleet column is gone (kill-fleets 0031). Operators who
+        // grouped hosts via fleet now have a `fleet=<old>` label.
+        // Surface that to the policy resolver so existing fleet-scoped
+        // policies keep working. Returns None when the host has no
+        // `fleet` label.
+        let labels = self
             .inv
-            .get_host(crate::host::HostId(host_id))
+            .list_agent_labels(crate::host::HostId(host_id))
             .await
-            .map_err(|e| PolicyLoaderError(format!("get_host: {e}")))?;
-        Ok(host.map(|h| h.fleet))
+            .map_err(|e| PolicyLoaderError(format!("list_agent_labels: {e}")))?;
+        Ok(labels.get("fleet").cloned())
     }
 }
 

@@ -15,7 +15,6 @@ pub mod deployment;
 pub mod deployment_group;
 pub mod enrollment_token;
 pub mod error;
-pub mod fleet;
 pub mod host;
 pub mod host_action;
 pub mod inventory;
@@ -47,7 +46,6 @@ pub use containers::{
 pub use deployment_group::{DeploymentGroup, DeploymentGroupState, InsertDeploymentGroup};
 pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};
 pub use error::{Error, Result};
-pub use fleet::Fleet;
 pub use host::{EnrollHost, Host, HostId};
 pub use host_action::{
     APPROVAL_KIND, ApprovalDecision, ApprovalFilter, ApprovalState, ApprovalStateFilter,

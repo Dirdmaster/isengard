@@ -7,7 +7,6 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 
 use crate::error::{Error, Result};
-use crate::fleet::Fleet;
 use crate::host::{EnrollHost, Host, HostId};
 use crate::host_action::{HostAction, HostActionId, HostActionKind};
 use crate::service::{InsertService, Service, ServiceId, ServiceState};
@@ -68,19 +67,12 @@ impl Inventory {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        // Ensure the fleet exists. Caller passes the fleet name (required:
-        // there is no implicit 'default' fleet).
-        sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES (?)")
-            .bind(&req.fleet)
-            .execute(&self.pool)
-            .await?;
-
         sqlx::query(
             r#"
             INSERT INTO hosts (
                 id, fingerprint, hostname, os, arch,
-                agent_version, docker_version, enrolled_at, fleet
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                agent_version, docker_version, enrolled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(id_bytes)
@@ -91,7 +83,6 @@ impl Inventory {
         .bind(&req.agent_version)
         .bind(&req.docker_version)
         .bind(enrolled_at)
-        .bind(&req.fleet)
         .execute(&self.pool)
         .await?;
 
@@ -105,7 +96,7 @@ impl Inventory {
         let row: Option<HostRow> = sqlx::query_as(
             r#"
             SELECT id, fingerprint, hostname, os, arch,
-                   agent_version, docker_version, enrolled_at, last_seen_at, metadata, fleet
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
             FROM hosts
             WHERE id = ?
             "#,
@@ -268,7 +259,7 @@ impl Inventory {
         let rows: Vec<HostRow> = sqlx::query_as(
             r#"
             SELECT id, fingerprint, hostname, os, arch,
-                   agent_version, docker_version, enrolled_at, last_seen_at, metadata, fleet
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
             FROM hosts
             ORDER BY last_seen_at DESC NULLS LAST, enrolled_at DESC
             "#,
@@ -311,13 +302,13 @@ impl Inventory {
     pub async fn list_stacks(&self, host_id: Option<HostId>) -> Result<Vec<Stack>> {
         let rows = match host_id {
             Some(h) => {
-                sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet FROM stacks WHERE host_id = ? ORDER BY name")
+                sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy FROM stacks WHERE host_id = ? ORDER BY name")
                     .bind(h.to_bytes().as_slice())
                     .fetch_all(&self.pool)
                     .await?
             }
             None => {
-                sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet FROM stacks ORDER BY name")
+                sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy FROM stacks ORDER BY name")
                     .fetch_all(&self.pool)
                     .await?
             }
@@ -328,7 +319,7 @@ impl Inventory {
 
     pub async fn get_stack(&self, id: StackId) -> Result<Option<Stack>> {
         let row =
-            sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet FROM stacks WHERE id = ?")
+            sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy FROM stacks WHERE id = ?")
                 .bind(id.0)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -398,26 +389,16 @@ impl Inventory {
         }
     }
 
-    pub async fn set_host_fleet(&self, id: HostId, fleet: &str) -> Result<bool> {
-        let result = sqlx::query("UPDATE hosts SET fleet = ? WHERE id = ?")
-            .bind(fleet)
-            .bind(id.to_bytes().as_slice())
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected() > 0)
-    }
-
     /// Phase 0.13: write the manifest body + metadata + deploy strategy
     /// for `stack_id`. Idempotent; called every time `isd deploy` ships
-    /// a stack with a manifest. Pass `None` for `deploy_strategy` /
-    /// `manifest_fleet` when the manifest doesn't pin them.
+    /// a stack with a manifest. Pass `None` for `deploy_strategy` when
+    /// the manifest doesn't pin one.
     pub async fn update_stack_manifest(
         &self,
         stack_id: StackId,
         manifest_toml: &str,
         manifest_sha256: &str,
         deploy_strategy: Option<&str>,
-        manifest_fleet: Option<&str>,
     ) -> Result<bool> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(
@@ -426,8 +407,7 @@ impl Inventory {
                SET manifest_toml         = ?,
                    manifest_sha256       = ?,
                    manifest_imported_at  = ?,
-                   deploy_strategy       = ?,
-                   manifest_fleet        = ?
+                   deploy_strategy       = ?
              WHERE id = ?
             "#,
         )
@@ -435,7 +415,6 @@ impl Inventory {
         .bind(manifest_sha256)
         .bind(&now)
         .bind(deploy_strategy)
-        .bind(manifest_fleet)
         .bind(stack_id.0)
         .execute(&self.pool)
         .await?;
@@ -524,7 +503,7 @@ impl Inventory {
         let row = sqlx::query(
             r#"
             SELECT manifest_toml, manifest_sha256, manifest_imported_at,
-                   deploy_strategy, manifest_fleet
+                   deploy_strategy
               FROM stacks
              WHERE id = ?
             "#,
@@ -532,16 +511,15 @@ impl Inventory {
         .bind(stack_id.0)
         .fetch_optional(&self.pool)
         .await?;
-        let (manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy, manifest_fleet) =
+        let (manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy) =
             match row {
                 Some(row) => (
                     row.try_get("manifest_toml")?,
                     row.try_get("manifest_sha256")?,
                     row.try_get("manifest_imported_at")?,
                     row.try_get("deploy_strategy")?,
-                    row.try_get("manifest_fleet")?,
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None),
             };
 
         let secret_rows = sqlx::query(
@@ -585,7 +563,6 @@ impl Inventory {
             manifest_sha256,
             manifest_imported_at,
             deploy_strategy,
-            manifest_fleet,
             secrets,
             hooks,
         })
@@ -747,46 +724,6 @@ impl Inventory {
         Ok(())
     }
 
-    pub async fn create_fleet(&self, name: &str) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO fleets (name) VALUES (?)")
-            .bind(name)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn list_fleets(&self) -> Result<Vec<Fleet>> {
-        use sqlx::Row;
-        let rows = sqlx::query("SELECT name, created_at FROM fleets ORDER BY name")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(Fleet {
-                    name: r.try_get("name")?,
-                    created_at: r.try_get("created_at")?,
-                })
-            })
-            .collect()
-    }
-
-    pub async fn delete_fleet(&self, name: &str) -> Result<bool> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hosts WHERE fleet = ?")
-            .bind(name)
-            .fetch_one(&self.pool)
-            .await?;
-        if count > 0 {
-            return Err(Error::Conflict(format!(
-                "fleet '{name}' has {count} hosts assigned"
-            )));
-        }
-        let r = sqlx::query("DELETE FROM fleets WHERE name = ?")
-            .bind(name)
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected() > 0)
-    }
-
     pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         let json = serde_json::to_string(value).map_err(|e| Error::Decode {
             reason: e.to_string(),
@@ -862,7 +799,6 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
     let manifest_sha256: Option<String> = row.try_get("manifest_sha256").ok().flatten();
     let manifest_imported_at: Option<String> = row.try_get("manifest_imported_at").ok().flatten();
     let deploy_strategy: Option<String> = row.try_get("deploy_strategy").ok().flatten();
-    let manifest_fleet: Option<String> = row.try_get("manifest_fleet").ok().flatten();
     Ok(Stack {
         id: StackId(row.try_get("id")?),
         host_id: HostId::from_bytes(arr),
@@ -873,7 +809,6 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
         manifest_sha256,
         manifest_imported_at,
         deploy_strategy,
-        manifest_fleet,
     })
 }
 
@@ -932,7 +867,6 @@ type HostRow = (
     i64,         // enrolled_at
     Option<i64>, // last_seen_at
     String,      // metadata (json text)
-    String,      // fleet
 );
 
 fn decode_host(row: HostRow) -> Result<Host> {
@@ -956,7 +890,6 @@ fn decode_host(row: HostRow) -> Result<Host> {
         enrolled_at: row.7,
         last_seen_at: row.8,
         metadata,
-        fleet: row.10,
     })
 }
 
@@ -1014,7 +947,6 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "0.1.0-alpha".into(),
             docker_version: "27.4.0".into(),
-            fleet: "default".into(),
         }
     }
 
@@ -1195,7 +1127,6 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "test".into(),
             docker_version: "test".into(),
-            fleet: "default".into(),
         };
         let id = inv.enroll_host(enroll).await.unwrap();
         let removed = inv.delete_host(id).await.unwrap();
@@ -1216,7 +1147,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0.1.0".into(),
                 docker_version: "27.0".into(),
-                fleet: "default".into(),
             })
             .await
             .unwrap();
@@ -1247,36 +1177,6 @@ mod tests {
         let listed = inv.list_stacks(Some(host_id)).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "wordpress");
-    }
-
-    #[tokio::test]
-    async fn set_host_fleet_updates_existing_host() {
-        let inv = Inventory::open_in_memory().await.unwrap();
-        let host_id = inv
-            .enroll_host(EnrollHost {
-                fingerprint: "fp1".into(),
-                hostname: "h1".into(),
-                os: "linux".into(),
-                arch: "x86_64".into(),
-                agent_version: "0.1.0".into(),
-                docker_version: "27.0".into(),
-                fleet: "default".into(),
-            })
-            .await
-            .unwrap();
-
-        let updated = inv.set_host_fleet(host_id, "prod").await.unwrap();
-        assert!(updated, "set_host_fleet should return true when row exists");
-
-        let host = inv.get_host(host_id).await.unwrap().unwrap();
-        assert_eq!(host.fleet, "prod");
-
-        let missing = HostId::new();
-        let updated = inv.set_host_fleet(missing, "prod").await.unwrap();
-        assert!(
-            !updated,
-            "set_host_fleet should return false when row does not exist"
-        );
     }
 
     #[tokio::test]
@@ -1337,49 +1237,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fleets_create_list_delete() {
-        let inv = Inventory::open_in_memory().await.unwrap();
-
-        inv.create_fleet("staging").await.unwrap();
-        inv.create_fleet("prod").await.unwrap();
-
-        let fleets = inv.list_fleets().await.unwrap();
-        let names: std::collections::HashSet<_> = fleets.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains("staging"));
-        assert!(names.contains("prod"));
-        assert!(
-            !names.contains("default"),
-            "default fleet must NOT exist before any host is enrolled"
-        );
-
-        let deleted = inv.delete_fleet("staging").await.unwrap();
-        assert!(deleted);
-
-        let host_id = test_enroll_h(&inv, "h-prod").await;
-        inv.set_host_fleet(host_id, "prod").await.unwrap();
-        let err = inv.delete_fleet("prod").await;
-        assert!(err.is_err(), "fleet with hosts should not be deletable");
-    }
-
-    /// Wave 5.B: `create_fleet` is idempotent. The dashboard's manifest
-    /// persist path calls it every time a stack.toml declares a fleet,
-    /// so calling twice (or against an existing fleet) must not error
-    /// and must not duplicate the row.
-    #[tokio::test]
-    async fn create_fleet_is_idempotent() {
-        let inv = Inventory::open_in_memory().await.unwrap();
-
-        inv.create_fleet("local").await.unwrap();
-        // Second create is a no-op (INSERT OR IGNORE).
-        inv.create_fleet("local").await.unwrap();
-        inv.create_fleet("local").await.unwrap();
-
-        let fleets = inv.list_fleets().await.unwrap();
-        let matches: Vec<_> = fleets.iter().filter(|f| f.name == "local").collect();
-        assert_eq!(matches.len(), 1, "no duplicate rows on repeated create");
-    }
-
-    #[tokio::test]
     async fn settings_round_trip() {
         let inv = Inventory::open_in_memory().await.unwrap();
 
@@ -1402,7 +1259,6 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "0.1.0".into(),
             docker_version: "27.0".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap()
@@ -1431,7 +1287,6 @@ mod tests {
                 "name = \"servarr\"\ncompose = [\"compose.toml\"]\n",
                 "abcd1234",
                 Some("blue-green"),
-                Some("homelab"),
             )
             .await
             .unwrap();
@@ -1440,7 +1295,6 @@ mod tests {
         let stack = inv.get_stack(stack_id).await.unwrap().unwrap();
         assert_eq!(stack.manifest_sha256.as_deref(), Some("abcd1234"));
         assert_eq!(stack.deploy_strategy.as_deref(), Some("blue-green"));
-        assert_eq!(stack.manifest_fleet.as_deref(), Some("homelab"));
         assert!(stack.manifest_imported_at.is_some());
     }
 

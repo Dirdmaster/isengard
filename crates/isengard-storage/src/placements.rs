@@ -302,7 +302,6 @@ mod tests {
             .enroll_host(EnrollHost {
                 hostname: "alice".into(),
                 fingerprint: "fp-alice".into(),
-                fleet: "default".into(),
                 os: "linux".into(),
                 arch: "x86_64".into(),
                 agent_version: "0.14.0".into(),
@@ -385,7 +384,6 @@ mod tests {
             .enroll_host(EnrollHost {
                 hostname: "x".into(),
                 fingerprint: "fp-x".into(),
-                fleet: "default".into(),
                 os: "linux".into(),
                 arch: "x86_64".into(),
                 agent_version: "0.14.0".into(),

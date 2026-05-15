@@ -124,7 +124,6 @@ mod tests {
             .enroll_host(EnrollHost {
                 hostname: "h".into(),
                 fingerprint: "fp".into(),
-                fleet: "default".into(),
                 os: "linux".into(),
                 arch: "x86_64".into(),
                 agent_version: "0.1.0".into(),
