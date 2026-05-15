@@ -89,15 +89,13 @@ const USER_AGENT: &str = concat!("isd-update/", env!("ISENGARD_BUILD_VERSION"));
 /// CLI flags for `isd update`.
 #[derive(Debug, Clone, Args)]
 pub struct UpdateArgs {
-    /// Print "current: vX, latest: vY" and exit. No download, no rename.
+    /// Print current and latest versions, then exit.
     #[arg(long)]
     pub check: bool,
-    /// Pin to a specific release tag (e.g. "v0.5.2"). When omitted, the
-    /// latest release is resolved from the GitHub API. The leading `v`
-    /// is normalised in: "0.5.2" and "v0.5.2" both work.
+    /// Pin to a specific release tag (e.g. v0.5.2).
     #[arg(long)]
     pub version: Option<String>,
-    /// Skip the confirmation prompt. Useful for scripted upgrades.
+    /// Skip the confirmation prompt.
     #[arg(long)]
     pub yes: bool,
 }

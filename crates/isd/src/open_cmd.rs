@@ -9,11 +9,10 @@ use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct OpenArgs {
-    /// Stack name (matches the `name` field in `/api/v1/stacks`).
+    /// Stack name.
     pub stack: String,
 
-    /// Print the resolved URL instead of launching the browser. Useful in
-    /// SSH sessions and tests.
+    /// Print the resolved URL instead of launching the browser.
     #[arg(long)]
     pub print: bool,
 }

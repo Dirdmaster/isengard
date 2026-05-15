@@ -14,8 +14,7 @@ use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct LogsArgs {
-    /// Target as `<stack>/<service>`. The stack is resolved by name; the
-    /// service is the container name inside that stack.
+    /// Target as <stack>/<service>.
     pub target: String,
 }
 

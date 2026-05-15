@@ -1,8 +1,5 @@
 //! `isd service ls`: list every service across every stack.
-//!
-//! Phase 0.18 step 6 companion to `stack_cmd`. Mirrors `docker service ls`
-//! for operators who want a flat global view. Talks to
-//! `GET /api/v1/services` (optionally `?fleet=`).
+//! Talks to `GET /api/v1/services` (optionally `?fleet=`).
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -21,9 +18,7 @@ pub struct ServiceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ServiceCommand {
-    /// List every service across the saved context's fleet. Joins to
-    /// the stacks endpoint client-side so the STACK column carries the
-    /// stack name instead of the opaque stack_id.
+    /// List services across stacks.
     Ls(LsArgs),
 }
 
@@ -32,7 +27,7 @@ pub struct LsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
-    /// Optional fleet filter, mirrors `GET /api/v1/services?fleet=`.
+    /// Filter by fleet.
     #[arg(long)]
     pub fleet: Option<String>,
 }

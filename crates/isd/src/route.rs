@@ -23,62 +23,50 @@ pub struct RouteArgs {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)] // CreateArgs is large but only one is alive at a time
 pub enum RouteCommand {
-    /// List every routing rule across the fleet.
+    /// List routing rules.
     List,
-    /// Create a routing rule. Defaults: fleet="default", protocol="http",
-    /// adapter="none", tls-mode="acme". Override via flags.
+    /// Create a routing rule.
     Create(CreateArgs),
-    /// Delete a routing rule by id (the integer printed by `list`).
+    /// Delete a routing rule by id.
     Rm(RmArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CreateArgs {
-    /// Public hostname the rule matches against (Pingora SNI / Host header),
-    /// e.g. `iso.vallee.casa`. Wildcards are not allowed in this field; an
-    /// `*.example.com` cert covers any single-label subdomain when present.
+    /// Public hostname the rule matches.
     pub public_hostname: String,
-    /// Agent serving the upstream. Defaults to the only enrolled agent in
-    /// the fleet (the homelab single-host case). Pass either `--host-id`
-    /// (ULID) or `--host` (hostname) when more than one agent exists.
+    /// Agent serving the upstream (ULID).
     #[arg(long, conflicts_with = "host")]
     pub host_id: Option<String>,
-    /// Agent hostname (resolved client-side to a host_id). Mutually
-    /// exclusive with `--host-id`.
+    /// Agent hostname (resolved to host_id).
     #[arg(long, conflicts_with = "host_id")]
     pub host: Option<String>,
-    /// Upstream container hostname (DNS name resolvable on the agent's
-    /// docker network) or service name. e.g. `iso-controller` to point at
-    /// the controller's dashboard, `nginx` for a stack service named nginx.
+    /// Upstream container or service name.
     #[arg(long)]
     pub service: String,
-    /// Upstream port on the container.
+    /// Upstream port.
     #[arg(long)]
     pub port: u16,
-    /// Fleet scope. Most installs run a single fleet.
+    /// Fleet scope.
     #[arg(long, default_value = "default")]
     pub fleet: String,
-    /// Upstream protocol. `http` is correct when the proxy terminates TLS
-    /// and the upstream serves plain HTTP (the common homelab case).
+    /// Upstream protocol (http or https).
     #[arg(long, default_value = "http")]
     pub protocol: String,
-    /// Networking adapter. `none` is direct docker-network routing, no
-    /// tunnel. Other adapters: `tailscale`, `cf-tunnel`.
+    /// Networking adapter (none, tailscale, cf-tunnel).
     #[arg(long, default_value = "none")]
     pub adapter: String,
-    /// TLS termination mode at the proxy edge. `acme` uses a Let's Encrypt
-    /// cert (wildcard or per-host). `edge` means TLS is already terminated
-    /// upstream of the proxy. `manual` reads from `tls_certs`.
+    /// TLS termination mode (acme, edge, manual).
     #[arg(long, default_value = "acme")]
     pub tls_mode: String,
-    /// Optional healthcheck path; the proxy probes this on the upstream.
+    /// Healthcheck path on the upstream.
     #[arg(long)]
     pub healthcheck_path: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct RmArgs {
-    /// Routing rule id (the integer column from `isd route list`).
+    /// Routing rule id.
     pub id: i64,
 }
 

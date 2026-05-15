@@ -18,19 +18,15 @@ const COMMAND_TRUNC_WIDTH: usize = 40;
 
 #[derive(Debug, Args, Default)]
 pub struct PsArgs {
-    /// Include containers whose `removed_at` is non-NULL (defaults to
-    /// alive only). Matches `docker ps -a`.
+    /// Show all containers, not just running.
     #[arg(short = 'a', long)]
     pub all: bool,
 
-    /// Disable CONTAINER ID and COMMAND truncation.
+    /// Disable ID and command truncation.
     #[arg(long)]
     pub no_trunc: bool,
 
-    /// Repeatable `key=value` filter applied at the controller. Known
-    /// keys: `host`, `stack`, `service`, `state`. Unknown keys are
-    /// ignored (the dashboard rejects with 400 if a future version
-    /// validates them).
+    /// Filter by key=value (repeatable). Known keys: host, stack, service, state.
     #[arg(long = "filter", value_name = "KEY=VALUE")]
     pub filters: Vec<String>,
 

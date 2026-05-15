@@ -35,25 +35,17 @@ pub struct ManifestArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ManifestCommand {
-    /// Print the persisted `stack.toml` body to stdout. Empty exit code
-    /// is 0; 204-equivalent (legacy compose-only stack) errors with a
-    /// clear message so scripts can branch on it.
+    /// Print the stack's stack.toml.
     Cat(CatArgs),
-    /// Write the persisted `stack.toml` to a local file. Defaults to
-    /// `./<stack>.stack.toml`. Use this to recover a manifest you lost
-    /// locally or to seed a new fleet's worktree from a deployed copy.
+    /// Write the stack's stack.toml to a local file.
     Export(ExportArgs),
-    /// Open the persisted manifest in `$EDITOR` and PUT it back on save.
-    /// Optimistic concurrency: if the manifest changes server-side
-    /// between fetch and save, the operator is prompted to re-edit
-    /// against the new content instead of overwriting.
+    /// Open the stack's manifest in $EDITOR and apply on save.
     Edit(EditArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CatArgs {
-    /// Stack name. The controller resolves to the unique id via the
-    /// `/api/v1/stacks` list (same as `isd deploy <name>`).
+    /// Stack name.
     pub stack: String,
 }
 
@@ -61,8 +53,7 @@ pub struct CatArgs {
 pub struct ExportArgs {
     /// Stack name.
     pub stack: String,
-    /// Output path. Defaults to `./<stack>.stack.toml` in cwd. Use `-`
-    /// to write to stdout (mirrors `cat`, but explicit).
+    /// Output path (- for stdout).
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
