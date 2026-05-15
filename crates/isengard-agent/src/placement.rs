@@ -587,6 +587,9 @@ mod tests {
 
     #[test]
     fn placement_default_is_singleton_no_selector() {
-        assert_eq!(Placement::default(), Placement::Singleton { selector: None });
+        assert_eq!(
+            Placement::default(),
+            Placement::Singleton { selector: None }
+        );
     }
 }
