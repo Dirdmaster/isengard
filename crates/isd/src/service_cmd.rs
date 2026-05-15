@@ -29,9 +29,9 @@ pub enum ServiceCommand {
 
 #[derive(Debug, Args)]
 pub struct LsArgs {
-    /// Emit JSON instead of the table.
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
     /// Optional fleet filter, mirrors `GET /api/v1/services?fleet=`.
     #[arg(long)]
     pub fleet: Option<String>,
@@ -77,11 +77,14 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
     let rows = build_rows(&stacks, &services);
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        let out = render_table(&rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_table(&rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }

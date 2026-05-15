@@ -30,6 +30,7 @@ mod hosts_cmd;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
+mod output;
 mod ps;
 mod route;
 mod secret;
@@ -231,7 +232,7 @@ fn default_command() -> Command {
         all: false,
         no_trunc: false,
         filters: Vec::new(),
-        format: "table".into(),
+        format: output::Format::Table,
     })
 }
 

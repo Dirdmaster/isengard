@@ -57,9 +57,9 @@ pub enum StackCommand {
 
 #[derive(Debug, Args)]
 pub struct LsArgs {
-    /// Emit JSON instead of the table.
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
     /// Optional fleet filter, mirrors `GET /api/v1/stacks?fleet=`.
     #[arg(long)]
     pub fleet: Option<String>,
@@ -71,9 +71,9 @@ pub struct PsArgs {
     /// the client fetches the stack list and resolves the id from the
     /// name client-side, then calls `?stack_id=` on services.
     pub name: String,
-    /// Emit JSON instead of the table.
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 }
 
 /// Mirror of the dashboard's `StackDto`. Extra fields are ignored
@@ -176,11 +176,14 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
     let rows = build_ls_rows(&stacks, &services);
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        let out = render_ls_table(&rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_ls_table(&rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
@@ -216,11 +219,14 @@ async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
     )
     .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&services)?);
-    } else {
-        let out = render_ps_table(&services);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&services)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_ps_table(&services);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
