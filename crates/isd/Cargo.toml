@@ -56,16 +56,10 @@ console = "0.16"
 # (`0.1.0-alpha`) never short-circuits an update against a real tag.
 semver.workspace = true
 
-# v0.3.5: gateway DNS + reverse proxy on the operator's Mac. Bridges browser
-# traffic to containerized backends without fighting mDNS-in-Docker on macOS.
-hickory-server.workspace = true
-hickory-proto.workspace = true
+# `async-trait` is still required by `watch.rs` for the StackOperations
+# trait abstraction.
 async-trait.workspace = true
-http-body-util = "0.1"
-http.workspace = true
-bytes = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
