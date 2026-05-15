@@ -1,9 +1,0 @@
-# Grafana on host port 3000. No `isengard.expose` label, so the
-# pingora proxy does not route to it; reach it directly via
-# http://<host>:3000.
-
-name = "monitoring"
-
-[services.grafana]
-image = "grafana/grafana:latest"
-ports = ["3000:3000"]
