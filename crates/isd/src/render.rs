@@ -267,7 +267,7 @@ fn style_cell(padded: &str, raw: &str, style: CellStyle, color: bool) -> String 
     }
     use console::Style;
     let mk = || Style::new().force_styling(true);
-    let styled = match style {
+    match style {
         CellStyle::Dim => mk().dim().apply_to(padded).to_string(),
         CellStyle::Plain => padded.to_string(),
         CellStyle::Emphasis => mk().bold().apply_to(padded).to_string(),
@@ -280,8 +280,7 @@ fn style_cell(padded: &str, raw: &str, style: CellStyle, color: bool) -> String 
             };
             s.apply_to(padded).to_string()
         }
-    };
-    styled
+    }
 }
 
 /// Dim a border line when `color` is on; pass through otherwise.
@@ -345,6 +344,29 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
     }
 
     out.push_str(&dim_border(&border_line(&widths, BL, T_UP, BR), color));
+    out
+}
+
+/// Render for a non-TTY stdout: tab-separated plain text, no borders,
+/// no color, no `#` index column (the index is a TTY-only affordance).
+/// ALL CAPS headers are kept on the first line. This is the pipeline
+/// contract: stable, parseable, `cut -f` friendly.
+pub fn render_plain(table: &Table) -> String {
+    // Drop the leading `#` column if present.
+    let skip_index = table
+        .columns
+        .first()
+        .map(|c| c.header == "#")
+        .unwrap_or(false);
+    let start = usize::from(skip_index);
+
+    let mut out = String::new();
+    let headers: Vec<&str> = table.columns[start..].iter().map(|c| c.header).collect();
+    out.push_str(&headers.join("\t"));
+    for row in &table.rows {
+        out.push('\n');
+        out.push_str(&row[start..].join("\t"));
+    }
     out
 }
 
@@ -473,6 +495,30 @@ mod tests {
         let cw: Vec<usize> = colored.lines().map(console::measure_text_width).collect();
         let pw: Vec<usize> = plain.lines().map(console::measure_text_width).collect();
         assert_eq!(cw, pw, "ANSI styling does not change display width");
+    }
+
+    #[test]
+    fn render_plain_is_tab_separated_no_box_no_index() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let out = render_plain(&table);
+        // No box drawing, no ANSI.
+        assert!(!out.contains('╭'));
+        assert!(!out.contains('│'));
+        assert!(!out.contains('\u{1b}'));
+        // Tab-separated.
+        assert!(out.lines().all(|l| l.contains('\t')));
+        // The `#` column is dropped: header line starts with CONTAINER ID.
+        let header = out.lines().next().unwrap();
+        assert!(header.starts_with("CONTAINER ID"));
+        assert!(!header.starts_with('#'));
+        // ALL CAPS headers retained, one header line + one line per row.
+        assert!(header.contains("NAMES"));
+        assert_eq!(out.lines().count(), 1 + ps_rows().len());
+        // Row content present, columns joined by tabs.
+        assert!(out.contains("a1b2c3d4e5f6\tnginx:1.27\tUp 2 hours"));
     }
 
     #[test]
