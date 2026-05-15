@@ -94,17 +94,12 @@ pub struct StackComposeRow {
     pub imported_at: String,
 }
 
-/// Phase 0.13: a single hook row read back from `stack_hooks`. Ordered
-/// by (on_event, ordinal). Used by the agent payload builder.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StackHook {
-    pub on_event: String,
-    pub cmd: Vec<String>,
-    pub timeout_ms: i64,
-    pub on_error: String,
-}
-
 /// Phase 0.13: full manifest read-back for `GET /api/v1/stacks/<id>`.
+///
+/// Track A teardown (2026-05-15): the lifecycle hooks bundle field is
+/// gone (Task 5); the manifest column reads survive one more commit so
+/// the dashboard's GET /stacks/:id response shape stays stable while
+/// the storage migration (Task 8) is in flight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackManifestBundle {
     pub manifest_toml: Option<String>,
@@ -113,7 +108,6 @@ pub struct StackManifestBundle {
     pub deploy_strategy: Option<String>,
     pub manifest_fleet: Option<String>,
     pub secrets: Vec<String>,
-    pub hooks: Vec<StackHook>,
 }
 
 #[cfg(test)]

@@ -552,8 +552,11 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
         }
     };
-    // Phase 0.13: include the manifest bundle inline. Legacy compose-only
-    // stacks get null / empty fields back; the dashboard JS ignores them.
+    // Track A teardown (2026-05-15): the manifest bundle no longer
+    // exposes a hooks slice. The manifest TOML / sha / fleet / strategy
+    // columns survive one more commit; Task 8 drops them. `secrets:`
+    // is informational only, populated from the compose body's native
+    // top-level `secrets:` block via stack_secrets.
     let bundle = handles
         .inventory
         .get_stack_manifest_bundle(StackId(id))
@@ -565,7 +568,6 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
             deploy_strategy: None,
             manifest_fleet: None,
             secrets: Vec::new(),
-            hooks: Vec::new(),
         });
     let mut json = serde_json::to_value(StackDto::from(stack)).unwrap_or_default();
     if let Some(obj) = json.as_object_mut() {
@@ -592,10 +594,6 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
         obj.insert(
             "secrets".into(),
             serde_json::to_value(&bundle.secrets).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
-            "hooks".into(),
-            serde_json::to_value(&bundle.hooks).unwrap_or(serde_json::Value::Null),
         );
     }
     Json(json).into_response()
