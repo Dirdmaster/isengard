@@ -35,6 +35,7 @@ mod ps;
 mod render;
 mod route;
 mod secret;
+mod selector;
 mod service_cmd;
 mod session;
 mod ssh_tunnel;
