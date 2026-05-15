@@ -24,3 +24,19 @@ async fn from_uri_rejects_invalid_scheme() {
         "error message should hint at valid schemes: {message}"
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn list_containers_against_local_daemon() {
+    let backend = DockerBackend::from_local().expect("local backend");
+    // Does not assert on count: a clean dev machine may have zero
+    // running containers. Asserts the call succeeds and the DTO shape
+    // is well-formed.
+    let containers = backend
+        .list_containers(true)
+        .await
+        .expect("list containers");
+    for c in &containers {
+        assert!(!c.id.is_empty(), "every container has an id");
+    }
+}
