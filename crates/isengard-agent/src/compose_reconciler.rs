@@ -9,16 +9,20 @@
 //! follow-ups. The diff logic here is what `isd diff` shows the operator
 //! before they say yes.
 //!
-//! Compose files are parsed in two formats:
-//! - YAML (`.yml` / `.yaml`): docker-compose-compatible, `services:` wrapper.
-//! - TOML (`.toml`): Isengard-native flat shape. Every top-level table IS
-//!   a service; there is no `services:` wrapper. Top-level scalars are
-//!   reserved for future metadata (version, description) and currently
-//!   ignored. Top-level arrays-of-tables (`[[foo]]`) are rejected.
+//! Compose files are parsed in two formats, both with the same shape:
+//! - YAML (`.yml` / `.yaml`): a top-level `services:` mapping plus
+//!   top-level `name` / `secrets` / `networks` / `volumes` keys.
+//! - TOML (`.toml`): the same shape in TOML (`[services.<name>]`
+//!   tables, top-level `name = "..."`). The TOML body is translated
+//!   structurally to the YAML shape and run through the one canonical
+//!   parser so env / ports / labels / networks / secrets all decode
+//!   the same way.
 //!
-//! The TOML path lifts every top-level table under a synthetic `services:`
-//! map and re-runs the existing YAML parser, so env / ports / labels /
-//! networks / secrets all use the same canonical decode.
+//! The wrapper shape was adopted in 2026-05-15 (one-file stack model
+//! design spec, Track A): with `name` / `secrets` / placement verbs
+//! sharing the top level, an explicit `services:` table keeps them
+//! unambiguous and matches the docker-compose surface operators
+//! already know.
 //!
 //! All YAML parsing uses `serde_yaml`. v0.3d still loses comments on
 //! round-trip; the dashboard editor's banner calls this out explicitly.
@@ -238,8 +242,9 @@ impl DesiredCompose {
 pub enum ComposeFormat {
     /// `.yml` / `.yaml`: standard docker-compose, `services:` wrapper.
     Yaml,
-    /// `.toml`: Isengard-native flat shape; every top-level table is a
-    /// service.
+    /// `.toml`: same shape as YAML in TOML syntax, with a top-level
+    /// `[services.<name>]` table per service and scalar/table siblings
+    /// for `name` / `secrets` / `networks` / `volumes`.
     Toml,
 }
 
@@ -272,10 +277,10 @@ pub fn parse_compose_path(path: &Path) -> anyhow::Result<DesiredCompose> {
 ///
 /// For [`ComposeFormat::Yaml`] this is a straight passthrough to
 /// [`parse_compose`]. For [`ComposeFormat::Toml`] the content is parsed
-/// to a `toml::Value`, lifted into a synthetic `{services: <flat-map>}`
-/// shape, re-emitted as YAML, and run back through [`parse_compose`] so
-/// the canonical YAML path stays the only place that knows about env /
-/// ports / labels / networks / secrets shapes.
+/// to a `toml::Value`, translated structurally into the YAML shape, and
+/// run through [`parse_compose`] so the canonical YAML path stays the
+/// only place that knows about env / ports / labels / networks /
+/// secrets shapes.
 pub fn parse_compose_str(content: &str, format: ComposeFormat) -> anyhow::Result<DesiredCompose> {
     match format {
         ComposeFormat::Yaml => parse_compose(content),
@@ -288,48 +293,22 @@ pub fn parse_compose_str(content: &str, format: ComposeFormat) -> anyhow::Result
     }
 }
 
-/// Lift a parsed flat-shape TOML compose into the YAML shape the
-/// existing parser understands.
+/// Lift a parsed TOML stack file into the YAML shape the canonical
+/// parser understands.
 ///
-/// Rules:
-/// - Every top-level table becomes an entry under `services:`.
-/// - Top-level non-table values (scalars, arrays) are currently ignored.
-///   They are reserved for future metadata (e.g. `version`, `description`).
-/// - A top-level array-of-tables (`[[foo]]`) is rejected: it has no
-///   sensible mapping into compose semantics.
+/// The TOML shape mirrors the YAML shape: a top-level `services` table
+/// holds the service definitions, and top-level keys like `name` and
+/// `secrets` sit beside it. This is a straight structural translation
+/// (every TOML scalar / table / array maps 1:1 to its YAML twin);
+/// `parse_compose` then does the real decode.
 fn toml_to_compose_yaml(value: toml::Value) -> anyhow::Result<String> {
-    let toml::Value::Table(tbl) = value else {
+    if !matches!(value, toml::Value::Table(_)) {
         return Err(anyhow::anyhow!(
             "compose.toml root must be a table; got {value:?}"
         ));
-    };
-    let mut services_map = serde_json::Map::new();
-    for (k, v) in tbl {
-        match v {
-            toml::Value::Table(_) => {
-                services_map.insert(k, toml_value_to_json(v)?);
-            }
-            toml::Value::Array(ref arr)
-                if arr.iter().all(|x| matches!(x, toml::Value::Table(_))) =>
-            {
-                // Array-of-tables (`[[k]]`). Compose has no sensible
-                // mapping for this shape; reject loudly so an operator
-                // doesn't think it silently became a service.
-                return Err(anyhow::anyhow!(
-                    "compose.toml top-level `[[{k}]]` array-of-tables is not supported; \
-                     each service must be a single `[name]` table"
-                ));
-            }
-            _other => {
-                // Scalar or non-table-array. Reserved for future top-level
-                // metadata; ignore for now.
-                continue;
-            }
-        }
     }
-    let mut top = serde_json::Map::new();
-    top.insert("services".into(), serde_json::Value::Object(services_map));
-    serde_yaml::to_string(&serde_json::Value::Object(top))
+    let json = toml_value_to_json(value)?;
+    serde_yaml::to_string(&json)
         .map_err(|e| anyhow::anyhow!("serialize toml-as-yaml: {e}"))
 }
 
@@ -1529,22 +1508,25 @@ services:
     // ----- TOML flat-shape -----
 
     #[test]
-    fn parse_toml_flat_shape_with_one_service() {
-        // Flat-shape: top-level `[web]` table IS a service. No `services:`
-        // wrapper. Mirrors the basic YAML smoke shape (image, env, ports,
-        // labels) so the canonical decode path is exercised end-to-end.
+    fn parse_toml_wrapper_shape_with_one_service() {
+        // Wrapper shape (2026-05-15 stack file model): `[services.<name>]`
+        // tables. Top-level `name` keys stack identity. Mirrors the basic
+        // YAML smoke shape (image, env, ports, labels).
         let toml_str = r#"
-[web]
+name = "blog"
+
+[services.web]
 image = "nginx:1.27"
 ports = ["8080:80"]
 
-[web.environment]
+[services.web.environment]
 TZ = "Europe/Zurich"
 
-[web.labels]
+[services.web.labels]
 "isengard.expose" = "foo.example.com"
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(parsed.name, Some("blog".to_string()));
         assert_eq!(parsed.services.len(), 1);
         let web = &parsed.services["web"];
         assert_eq!(web.image.as_deref(), Some("nginx:1.27"));
@@ -1554,18 +1536,22 @@ TZ = "Europe/Zurich"
     }
 
     #[test]
-    fn parse_toml_with_multiple_services() {
+    fn parse_toml_wrapper_shape_with_multiple_services() {
         let toml_str = r#"
-[web]
+name = "stack"
+
+[services.web]
 image = "nginx"
 networks = ["frontend"]
 
-[api]
+[services.api]
 image = "alpine"
 networks = ["frontend", "backend"]
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         assert_eq!(parsed.services.len(), 2);
+        assert!(parsed.services.contains_key("web"));
+        assert!(parsed.services.contains_key("api"));
         assert!(
             parsed.services["web"]
                 .networks
@@ -1575,46 +1561,24 @@ networks = ["frontend", "backend"]
     }
 
     #[test]
-    fn parse_toml_top_level_scalars_are_ignored_metadata() {
-        // Top-level scalars (version, description, etc.) are reserved
-        // for future metadata. Today they're ignored without error: the
-        // services list still parses cleanly.
-        let toml_str = r#"
-version = "1"
-description = "smoke"
-
-[web]
-image = "nginx"
-"#;
+    fn parse_toml_without_services_table_is_empty() {
+        // Name-only stack file is valid: it carries identity without
+        // declaring services yet. Mirrors the YAML same-shape behavior.
+        let toml_str = r#"name = "empty""#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
-        assert_eq!(parsed.services.len(), 1);
-        assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
-    }
-
-    #[test]
-    fn parse_toml_rejects_top_level_array_of_tables() {
-        // `[[foo]]` is array-of-tables in TOML; there's no sensible
-        // mapping into compose. Reject loudly so an operator doesn't
-        // think it silently became a service.
-        let toml_str = r#"
-[[svc]]
-image = "nginx"
-
-[[svc]]
-image = "alpine"
-"#;
-        let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
-        assert!(format!("{err}").contains("array-of-tables"));
+        assert_eq!(parsed.name, Some("empty".to_string()));
+        assert!(parsed.services.is_empty());
     }
 
     #[test]
     fn parse_toml_with_conflicting_placement_verbs_errors() {
-        // Phase 0.14: native placement verbs are now first-class. The
-        // pre-0.14 test asserted only "doesn't crash"; with verbs wired
-        // through, mixing more than one of spread / global / on in a
-        // single service is a hard parse error.
+        // Phase 0.14: native placement verbs are first-class. Mixing
+        // more than one of spread / global / on in a single service is
+        // a hard parse error in the wrapper shape too.
         let toml_str = r#"
-[web]
+name = "x"
+
+[services.web]
 image = "nginx"
 spread = 2
 global = true
@@ -1629,7 +1593,7 @@ global = true
     #[test]
     fn parse_toml_spread_n_populates_placement() {
         let toml_str = r#"
-[web]
+[services.web]
 image = "nginx"
 spread = 3
 "#;
@@ -1646,7 +1610,7 @@ spread = 3
     #[test]
     fn parse_toml_spread_one_normalizes_to_singleton() {
         let toml_str = r#"
-[web]
+[services.web]
 image = "nginx"
 spread = 1
 "#;
@@ -1660,7 +1624,7 @@ spread = 1
     #[test]
     fn parse_toml_global_true_populates_placement() {
         let toml_str = r#"
-[node-exporter]
+[services.node-exporter]
 image = "prom/node-exporter"
 global = true
 "#;
@@ -1674,7 +1638,7 @@ global = true
     #[test]
     fn parse_toml_on_host_populates_placement() {
         let toml_str = r#"
-[postgres]
+[services.postgres]
 image = "postgres:16"
 on = "alice"
 "#;
@@ -1691,7 +1655,7 @@ on = "alice"
     #[test]
     fn parse_toml_where_alone_is_singleton_with_selector() {
         let toml_str = r#"
-[prometheus]
+[services.prometheus]
 image = "prom/prometheus"
 where = "role==monitoring"
 "#;
@@ -1708,7 +1672,7 @@ where = "role==monitoring"
     #[test]
     fn parse_toml_spread_with_where_combines() {
         let toml_str = r#"
-[gpu-worker]
+[services.gpu-worker]
 image = "myorg/inference:v3"
 spread = 4
 where = "tier==gpu, role!=control"
@@ -1727,11 +1691,11 @@ where = "tier==gpu, role!=control"
     #[test]
     fn parse_toml_native_plus_deploy_block_errors() {
         let toml_str = r#"
-[web]
+[services.web]
 image = "nginx"
 spread = 2
 
-[web.deploy]
+[services.web.deploy]
 replicas = 3
 "#;
         let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
@@ -1741,12 +1705,39 @@ replicas = 3
     #[test]
     fn parse_toml_bad_where_selector_errors() {
         let toml_str = r#"
-[web]
+[services.web]
 image = "nginx"
 where = "==value"
 "#;
         let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
         assert!(format!("{err}").contains("where:"));
+    }
+
+    #[test]
+    fn parse_toml_placement_verbs_parse_in_wrapper_shape() {
+        let toml_str = r#"
+name = "infra"
+
+[services.web]
+image = "nginx:alpine"
+spread = 2
+
+[services.agent]
+image = "telegraf:1.30"
+global = true
+where = "role==worker"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert!(matches!(
+            parsed.services["web"].placement,
+            Some(crate::placement::Placement::Spread { count: 2, selector: None })
+        ));
+        match &parsed.services["agent"].placement {
+            Some(crate::placement::Placement::Global { selector }) => {
+                assert_eq!(selector.as_ref().unwrap().raw, "role==worker");
+            }
+            other => panic!("expected Global with selector, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1935,7 +1926,7 @@ services:
     where: "role==worker"
 "#;
         let toml_str = r#"
-[web]
+[services.web]
 image = "nginx"
 spread = 3
 where = "role==worker"
@@ -2025,7 +2016,7 @@ services:
         assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
 
         let toml_path = dir.path().join("compose.toml");
-        std::fs::write(&toml_path, "[web]\nimage = \"alpine\"\n").unwrap();
+        std::fs::write(&toml_path, "[services.web]\nimage = \"alpine\"\n").unwrap();
         let parsed = parse_compose_path(&toml_path).unwrap();
         assert_eq!(parsed.services["web"].image.as_deref(), Some("alpine"));
 
