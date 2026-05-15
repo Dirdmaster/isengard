@@ -8,6 +8,7 @@ pub mod event;
 pub mod hooks;
 pub mod labels;
 pub mod networking;
+pub mod placement;
 pub mod plugin;
 pub mod policy;
 pub mod policy_loader;
