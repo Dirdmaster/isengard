@@ -771,14 +771,11 @@ async fn put_stack_compose(
     // Track A teardown (2026-05-15): the manifest bundle is gone. Only
     // the secrets binding survives; it lands in `stack_secrets` via
     // `set_stack_secrets`. Manifest TOML / fleet / strategy / hooks no
-    // longer round-trip through the controller. The proto's manifest
-    // and hooks fields ship empty until Task 7 drops them entirely.
+    // longer round-trip through the controller.
     if let Err(resp) = persist_stack_secrets(&handles, stack.id, input.secrets.as_deref()).await {
         return resp;
     }
 
-    let manifest_for_agent = String::new();
-    let proto_hooks: Vec<isengard_proto::pb::LifecycleHook> = Vec::new();
     let proto_secrets: Vec<String> = input.secrets.clone().unwrap_or_default();
 
     let request_id = ulid::Ulid::new().to_string();
@@ -793,10 +790,7 @@ async fn put_stack_compose(
                     compose_yaml: input.compose_yaml,
                     expected_sha256: input.expected_sha256,
                     force: input.force,
-                    manifest_toml: manifest_for_agent,
                     secrets: proto_secrets,
-                    hooks: proto_hooks,
-                    deployment_id: ulid::Ulid::new().to_string(),
                 },
             ),
         ),
@@ -1067,8 +1061,7 @@ async fn create_stack(
     };
 
     // Track A teardown (2026-05-15): persist only the secrets binding.
-    // Manifest TOML / fleet / strategy / hooks are gone; the proto's
-    // manifest_toml + hooks fields ship empty until Task 7 drops them.
+    // Manifest TOML / fleet / strategy / hooks are gone.
     if let Err(resp) = persist_stack_secrets(&handles, stack_id, body.secrets.as_deref()).await {
         return resp;
     }
@@ -1079,7 +1072,6 @@ async fn create_stack(
     let request_id = ulid::Ulid::new().to_string();
     let rx = handles.compose_broker.register(request_id.clone()).await;
 
-    let deployment_id = ulid::Ulid::new().to_string();
     let msg = isengard_proto::pb::ControllerMessage {
         payload: Some(
             isengard_proto::pb::controller_message::Payload::WriteCompose(
@@ -1089,10 +1081,7 @@ async fn create_stack(
                     compose_yaml: body.compose_yaml,
                     expected_sha256: String::new(),
                     force: true,
-                    manifest_toml: String::new(),
                     secrets: body.secrets.clone().unwrap_or_default(),
-                    hooks: Vec::new(),
-                    deployment_id,
                 },
             ),
         ),
