@@ -156,12 +156,7 @@ async fn run_list(context: Option<&str>) -> Result<()> {
 
 async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
-    let host_id = resolve_host_id(
-        &session,
-        args.host_id.as_deref(),
-        args.host.as_deref(),
-    )
-    .await?;
+    let host_id = resolve_host_id(&session, args.host_id.as_deref(), args.host.as_deref()).await?;
     let body = CreateBody {
         host_id: &host_id,
         service_name: &args.service,
