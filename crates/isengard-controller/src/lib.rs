@@ -19,6 +19,7 @@ pub mod plugin_host;
 pub mod policy_ingest;
 pub mod revocation;
 pub mod routing;
+pub mod scheduler;
 pub mod secrets;
 pub mod stack_deploy_orchestrator;
 pub mod sync_containers;
