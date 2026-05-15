@@ -25,6 +25,7 @@ use clap::{Parser, Subcommand};
 mod compose_cmd;
 mod context;
 mod credentials;
+mod help_render;
 mod hosts_cmd;
 mod logs;
 mod manifest_cmd;
@@ -47,7 +48,7 @@ mod watch;
     version = env!("ISENGARD_BUILD_VERSION"),
     about = "Operate Docker fleets from your terminal",
 )]
-struct Cli {
+pub(crate) struct Cli {
     /// Logging filter (e.g. "info", "debug,isd=trace").
     #[arg(long, global = true, env = "ISD_LOG")]
     log: Option<String>,
@@ -92,6 +93,19 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    use clap::CommandFactory;
+
+    // Intercept the root help flow: bare `isd` or `-h`/`--help` at the
+    // root prints the grouped help, then exits.
+    let raw: Vec<String> = std::env::args().collect();
+    let wants_root_help =
+        raw.len() == 1 || (raw.len() == 2 && matches!(raw[1].as_str(), "-h" | "--help"));
+    if wants_root_help {
+        let cmd = Cli::command();
+        println!("{}", help_render::render(&cmd));
+        return;
+    }
+
     let cli = Cli::parse();
     init_tracing(cli.log.as_deref());
 
