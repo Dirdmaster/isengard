@@ -23,11 +23,14 @@
 use clap::{Parser, Subcommand};
 
 mod compose_cmd;
+mod confirm;
 mod context;
 mod credentials;
 mod help_render;
 mod hosts_cmd;
 mod index_cache;
+mod index_resolve;
+mod lifecycle_cmd;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
@@ -36,6 +39,7 @@ mod ps;
 mod render;
 mod route;
 mod secret;
+mod selector;
 mod service_cmd;
 mod session;
 mod ssh_tunnel;
@@ -74,6 +78,18 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail container logs.
     Logs(logs::LogsArgs),
+    /// Stop one or more containers by ID, name, or index from `isd ps`.
+    Stop(lifecycle_cmd::StopArgs),
+    /// Start one or more containers.
+    Start(lifecycle_cmd::StartArgs),
+    /// Restart one or more containers.
+    Restart(lifecycle_cmd::RestartArgs),
+    /// Remove one or more containers. Confirms when targets came from
+    /// indices; `-f` skips the prompt.
+    Rm(lifecycle_cmd::RmArgs),
+    /// Send a signal to one or more containers. Confirms when targets
+    /// came from indices.
+    Kill(lifecycle_cmd::KillArgs),
     /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
@@ -122,6 +138,11 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
+        Command::Stop(args) => lifecycle_cmd::run_stop(args, cli.context.as_deref()).await,
+        Command::Start(args) => lifecycle_cmd::run_start(args, cli.context.as_deref()).await,
+        Command::Restart(args) => lifecycle_cmd::run_restart(args, cli.context.as_deref()).await,
+        Command::Rm(args) => lifecycle_cmd::run_rm(args, cli.context.as_deref()).await,
+        Command::Kill(args) => lifecycle_cmd::run_kill(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
         }

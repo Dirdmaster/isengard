@@ -104,6 +104,20 @@ pub fn read() -> Result<Option<IndexCache>> {
     }
 }
 
+/// Process-wide guard for tests that touch `ISD_INDEX_CACHE`. Cargo
+/// runs tests in parallel; the env var is process-global, so two tests
+/// fighting over it will see each other's writes. Every test in the
+/// crate that mutates `ISD_INDEX_CACHE` acquires this lock first.
+/// Pattern mirrors `crates/isengard-plugins/dashboard/tests/approvals_endpoints.rs`.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +125,7 @@ mod tests {
     /// Point the cache at a unique temp path for the duration of a test.
     /// SAFETY: matches the `ISD_CREDENTIALS_FILE` test pattern in
     /// `ps.rs` / `manifest_cmd.rs`; each test uses a distinct path.
+    /// Callers must hold `test_env_lock()` for the duration.
     fn with_temp_cache(name: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(name);
@@ -143,6 +158,7 @@ mod tests {
 
     #[test]
     fn write_then_read_round_trips() {
+        let _lock = test_env_lock();
         let _dir = with_temp_cache("rt.json");
         let cache = sample();
         write(&cache).unwrap();
@@ -155,6 +171,7 @@ mod tests {
 
     #[test]
     fn read_missing_file_is_ok_none() {
+        let _lock = test_env_lock();
         let _dir = with_temp_cache("does-not-exist.json");
         assert!(read().unwrap().is_none());
     }

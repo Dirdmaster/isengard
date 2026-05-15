@@ -219,7 +219,7 @@ fn urlencoded(s: &str) -> String {
 /// controller path. Returns `Ok(None)` for "no context selected at
 /// all" too, so the controller path can produce its own canonical
 /// "no context" error.
-fn resolve_docker_uri(context: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn resolve_docker_uri(context: Option<&str>) -> Result<Option<String>> {
     let path = crate::credentials::default_credentials_path()?;
     let file = crate::credentials::load(&path)?;
     let target_name = context
@@ -241,13 +241,30 @@ fn resolve_docker_uri(context: Option<&str>) -> Result<Option<String>> {
 /// index cache can record which host each row lives on. Returns an
 /// error only if no context is selected at all; a missing docker URI
 /// is handled upstream by `resolve_docker_uri`.
-fn resolve_docker_context(context: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_docker_context(context: Option<&str>) -> Result<String> {
     let path = crate::credentials::default_credentials_path()?;
     let file = crate::credentials::load(&path)?;
     context
         .map(str::to_string)
         .or(file.default_context)
         .ok_or_else(|| anyhow::anyhow!("no context selected; pass --context <name>"))
+}
+
+/// Open a DockerBackend for the resolved context. Used by the
+/// lifecycle commands so they share `ps`'s context-resolution + docker
+/// connection path.
+pub(crate) async fn open_docker_backend(
+    context: Option<&str>,
+) -> Result<isd_runtime::DockerBackend> {
+    let uri = resolve_docker_uri(context)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no docker endpoint on the resolved context; \
+             add one with `isd context create ... --docker ssh://...`"
+        )
+    })?;
+    isd_runtime::DockerBackend::from_uri(&uri)
+        .await
+        .with_context(|| format!("opening docker backend at {uri}"))
 }
 
 /// Column layout for the docker-backend `isd ps` table. Order matches
