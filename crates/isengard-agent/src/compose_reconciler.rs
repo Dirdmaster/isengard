@@ -308,8 +308,7 @@ fn toml_to_compose_yaml(value: toml::Value) -> anyhow::Result<String> {
         ));
     }
     let json = toml_value_to_json(value)?;
-    serde_yaml::to_string(&json)
-        .map_err(|e| anyhow::anyhow!("serialize toml-as-yaml: {e}"))
+    serde_yaml::to_string(&json).map_err(|e| anyhow::anyhow!("serialize toml-as-yaml: {e}"))
 }
 
 /// Recursively translate a `toml::Value` into a `serde_json::Value`.
@@ -636,9 +635,8 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
                 "service {name:?}: `strategy:` must be a string"
             ));
         };
-        svc.strategy = Some(
-            Strategy::parse(s).map_err(|e| anyhow::anyhow!("service {name:?}: {e}"))?,
-        );
+        svc.strategy =
+            Some(Strategy::parse(s).map_err(|e| anyhow::anyhow!("service {name:?}: {e}"))?);
     }
 
     Ok(svc)
@@ -1262,9 +1260,7 @@ services:
             ("rolling", Strategy::Rolling),
             ("recreate", Strategy::Recreate),
         ] {
-            let yaml = format!(
-                "services:\n  web:\n    image: nginx\n    strategy: {kw}\n"
-            );
+            let yaml = format!("services:\n  web:\n    image: nginx\n    strategy: {kw}\n");
             let dc = parse_compose(&yaml).unwrap();
             assert_eq!(dc.services["web"].strategy, Some(expected), "kw={kw}");
         }
@@ -1730,7 +1726,10 @@ where = "role==worker"
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         assert!(matches!(
             parsed.services["web"].placement,
-            Some(crate::placement::Placement::Spread { count: 2, selector: None })
+            Some(crate::placement::Placement::Spread {
+                count: 2,
+                selector: None
+            })
         ));
         match &parsed.services["agent"].placement {
             Some(crate::placement::Placement::Global { selector }) => {
@@ -2051,35 +2050,64 @@ services:
 
     #[test]
     fn parse_toml_and_yaml_produce_equivalent_desired_compose() {
-        // Same logical compose expressed in both formats should
-        // round-trip into the same DesiredCompose. This is the smoke
-        // assertion that the TOML lift-to-YAML path doesn't lose
-        // information versus the canonical YAML path. (The Phase 0.9
-        // wisp e2e test runs the YAML form; this test proves the TOML
-        // form lands on the identical structural result.)
-        let yaml = r#"services:
-  hello:
-    image: docker.io/library/busybox:latest
-    container_name: hello-toml
-    command: ["/bin/sh", "-c", "sleep 60"]
-    labels:
-      isengard.expose: e2e.wisp.local
-    networks:
-      - frontend
+        // 2026-05-15 stack-file model: a single stack file expressing
+        // top-level `name`, per-service `strategy`, and the native
+        // placement verbs must round-trip identically through the TOML
+        // and YAML paths. Asserts structural equality of DesiredCompose
+        // plus a few spot checks on the new fields.
+        let yaml = r#"
+name: monitoring
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    where: "role==monitoring"
+    strategy: recreate
+  node-exporter:
+    image: prom/node-exporter:latest
+    global: true
+  grafana:
+    image: grafana/grafana:latest
+    spread: 2
+    strategy: blue-green
 "#;
         let toml_str = r#"
-[hello]
-image = "docker.io/library/busybox:latest"
-container_name = "hello-toml"
-command = ["/bin/sh", "-c", "sleep 60"]
-networks = ["frontend"]
+name = "monitoring"
 
-[hello.labels]
-"isengard.expose" = "e2e.wisp.local"
+[services.prometheus]
+image = "prom/prometheus:latest"
+where = "role==monitoring"
+strategy = "recreate"
+
+[services.node-exporter]
+image = "prom/node-exporter:latest"
+global = true
+
+[services.grafana]
+image = "grafana/grafana:latest"
+spread = 2
+strategy = "blue-green"
 "#;
-        let yaml_parsed = parse_compose_str(yaml, ComposeFormat::Yaml).unwrap();
-        let toml_parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
-        assert_eq!(yaml_parsed, toml_parsed);
+        let from_yaml = parse_compose_str(yaml, ComposeFormat::Yaml).unwrap();
+        let from_toml = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(from_yaml, from_toml);
+        assert_eq!(from_yaml.name, Some("monitoring".to_string()));
+        assert_eq!(
+            from_yaml.services["prometheus"].strategy,
+            Some(Strategy::Recreate)
+        );
+        assert_eq!(
+            from_yaml.services["grafana"].placement,
+            Some(crate::placement::Placement::Spread {
+                count: 2,
+                selector: None,
+            })
+        );
+        match &from_yaml.services["node-exporter"].placement {
+            Some(crate::placement::Placement::Global { selector }) => {
+                assert!(selector.is_none());
+            }
+            other => panic!("expected Global, got {other:?}"),
+        }
     }
 
     #[test]
