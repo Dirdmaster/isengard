@@ -317,7 +317,7 @@ async fn run_docker_backend(args: PsArgs, docker_uri: String, context: Option<&s
 
     // JSON output: the raw DTO list, no index cache write (the `#`
     // column is a TTY affordance, not part of the JSON contract).
-    if args.json || args.format == "json" {
+    if args.format == crate::output::Format::Json {
         // ContainerSummary is not Serialize; emit a stable hand-rolled
         // shape so `--format json` stays parseable.
         let json: Vec<serde_json::Value> = containers
@@ -669,7 +669,7 @@ docker = "local"
         }
         let args = PsArgs {
             all: true,
-            format: "table".into(),
+            format: crate::output::Format::Table,
             ..Default::default()
         };
         run(args, None)
