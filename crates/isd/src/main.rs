@@ -29,6 +29,7 @@ mod gateway;
 mod hosts_cmd;
 mod index_cache;
 mod index_resolve;
+mod lifecycle_cmd;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
@@ -92,6 +93,8 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail logs for `<stack>/<service>` over the controller WebSocket.
     Logs(logs::LogsArgs),
+    /// Stop one or more containers by ID, name, or index from `isd ps`.
+    Stop(lifecycle_cmd::StopArgs),
     /// Ship a stack to the controller. On first run for a name, creates
     /// the stack from the compose.yaml; subsequent runs preview the
     /// reconcile plan vs the current YAML, prompt y/N, then write.
@@ -159,6 +162,7 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
+        Command::Stop(args) => lifecycle_cmd::run_stop(args, cli.context.as_deref()).await,
         Command::Deploy(args) => {
             print_stack_alias_hint("deploy");
             compose_cmd::run_deploy(args, cli.context.as_deref()).await
