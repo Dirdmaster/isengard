@@ -417,7 +417,6 @@ mod supervisor_tests {
                 arch: "x86_64".into(),
                 agent_version: "0.1.0".into(),
                 docker_version: "24.0".into(),
-                fleet: "default".into(),
             })
             .await
             .unwrap();
