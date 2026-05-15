@@ -283,15 +283,39 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         "controller plugins started"
     );
 
+    // Phase 0.14: placement scheduler. Constructed BEFORE the
+    // disconnect monitor so the monitor can be wired to call
+    // on_host_disconnect_long whenever it fires. The scheduler
+    // itself rebuilds in-memory state from the placements +
+    // agent_labels tables (the migration backfilled pre-0.14
+    // services).
+    //
+    // PlacementSource lookups land in step 7; the skeleton uses
+    // EmptyPlacementSource so reconcile_all is a no-op until then.
+    let placement_scheduler = std::sync::Arc::new(
+        scheduler::Scheduler::new(
+            inventory.clone(),
+            bus.clone(),
+            std::time::Duration::from_secs(scheduler::DEFAULT_GRACE_SECS),
+            std::sync::Arc::new(scheduler::EmptyPlacementSource),
+        )
+        .await
+        .context("initialising placement scheduler")?,
+    );
+    let scheduler_handle = placement_scheduler.clone().start();
+
     // Background task: detect long-disconnected agents and emit
     // `agent.disconnect_long` (4h threshold, 60s poll cadence in production).
-    let disconnect_monitor = std::sync::Arc::new(disconnect_monitor::DisconnectMonitor::new(
-        inventory.clone(),
-        journal.clone(),
-        bus.clone(),
-        14400, // 4 hours
-        60.0,  // 60s poll
-    ));
+    let disconnect_monitor = std::sync::Arc::new(
+        disconnect_monitor::DisconnectMonitor::new(
+            inventory.clone(),
+            journal.clone(),
+            bus.clone(),
+            14400, // 4 hours
+            60.0,  // 60s poll
+        )
+        .with_scheduler(placement_scheduler.clone()),
+    );
     let disconnect_handle = disconnect_monitor.start();
 
     // v0.3b: optional DNS resolver. Off by default (`--dns-zone ""`); when a
@@ -504,6 +528,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         log_fanout,
         compose_broker.clone(),
         secrets_store.clone(),
+        Some(placement_scheduler.clone()),
     ));
 
     // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.
@@ -554,6 +579,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     deployment_handle.abort();
     reaper_handle.abort();
     orchestrator_handle.abort();
+    scheduler_handle.abort();
     if let Some(h) = dns_handle {
         h.abort();
     }
