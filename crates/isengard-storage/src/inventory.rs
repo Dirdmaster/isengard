@@ -12,9 +12,7 @@ use crate::host::{EnrollHost, Host, HostId};
 use crate::host_action::{HostAction, HostActionId, HostActionKind};
 use crate::service::{InsertService, Service, ServiceId, ServiceState};
 use crate::setting::Setting;
-use crate::stack::{
-    InsertStack, Stack, StackComposeRow, StackId, StackSource,
-};
+use crate::stack::{InsertStack, Stack, StackComposeRow, StackId, StackSource};
 
 /// Wraps a `sqlx::SqlitePool` opened against a single `.db` file.
 /// Cheap to clone (the pool is `Arc`-backed inside).
@@ -327,12 +325,11 @@ impl Inventory {
     }
 
     pub async fn get_stack(&self, id: StackId) -> Result<Option<Stack>> {
-        let row = sqlx::query(
-            "SELECT id, host_id, name, source, discovered_at FROM stacks WHERE id = ?",
-        )
-        .bind(id.0)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT id, host_id, name, source, discovered_at FROM stacks WHERE id = ?")
+                .bind(id.0)
+                .fetch_optional(&self.pool)
+                .await?;
         row.map(stack_from_row).transpose()
     }
 
