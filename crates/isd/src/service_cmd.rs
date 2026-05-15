@@ -1,5 +1,5 @@
 //! `isd service ls`: list every service across every stack.
-//! Talks to `GET /api/v1/services` (optionally `?fleet=`).
+//! Talks to `GET /api/v1/services`.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -27,9 +27,6 @@ pub struct LsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
-    /// Filter by fleet.
-    #[arg(long)]
-    pub fleet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,24 +48,10 @@ pub async fn run(args: ServiceArgs, context: Option<&str>) -> Result<()> {
 async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
 
-    let stacks: Vec<StackApiRow> = fetch(
-        &session,
-        &build_url(
-            session.controller_url(),
-            "/api/v1/stacks",
-            args.fleet.as_deref(),
-        ),
-    )
-    .await?;
-    let services: Vec<ServiceApiRow> = fetch(
-        &session,
-        &build_url(
-            session.controller_url(),
-            "/api/v1/services",
-            args.fleet.as_deref(),
-        ),
-    )
-    .await?;
+    let stacks: Vec<StackApiRow> =
+        fetch(&session, &format!("{}/api/v1/stacks", session.controller_url())).await?;
+    let services: Vec<ServiceApiRow> =
+        fetch(&session, &format!("{}/api/v1/services", session.controller_url())).await?;
 
     let rows = build_rows(&stacks, &services);
 
@@ -82,13 +65,6 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn build_url(base: &str, path: &str, fleet: Option<&str>) -> String {
-    match fleet {
-        Some(f) => format!("{base}{path}?fleet={f}"),
-        None => format!("{base}{path}"),
-    }
 }
 
 async fn fetch<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) -> Result<T> {
