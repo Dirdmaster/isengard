@@ -48,7 +48,7 @@ const HEARTBEAT_INTERVAL_SECS: u32 = 10;
 
 /// Minimal host descriptor the agent presents at redeem time. The agent supplies
 /// what it knows locally; storage fills in everything else (HostId, enrolled_at).
-/// Other host fields (arch, docker_version, fingerprint, fleet) default to
+/// Other host fields (arch, docker_version, fingerprint) default to
 /// placeholders here and are refined later via heartbeat / re-enrollment — the
 /// enrollment exchange is intentionally minimal so a freshly-installed agent
 /// can come online without first running a full system probe.
@@ -159,7 +159,6 @@ impl EnrollmentService {
                     arch: String::new(),
                     agent_version: host_info.version.clone(),
                     docker_version: String::new(),
-                    fleet: "default".to_string(),
                 },
             )
             .await

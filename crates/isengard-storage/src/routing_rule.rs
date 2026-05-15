@@ -90,7 +90,6 @@ impl RoutingRuleSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingRule {
     pub id: RoutingRuleId,
-    pub fleet: String,
     pub host_id: HostId,
     pub stack_id: Option<StackId>,
     pub service_name: String,
@@ -110,7 +109,6 @@ pub struct RoutingRule {
 
 #[derive(Debug, Clone)]
 pub struct InsertRoutingRule {
-    pub fleet: String,
     pub host_id: HostId,
     pub stack_id: Option<StackId>,
     pub service_name: String,
@@ -136,15 +134,14 @@ impl crate::inventory::Inventory {
         let row = sqlx::query(
             r#"
             INSERT INTO routing_rules (
-              fleet, host_id, stack_id, service_name, container_port,
+              host_id, stack_id, service_name, container_port,
               public_hostname, protocol, adapter, tls_mode, healthcheck_path,
               healthcheck_interval_secs, auth, state, source,
               source_container_id, source_imported_from
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
-        .bind(&ins.fleet)
         .bind(&host_bytes)
         .bind(stack_id)
         .bind(&ins.service_name)
@@ -167,7 +164,6 @@ impl crate::inventory::Inventory {
 
         Ok(RoutingRule {
             id: RoutingRuleId(id),
-            fleet: ins.fleet,
             host_id: ins.host_id,
             stack_id: ins.stack_id,
             service_name: ins.service_name,
@@ -190,7 +186,7 @@ impl crate::inventory::Inventory {
         let host_bytes = host_id.to_bytes().to_vec();
         let rows = sqlx::query(
             r#"
-            SELECT id, fleet, host_id, stack_id, service_name, container_port,
+            SELECT id, host_id, stack_id, service_name, container_port,
                    public_hostname, protocol, adapter, tls_mode, healthcheck_path,
                    healthcheck_interval_secs, auth, state, source,
                    source_container_id, source_imported_from
@@ -206,13 +202,13 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(routing_rule_from_row).collect()
     }
 
-    /// Fleet-wide listing. Returns ALL rules across hosts, ordered by host
-    /// then id. Replaces the per-host fan-out the dashboard's `list_rules`
-    /// endpoint did before — one query instead of N+1.
+    /// Listing across all hosts, ordered by host then id. Replaces the
+    /// per-host fan-out the dashboard's `list_rules` endpoint did before:
+    /// one query instead of N+1.
     pub async fn list_all_routing_rules(&self) -> Result<Vec<RoutingRule>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, fleet, host_id, stack_id, service_name, container_port,
+            SELECT id, host_id, stack_id, service_name, container_port,
                    public_hostname, protocol, adapter, tls_mode, healthcheck_path,
                    healthcheck_interval_secs, auth, state, source,
                    source_container_id, source_imported_from
@@ -230,7 +226,7 @@ impl crate::inventory::Inventory {
     pub async fn get_routing_rule(&self, id: RoutingRuleId) -> Result<Option<RoutingRule>> {
         let row = sqlx::query(
             r#"
-            SELECT id, fleet, host_id, stack_id, service_name, container_port,
+            SELECT id, host_id, stack_id, service_name, container_port,
                    public_hostname, protocol, adapter, tls_mode, healthcheck_path,
                    healthcheck_interval_secs, auth, state, source,
                    source_container_id, source_imported_from
@@ -285,7 +281,6 @@ fn routing_rule_from_row(row: sqlx::sqlite::SqliteRow) -> Result<RoutingRule> {
 
     Ok(RoutingRule {
         id: RoutingRuleId(row.try_get("id")?),
-        fleet: row.try_get("fleet")?,
         host_id: HostId::from_bytes(arr),
         stack_id: row.try_get::<Option<i64>, _>("stack_id")?.map(StackId),
         service_name: row.try_get("service_name")?,

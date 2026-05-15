@@ -58,10 +58,10 @@ const fleetSummary = computed(() => {
   const counts = new Map<string, { up: number; total: number }>()
   const cutoff = Date.now() - 5 * 60 * 1000
   for (const h of hostsStore.hosts) {
-    const c = counts.get(h.fleet) ?? { up: 0, total: 0 }
+    const c = counts.get('') ?? { up: 0, total: 0 }
     c.total++
     if (h.last_seen_at && new Date(h.last_seen_at).getTime() >= cutoff) c.up++
-    counts.set(h.fleet, c)
+    counts.set('', c)
   }
   return Array.from(counts.entries())
     .sort((a, b) => b[1].total - a[1].total)

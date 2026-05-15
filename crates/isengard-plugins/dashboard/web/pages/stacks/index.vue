@@ -89,12 +89,10 @@ watch(
 )
 
 const rows = computed<StackRowData[]>(() => {
-  const fleet = uiStore.activeFleet
   return stacksStore.items
     .map((stack): StackRowData | null => {
       const host = hostsStore.hosts.find((h) => h.id === stack.host_id)
       if (!host) return null
-      if (fleet !== 'all' && host.fleet !== fleet) return null
 
       const services = servicesByStack.value[stack.id] ?? []
       const dep = depByStack.value[stack.id] ?? { latestActive: null, lastFinishedIso: '' }
@@ -134,7 +132,7 @@ const rows = computed<StackRowData[]>(() => {
       return {
         stack,
         hostHostname: host.hostname,
-        fleet: host.fleet,
+        fleet: '',
         serviceCount: services.length,
         primaryImage,
         extraImageCount,

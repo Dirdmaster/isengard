@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import type { Host } from '~/stores/hosts'
 import { useEnrollment } from '~/composables/useEnrollment'
 
@@ -10,29 +10,9 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 
-const fleets = useFleetsStore()
-if (fleets.fleets.length === 0) await fleets.load()
-
 const actions = useHostActions()
 const enrollment = useEnrollment()
 const toast = useToast()
-const editingFleet = ref(false)
-const newFleet = ref(props.host.fleet)
-const error = ref('')
-
-async function applyFleet() {
-  error.value = ''
-  try {
-    await actions.setFleet(props.host.id, newFleet.value)
-    editingFleet.value = false
-    toast.success(`Fleet updated to ${newFleet.value}`)
-    emit('changed')
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    error.value = msg
-    toast.error(`Set fleet failed: ${msg}`)
-  }
-}
 
 async function forceUpdate() {
   try {
@@ -120,14 +100,11 @@ const fingerprintShort = computed(() => {
     <aside
       class="relative z-10 w-[480px] h-full bg-iso-bg-elevated border-l border-iso-border-subtle shadow-2xl flex flex-col overflow-hidden"
     >
-      <!-- Header: status dot + hostname (mono) + fleet pill + close -->
+      <!-- Header: status dot + hostname (mono) + close -->
       <header class="flex items-center justify-between px-5 py-4 border-b border-iso-border-subtle shrink-0">
         <div class="flex items-center gap-2.5 min-w-0">
           <span class="w-2 h-2 rounded-full bg-iso-success shrink-0"></span>
           <h2 class="font-mono text-base text-iso-text-primary truncate">{{ host.hostname }}</h2>
-          <span
-            class="px-1.5 py-0.5 rounded-iso-sm bg-iso-bg-base border border-iso-border-subtle font-mono text-[10px] text-iso-text-secondary shrink-0"
-          >{{ host.fleet }}</span>
         </div>
         <button
           class="text-iso-text-muted hover:text-iso-text-primary transition-colors"
@@ -174,29 +151,9 @@ const fingerprintShort = computed(() => {
           </dl>
         </section>
 
-        <!-- Fleet: concept renders a pill-style row with chevron; "Change" expands inline. -->
-        <section class="flex flex-col gap-2">
-          <div class="text-[10px] font-semibold tracking-wider text-iso-text-muted">FLEET</div>
-          <button
-            v-if="!editingFleet"
-            class="px-3 py-2 rounded-iso-md bg-iso-bg-base border border-iso-border-subtle hover:border-iso-border-strong flex items-center justify-between text-xs transition-colors"
-            @click="editingFleet = true"
-          >
-            <span class="font-mono text-iso-text-primary">{{ host.fleet }}</span>
-            <Icon name="lucide:chevron-down" class="w-3 h-3 text-iso-text-muted" />
-          </button>
-          <div v-else class="flex items-center gap-2">
-            <select
-              v-model="newFleet"
-              class="flex-1 bg-iso-bg-base border border-iso-border-subtle rounded-iso-md px-3 py-2 text-xs font-mono text-iso-text-primary"
-            >
-              <option v-for="f in fleets.fleets" :key="f.name" :value="f.name">{{ f.name }}</option>
-            </select>
-            <Button size="sm" variant="outline" @click="applyFleet">Apply</Button>
-            <Button size="sm" variant="ghost" @click="editingFleet = false">Cancel</Button>
-          </div>
-          <p v-if="error" class="text-[11px] text-iso-error">{{ error }}</p>
-        </section>
+        <!-- kill-fleets: the per-host FLEET edit section is gone. Operators
+             now express grouping via agent labels (agent.toml `[labels]`)
+             and placement selectors instead. -->
 
         <!-- Settings: matches concept's "Force update cycle / Open shell / Decommission".
              Adds View stacks + Revoke cert (kept from existing flow; both useful). -->

@@ -39,7 +39,6 @@ async fn rule_inserted_then_push_delivers_proxy_config_to_registered_sender() {
             arch: "x86_64".into(),
             agent_version: "0.1.0-test".into(),
             docker_version: "27.4.0".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -52,7 +51,6 @@ async fn rule_inserted_then_push_delivers_proxy_config_to_registered_sender() {
 
     // Insert a routing rule for this host.
     inv.insert_routing_rule(InsertRoutingRule {
-        fleet: "default".into(),
         host_id,
         stack_id: None,
         service_name: "web".into(),
@@ -109,7 +107,6 @@ async fn unregister_sender_silences_subsequent_pushes() {
             arch: "x86_64".into(),
             agent_version: "0.1.0-test".into(),
             docker_version: "27.4.0".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -121,7 +118,6 @@ async fn unregister_sender_silences_subsequent_pushes() {
 
     // Insert a rule and push: with no registered sender, nothing should arrive.
     inv.insert_routing_rule(InsertRoutingRule {
-        fleet: "default".into(),
         host_id,
         stack_id: None,
         service_name: "api".into(),

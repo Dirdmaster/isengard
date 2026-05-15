@@ -1,7 +1,7 @@
 //! Derive the operator-visible container id from
 //! `sha256(host_id || "|" || runtime_container_id)[..8]` (16 hex chars).
 //!
-//! 64 bits of entropy. Collision-resistant per fleet. Stable: the same
+//! 64 bits of entropy. Collision-resistant per cluster. Stable: the same
 //! host + runtime id always hashes to the same id, so reconnects and
 //! agent restarts don't churn the row. Globally unique without
 //! depending on host-local id spaces (so `isd container inspect <id>`

@@ -209,7 +209,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0".into(),
                 docker_version: "27".into(),
-                fleet: "default".into(),
             })
             .await
             .unwrap();

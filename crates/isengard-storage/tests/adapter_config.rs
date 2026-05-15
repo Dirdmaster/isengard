@@ -15,7 +15,6 @@ async fn upsert_then_get_returns_config() {
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();

@@ -343,7 +343,7 @@ message WriteCompose {
   // agent does NOT parse it; behavior is driven by the explicit
   // `secrets` and `hooks` fields below.
   string manifest_toml   = 6;
-  // Phase 0.13: per-fleet secret names to mount into every service in
+  // Phase 0.13: per-stack secret names to mount into every service in
   // the stack. Values arrive via the v0.3.6 FetchSecret RPC.
   repeated string secrets = 7;
   // Phase 0.13: lifecycle hooks (pre-deploy, post-deploy, failure)

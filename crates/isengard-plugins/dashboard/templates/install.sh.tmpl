@@ -5,7 +5,6 @@ set -euo pipefail
 
 ISENGARD_CONTROLLER="{{controller_url}}"
 ISENGARD_TOKEN="{{token}}"
-ISENGARD_FLEET="{{fleet}}"
 ISENGARD_HOSTNAME="${ISENGARD_HOSTNAME:-{{hostname_or_default}}}"
 
 ARCH="$(uname -m)"
@@ -39,7 +38,6 @@ echo "Enrolling with controller..."
 "$INSTALL_DIR/isengard-agent" enroll \
   --controller "$ISENGARD_CONTROLLER" \
   --token "$ISENGARD_TOKEN" \
-  --fleet "$ISENGARD_FLEET" \
   ${ISENGARD_HOSTNAME:+--hostname "$ISENGARD_HOSTNAME"}
 
 echo "Installing systemd unit..."

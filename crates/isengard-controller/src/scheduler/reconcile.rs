@@ -150,7 +150,7 @@ impl Scheduler {
                 None,
                 serde_json::json!({
                     "selector": selector.map(|s| s.to_string()),
-                    "fleet_size": hosts.len(),
+                    "host_count": hosts.len(),
                 }),
             );
         }
@@ -366,7 +366,6 @@ mod tests {
         inv.enroll_host(EnrollHost {
             hostname: name.into(),
             fingerprint: format!("fp-{name}"),
-            fleet: "default".into(),
             os: "linux".into(),
             arch: "x86_64".into(),
             agent_version: "0.14".into(),

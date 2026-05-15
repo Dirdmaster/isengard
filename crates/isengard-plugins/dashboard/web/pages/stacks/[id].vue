@@ -145,7 +145,7 @@ const stackTabs = [
       <StackHeader
         :stack="stack"
         :host-hostname="host.hostname"
-        :fleet="host.fleet"
+        :fleet="''"
         :active-deployment="visibleDeployment"
         @force-update="forceUpdate"
         @abort-deploy="abortDeploy"
@@ -173,7 +173,7 @@ const stackTabs = [
           :stack="stack"
           :services="services"
           :recent-events="recentEvents"
-          :fleet="host.fleet"
+          :fleet="''"
           @expose="openExposeFor"
         />
         <StackComposeTab v-else-if="activeTab === 'compose'" :stack-id="stackId" />
@@ -188,7 +188,7 @@ const stackTabs = [
           :stack-id="stackId"
           :host-id="stack.host_id"
           :stack-name="stack.name"
-          :fleet="host.fleet"
+          :fleet="''"
         />
       </StackTabs>
     </div>

@@ -465,7 +465,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0".into(),
                 docker_version: "27".into(),
-                fleet: "default".into(),
             })
             .await
             .unwrap();
@@ -475,7 +474,6 @@ mod tests {
         }
 
         inv.insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id: host,
             stack_id: None,
             service_name: "svc".into(),
@@ -521,13 +519,11 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0".into(),
                 docker_version: "27".into(),
-                fleet: "default".into(),
             })
             .await
             .unwrap();
         inv.set_host_lan_ip(host, "10.0.0.5").await.unwrap();
         inv.insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id: host,
             stack_id: None,
             service_name: "svc".into(),

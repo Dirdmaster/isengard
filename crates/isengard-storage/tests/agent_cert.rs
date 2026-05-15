@@ -15,7 +15,6 @@ async fn make_host(inv: &Inventory) -> HostId {
         arch: "x86_64".into(),
         agent_version: "0.1".into(),
         docker_version: "27".into(),
-        fleet: "default".into(),
     })
     .await
     .unwrap()

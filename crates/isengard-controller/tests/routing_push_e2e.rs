@@ -23,14 +23,12 @@ async fn build_proxy_config_for_host_includes_rule() {
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
 
     let _r = inv
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id: host,
             stack_id: None,
             service_name: "web".into(),
@@ -62,7 +60,6 @@ async fn build_proxy_config_for_host_includes_rule() {
 
     // Adding another rule increments.
     inv.insert_routing_rule(InsertRoutingRule {
-        fleet: "default".into(),
         host_id: host,
         stack_id: None,
         service_name: "api".into(),

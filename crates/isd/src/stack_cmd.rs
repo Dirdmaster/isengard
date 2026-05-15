@@ -54,9 +54,6 @@ pub struct LsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
-    /// Filter by fleet.
-    #[arg(long)]
-    pub fleet: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -147,22 +144,14 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
     let stacks: Vec<StackApiRow> = fetch_json(
         &session,
-        &build_url(
-            session.controller_url(),
-            "/api/v1/stacks",
-            args.fleet.as_deref(),
-        ),
+        &format!("{}/api/v1/stacks", session.controller_url()),
     )
     .await?;
 
-    // Services for aggregation. Same fleet filter applied client-side.
+    // Services for aggregation.
     let services: Vec<ServiceApiRow> = fetch_json(
         &session,
-        &build_url(
-            session.controller_url(),
-            "/api/v1/services",
-            args.fleet.as_deref(),
-        ),
+        &format!("{}/api/v1/services", session.controller_url()),
     )
     .await?;
 
@@ -221,13 +210,6 @@ async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn build_url(base: &str, path: &str, fleet: Option<&str>) -> String {
-    match fleet {
-        Some(f) => format!("{base}{path}?fleet={f}"),
-        None => format!("{base}{path}"),
-    }
 }
 
 async fn fetch_json<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) -> Result<T> {
