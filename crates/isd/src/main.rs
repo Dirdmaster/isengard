@@ -28,6 +28,7 @@ mod credentials;
 mod gateway;
 mod hosts_cmd;
 mod index_cache;
+mod index_resolve;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
