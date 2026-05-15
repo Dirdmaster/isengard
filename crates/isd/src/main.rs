@@ -44,80 +44,48 @@ mod watch;
 #[derive(Parser, Debug)]
 #[command(
     name = "isd",
-    // Overridden to use the build-script-resolved version (git tag for
-    // CI builds, `git describe` for dev). The default `version` macro
-    // reads CARGO_PKG_VERSION, which is pinned at `0.1.0-alpha` in the
-    // workspace manifest and never bumped on release; that meant every
-    // `isd --version` printed the wrong thing after `isd update`.
     version = env!("ISENGARD_BUILD_VERSION"),
-    about = "Isengard operator CLI",
-    long_about = "Talk to an Isengard controller from your terminal: list \
-                  stacks, open services in a browser, tail logs. Configure \
-                  reachability via `isd context create --ssh <target>` (or \
-                  `--http <url>` for local dev)."
+    about = "Operate Docker fleets from your terminal",
 )]
 struct Cli {
-    /// Logging filter (e.g. "info", "debug,isd=trace"). Read from
-    /// `ISD_LOG` if not set.
+    /// Logging filter (e.g. "info", "debug,isd=trace").
     #[arg(long, global = true, env = "ISD_LOG")]
     log: Option<String>,
 
-    /// Use a specific saved context (defaults to the credentials file's
-    /// `default_context`). Useful when you have multiple controllers.
+    /// Use a specific saved context.
     #[arg(long, global = true)]
     context: Option<String>,
 
-    /// Subcommand. Optional in Phase 0.18: bare `isd` invokes
-    /// `Ps` with default flags so the operator gets a docker-style
-    /// container list with zero ceremony. Override default-and-document
-    /// table entry in the spec.
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Manage saved controller contexts. SSH-backed contexts tunnel the
-    /// dashboard port via `~/.ssh/config`; HTTP contexts target a
-    /// directly-reachable URL.
+    /// Manage saved controller contexts.
     #[command(subcommand)]
     Context(context::ContextCommand),
-    /// List stacks + services across all hosts in the saved context.
+    /// List containers.
     Ps(ps::PsArgs),
-    /// Open the stack's primary `expose.host` in the OS default browser.
+    /// Open a stack in the browser.
     Open(open_cmd::OpenArgs),
-    /// Tail logs for `<stack>/<service>` over the controller WebSocket.
+    /// Tail container logs.
     Logs(logs::LogsArgs),
-    /// v0.3.6: manage Isengard-managed secrets. `put` upserts, `list`
-    /// shows names only (no values), `rm` deletes.
+    /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
-    /// Manage routing rules. `list` / `create` / `rm`. Most rules come from
-    /// stack compose.yaml `expose.host` annotations; this surface is for
-    /// non-stack routes (e.g., the controller dashboard) and ad-hoc edits.
+    /// Manage routing rules.
     #[command(subcommand)]
     Route(route::RouteCommand),
-    /// Inspect enrolled hosts. `list` prints a kubectl-style table with
-    /// host ULID, hostname, enrolled timestamp, and fleet. Without this
-    /// the canonical Crockford ULID for a host was only recoverable by
-    /// dumping the controller's SQLite by hand: wave 5.B polish.
+    /// Inspect enrolled hosts.
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
-    /// v0.5.2: self-update the operator CLI. Detects the latest GitHub
-    /// release for the host triple (macOS aarch64/x86_64, Linux musl
-    /// x86_64/aarch64), verifies sha256 against the release manifest,
-    /// and atomic-renames the new binary onto the running executable.
-    /// Doesn't restart anything: isd is one-shot, the next invocation
-    /// picks up the new binary.
+    /// Self-update isd.
     Update(update_cmd::UpdateArgs),
-    /// Phase 0.18: stack subcommands (`ls`, `ps <name>`, plus the
-    /// canonical home of deploy/diff/edit/manifest). Mirrors
-    /// `docker stack`. Top-level `isd deploy` etc. keep working with a
-    /// deprecation hint for one release.
+    /// Deploy, diff, edit, inspect stacks.
     #[command(subcommand)]
     Stack(stack_cmd::StackCommand),
-    /// Phase 0.18: service subcommands. Today: `ls` for a flat view of
-    /// every service across every stack. Mirrors `docker service`.
+    /// List services across stacks.
     #[command(subcommand)]
     Service(service_cmd::ServiceCommand),
 }

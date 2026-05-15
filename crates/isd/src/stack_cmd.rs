@@ -34,23 +34,17 @@ pub struct StackArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum StackCommand {
-    /// List every stack across the saved context's fleet. Renders a
-    /// kubectl-style ASCII table with services and hosts counts plus an
-    /// aggregate STATE derived from each service's last-seen state.
+    /// List stacks.
     Ls(LsArgs),
-    /// Services in the named stack. Mirrors `docker stack ps`.
+    /// List services in a stack.
     Ps(PsArgs),
-    /// Ship a stack to the controller. Alias of the top-level
-    /// `isd deploy`; lives here for docker-parity discoverability.
+    /// Deploy a stack from compose.yaml.
     Deploy(DeployArgs),
-    /// Show the reconcile plan for a proposed compose.yaml. Alias of
-    /// the top-level `isd diff`.
+    /// Show the reconcile plan for a compose.yaml.
     Diff(DiffArgs),
-    /// Open the stack's compose.yaml in `$EDITOR` and apply on save.
-    /// Alias of the top-level `isd edit`.
+    /// Open compose.yaml in $EDITOR and apply on save.
     Edit(EditArgs),
-    /// View + edit a deployed stack's `stack.toml`. Alias of the
-    /// top-level `isd manifest`.
+    /// View and edit a stack's stack.toml.
     #[command(subcommand)]
     Manifest(ManifestCommand),
 }
@@ -60,16 +54,14 @@ pub struct LsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
-    /// Optional fleet filter, mirrors `GET /api/v1/stacks?fleet=`.
+    /// Filter by fleet.
     #[arg(long)]
     pub fleet: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct PsArgs {
-    /// Stack name. The controller has no `?name=` filter on stacks, so
-    /// the client fetches the stack list and resolves the id from the
-    /// name client-side, then calls `?stack_id=` on services.
+    /// Stack name.
     pub name: String,
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]

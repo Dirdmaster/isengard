@@ -41,13 +41,10 @@ use crate::session::Session;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum Scope {
-    /// Apply to the currently-selected (or `--context`-overridden) fleet
-    /// only. No fan-out. This is the v0.3.6 behaviour.
+    /// Apply to the current fleet only.
     #[default]
     Fleet,
-    /// Apply to every fleet in `~/.config/isengard/credentials.toml`. Each
-    /// controller gets its own encrypted copy. Best-effort: per-fleet
-    /// failures are reported in a summary line; the run does not abort.
+    /// Apply to every saved fleet.
     Global,
 }
 
@@ -59,30 +56,22 @@ pub struct SecretArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
-    /// Upsert a secret value. Reads from stdin by default; `--from-file`
-    /// reads the named file. The value is encrypted by the controller
-    /// before it touches disk.
+    /// Upsert a secret value.
     Put(PutArgs),
-    /// List secret names + timestamps. NEVER prints values: secrets are
-    /// write-only from the operator's CLI.
+    /// List secret names (never values).
     List(ListArgs),
-    /// Delete a secret by name. Idempotent in spirit but errors if the
-    /// name doesn't exist (so a typo doesn't silently no-op).
+    /// Delete a secret.
     Rm(RmArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct PutArgs {
-    /// Secret name. Allowed chars: `[A-Za-z0-9._-]`, max 64.
+    /// Secret name.
     pub name: String,
-    /// Read the value from this file. Mutually exclusive with stdin.
-    /// When omitted, the value is read from stdin (must not be a TTY).
+    /// Read the value from this file (defaults to stdin).
     #[arg(long)]
     pub from_file: Option<PathBuf>,
-    /// Where the secret lands. `fleet` (default) writes to the current
-    /// `--context`; `global` writes to every saved context, encrypted
-    /// per-fleet under each controller's master.key. Best-effort: a
-    /// summary line at the end names per-context failures.
+    /// Apply to one fleet or every saved fleet.
     #[arg(long, value_enum, default_value_t = Scope::Fleet)]
     pub scope: Scope,
 }
@@ -91,23 +80,14 @@ pub struct PutArgs {
 pub struct RmArgs {
     /// Secret name to delete.
     pub name: String,
-    /// Where the deletion applies. `fleet` (default) removes from the
-    /// current `--context`; `global` removes from every saved context.
-    /// Best-effort: per-context misses (404) are reported but don't fail
-    /// the run, since "remove everywhere" is naturally idempotent.
+    /// Apply to one fleet or every saved fleet.
     #[arg(long, value_enum, default_value_t = Scope::Fleet)]
     pub scope: Scope,
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Where the listing reads from. `fleet` (default) lists secrets in
-    /// the current `--context`; `global` aggregates across every saved
-    /// context, marking each name as `global` (present in every fleet
-    /// with the same name), `fleet` (only one fleet has it), or
-    /// `partial` (some fleets have it, others don't). Per-context fetch
-    /// errors are reported on stderr and the context is omitted from
-    /// aggregation.
+    /// List secrets in one fleet or every saved fleet.
     #[arg(long, value_enum, default_value_t = Scope::Fleet)]
     pub scope: Scope,
 }

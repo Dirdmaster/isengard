@@ -1,10 +1,9 @@
 //! `isd context create | use | list | rm | show`.
 //!
-//! Replaces the old `isd login` command. Each context records a
-//! [`Backend`](crate::credentials::Backend) — either an HTTP URL the
-//! operator can reach directly, or an SSH target whose `~/.ssh/config`
-//! handles authentication and the controller's dashboard port is
-//! tunneled per-command. Modeled on `docker context create`.
+//! Each context records a [`Backend`](crate::credentials::Backend): either
+//! an HTTP URL the operator can reach directly, or an SSH target whose
+//! `~/.ssh/config` handles authentication and the controller's dashboard
+//! port is tunneled per-command. Modeled on `docker context create`.
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand};
@@ -20,59 +19,40 @@ pub struct ContextArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
-    /// Save a new context. Choose `--ssh` for remote homelabs (the
-    /// canonical path) or `--http` for local dev / direct-reachable
-    /// dashboards.
+    /// Save a new context.
     Create(CreateArgs),
-    /// Set the default context. Subsequent `isd` commands without
-    /// `--context <name>` use this one.
+    /// Set the default context.
     Use(UseArgs),
-    /// Show every saved context, with the default one starred.
+    /// Show every saved context.
     List,
-    /// Delete a context. Idempotent: errors if the name doesn't exist
-    /// (so a typo doesn't silently no-op).
+    /// Delete a context.
     Rm(RmArgs),
-    /// Print one context's full backend details. Defaults to the
-    /// current default if no name is given.
+    /// Print one context's full backend details.
     Show(ShowArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CreateArgs {
-    /// Context name. Used in `--context <name>` and as the key in the
-    /// credentials file. Allowed chars: `[A-Za-z0-9._-]{1,64}`.
+    /// Context name.
     pub name: String,
 
-    /// SSH target: anything `ssh` understands. Examples:
-    /// `dirdmaster@10.17.0.125`, `lausanne` (resolved via
-    /// `~/.ssh/config`), `user@host:2222`. Mutually exclusive with
-    /// `--http`.
+    /// SSH target (e.g. user@host).
     #[arg(long, conflicts_with = "http")]
     pub ssh: Option<String>,
 
-    /// HTTP/HTTPS URL of the dashboard, including scheme and port.
-    /// Example: `http://127.0.0.1:9418`. Mutually exclusive with
-    /// `--ssh`.
+    /// Dashboard URL (e.g. http://127.0.0.1:9418).
     #[arg(long, conflicts_with = "ssh")]
     pub http: Option<String>,
 
-    /// Dashboard port on the remote (SSH backend only). The tunnel
-    /// forwards `127.0.0.1:<dashboard-port>` on the remote to a local
-    /// ephemeral port for each `isd` command.
+    /// Remote dashboard port to forward over SSH.
     #[arg(long, default_value_t = 9418, requires = "ssh")]
     pub dashboard_port: u16,
 
-    /// Set this context as the default after creating it. Without this
-    /// flag, the first context created becomes the default; subsequent
-    /// `create` invocations leave the default alone.
+    /// Set as the default context.
     #[arg(long)]
     pub r#use: bool,
 
-    /// Phase 0.20: Docker endpoint for direct-bollard access. Accepts
-    /// `ssh://user@host`, `tcp://host:port`, or `unix:///path`. When
-    /// set, `isd ps --backend docker` (Phase 0.20) and the default
-    /// container surface (Phase 0.21) use this instead of going through
-    /// the Isengard controller's REST API.
+    /// Docker endpoint (ssh://, tcp://, unix://, or local).
     #[arg(long)]
     pub docker: Option<String>,
 }
@@ -90,7 +70,7 @@ pub struct RmArgs {
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
-    /// Context name to print. Defaults to the file's `default_context`.
+    /// Context name to print (defaults to current).
     pub name: Option<String>,
 }
 

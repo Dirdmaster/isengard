@@ -27,60 +27,39 @@ use crate::watch;
 
 #[derive(Debug, Args)]
 pub struct DeployArgs {
-    /// Path to a local compose file, or a directory containing a
-    /// `stack.toml` (Phase 0.13). Optional: when omitted, `isd deploy`
-    /// looks for `./stack.toml` in the current directory. Use `-` to
-    /// read a compose from stdin (legacy single-file path).
+    /// Path to compose file or directory with stack.toml.
     pub path: Option<PathBuf>,
-    /// Stack name override. Defaults to the file's parent directory
-    /// (legacy single-file path) or to `manifest.name` (Phase 0.13).
+    /// Stack name override.
     #[arg(long)]
     pub stack: Option<String>,
-    /// Target host ULID for first-time deploys. Optional: when omitted
-    /// and exactly one host is enrolled (the homelab single-host case),
-    /// the controller auto-picks. Ignored on subsequent deploys (the
-    /// stack already has a host).
+    /// Target host ULID for first-time deploys.
     #[arg(long)]
     pub host_id: Option<String>,
-    /// Skip the interactive y/N prompt. CI and scripted use.
+    /// Skip the interactive y/N prompt.
     #[arg(long)]
     pub yes: bool,
-    /// Force overwrite even when the on-disk file has drifted from the
-    /// hash the dashboard / controller last saw. Dangerous: blows away
-    /// concurrent operator edits.
+    /// Force overwrite even on hash drift.
     #[arg(long)]
     pub force: bool,
-    /// Phase 0.13: walk immediate subdirs of cwd (or `--root`) and
-    /// deploy every dir containing a `stack.toml`. Sequential, lexical
-    /// order. Sane failure semantics: continue on per-stack failure,
-    /// report at the end (override with `--fail-fast`).
+    /// Deploy every subdir containing a stack.toml.
     #[arg(long)]
     pub all: bool,
-    /// Phase 0.13: walk root for `--all`. Defaults to cwd.
+    /// Root for --all (defaults to cwd).
     #[arg(long, requires = "all")]
     pub root: Option<PathBuf>,
-    /// Phase 0.13: select a named `[overlays.<name>]` block from the
-    /// manifest. Applies after the base `compose = [...]` list.
+    /// Apply a named overlay from the manifest.
     #[arg(long)]
     pub overlay: Option<String>,
-    /// Phase 0.13: override the manifest's `strategy` for this run.
-    /// Doesn't persist to the manifest.
+    /// Override the manifest's strategy for this run.
     #[arg(long)]
     pub strategy: Option<String>,
-    /// Phase 0.13: with `--all`, stop at the first failing stack.
-    /// Default is "continue, report at the end".
+    /// With --all, stop at the first failing stack.
     #[arg(long)]
     pub fail_fast: bool,
-    /// Phase 0.13: dry-run; print the plan for each affected stack and
-    /// exit without writing. Same as `isd diff <stack>` but for `--all`.
+    /// Print the plan and exit without applying.
     #[arg(long)]
     pub diff: bool,
-    /// v0.5.2: stream per-service state transitions until every service
-    /// reaches a terminal state. ON by default. Pass `--detach` to
-    /// revert to the pre-v0.5.2 fire-and-forget shape. Polls
-    /// `GET /api/v1/services?stack_id=...` every 1s and renders one
-    /// cliclack line per observed transition. Ctrl+C detaches without
-    /// canceling the deploy on the agent side.
+    /// Don't stream state transitions after deploy.
     #[arg(long)]
     pub detach: bool,
 }
@@ -95,22 +74,17 @@ impl DeployArgs {
 
 #[derive(Debug, Args)]
 pub struct DiffArgs {
-    /// Stack name (matches the compose project / `isengard.stack` label).
+    /// Stack name.
     pub stack: String,
-    /// Optional path to a local compose.yaml. When set, diff `path` vs
-    /// the controller's stored copy. When omitted, diff the controller's
-    /// copy vs an empty compose (i.e. "what would isd apply on an empty
-    /// file remove?").
+    /// Optional local compose.yaml to diff against.
     pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct EditArgs {
-    /// Stack name. The current compose.yaml is fetched into a temp
-    /// file, opened in `$EDITOR` (default `vi`), and applied on save.
+    /// Stack name.
     pub stack: String,
-    /// Skip the interactive y/N prompt after the editor exits. Useful
-    /// for `EDITOR='sed -i ...' isd edit hello --yes`.
+    /// Skip the y/N prompt after the editor exits.
     #[arg(long)]
     pub yes: bool,
 }
