@@ -11,7 +11,12 @@ use console::Style;
 /// Groups in render order. Every top-level subcommand must appear in
 /// exactly one group (enforced by [`coverage`] in tests).
 pub const GROUPS: &[(&str, &[&str])] = &[
-    ("Containers", &["ps", "logs"]),
+    (
+        "Containers",
+        &[
+            "ps", "logs", "stop", "start", "restart", "rm", "kill",
+        ],
+    ),
     ("Stacks", &["stack", "open"]),
     ("Fleet", &["hosts", "service", "route", "secret"]),
     ("Setup", &["context", "update"]),
