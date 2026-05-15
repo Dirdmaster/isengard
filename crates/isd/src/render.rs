@@ -168,6 +168,94 @@ fn pad(text: &str, width: usize, align: Align) -> String {
     }
 }
 
+/// Truncate `text` to at most `max` display columns. Generic strings
+/// middle-truncate (`ab...ij`). When `is_image` is true, the suffix is
+/// preserved instead (`...isengard-agent:next`): for an image ref the
+/// tag end is the meaningful part, the registry prefix is droppable.
+fn truncate_cell(text: &str, max: usize, is_image: bool) -> String {
+    let w = console::measure_text_width(text);
+    if w <= max {
+        return text.to_string();
+    }
+    if max <= 3 {
+        return ".".repeat(max);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if is_image {
+        // Keep the last `max - 3` chars, prefix with "...".
+        let keep = max - 3;
+        let tail: String = chars[chars.len() - keep..].iter().collect();
+        format!("...{tail}")
+    } else {
+        // Middle-truncate: head + "..." + tail.
+        let budget = max - 3;
+        let head_len = budget.div_ceil(2);
+        let tail_len = budget - head_len;
+        let head: String = chars[..head_len].iter().collect();
+        let tail: String = chars[chars.len() - tail_len..].iter().collect();
+        format!("{head}...{tail}")
+    }
+}
+
+/// Decide the rendered width of each column given a terminal cap.
+/// Returns one width per column. If the natural layout fits, returns
+/// natural widths unchanged. Otherwise shrinks columns starting from
+/// the lowest `shrink_priority`, each down to its `min_width`. If the
+/// table still does not fit (every column at its min and the sum of
+/// minimums + chrome still exceeds `term_width`), keeps shrinking
+/// past min in the same priority order down to 1: a tiny terminal
+/// gets a usable (heavily-truncated) table instead of a wrapped one.
+fn fit_widths(table: &Table, term_width: usize) -> Vec<usize> {
+    let mut widths = natural_widths(table);
+    let n = widths.len();
+    // Chrome per column: 2 spaces padding + 1 border char, plus the
+    // leading border char.
+    let chrome = n * 3 + 1;
+    let total = |w: &[usize]| -> usize { w.iter().sum::<usize>() + chrome };
+
+    if total(&widths) <= term_width {
+        return widths;
+    }
+
+    // Column indices ordered by shrink_priority ascending (shrink the
+    // lowest-priority columns first).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| table.columns[i].shrink_priority);
+
+    // Pass 1: shrink down to min_width.
+    for &i in &order {
+        if total(&widths) <= term_width {
+            break;
+        }
+        let min = table.columns[i].min_width;
+        if widths[i] <= min {
+            continue;
+        }
+        let overflow = total(&widths) - term_width;
+        let reclaimable = widths[i] - min;
+        let take = overflow.min(reclaimable);
+        widths[i] -= take;
+    }
+
+    // Pass 2: still too wide? Shrink past min_width down to 1. A user
+    // with a 40-col terminal still gets a parseable table.
+    if total(&widths) > term_width {
+        for &i in &order {
+            if total(&widths) <= term_width {
+                break;
+            }
+            if widths[i] <= 1 {
+                continue;
+            }
+            let overflow = total(&widths) - term_width;
+            let reclaimable = widths[i] - 1;
+            let take = overflow.min(reclaimable);
+            widths[i] -= take;
+        }
+    }
+    widths
+}
+
 /// Apply the column's `CellStyle` to already-padded cell text. Borders
 /// are styled by the caller via [`dim_border`]. When `color` is false
 /// the text is returned unchanged. The caller's `color` flag is
@@ -210,9 +298,10 @@ fn dim_border(line: &str, color: bool) -> String {
 }
 
 /// Render the table as a boxed string. `term_width` caps the total
-/// width (enforced in Task 5); `color` toggles ANSI styling.
-pub fn render(table: &Table, _term_width: usize, color: bool) -> String {
-    let widths = natural_widths(table);
+/// width (shrinks low-priority columns then middle-truncates with
+/// `...`); `color` toggles ANSI styling.
+pub fn render(table: &Table, term_width: usize, color: bool) -> String {
+    let widths = fit_widths(table, term_width);
     let mut out = String::new();
 
     out.push_str(&dim_border(&border_line(&widths, TL, T_DOWN, TR), color));
@@ -222,7 +311,8 @@ pub fn render(table: &Table, _term_width: usize, color: bool) -> String {
     // box itself, not the column's data style.
     out.push_str(&dim_border(&V.to_string(), color));
     for (i, col) in table.columns.iter().enumerate() {
-        let padded = pad(col.header, widths[i], col.align);
+        let truncated = truncate_cell(col.header, widths[i], false);
+        let padded = pad(&truncated, widths[i], col.align);
         let cell = if color {
             console::Style::new()
                 .force_styling(true)
@@ -243,7 +333,9 @@ pub fn render(table: &Table, _term_width: usize, color: bool) -> String {
     for row in &table.rows {
         out.push_str(&dim_border(&V.to_string(), color));
         for (i, col) in table.columns.iter().enumerate() {
-            let padded = pad(&row[i], widths[i], col.align);
+            let is_image = col.header == "IMAGE";
+            let truncated = truncate_cell(&row[i], widths[i], is_image);
+            let padded = pad(&truncated, widths[i], col.align);
             out.push(' ');
             out.push_str(&style_cell(&padded, &row[i], col.style, color));
             out.push(' ');
@@ -323,6 +415,47 @@ mod tests {
             widths.windows(2).all(|w| w[0] == w[1]),
             "all rendered lines share one width: {widths:?}"
         );
+    }
+
+    #[test]
+    fn truncate_middle_preserves_both_ends() {
+        assert_eq!(truncate_cell("abcdefghij", 7, false), "ab...ij");
+        // Already short enough: unchanged.
+        assert_eq!(truncate_cell("abc", 7, false), "abc");
+        // Image refs preserve the meaningful suffix (tag end). `max` is
+        // the total budget including the leading ellipsis: keep is
+        // `max - 3` tail chars.
+        assert_eq!(
+            truncate_cell("ghcr.io/weavers/isengard-agent:next", 20, true),
+            "...engard-agent:next"
+        );
+        assert_eq!(
+            console::measure_text_width(&truncate_cell(
+                "ghcr.io/weavers/isengard-agent:next",
+                20,
+                true
+            )),
+            20
+        );
+    }
+
+    #[test]
+    fn render_shrinks_to_terminal_width() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        // A width far below natural: every rendered line must fit.
+        let out = render(&table, 50, false);
+        for line in out.lines() {
+            assert!(
+                console::measure_text_width(line) <= 50,
+                "line exceeds term width 50: {line:?} ({})",
+                console::measure_text_width(line)
+            );
+        }
+        // Low-priority columns (PORTS, IMAGE) truncate before STATUS / #.
+        assert!(out.contains("..."), "something was truncated");
     }
 
     #[test]
