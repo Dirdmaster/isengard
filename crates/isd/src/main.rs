@@ -79,6 +79,10 @@ enum Command {
     Logs(logs::LogsArgs),
     /// Stop one or more containers by ID, name, or index from `isd ps`.
     Stop(lifecycle_cmd::StopArgs),
+    /// Start one or more containers.
+    Start(lifecycle_cmd::StartArgs),
+    /// Restart one or more containers.
+    Restart(lifecycle_cmd::RestartArgs),
     /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
@@ -128,6 +132,8 @@ async fn main() {
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
         Command::Stop(args) => lifecycle_cmd::run_stop(args, cli.context.as_deref()).await,
+        Command::Start(args) => lifecycle_cmd::run_start(args, cli.context.as_deref()).await,
+        Command::Restart(args) => lifecycle_cmd::run_restart(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
         }

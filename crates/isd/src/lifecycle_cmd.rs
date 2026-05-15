@@ -37,6 +37,49 @@ pub async fn run_stop(args: StopArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Args)]
+pub struct StartArgs {
+    /// One or more container IDs, names, or index selectors.
+    #[arg(required = true)]
+    pub targets: Vec<String>,
+}
+
+pub async fn run_start(args: StartArgs, context: Option<&str>) -> Result<()> {
+    let targets = index_resolve::resolve(&args.targets)?;
+    let backend = ps::open_docker_backend(context).await?;
+    for t in &targets {
+        backend
+            .start_container(&t.container_id)
+            .await
+            .with_context(|| format!("start {} ({})", t.name, t.container_id))?;
+        println!("{} started", t.name);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Args)]
+pub struct RestartArgs {
+    /// One or more container IDs, names, or index selectors.
+    #[arg(required = true)]
+    pub targets: Vec<String>,
+    /// Grace period in seconds before SIGKILL. Matches `docker restart --time`.
+    #[arg(short = 't', long, default_value_t = 10)]
+    pub time: i64,
+}
+
+pub async fn run_restart(args: RestartArgs, context: Option<&str>) -> Result<()> {
+    let targets = index_resolve::resolve(&args.targets)?;
+    let backend = ps::open_docker_backend(context).await?;
+    for t in &targets {
+        backend
+            .restart_container(&t.container_id, args.time)
+            .await
+            .with_context(|| format!("restart {} ({})", t.name, t.container_id))?;
+        println!("{} restarted", t.name);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// Spin up a container, run isd stop against its index, verify it
