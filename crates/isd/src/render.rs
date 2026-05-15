@@ -168,47 +168,91 @@ fn pad(text: &str, width: usize, align: Align) -> String {
     }
 }
 
+/// Apply the column's `CellStyle` to already-padded cell text. Borders
+/// are styled by the caller via [`dim_border`]. When `color` is false
+/// the text is returned unchanged. The caller's `color` flag is
+/// authoritative: `force_styling(true)` bypasses the global TTY check
+/// so a piped-and-explicitly-colored render still emits ANSI.
+fn style_cell(padded: &str, raw: &str, style: CellStyle, color: bool) -> String {
+    if !color {
+        return padded.to_string();
+    }
+    use console::Style;
+    let mk = || Style::new().force_styling(true);
+    let styled = match style {
+        CellStyle::Dim => mk().dim().apply_to(padded).to_string(),
+        CellStyle::Plain => padded.to_string(),
+        CellStyle::Emphasis => mk().bold().apply_to(padded).to_string(),
+        CellStyle::State => {
+            let s = match classify_status(raw) {
+                StatusColor::Green => mk().green(),
+                StatusColor::Yellow => mk().yellow(),
+                StatusColor::Red => mk().red(),
+                StatusColor::Grey => mk().dim(),
+            };
+            s.apply_to(padded).to_string()
+        }
+    };
+    styled
+}
+
+/// Dim a border line when `color` is on; pass through otherwise.
+fn dim_border(line: &str, color: bool) -> String {
+    if color {
+        console::Style::new()
+            .force_styling(true)
+            .dim()
+            .apply_to(line)
+            .to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 /// Render the table as a boxed string. `term_width` caps the total
-/// width (see Task 5 for shrink/truncate); `color` toggles ANSI
-/// styling (see Task 4). This task implements layout only: `color` is
-/// accepted but ignored until Task 4, and `term_width` is accepted but
-/// not yet enforced until Task 5.
-pub fn render(table: &Table, _term_width: usize, _color: bool) -> String {
+/// width (enforced in Task 5); `color` toggles ANSI styling.
+pub fn render(table: &Table, _term_width: usize, color: bool) -> String {
     let widths = natural_widths(table);
     let mut out = String::new();
 
-    // Top border.
-    out.push_str(&border_line(&widths, TL, T_DOWN, TR));
+    out.push_str(&dim_border(&border_line(&widths, TL, T_DOWN, TR), color));
     out.push('\n');
 
-    // Header row.
-    out.push(V);
+    // Header row: headers always render with the Dim treatment of the
+    // box itself, not the column's data style.
+    out.push_str(&dim_border(&V.to_string(), color));
     for (i, col) in table.columns.iter().enumerate() {
-        out.push(' ');
-        out.push_str(&pad(col.header, widths[i], col.align));
-        out.push(' ');
-        out.push(V);
+        let padded = pad(col.header, widths[i], col.align);
+        let cell = if color {
+            console::Style::new()
+                .force_styling(true)
+                .dim()
+                .apply_to(format!(" {padded} "))
+                .to_string()
+        } else {
+            format!(" {padded} ")
+        };
+        out.push_str(&cell);
+        out.push_str(&dim_border(&V.to_string(), color));
     }
     out.push('\n');
 
-    // Header rule.
-    out.push_str(&border_line(&widths, T_RIGHT, CROSS, T_LEFT));
+    out.push_str(&dim_border(&border_line(&widths, T_RIGHT, CROSS, T_LEFT), color));
     out.push('\n');
 
-    // Data rows.
     for row in &table.rows {
-        out.push(V);
+        out.push_str(&dim_border(&V.to_string(), color));
         for (i, col) in table.columns.iter().enumerate() {
+            let padded = pad(&row[i], widths[i], col.align);
             out.push(' ');
-            out.push_str(&pad(&row[i], widths[i], col.align));
+            out.push_str(&style_cell(&padded, &row[i], col.style, color));
             out.push(' ');
-            out.push(V);
+            out.push_str(&dim_border(&V.to_string(), color));
         }
         out.push('\n');
     }
 
-    // Bottom border.
-    out.push_str(&border_line(&widths, BL, T_UP, BR));
+    out.push_str(&dim_border(&border_line(&widths, BL, T_UP, BR), color));
     out
 }
 
@@ -279,6 +323,23 @@ mod tests {
             widths.windows(2).all(|w| w[0] == w[1]),
             "all rendered lines share one width: {widths:?}"
         );
+    }
+
+    #[test]
+    fn render_with_color_emits_ansi_for_styled_columns() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let colored = render(&table, 200, true);
+        let plain = render(&table, 200, false);
+        // Color path emits ANSI escape bytes; the no-color path does not.
+        assert!(colored.contains('\u{1b}'), "color=true emits ANSI");
+        assert!(!plain.contains('\u{1b}'), "color=false emits no ANSI");
+        // Display width is unchanged by styling (ANSI is zero-width).
+        let cw: Vec<usize> = colored.lines().map(console::measure_text_width).collect();
+        let pw: Vec<usize> = plain.lines().map(console::measure_text_width).collect();
+        assert_eq!(cw, pw, "ANSI styling does not change display width");
     }
 
     #[test]
