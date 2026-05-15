@@ -105,6 +105,20 @@ pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
 pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     info!(state_dir = ?opts.state_dir, "starting agent");
 
+    // kill-fleets (0.15): the fleet concept has been removed. Existing
+    // installs that set `ISENGARD_FLEET` get a one-time warning so the
+    // operator can migrate to host labels (agent.toml `[labels]` /
+    // placement selectors `where = "fleet==lab"`). The env var is
+    // otherwise ignored. Drop this warning in the next release.
+    if std::env::var("ISENGARD_FLEET").is_ok() {
+        tracing::warn!(
+            "ISENGARD_FLEET is set but the fleet concept has been removed. \
+            Use host labels via /etc/isengard/agent.toml `[labels]` and \
+            placement selectors instead. This warning will be removed in \
+            the next release."
+        );
+    }
+
     // Make sure state_dir exists before the cert store / agent.json writes
     // hit it. The CLI also does this, but other entry points (tests) may not.
     std::fs::create_dir_all(&opts.state_dir)

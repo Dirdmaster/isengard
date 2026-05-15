@@ -66,7 +66,6 @@ async fn blue_green_happy_path_drains_blue_destroys_blue_and_serves_green() {
             arch: "x86_64".into(),
             agent_version: "0.1.0".into(),
             docker_version: "24.0".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -139,7 +138,6 @@ async fn blue_green_happy_path_drains_blue_destroys_blue_and_serves_green() {
     };
     let _rule = inv
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id,
             stack_id: Some(stack_id),
             service_name: "web".into(),
