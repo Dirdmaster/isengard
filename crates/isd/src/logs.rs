@@ -17,12 +17,6 @@ pub struct LogsArgs {
     /// Target as `<stack>/<service>`. The stack is resolved by name; the
     /// service is the container name inside that stack.
     pub target: String,
-
-    /// Follow new log lines. v0.3a always follows; this flag is reserved
-    /// for forward compatibility with `--no-follow` once tail-only mode
-    /// makes sense.
-    #[arg(short = 'f', long, default_value_t = true)]
-    pub follow: bool,
 }
 
 #[derive(Debug, Deserialize)]

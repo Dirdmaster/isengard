@@ -232,9 +232,6 @@ fn default_command() -> Command {
         no_trunc: false,
         filters: Vec::new(),
         format: "table".into(),
-        legacy: false,
-        json: false,
-        fleet: None,
     })
 }
 
