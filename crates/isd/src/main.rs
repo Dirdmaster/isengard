@@ -29,6 +29,7 @@ mod help_render;
 mod hosts_cmd;
 mod index_cache;
 mod index_resolve;
+mod lifecycle_cmd;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
@@ -76,6 +77,8 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail container logs.
     Logs(logs::LogsArgs),
+    /// Stop one or more containers by ID, name, or index from `isd ps`.
+    Stop(lifecycle_cmd::StopArgs),
     /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
@@ -124,6 +127,7 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
+        Command::Stop(args) => lifecycle_cmd::run_stop(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
         }
