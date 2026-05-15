@@ -332,11 +332,6 @@ mod tests {
             name: "wordpress".into(),
             source: StackSource::Compose,
             discovered_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
-            manifest_toml: None,
-            manifest_sha256: None,
-            manifest_imported_at: None,
-            deploy_strategy: None,
-            manifest_fleet: None,
         };
 
         let dto: StackDto = s.into();

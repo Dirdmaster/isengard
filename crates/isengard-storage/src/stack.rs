@@ -57,23 +57,6 @@ pub struct Stack {
     pub name: String,
     pub source: StackSource,
     pub discovered_at: DateTime<Utc>,
-    /// Phase 0.13: verbatim `stack.toml`. NULL for legacy compose-only stacks.
-    #[serde(default)]
-    pub manifest_toml: Option<String>,
-    /// Phase 0.13: sha256 hex of `manifest_toml`. NULL when manifest absent.
-    #[serde(default)]
-    pub manifest_sha256: Option<String>,
-    /// Phase 0.13: RFC3339 timestamp when the manifest was last written.
-    #[serde(default)]
-    pub manifest_imported_at: Option<String>,
-    /// Phase 0.13: stack-level deploy strategy override. NULL means the
-    /// per-service phase 10g labels drive behavior.
-    #[serde(default)]
-    pub deploy_strategy: Option<String>,
-    /// Phase 0.13: fleet name captured from the manifest. NULL when the
-    /// stack predates the manifest or the manifest didn't pin a fleet.
-    #[serde(default)]
-    pub manifest_fleet: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,21 +77,10 @@ pub struct StackComposeRow {
     pub imported_at: String,
 }
 
-/// Phase 0.13: full manifest read-back for `GET /api/v1/stacks/<id>`.
-///
-/// Track A teardown (2026-05-15): the lifecycle hooks bundle field is
-/// gone (Task 5); the manifest column reads survive one more commit so
-/// the dashboard's GET /stacks/:id response shape stays stable while
-/// the storage migration (Task 8) is in flight.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StackManifestBundle {
-    pub manifest_toml: Option<String>,
-    pub manifest_sha256: Option<String>,
-    pub manifest_imported_at: Option<String>,
-    pub deploy_strategy: Option<String>,
-    pub manifest_fleet: Option<String>,
-    pub secrets: Vec<String>,
-}
+/// Track A teardown (2026-05-15): the manifest bundle is gone. Stack
+/// secret bindings (the only piece that survives) are read via
+/// `list_stack_secrets`; callers that used to consume StackManifestBundle
+/// either drop the call or switch to the secret-only accessor.
 
 #[cfg(test)]
 mod tests {

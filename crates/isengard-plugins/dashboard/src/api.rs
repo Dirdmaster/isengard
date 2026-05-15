@@ -552,48 +552,22 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
         }
     };
-    // Track A teardown (2026-05-15): the manifest bundle no longer
-    // exposes a hooks slice. The manifest TOML / sha / fleet / strategy
-    // columns survive one more commit; Task 8 drops them. `secrets:`
-    // is informational only, populated from the compose body's native
-    // top-level `secrets:` block via stack_secrets.
-    let bundle = handles
+    // Track A teardown (2026-05-15): the manifest layer is gone; the
+    // GET /stacks/:id response no longer carries manifest_toml /
+    // sha256 / imported_at / fleet / deploy_strategy. The `secrets`
+    // field stays: it lists per-fleet secret names bound to this stack
+    // (populated from the compose body's native top-level `secrets:`
+    // block via the stack_secrets table).
+    let secrets = handles
         .inventory
-        .get_stack_manifest_bundle(StackId(id))
+        .list_stack_secrets(StackId(id))
         .await
-        .unwrap_or_else(|_| isengard_storage::StackManifestBundle {
-            manifest_toml: None,
-            manifest_sha256: None,
-            manifest_imported_at: None,
-            deploy_strategy: None,
-            manifest_fleet: None,
-            secrets: Vec::new(),
-        });
+        .unwrap_or_default();
     let mut json = serde_json::to_value(StackDto::from(stack)).unwrap_or_default();
     if let Some(obj) = json.as_object_mut() {
         obj.insert(
-            "manifest_toml".into(),
-            serde_json::to_value(&bundle.manifest_toml).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
-            "manifest_sha256".into(),
-            serde_json::to_value(&bundle.manifest_sha256).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
-            "manifest_imported_at".into(),
-            serde_json::to_value(&bundle.manifest_imported_at).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
-            "deploy_strategy".into(),
-            serde_json::to_value(&bundle.deploy_strategy).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
-            "manifest_fleet".into(),
-            serde_json::to_value(&bundle.manifest_fleet).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
             "secrets".into(),
-            serde_json::to_value(&bundle.secrets).unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(&secrets).unwrap_or(serde_json::Value::Null),
         );
     }
     Json(json).into_response()
@@ -2241,15 +2215,16 @@ mod tests {
             .await
             .unwrap();
         // Same 503 ceiling as the YAML test (no agent). The manifest
-        // field is accepted (no 400) but never persisted.
+        // field is accepted (no 400) and dropped on the floor (the
+        // stacks table no longer has a manifest_toml column after
+        // Task 8).
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let s = handles
+        let _ = handles
             .inventory
             .get_stack(stack_id)
             .await
             .unwrap()
             .expect("stack present");
-        assert_eq!(s.manifest_toml, None);
     }
 
     /// Phase 0.13 wave 2.A follow-up: 422 with `missing: [...]` when the
