@@ -14,6 +14,7 @@ fn agent_reports_backend_in_heartbeat() {
         services: Vec::new(),
         runtime_backend: "wisp".into(),
         containers: Vec::new(),
+        labels: Default::default(),
     };
     let bytes = hb.encode_to_vec();
     let back = Heartbeat::decode(&*bytes).unwrap();
@@ -34,8 +35,31 @@ fn heartbeat_runtime_backend_default_empty_for_legacy_blob() {
         services: Vec::new(),
         runtime_backend: String::new(),
         containers: Vec::new(),
+        labels: Default::default(),
     };
     let bytes = hb_old.encode_to_vec();
     let back = Heartbeat::decode(&*bytes).unwrap();
     assert!(back.runtime_backend.is_empty());
+}
+
+#[test]
+fn heartbeat_labels_round_trip() {
+    // Phase 0.14: gossiped labels travel as a map<string, string> on
+    // field 6. Round-trip a non-empty map; older blobs without field 6
+    // decode to an empty map (covered by the legacy-backend test above
+    // which round-trips Default::default()).
+    let mut labels = std::collections::HashMap::new();
+    labels.insert("role".to_string(), "worker".to_string());
+    labels.insert("tier".to_string(), "gpu".to_string());
+    let hb = Heartbeat {
+        ts_ms: 1,
+        stacks: Vec::new(),
+        services: Vec::new(),
+        runtime_backend: String::new(),
+        containers: Vec::new(),
+        labels: labels.clone(),
+    };
+    let bytes = hb.encode_to_vec();
+    let back = Heartbeat::decode(&*bytes).unwrap();
+    assert_eq!(back.labels, labels);
 }

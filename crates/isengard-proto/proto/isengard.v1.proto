@@ -168,6 +168,15 @@ message Heartbeat {
   // Older agents that don't ship containers send an empty repeated;
   // older controllers that don't read containers ignore the field.
   repeated ContainerInfo containers = 5;
+  // Phase 0.14: per-host gossiped labels (sourced from
+  // `/etc/isengard/agent.toml` `[labels]` table and
+  // `ISENGARD_LABEL_*` env vars) so the controller's placement
+  // scheduler can match `where:` selectors. Field 6 (plan said 5
+  // but containers already owns 5; documented in
+  // 2026-05-15-placement-scheduler default-and-document log).
+  // Empty map from older agents is fine; selectors that reference a
+  // missing label simply do not match.
+  map<string, string> labels = 6;
 }
 
 // Phase 0.18: per-container snapshot the agent stamps once per
