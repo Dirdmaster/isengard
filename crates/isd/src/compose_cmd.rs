@@ -705,20 +705,16 @@ fn read_compose_path(path: &std::path::Path) -> Result<String> {
 
 fn toml_compose_to_yaml(toml_content: &str) -> Result<String> {
     let value: toml::Value = toml::from_str(toml_content).context("parsing toml")?;
-    let toml::Value::Table(tbl) = value else {
+    if !matches!(value, toml::Value::Table(_)) {
         return Err(anyhow!("compose.toml root must be a table"));
-    };
-    // Flat-shape rule: every top-level table is a service. Top-level
-    // scalars are dropped (reserved for future stack-level metadata).
-    let mut services = serde_json::Map::new();
-    for (name, entry) in tbl {
-        if let toml::Value::Table(_) = entry {
-            services.insert(name, toml_value_to_json(entry));
-        }
     }
-    let mut root = serde_json::Map::new();
-    root.insert("services".into(), serde_json::Value::Object(services));
-    serde_yaml::to_string(&serde_json::Value::Object(root)).context("serializing yaml")
+    // 2026-05-15 stack file model: the TOML shape mirrors the YAML
+    // shape exactly (a top-level `services` table plus top-level
+    // `name` / `secrets` / `networks` / `volumes` keys). A straight
+    // structural translation is enough; the agent's parser does the
+    // real decode.
+    let json = toml_value_to_json(value);
+    serde_yaml::to_string(&json).context("serializing yaml")
 }
 
 fn toml_value_to_json(v: toml::Value) -> serde_json::Value {
