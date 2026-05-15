@@ -2326,9 +2326,7 @@ mod tests {
         let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["name"], "web");
-
     }
-
 
     /// Phase 0.13 wave 2.A follow-up: `PUT /stacks/{id}/compose` with no
     /// Content-Type returns 415 with the accepted types listed. Operators
