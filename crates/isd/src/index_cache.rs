@@ -5,7 +5,15 @@
 //! argument (`isd stop 2`) to a container. This module owns the schema,
 //! the read/write, and the staleness check; it does not do resolution.
 //!
+//! Phase 0.21 only exercises `write`; `read`, `age_secs`, `is_stale`,
+//! and `STALE_AFTER_SECS` are the API surface Phase 0.22's resolver
+//! will call. They're covered by unit tests in this module but not yet
+//! by a consumer in `main.rs`, so `dead_code` is allowed module-wide
+//! until Phase 0.22 wires them in.
+//!
 //! Design: `3 Resources/Superpowers/specs/2026-05-15-isd-table-renderer-design.md`.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 
