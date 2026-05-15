@@ -99,6 +99,11 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    /// Process-wide env-lock shared with `index_cache::tests` so both
+    /// modules' tests serialize their access to `ISD_INDEX_CACHE`. See
+    /// `index_cache::test_env_lock` for the rationale.
+    use crate::index_cache::test_env_lock as env_lock;
+
     fn with_cache(rows: Vec<IndexRow>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("last-ps.json");
@@ -139,6 +144,7 @@ mod tests {
 
     #[test]
     fn literal_ids_pass_through() {
+        let _lock = env_lock();
         let _dir = with_cache(sample_rows());
         let r = resolve(&["a1b2c3d4e5f6".into()]).unwrap();
         assert_eq!(r.len(), 1);
@@ -148,6 +154,7 @@ mod tests {
 
     #[test]
     fn single_index_resolves() {
+        let _lock = env_lock();
         let _dir = with_cache(sample_rows());
         let r = resolve(&["1".into()]).unwrap();
         assert_eq!(r.len(), 1);
@@ -158,6 +165,7 @@ mod tests {
 
     #[test]
     fn range_and_list_resolve() {
+        let _lock = env_lock();
         let _dir = with_cache(sample_rows());
         let r = resolve(&["0-2".into()]).unwrap();
         assert_eq!(r.len(), 3);
@@ -167,6 +175,7 @@ mod tests {
 
     #[test]
     fn mixed_indices_and_literals_preserve_order() {
+        let _lock = env_lock();
         let _dir = with_cache(sample_rows());
         let r = resolve(&["0".into(), "a1b2c3d4e5f6".into(), "2".into()]).unwrap();
         assert_eq!(r.len(), 3);
@@ -177,6 +186,7 @@ mod tests {
 
     #[test]
     fn out_of_range_index_errors_with_max() {
+        let _lock = env_lock();
         let _dir = with_cache(sample_rows());
         let err = resolve(&["9".into()]).unwrap_err().to_string();
         assert!(err.contains("out of range"), "got: {err}");
@@ -185,6 +195,7 @@ mod tests {
 
     #[test]
     fn missing_cache_errors_with_pointer() {
+        let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.json");
         unsafe {
@@ -196,6 +207,7 @@ mod tests {
 
     #[test]
     fn literal_only_args_do_not_require_cache() {
+        let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.json");
         unsafe {
