@@ -89,14 +89,6 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail logs for `<stack>/<service>` over the controller WebSocket.
     Logs(logs::LogsArgs),
-    /// Ship a stack to the controller. On first run for a name, creates
-    /// the stack from the compose.yaml; subsequent runs preview the
-    /// reconcile plan vs the current YAML, prompt y/N, then write.
-    Deploy(compose_cmd::DeployArgs),
-    /// v0.3d: show the reconcile plan for a proposed compose.yaml. Read-only.
-    Diff(compose_cmd::DiffArgs),
-    /// v0.3d: open the stack's compose.yaml in `$EDITOR`, then apply on save.
-    Edit(compose_cmd::EditArgs),
     /// v0.3.5: DNS + reverse proxy bridging the operator's Mac to
     /// containerized stacks. Single foreground command; Ctrl+C tears down.
     Gateway(gateway::GatewayArgs),
@@ -115,12 +107,6 @@ enum Command {
     /// dumping the controller's SQLite by hand: wave 5.B polish.
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
-    /// View + edit a deployed stack's `stack.toml` from the controller.
-    /// `cat` prints the persisted body to stdout; `export` writes it to
-    /// a local file; `edit` opens it in `$EDITOR` and PUTs the result
-    /// back with optimistic concurrency (sha256 If-Match).
-    #[command(subcommand)]
-    Manifest(manifest_cmd::ManifestCommand),
     /// v0.5.2: self-update the operator CLI. Detects the latest GitHub
     /// release for the host triple (macOS aarch64/x86_64, Linux musl
     /// x86_64/aarch64), verifies sha256 against the release manifest,
@@ -156,18 +142,6 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
-        Command::Deploy(args) => {
-            print_stack_alias_hint("deploy");
-            compose_cmd::run_deploy(args, cli.context.as_deref()).await
-        }
-        Command::Diff(args) => {
-            print_stack_alias_hint("diff");
-            compose_cmd::run_diff(args, cli.context.as_deref()).await
-        }
-        Command::Edit(args) => {
-            print_stack_alias_hint("edit");
-            compose_cmd::run_edit(args, cli.context.as_deref()).await
-        }
         Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
@@ -178,14 +152,6 @@ async fn main() {
         Command::Hosts(cmd) => {
             hosts_cmd::run(
                 hosts_cmd::HostsArgs { command: cmd },
-                cli.context.as_deref(),
-            )
-            .await
-        }
-        Command::Manifest(cmd) => {
-            print_stack_alias_hint("manifest");
-            manifest_cmd::run(
-                manifest_cmd::ManifestArgs { command: cmd },
                 cli.context.as_deref(),
             )
             .await
@@ -211,17 +177,6 @@ async fn main() {
         eprintln!("isd: {e:#}");
         std::process::exit(1);
     }
-}
-
-/// Phase 0.18: print a one-line deprecation hint when an operator
-/// invokes a top-level stack verb. The verb still runs; the hint
-/// points at the canonical `isd stack <verb>` form. Removed in v0.6
-/// when the top-level forms are dropped.
-fn print_stack_alias_hint(verb: &str) {
-    eprintln!(
-        "isd: `{verb}` will move under `isd stack {verb}` in v0.6. \
-         Both work today; the stack-namespaced form is canonical."
-    );
 }
 
 /// Phase 0.18: when the operator runs bare `isd` with no subcommand,
