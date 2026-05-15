@@ -77,10 +77,10 @@ pub struct StackComposeRow {
     pub imported_at: String,
 }
 
-/// Track A teardown (2026-05-15): the manifest bundle is gone. Stack
-/// secret bindings (the only piece that survives) are read via
-/// `list_stack_secrets`; callers that used to consume StackManifestBundle
-/// either drop the call or switch to the secret-only accessor.
+// Track A teardown (2026-05-15): the manifest bundle struct is gone.
+// Stack secret bindings (the only piece that survives) are read via
+// Inventory::list_stack_secrets; callers that used to consume
+// StackManifestBundle either drop the call or switch to that accessor.
 
 #[cfg(test)]
 mod tests {
