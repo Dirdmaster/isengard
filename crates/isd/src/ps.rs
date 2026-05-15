@@ -1,15 +1,8 @@
 //! `isd ps`: container-first view of the saved context's controller.
 //!
-//! Phase 0.18 rewrite. The handler now hits `GET /api/v1/containers`
-//! and renders one row per container, matching the column layout
-//! `docker ps` operators expect (CONTAINER ID, IMAGE, COMMAND, STATUS,
-//! HOST, STACK, NAMES). The legacy stack+service join is preserved
-//! behind `--legacy` for one release; `isd ps --legacy` will be
-//! removed in v0.6.
-//!
-//! Default behaviour: one round-trip to `/containers` plus `--filter`
-//! query params. `--no-trunc` widens CONTAINER ID + COMMAND to their
-//! full value; `--format json` dumps the raw API rows.
+//! One round-trip to `/containers` plus `--filter` query params.
+//! `--no-trunc` widens CONTAINER ID + COMMAND to their full value;
+//! `--format json` dumps the raw API rows.
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -21,50 +14,27 @@ use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use crate::session::Session;
 use crate::table::{ContainerPsRow, render_container_json, render_container_table};
 
-/// Default width of the CONTAINER ID column. Docker uses 12 chars;
-/// `--no-trunc` widens to the full 16. Default-and-document per the
-/// Phase 0.18 spec.
+// Docker uses 12 chars for the short CONTAINER ID; --no-trunc widens to 16.
 const ID_DISPLAY_WIDTH: usize = 12;
 const COMMAND_TRUNC_WIDTH: usize = 40;
 
 #[derive(Debug, Args, Default)]
 pub struct PsArgs {
-    /// Include containers whose `removed_at` is non-NULL (defaults to
-    /// alive only). Matches `docker ps -a`.
+    /// Show all containers, not just running.
     #[arg(short = 'a', long)]
     pub all: bool,
 
-    /// Disable CONTAINER ID and COMMAND truncation.
+    /// Disable ID and command truncation.
     #[arg(long)]
     pub no_trunc: bool,
 
-    /// Repeatable `key=value` filter applied at the controller. Known
-    /// keys: `host`, `stack`, `service`, `state`. Unknown keys are
-    /// ignored (the dashboard rejects with 400 if a future version
-    /// validates them).
+    /// Filter by key=value (repeatable). Known keys: host, stack, service, state.
     #[arg(long = "filter", value_name = "KEY=VALUE")]
     pub filters: Vec<String>,
 
-    /// One of `table` (default) or `json`. JSON output is the raw API
-    /// row array.
-    #[arg(long, default_value = "table")]
-    pub format: String,
-
-    /// Fall back to the legacy stack+service join (deprecated).
-    /// Removed in v0.6.
-    #[arg(long)]
-    pub legacy: bool,
-
-    /// Deprecated: alias of `--format json` kept for one release so
-    /// pre-0.18 scripts don't break.
-    #[arg(long, hide = true)]
-    pub json: bool,
-
-    /// Deprecated: legacy stack+service join honoured this. The new
-    /// container view filters fleet at the controller via
-    /// `--filter host=<id>` instead.
-    #[arg(long, hide = true)]
-    pub fleet: Option<String>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 }
 
 /// One row from `GET /api/v1/containers`.
@@ -90,10 +60,6 @@ pub struct ContainerApiDto {
 }
 
 pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
-    if args.legacy {
-        return run_legacy(args, context).await;
-    }
-
     // Phase 0.20: container-level commands route by context shape, not
     // by a CLI flag. If the resolved context carries a `docker = "..."`
     // endpoint, `isd ps` is a docker-daemon round-trip; otherwise we
@@ -119,12 +85,15 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         .await
         .context("decoding containers JSON")?;
 
-    if args.json || args.format == "json" {
-        println!("{}", render_container_json(&rows)?);
-    } else {
-        let ps_rows = build_ps_rows(&rows, args.no_trunc);
-        let out = render_container_table(&ps_rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", render_container_json(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let ps_rows = build_ps_rows(&rows, args.no_trunc);
+            let out = render_container_table(&ps_rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
@@ -240,44 +209,6 @@ fn urlencoded(s: &str) -> String {
         }
     }
     out
-}
-
-// ----- legacy path -----
-
-#[derive(Debug, Deserialize)]
-struct LegacyStackDto {
-    id: String,
-    #[allow(dead_code)]
-    host_id: String,
-    name: String,
-    #[allow(dead_code)]
-    source: String,
-    #[allow(dead_code)]
-    discovered_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyServiceDto {
-    #[allow(dead_code)]
-    id: String,
-    host_id: String,
-    hostname: Option<String>,
-    stack_id: Option<String>,
-    name: String,
-    image: String,
-    state: String,
-    last_seen_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyHostBackendDto {
-    id: String,
-    #[serde(default = "default_backend")]
-    runtime_backend: String,
-}
-
-fn default_backend() -> String {
-    "docker".to_string()
 }
 
 // ----- direct-bollard path (Phase 0.20) -----
@@ -431,126 +362,6 @@ async fn run_docker_backend(args: PsArgs, docker_uri: String, context: Option<&s
         println!("{}", render_plain(&table));
     }
     Ok(())
-}
-
-async fn run_legacy(args: PsArgs, context: Option<&str>) -> Result<()> {
-    eprintln!(
-        "isd ps --legacy: stack+service join is deprecated and will be removed in v0.6. Switch to the default container view."
-    );
-    let session = Session::open(context).await?;
-    let mut url = format!("{}/api/v1/stacks", session.controller_url());
-    if let Some(f) = args.fleet.as_deref() {
-        url.push_str(&format!("?fleet={f}"));
-    }
-    let stacks: Vec<LegacyStackDto> = session
-        .client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .context("listing stacks")?
-        .json()
-        .await
-        .context("decoding stacks JSON")?;
-
-    let services_url = format!("{}/api/v1/services", session.controller_url());
-    let services: Vec<LegacyServiceDto> = session
-        .client
-        .get(&services_url)
-        .send()
-        .await
-        .with_context(|| format!("GET {services_url}"))?
-        .error_for_status()
-        .context("listing services")?
-        .json()
-        .await
-        .context("decoding services JSON")?;
-
-    let hosts_url = format!("{}/api/v1/hosts", session.controller_url());
-    let hosts: Vec<LegacyHostBackendDto> = match session.client.get(&hosts_url).send().await {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(ok) => ok.json().await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
-
-    let rows = build_legacy_rows(&stacks, &services, &hosts);
-    if args.json || args.format == "json" {
-        println!("{}", crate::table::render_json(&rows)?);
-    } else {
-        let out = crate::table::render_table(&rows);
-        println!("{}", out.trim_end());
-    }
-    Ok(())
-}
-
-fn build_legacy_rows(
-    stacks: &[LegacyStackDto],
-    services: &[LegacyServiceDto],
-    hosts: &[LegacyHostBackendDto],
-) -> Vec<crate::table::PsRow> {
-    let mut by_id: std::collections::HashMap<&str, &LegacyStackDto> =
-        std::collections::HashMap::new();
-    for s in stacks {
-        by_id.insert(&s.id, s);
-    }
-    let mut backend_by_host: std::collections::HashMap<&str, &str> =
-        std::collections::HashMap::new();
-    for h in hosts {
-        backend_by_host.insert(h.id.as_str(), h.runtime_backend.as_str());
-    }
-    let mut rows: Vec<crate::table::PsRow> = services
-        .iter()
-        .map(|svc| {
-            let stack_name = svc
-                .stack_id
-                .as_deref()
-                .and_then(|id| by_id.get(id))
-                .map(|s| s.name.as_str())
-                .unwrap_or("(unstacked)");
-            let host_label = svc
-                .hostname
-                .as_deref()
-                .map(str::to_string)
-                .unwrap_or_else(|| svc.host_id.chars().take(8).collect::<String>());
-            let backend = backend_by_host
-                .get(svc.host_id.as_str())
-                .copied()
-                .unwrap_or("docker")
-                .to_string();
-            crate::table::PsRow {
-                stack: stack_name.to_string(),
-                service: svc.name.clone(),
-                host: host_label,
-                state: svc.state.clone(),
-                image: svc.image.clone(),
-                last_seen: humanize_age(svc.last_seen_at),
-                backend,
-            }
-        })
-        .collect();
-    rows.sort_by(|a, b| {
-        a.stack
-            .cmp(&b.stack)
-            .then_with(|| a.service.cmp(&b.service))
-    });
-    rows
-}
-
-fn humanize_age(when: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let delta = now.signed_duration_since(when);
-    if delta.num_seconds() < 60 {
-        format!("{}s ago", delta.num_seconds().max(0))
-    } else if delta.num_minutes() < 60 {
-        format!("{}m ago", delta.num_minutes())
-    } else if delta.num_hours() < 24 {
-        format!("{}h ago", delta.num_hours())
-    } else {
-        format!("{}d ago", delta.num_days())
-    }
 }
 
 #[cfg(test)]
@@ -711,9 +522,7 @@ mod tests {
         assert!(!args.all);
         assert!(!args.no_trunc);
         assert!(args.filters.is_empty());
-        assert_eq!(args.format, ""); // Default::default for String is empty
-        assert!(!args.legacy);
-        assert!(!args.json);
+        assert_eq!(args.format, crate::output::Format::Table);
     }
 
     /// Phase 0.18: end-to-end against a wiremock controller. The handler
@@ -777,7 +586,7 @@ url = "{}"
         }
 
         let args = PsArgs {
-            format: "table".into(),
+            format: crate::output::Format::Table,
             ..Default::default()
         };
         run(args, None).await.expect("ps should succeed");
@@ -824,7 +633,7 @@ url = "{}"
 
         let args = PsArgs {
             filters: vec!["stack=hello".into(), "state=running".into()],
-            format: "table".into(),
+            format: crate::output::Format::Table,
             ..Default::default()
         };
         run(args, None).await.expect("ps should succeed");

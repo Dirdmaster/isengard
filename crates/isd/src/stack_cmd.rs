@@ -34,46 +34,38 @@ pub struct StackArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum StackCommand {
-    /// List every stack across the saved context's fleet. Renders a
-    /// kubectl-style ASCII table with services and hosts counts plus an
-    /// aggregate STATE derived from each service's last-seen state.
+    /// List stacks.
     Ls(LsArgs),
-    /// Services in the named stack. Mirrors `docker stack ps`.
+    /// List services in a stack.
     Ps(PsArgs),
-    /// Ship a stack to the controller. Alias of the top-level
-    /// `isd deploy`; lives here for docker-parity discoverability.
+    /// Deploy a stack from compose.yaml.
     Deploy(DeployArgs),
-    /// Show the reconcile plan for a proposed compose.yaml. Alias of
-    /// the top-level `isd diff`.
+    /// Show the reconcile plan for a compose.yaml.
     Diff(DiffArgs),
-    /// Open the stack's compose.yaml in `$EDITOR` and apply on save.
-    /// Alias of the top-level `isd edit`.
+    /// Open compose.yaml in $EDITOR and apply on save.
     Edit(EditArgs),
-    /// View + edit a deployed stack's `stack.toml`. Alias of the
-    /// top-level `isd manifest`.
+    /// View and edit a stack's stack.toml.
     #[command(subcommand)]
     Manifest(ManifestCommand),
 }
 
 #[derive(Debug, Args)]
 pub struct LsArgs {
-    /// Emit JSON instead of the table.
-    #[arg(long)]
-    pub json: bool,
-    /// Optional fleet filter, mirrors `GET /api/v1/stacks?fleet=`.
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
+    /// Filter by fleet.
     #[arg(long)]
     pub fleet: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct PsArgs {
-    /// Stack name. The controller has no `?name=` filter on stacks, so
-    /// the client fetches the stack list and resolves the id from the
-    /// name client-side, then calls `?stack_id=` on services.
+    /// Stack name.
     pub name: String,
-    /// Emit JSON instead of the table.
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 }
 
 /// Mirror of the dashboard's `StackDto`. Extra fields are ignored
@@ -176,11 +168,14 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
     let rows = build_ls_rows(&stacks, &services);
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        let out = render_ls_table(&rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_ls_table(&rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
@@ -216,11 +211,14 @@ async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
     )
     .await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&services)?);
-    } else {
-        let out = render_ps_table(&services);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&services)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_ps_table(&services);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }

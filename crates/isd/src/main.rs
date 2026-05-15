@@ -25,12 +25,13 @@ use clap::{Parser, Subcommand};
 mod compose_cmd;
 mod context;
 mod credentials;
-mod gateway;
+mod help_render;
 mod hosts_cmd;
 mod index_cache;
 mod logs;
 mod manifest_cmd;
 mod open_cmd;
+mod output;
 mod ps;
 mod render;
 mod route;
@@ -46,103 +47,67 @@ mod watch;
 #[derive(Parser, Debug)]
 #[command(
     name = "isd",
-    // Overridden to use the build-script-resolved version (git tag for
-    // CI builds, `git describe` for dev). The default `version` macro
-    // reads CARGO_PKG_VERSION, which is pinned at `0.1.0-alpha` in the
-    // workspace manifest and never bumped on release; that meant every
-    // `isd --version` printed the wrong thing after `isd update`.
     version = env!("ISENGARD_BUILD_VERSION"),
-    about = "Isengard operator CLI",
-    long_about = "Talk to an Isengard controller from your terminal: list \
-                  stacks, open services in a browser, tail logs. Configure \
-                  reachability via `isd context create --ssh <target>` (or \
-                  `--http <url>` for local dev)."
+    about = "Operate Docker fleets from your terminal",
 )]
-struct Cli {
-    /// Logging filter (e.g. "info", "debug,isd=trace"). Read from
-    /// `ISD_LOG` if not set.
+pub(crate) struct Cli {
+    /// Logging filter (e.g. "info", "debug,isd=trace").
     #[arg(long, global = true, env = "ISD_LOG")]
     log: Option<String>,
 
-    /// Use a specific saved context (defaults to the credentials file's
-    /// `default_context`). Useful when you have multiple controllers.
+    /// Use a specific saved context.
     #[arg(long, global = true)]
     context: Option<String>,
 
-    /// Subcommand. Optional in Phase 0.18: bare `isd` invokes
-    /// `Ps` with default flags so the operator gets a docker-style
-    /// container list with zero ceremony. Override default-and-document
-    /// table entry in the spec.
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Manage saved controller contexts. SSH-backed contexts tunnel the
-    /// dashboard port via `~/.ssh/config`; HTTP contexts target a
-    /// directly-reachable URL.
+    /// Manage saved controller contexts.
     #[command(subcommand)]
     Context(context::ContextCommand),
-    /// List stacks + services across all hosts in the saved context.
+    /// List containers.
     Ps(ps::PsArgs),
-    /// Open the stack's primary `expose.host` in the OS default browser.
+    /// Open a stack in the browser.
     Open(open_cmd::OpenArgs),
-    /// Tail logs for `<stack>/<service>` over the controller WebSocket.
+    /// Tail container logs.
     Logs(logs::LogsArgs),
-    /// Ship a stack to the controller. On first run for a name, creates
-    /// the stack from the compose.yaml; subsequent runs preview the
-    /// reconcile plan vs the current YAML, prompt y/N, then write.
-    Deploy(compose_cmd::DeployArgs),
-    /// v0.3d: show the reconcile plan for a proposed compose.yaml. Read-only.
-    Diff(compose_cmd::DiffArgs),
-    /// v0.3d: open the stack's compose.yaml in `$EDITOR`, then apply on save.
-    Edit(compose_cmd::EditArgs),
-    /// v0.3.5: DNS + reverse proxy bridging the operator's Mac to
-    /// containerized stacks. Single foreground command; Ctrl+C tears down.
-    Gateway(gateway::GatewayArgs),
-    /// v0.3.6: manage Isengard-managed secrets. `put` upserts, `list`
-    /// shows names only (no values), `rm` deletes.
+    /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
-    /// Manage routing rules. `list` / `create` / `rm`. Most rules come from
-    /// stack compose.yaml `expose.host` annotations; this surface is for
-    /// non-stack routes (e.g., the controller dashboard) and ad-hoc edits.
+    /// Manage routing rules.
     #[command(subcommand)]
     Route(route::RouteCommand),
-    /// Inspect enrolled hosts. `list` prints a kubectl-style table with
-    /// host ULID, hostname, enrolled timestamp, and fleet. Without this
-    /// the canonical Crockford ULID for a host was only recoverable by
-    /// dumping the controller's SQLite by hand: wave 5.B polish.
+    /// Inspect enrolled hosts.
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
-    /// View + edit a deployed stack's `stack.toml` from the controller.
-    /// `cat` prints the persisted body to stdout; `export` writes it to
-    /// a local file; `edit` opens it in `$EDITOR` and PUTs the result
-    /// back with optimistic concurrency (sha256 If-Match).
-    #[command(subcommand)]
-    Manifest(manifest_cmd::ManifestCommand),
-    /// v0.5.2: self-update the operator CLI. Detects the latest GitHub
-    /// release for the host triple (macOS aarch64/x86_64, Linux musl
-    /// x86_64/aarch64), verifies sha256 against the release manifest,
-    /// and atomic-renames the new binary onto the running executable.
-    /// Doesn't restart anything: isd is one-shot, the next invocation
-    /// picks up the new binary.
+    /// Self-update isd.
     Update(update_cmd::UpdateArgs),
-    /// Phase 0.18: stack subcommands (`ls`, `ps <name>`, plus the
-    /// canonical home of deploy/diff/edit/manifest). Mirrors
-    /// `docker stack`. Top-level `isd deploy` etc. keep working with a
-    /// deprecation hint for one release.
+    /// Deploy, diff, edit, inspect stacks.
     #[command(subcommand)]
     Stack(stack_cmd::StackCommand),
-    /// Phase 0.18: service subcommands. Today: `ls` for a flat view of
-    /// every service across every stack. Mirrors `docker service`.
+    /// List services across stacks.
     #[command(subcommand)]
     Service(service_cmd::ServiceCommand),
 }
 
 #[tokio::main]
 async fn main() {
+    use clap::CommandFactory;
+
+    // Intercept the root help flow: bare `isd` or `-h`/`--help` at the
+    // root prints the grouped help, then exits.
+    let raw: Vec<String> = std::env::args().collect();
+    let wants_root_help =
+        raw.len() == 1 || (raw.len() == 2 && matches!(raw[1].as_str(), "-h" | "--help"));
+    if wants_root_help {
+        let cmd = Cli::command();
+        println!("{}", help_render::render(&cmd));
+        return;
+    }
+
     let cli = Cli::parse();
     init_tracing(cli.log.as_deref());
 
@@ -157,19 +122,6 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
-        Command::Deploy(args) => {
-            print_stack_alias_hint("deploy");
-            compose_cmd::run_deploy(args, cli.context.as_deref()).await
-        }
-        Command::Diff(args) => {
-            print_stack_alias_hint("diff");
-            compose_cmd::run_diff(args, cli.context.as_deref()).await
-        }
-        Command::Edit(args) => {
-            print_stack_alias_hint("edit");
-            compose_cmd::run_edit(args, cli.context.as_deref()).await
-        }
-        Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
         }
@@ -179,14 +131,6 @@ async fn main() {
         Command::Hosts(cmd) => {
             hosts_cmd::run(
                 hosts_cmd::HostsArgs { command: cmd },
-                cli.context.as_deref(),
-            )
-            .await
-        }
-        Command::Manifest(cmd) => {
-            print_stack_alias_hint("manifest");
-            manifest_cmd::run(
-                manifest_cmd::ManifestArgs { command: cmd },
                 cli.context.as_deref(),
             )
             .await
@@ -214,17 +158,6 @@ async fn main() {
     }
 }
 
-/// Phase 0.18: print a one-line deprecation hint when an operator
-/// invokes a top-level stack verb. The verb still runs; the hint
-/// points at the canonical `isd stack <verb>` form. Removed in v0.6
-/// when the top-level forms are dropped.
-fn print_stack_alias_hint(verb: &str) {
-    eprintln!(
-        "isd: `{verb}` will move under `isd stack {verb}` in v0.6. \
-         Both work today; the stack-namespaced form is canonical."
-    );
-}
-
 /// Phase 0.18: when the operator runs bare `isd` with no subcommand,
 /// route through `Ps` with the same defaults clap would pick for an
 /// explicit `isd ps`. Spec entry: bare-isd default-and-document.
@@ -233,10 +166,7 @@ fn default_command() -> Command {
         all: false,
         no_trunc: false,
         filters: Vec::new(),
-        format: "table".into(),
-        legacy: false,
-        json: false,
-        fleet: None,
+        format: output::Format::Table,
     })
 }
 

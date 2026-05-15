@@ -14,15 +14,8 @@ use crate::session::Session;
 
 #[derive(Debug, Args)]
 pub struct LogsArgs {
-    /// Target as `<stack>/<service>`. The stack is resolved by name; the
-    /// service is the container name inside that stack.
+    /// Target as <stack>/<service>.
     pub target: String,
-
-    /// Follow new log lines. v0.3a always follows; this flag is reserved
-    /// for forward compatibility with `--no-follow` once tail-only mode
-    /// makes sense.
-    #[arg(short = 'f', long, default_value_t = true)]
-    pub follow: bool,
 }
 
 #[derive(Debug, Deserialize)]

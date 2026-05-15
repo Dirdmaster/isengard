@@ -1,14 +1,5 @@
 //! `isd hosts list`: enumerate every host enrolled on the controller.
-//!
-//! Wave 5.B polish: before this surface existed, the canonical Crockford
-//! ULID for a host was only recoverable via `sqlite3 ... hex(id)` on the
-//! controller box (sled / pid namespace) plus a manual base32 decode.
-//! Operators on multi-host fleets had no way to learn `--host-id` from
-//! the CLI when commands like `isd deploy` rejected an ambiguous host.
-//!
-//! Talks to `GET /api/v1/hosts` (optionally `?fleet=<name>`). Renders a
-//! kubectl-style ASCII table by default; `--json` emits the raw rows for
-//! shell scripting.
+//! Talks to `GET /api/v1/hosts` (optionally `?fleet=<name>`).
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -26,19 +17,17 @@ pub struct HostsArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum HostsCommand {
-    /// List every host enrolled on the controller. Default output is a
-    /// kubectl-style ASCII table; `--json` emits a JSON array.
+    /// List enrolled hosts.
     List(ListArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Emit JSON instead of the table. Shape matches [`HostRow`] and is
-    /// stable across patch releases.
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 
-    /// Optional fleet filter. Mirrors the dashboard's `?fleet=` query param.
+    /// Filter by fleet.
     #[arg(long)]
     pub fleet: Option<String>,
 }
@@ -79,11 +68,14 @@ async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
         .await
         .context("decoding hosts JSON")?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        let out = render_table(&rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_table(&rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
@@ -234,7 +226,7 @@ url = "{}"
 
         let result = run_list(
             ListArgs {
-                json: true,
+                format: crate::output::Format::Json,
                 fleet: None,
             },
             None,
