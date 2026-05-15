@@ -91,6 +91,51 @@ impl DockerBackend {
         let raw = self.docker.list_containers(Some(opts)).await?;
         Ok(raw.iter().map(map_summary).collect())
     }
+
+    /// Stop a container by ID or name. `timeout_secs` is the grace period
+    /// before docker sends SIGKILL; bollard's default when None is 10s.
+    pub async fn stop_container(&self, id: &str, timeout_secs: i64) -> Result<()> {
+        let opts = bollard::container::StopContainerOptions { t: timeout_secs };
+        self.docker.stop_container(id, Some(opts)).await?;
+        Ok(())
+    }
+
+    /// Start a stopped container.
+    pub async fn start_container(&self, id: &str) -> Result<()> {
+        self.docker.start_container::<String>(id, None).await?;
+        Ok(())
+    }
+
+    /// Restart a container. `timeout_secs` is the grace period before
+    /// SIGKILL. Note: bollard 0.18 types this as `isize` on the
+    /// restart options (vs `i64` on stop); we keep the public API
+    /// consistent (`i64`) and cast at the boundary.
+    pub async fn restart_container(&self, id: &str, timeout_secs: i64) -> Result<()> {
+        let opts = bollard::container::RestartContainerOptions {
+            t: timeout_secs as isize,
+        };
+        self.docker.restart_container(id, Some(opts)).await?;
+        Ok(())
+    }
+
+    /// Send a signal to a running container. `signal` defaults to
+    /// SIGKILL when None.
+    pub async fn kill_container(&self, id: &str, signal: Option<&str>) -> Result<()> {
+        let opts = signal.map(|s| bollard::container::KillContainerOptions { signal: s });
+        self.docker.kill_container(id, opts).await?;
+        Ok(())
+    }
+
+    /// Remove a container. `force = true` is the `docker rm -f` form
+    /// (kills if running).
+    pub async fn remove_container(&self, id: &str, force: bool) -> Result<()> {
+        let opts = bollard::container::RemoveContainerOptions {
+            force,
+            ..Default::default()
+        };
+        self.docker.remove_container(id, Some(opts)).await?;
+        Ok(())
+    }
 }
 
 /// A container row as the `isd` CLI consumes it: bollard's
@@ -182,6 +227,37 @@ mod tests {
     #[test]
     fn format_ports_empty_is_blank() {
         assert_eq!(format_ports(&[]), "");
+    }
+
+    // Pure unit tests: every backend method is a thin bollard wrap, so
+    // we test the wiring (method exists, takes the right shape) and let
+    // the ignored smoke test below cover the real daemon round-trip.
+
+    #[tokio::test]
+    #[ignore]
+    async fn stop_then_start_round_trips() {
+        // Smoke against the local docker daemon. Spins up a sleeping
+        // container, stops it, starts it, removes it. Ignored because
+        // it needs a real daemon; run with --ignored.
+        let backend = DockerBackend::from_local().expect("local backend");
+        let body = bollard::container::Config {
+            image: Some("alpine:latest".to_string()),
+            cmd: Some(vec!["sleep".into(), "3600".into()]),
+            ..Default::default()
+        };
+        let id = backend
+            .client()
+            .create_container::<&str, _>(None, body)
+            .await
+            .expect("create")
+            .id;
+        backend.start_container(&id).await.expect("start");
+        backend.stop_container(&id, 5).await.expect("stop");
+        backend
+            .start_container(&id)
+            .await
+            .expect("restart-via-start");
+        backend.remove_container(&id, true).await.expect("rm -f");
     }
 
     #[test]
