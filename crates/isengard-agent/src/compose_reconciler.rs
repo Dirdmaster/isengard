@@ -30,7 +30,7 @@ use bollard::secret::ContainerInspectResponse;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
-use crate::placement::{LabelSelector, Placement};
+use crate::placement::{LabelSelector, Placement, Strategy};
 use crate::runtime::ContainerSnapshot;
 
 /// One service entry in `services:` after parsing. We keep the raw
@@ -72,6 +72,11 @@ pub struct DesiredService {
     /// `deploy:` block). `None` means "no placement verb supplied"; the
     /// controller's scheduler treats that as `Singleton { selector: None }`.
     pub placement: Option<Placement>,
+    /// Per-service deploy strategy from the stack file's `strategy:` key.
+    /// `None` means the stack file did not set one; the controller's
+    /// deployment supervisor applies its default. See the 2026-05-15
+    /// one-file stack model design spec (Track A).
+    pub strategy: Option<Strategy>,
 }
 
 /// One entry in a service's `secrets:` list.
@@ -97,6 +102,10 @@ pub struct DesiredCompose {
     /// v0.3.6: top-level `secrets:` map. Keys are secret names; the
     /// declared source determines how the agent resolves them.
     pub secrets: BTreeMap<String, TopLevelSecret>,
+    /// Stack name from the file's top-level `name:` key. `None` for a
+    /// bare compose file with no stack identity. See the 2026-05-15
+    /// one-file stack model design spec (Track A).
+    pub name: Option<String>,
 }
 
 /// One top-level `secrets:` entry.
@@ -1203,6 +1212,19 @@ mod tests {
         let parsed = parse_compose(yaml).unwrap();
         assert_eq!(parsed.services.len(), 1);
         assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx:1.27"));
+    }
+
+    #[test]
+    fn desired_service_carries_strategy_and_placement_defaults() {
+        let svc = DesiredService::default();
+        assert_eq!(svc.strategy, None);
+        assert_eq!(svc.placement, None);
+    }
+
+    #[test]
+    fn desired_compose_carries_optional_name() {
+        let dc = DesiredCompose::default();
+        assert_eq!(dc.name, None);
     }
 
     #[test]

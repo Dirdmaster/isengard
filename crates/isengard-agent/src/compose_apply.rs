@@ -1124,6 +1124,7 @@ mod tests {
                 m
             },
             secrets: std::collections::BTreeMap::new(),
+            name: None,
         };
         let stack = vec!["fleet_secret".to_string()];
         let out = merge_secret_targets(&d, "web", &stack).unwrap();
