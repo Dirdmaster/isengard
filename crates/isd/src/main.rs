@@ -28,7 +28,6 @@ mod credentials;
 mod gateway;
 mod hosts_cmd;
 mod logs;
-mod manifest_cmd;
 mod open_cmd;
 mod ps;
 mod route;
@@ -114,12 +113,6 @@ enum Command {
     /// dumping the controller's SQLite by hand: wave 5.B polish.
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
-    /// View + edit a deployed stack's `stack.toml` from the controller.
-    /// `cat` prints the persisted body to stdout; `export` writes it to
-    /// a local file; `edit` opens it in `$EDITOR` and PUTs the result
-    /// back with optimistic concurrency (sha256 If-Match).
-    #[command(subcommand)]
-    Manifest(manifest_cmd::ManifestCommand),
     /// v0.5.2: self-update the operator CLI. Detects the latest GitHub
     /// release for the host triple (macOS aarch64/x86_64, Linux musl
     /// x86_64/aarch64), verifies sha256 against the release manifest,
@@ -177,14 +170,6 @@ async fn main() {
         Command::Hosts(cmd) => {
             hosts_cmd::run(
                 hosts_cmd::HostsArgs { command: cmd },
-                cli.context.as_deref(),
-            )
-            .await
-        }
-        Command::Manifest(cmd) => {
-            print_stack_alias_hint("manifest");
-            manifest_cmd::run(
-                manifest_cmd::ManifestArgs { command: cmd },
                 cli.context.as_deref(),
             )
             .await

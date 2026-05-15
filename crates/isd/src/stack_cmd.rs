@@ -2,8 +2,8 @@
 //!
 //! Phase 0.18 step 6. The pre-0.18 surface had no `isd stack` namespace:
 //! stack enumeration was buried inside the joined `isd ps` view and the
-//! verbs (`deploy`, `diff`, `edit`, `manifest`) lived at the top level
-//! with no shared parent. This module gives stacks their own namespace.
+//! verbs (`deploy`, `diff`, `edit`) lived at the top level with no
+//! shared parent. This module gives stacks their own namespace.
 //!
 //! - `isd stack ls`: one row per stack, with services and hosts counts
 //!   and an aggregate STATE column. Talks to `GET /api/v1/stacks` +
@@ -11,9 +11,9 @@
 //! - `isd stack ps <name>`: services in the named stack. Mirrors
 //!   `docker stack ps`.
 //!
-//! The deploy / diff / edit / manifest verbs also live under
-//! `isd stack <verb>` (one-release deprecation window: top-level forms
-//! keep working and print a hint).
+//! The deploy / diff / edit verbs also live under `isd stack <verb>`
+//! (one-release deprecation window: top-level forms keep working and
+//! print a hint).
 
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::compose_cmd::{DeployArgs, DiffArgs, EditArgs};
-use crate::manifest_cmd::ManifestCommand;
 use crate::session::Session;
 
 #[derive(Debug, Args)]
@@ -49,10 +48,6 @@ pub enum StackCommand {
     /// Open the stack's compose.yaml in `$EDITOR` and apply on save.
     /// Alias of the top-level `isd edit`.
     Edit(EditArgs),
-    /// View + edit a deployed stack's `stack.toml`. Alias of the
-    /// top-level `isd manifest`.
-    #[command(subcommand)]
-    Manifest(ManifestCommand),
 }
 
 #[derive(Debug, Args)]
@@ -143,10 +138,6 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
         StackCommand::Deploy(a) => crate::compose_cmd::run_deploy(a, context).await,
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
-        StackCommand::Manifest(cmd) => {
-            crate::manifest_cmd::run(crate::manifest_cmd::ManifestArgs { command: cmd }, context)
-                .await
-        }
     }
 }
 
