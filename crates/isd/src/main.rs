@@ -100,6 +100,12 @@ enum Command {
     Start(lifecycle_cmd::StartArgs),
     /// Restart one or more containers.
     Restart(lifecycle_cmd::RestartArgs),
+    /// Remove one or more containers. Confirms when targets came from
+    /// indices; `-f` skips the prompt.
+    Rm(lifecycle_cmd::RmArgs),
+    /// Send a signal to one or more containers. Confirms when targets
+    /// came from indices.
+    Kill(lifecycle_cmd::KillArgs),
     /// Ship a stack to the controller. On first run for a name, creates
     /// the stack from the compose.yaml; subsequent runs preview the
     /// reconcile plan vs the current YAML, prompt y/N, then write.
@@ -170,6 +176,8 @@ async fn main() {
         Command::Stop(args) => lifecycle_cmd::run_stop(args, cli.context.as_deref()).await,
         Command::Start(args) => lifecycle_cmd::run_start(args, cli.context.as_deref()).await,
         Command::Restart(args) => lifecycle_cmd::run_restart(args, cli.context.as_deref()).await,
+        Command::Rm(args) => lifecycle_cmd::run_rm(args, cli.context.as_deref()).await,
+        Command::Kill(args) => lifecycle_cmd::run_kill(args, cli.context.as_deref()).await,
         Command::Deploy(args) => {
             print_stack_alias_hint("deploy");
             compose_cmd::run_deploy(args, cli.context.as_deref()).await
