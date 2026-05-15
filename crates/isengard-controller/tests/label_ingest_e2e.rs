@@ -30,7 +30,6 @@ async fn setup() -> (
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -115,7 +114,6 @@ async fn label_arriving_for_existing_ui_hostname_replaces_ui_rule() {
 
     // Pre-existing UI rule on hostname "blog.test"
     inv.insert_routing_rule(InsertRoutingRule {
-        fleet: "default".into(),
         host_id: host,
         stack_id: None,
         service_name: "old".into(),
@@ -169,7 +167,6 @@ async fn label_displacing_ui_rule_preserves_overrides() {
 
     let ui = inv
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id: host,
             stack_id: None,
             service_name: "old".into(),

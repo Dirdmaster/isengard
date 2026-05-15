@@ -73,7 +73,6 @@ async fn enroll(handles: &ControllerHandles, hostname: &str) -> HostId {
             arch: "x86_64".into(),
             agent_version: "0.1".into(),
             docker_version: "27".into(),
-            fleet: "test".into(),
         })
         .await
         .unwrap()

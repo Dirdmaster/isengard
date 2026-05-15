@@ -73,7 +73,6 @@ mod tests {
             enrolled_at: 0,
             last_seen_at: Some(0),
             metadata: serde_json::Value::Null,
-            fleet: "default".into(),
         }
     }
 

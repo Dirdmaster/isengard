@@ -39,7 +39,7 @@ use tracing::{debug, info, warn};
 
 use crate::bus::EventBus;
 
-/// Default fleet-wide grace period before a disconnected host's
+/// Default cluster-wide grace period before a disconnected host's
 /// placements are reassigned. Configurable via the controller flag
 /// `--placement-grace-secs`. Operator decision 2026-05-11 deferred
 /// per-service grace to 0.15+.
@@ -384,7 +384,6 @@ mod tests {
             .enroll_host(EnrollHost {
                 hostname: "alice".into(),
                 fingerprint: "fp-alice".into(),
-                fleet: "default".into(),
                 os: "linux".into(),
                 arch: "x86_64".into(),
                 agent_version: "0.14".into(),

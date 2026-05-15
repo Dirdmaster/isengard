@@ -47,7 +47,6 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 
 #[derive(serde::Deserialize)]
 struct CreateRuleBody {
-    fleet: String,
     /// ULID string; parsed into `HostId` before inserting.
     host_id: String,
     stack_id: Option<i64>,
@@ -70,8 +69,7 @@ struct UpdateRuleBody {
 }
 
 async fn list_rules(State(handles): State<Arc<ControllerHandles>>) -> Response {
-    // Single fleet-wide query. Fleet-scoping comes when the active-fleet
-    // query param lands; until then the frontend can filter client-side.
+    // Single cluster-wide query.
     match handles.inventory.list_all_routing_rules().await {
         Ok(rules) => Json(rules).into_response(),
         Err(e) => (
@@ -98,7 +96,6 @@ async fn create_rule(
     };
     let stack_id = body.stack_id.map(isengard_storage::StackId);
     let insert = InsertRoutingRule {
-        fleet: body.fleet,
         host_id,
         stack_id,
         service_name: body.service_name,
@@ -458,7 +455,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "0.1.0".into(),
                 docker_version: "27.0".into(),
-                fleet: "default".into(),
             })
             .await
             .unwrap()
@@ -472,7 +468,6 @@ mod tests {
         handles
             .inventory
             .insert_routing_rule(InsertRoutingRule {
-                fleet: "default".into(),
                 host_id,
                 stack_id: None,
                 service_name: "web".into(),

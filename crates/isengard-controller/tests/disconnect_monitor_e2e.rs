@@ -36,7 +36,6 @@ async fn disconnect_monitor_emits_for_stale_host() {
         arch: "x86_64".to_string(),
         agent_version: "0.1.0-test".to_string(),
         docker_version: "27.4.0".to_string(),
-        fleet: "test".to_string(),
     };
     let host_id = inventory.enroll_host(enroll).await.unwrap();
 

@@ -26,7 +26,6 @@ async fn setup() -> (TempDir, Arc<Inventory>, isengard_storage::HostId) {
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -109,7 +108,7 @@ async fn resolver_uses_container_scope_after_label_ingest() {
 
     let host_str = host.to_string();
     let ctx = PolicyContext {
-        fleet: Some("default"),
+        fleet: None,
         stack: Some("blog"),
         service: Some("web"),
         host_id_hex: Some(host_str.as_str()),

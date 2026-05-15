@@ -207,11 +207,10 @@ impl RoutingPusher {
 
     /// Translate a `ContainerLabelsReport` into routing rules. Any existing
     /// label-source rules for the same container are deleted first, so the
-    /// report becomes the single source of truth — adds, edits and removals
+    /// report becomes the single source of truth: adds, edits and removals
     /// of individual labels all converge to the same end state.
     ///
-    /// `fleet` is hardcoded to "default" for v1; resolving the host's actual
-    /// fleet (and the `stack_id` from the container's compose project label)
+    /// Resolving the `stack_id` from the container's compose project label
     /// is a TODO for Plan B.
     pub async fn ingest_labels(
         &self,
@@ -254,7 +253,6 @@ impl RoutingPusher {
             let insert_result = self
                 .inv
                 .insert_routing_rule(InsertRoutingRule {
-                    fleet: "default".into(),
                     host_id,
                     stack_id: None,
                     service_name: report.container_name.clone(),
