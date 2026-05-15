@@ -511,16 +511,15 @@ impl Inventory {
         .bind(stack_id.0)
         .fetch_optional(&self.pool)
         .await?;
-        let (manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy) =
-            match row {
-                Some(row) => (
-                    row.try_get("manifest_toml")?,
-                    row.try_get("manifest_sha256")?,
-                    row.try_get("manifest_imported_at")?,
-                    row.try_get("deploy_strategy")?,
-                ),
-                None => (None, None, None, None),
-            };
+        let (manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy) = match row {
+            Some(row) => (
+                row.try_get("manifest_toml")?,
+                row.try_get("manifest_sha256")?,
+                row.try_get("manifest_imported_at")?,
+                row.try_get("deploy_strategy")?,
+            ),
+            None => (None, None, None, None),
+        };
 
         let secret_rows = sqlx::query(
             "SELECT secret_name FROM stack_secrets WHERE stack_id = ? ORDER BY bound_at, secret_name",
