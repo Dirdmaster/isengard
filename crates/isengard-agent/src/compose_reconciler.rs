@@ -372,20 +372,38 @@ fn toml_value_to_json(v: toml::Value) -> anyhow::Result<serde_json::Value> {
 pub fn parse_compose(yaml: &str) -> anyhow::Result<DesiredCompose> {
     let root: Value =
         serde_yaml::from_str(yaml).map_err(|e| anyhow::anyhow!("parse compose.yaml: {e}"))?;
+
+    let mut out = DesiredCompose::default();
+
+    // 2026-05-15 stack file model: top-level `name:` keys the stack
+    // identity. Parsed before services so a name-only file (no services
+    // table) still carries the identity through to the reconciler.
+    if let Value::Mapping(root_map) = &root {
+        if let Some(name_value) = root_map.get(Value::String("name".into())) {
+            let Value::String(name) = name_value else {
+                return Err(anyhow::anyhow!("top-level `name:` must be a string"));
+            };
+            if name.trim().is_empty() {
+                return Err(anyhow::anyhow!("top-level `name:` must not be empty"));
+            }
+            out.name = Some(name.clone());
+        }
+    }
+
     let services_value = match &root {
         Value::Mapping(m) => m.get(Value::String("services".into())),
         _ => None,
     };
     let Some(services_value) = services_value else {
         // No services key means an empty compose. Useful for the "stop
-        // everything" case (delete the file -> reconcile says stop all).
-        return Ok(DesiredCompose::default());
+        // everything" case (delete the file -> reconcile says stop all)
+        // and for stack files that only set top-level keys (name only).
+        return Ok(out);
     };
     let Value::Mapping(services_map) = services_value else {
         return Err(anyhow::anyhow!("`services:` must be a mapping"));
     };
 
-    let mut out = DesiredCompose::default();
     for (k, v) in services_map {
         let Value::String(name) = k else { continue };
         let Value::Mapping(svc) = v else { continue };
@@ -1295,6 +1313,52 @@ services:
 "#;
         let err = parse_compose(yaml).unwrap_err().to_string();
         assert!(err.contains("strategy"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_compose_reads_top_level_name() {
+        let yaml = r#"
+name: monitoring
+services:
+  web:
+    image: nginx:alpine
+"#;
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.name, Some("monitoring".to_string()));
+        assert!(dc.services.contains_key("web"));
+    }
+
+    #[test]
+    fn parse_compose_name_absent_is_none() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:alpine
+"#;
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.name, None);
+    }
+
+    #[test]
+    fn parse_compose_name_only_no_services() {
+        let yaml = "name: solo\n";
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.name, Some("solo".to_string()));
+        assert!(dc.services.is_empty());
+    }
+
+    #[test]
+    fn parse_compose_rejects_non_string_name() {
+        let yaml = "name: 42\nservices: {}\n";
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("name"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_compose_rejects_empty_name() {
+        let yaml = "name: \"  \"\nservices: {}\n";
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("name"), "got: {err}");
     }
 
     #[test]
