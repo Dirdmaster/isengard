@@ -34,10 +34,9 @@ pub struct PsArgs {
     #[arg(long = "filter", value_name = "KEY=VALUE")]
     pub filters: Vec<String>,
 
-    /// One of `table` (default) or `json`. JSON output is the raw API
-    /// row array.
-    #[arg(long, default_value = "table")]
-    pub format: String,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 }
 
 /// One row from `GET /api/v1/containers`.
@@ -88,12 +87,15 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         .await
         .context("decoding containers JSON")?;
 
-    if args.format == "json" {
-        println!("{}", render_container_json(&rows)?);
-    } else {
-        let ps_rows = build_ps_rows(&rows, args.no_trunc);
-        let out = render_container_table(&ps_rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", render_container_json(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let ps_rows = build_ps_rows(&rows, args.no_trunc);
+            let out = render_container_table(&ps_rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
@@ -361,7 +363,7 @@ mod tests {
         assert!(!args.all);
         assert!(!args.no_trunc);
         assert!(args.filters.is_empty());
-        assert_eq!(args.format, ""); // Default::default for String is empty
+        assert_eq!(args.format, crate::output::Format::Table);
     }
 
     /// Phase 0.18: end-to-end against a wiremock controller. The handler
@@ -425,7 +427,7 @@ url = "{}"
         }
 
         let args = PsArgs {
-            format: "table".into(),
+            format: crate::output::Format::Table,
             ..Default::default()
         };
         run(args, None).await.expect("ps should succeed");
@@ -472,7 +474,7 @@ url = "{}"
 
         let args = PsArgs {
             filters: vec!["stack=hello".into(), "state=running".into()],
-            format: "table".into(),
+            format: crate::output::Format::Table,
             ..Default::default()
         };
         run(args, None).await.expect("ps should succeed");

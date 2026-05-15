@@ -33,10 +33,9 @@ pub enum HostsCommand {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Emit JSON instead of the table. Shape matches [`HostRow`] and is
-    /// stable across patch releases.
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 
     /// Optional fleet filter. Mirrors the dashboard's `?fleet=` query param.
     #[arg(long)]
@@ -79,11 +78,14 @@ async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
         .await
         .context("decoding hosts JSON")?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        let out = render_table(&rows);
-        println!("{}", out.trim_end());
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        crate::output::Format::Table => {
+            let out = render_table(&rows);
+            println!("{}", out.trim_end());
+        }
     }
     Ok(())
 }
@@ -234,7 +236,7 @@ url = "{}"
 
         let result = run_list(
             ListArgs {
-                json: true,
+                format: crate::output::Format::Json,
                 fleet: None,
             },
             None,
