@@ -55,7 +55,7 @@ const hostsStore = useHostsStore()
 
 // Issues = recent events with a problematic kind, filtered to this fleet's hosts.
 const fleetHostIds = computed(() =>
-  new Set(hostsStore.hosts.filter(h => h.fleet === props.fleet.name).map(h => h.id))
+  new Set(hostsStore.hosts.filter(h => '' === props.fleet.name).map(h => h.id))
 )
 
 function hostnameOf(hostId: string | null | undefined): string {

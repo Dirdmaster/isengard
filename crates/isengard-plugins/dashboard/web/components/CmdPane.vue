@@ -175,7 +175,7 @@ const baseActions = computed<CmdAction[]>(() => {
 
   // Force update cycle — first matching host, if any
   const fleetTarget = q.length > 0
-    ? hostsStore.hosts.find(h => h.hostname.toLowerCase().includes(q.toLowerCase()) || h.fleet.toLowerCase().includes(q.toLowerCase()))
+    ? hostsStore.hosts.find(h => h.hostname.toLowerCase().includes(q.toLowerCase()) || ''.toLowerCase().includes(q.toLowerCase()))
     : hostsStore.hosts[0]
   if (fleetTarget) {
     actions.push({

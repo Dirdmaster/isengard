@@ -3,12 +3,9 @@ import { computed, ref } from 'vue'
 import { useHostsStore, type Host } from '~/stores/hosts'
 import { useStacksStore } from '~/stores/stacks'
 import { useEventsStore } from '~/stores/events'
-import { useUiStore } from '~/stores/ui'
-
 const hostsStore = useHostsStore()
 const stacksStore = useStacksStore()
 const eventsStore = useEventsStore()
-const uiStore = useUiStore()
 
 const inspectingHost = ref<Host | null>(null)
 
@@ -18,28 +15,13 @@ await Promise.all([
   eventsStore.load(200),
 ])
 
-const filteredHosts = computed(() => {
-  const fleet = uiStore.activeFleet
-  return fleet === 'all'
-    ? hostsStore.hosts
-    : hostsStore.hosts.filter((h) => h.fleet === fleet)
-})
+// kill-fleets: no fleet filter. The whole hosts list is rendered.
+const filteredHosts = computed(() => hostsStore.hosts)
 
-const fleetCount = computed(() => {
-  const set = new Set(hostsStore.hosts.map((h) => h.fleet))
-  return set.size
-})
-
-// Spec: `5 hosts across 3 fleets` when unfiltered, `5 hosts in prod` when scoped.
-// `design/pages/hosts.md` § States.
 const subtitle = computed(() => {
   const n = filteredHosts.value.length
   const noun = n === 1 ? 'host' : 'hosts'
-  const fleet = uiStore.activeFleet
-  if (fleet !== 'all') return `${n} ${noun} in ${fleet}`
-  const fleets = fleetCount.value
-  if (fleets === 0) return `${n} ${noun}`
-  return `${n} ${noun} across ${fleets} ${fleets === 1 ? 'fleet' : 'fleets'}`
+  return `${n} ${noun}`
 })
 
 const stackCounts = computed(() => {

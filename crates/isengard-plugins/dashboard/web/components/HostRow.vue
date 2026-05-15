@@ -63,7 +63,7 @@ const osDocker = computed(() => {
       <span class="w-2 h-2 rounded-full shrink-0" :class="stateDot"></span>
       <span class="font-medium text-iso-text-primary truncate">{{ host.hostname }}</span>
     </div>
-    <span class="text-iso-text-muted truncate">{{ host.fleet }}</span>
+    <span class="text-iso-text-muted truncate"></span>
     <span class="text-iso-text-muted">
       {{ stackCount }} · {{ serviceCount }} svcs
     </span>
