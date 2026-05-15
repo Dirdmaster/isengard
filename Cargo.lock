@@ -2683,7 +2683,7 @@ dependencies = [
  "http-body-util",
  "indicatif",
  "isd-runtime",
- "isengard-manifest",
+ "isengard-agent",
  "open",
  "predicates",
  "reqwest",

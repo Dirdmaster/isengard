@@ -13,7 +13,7 @@ name = "isd"
 path = "src/main.rs"
 
 [dependencies]
-isengard-manifest.workspace = true
+isengard-agent.workspace = true
 isd-runtime.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
