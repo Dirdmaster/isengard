@@ -239,7 +239,6 @@ fn default_command() -> Command {
         format: "table".into(),
         legacy: false,
         json: false,
-        fleet: None,
     })
 }
 

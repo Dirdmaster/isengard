@@ -2,7 +2,7 @@
 //!
 //! Phase 0.18 step 6 companion to `stack_cmd`. Mirrors `docker service ls`
 //! for operators who want a flat global view. Talks to
-//! `GET /api/v1/services` (optionally `?fleet=`).
+//! `GET /api/v1/services`.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -21,8 +21,8 @@ pub struct ServiceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ServiceCommand {
-    /// List every service across the saved context's fleet. Joins to
-    /// the stacks endpoint client-side so the STACK column carries the
+    /// List every service across every stack on the saved context. Joins
+    /// to the stacks endpoint client-side so the STACK column carries the
     /// stack name instead of the opaque stack_id.
     Ls(LsArgs),
 }
@@ -32,9 +32,6 @@ pub struct LsArgs {
     /// Emit JSON instead of the table.
     #[arg(long)]
     pub json: bool,
-    /// Optional fleet filter, mirrors `GET /api/v1/services?fleet=`.
-    #[arg(long)]
-    pub fleet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,24 +53,10 @@ pub async fn run(args: ServiceArgs, context: Option<&str>) -> Result<()> {
 async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
 
-    let stacks: Vec<StackApiRow> = fetch(
-        &session,
-        &build_url(
-            session.controller_url(),
-            "/api/v1/stacks",
-            args.fleet.as_deref(),
-        ),
-    )
-    .await?;
-    let services: Vec<ServiceApiRow> = fetch(
-        &session,
-        &build_url(
-            session.controller_url(),
-            "/api/v1/services",
-            args.fleet.as_deref(),
-        ),
-    )
-    .await?;
+    let stacks: Vec<StackApiRow> =
+        fetch(&session, &format!("{}/api/v1/stacks", session.controller_url())).await?;
+    let services: Vec<ServiceApiRow> =
+        fetch(&session, &format!("{}/api/v1/services", session.controller_url())).await?;
 
     let rows = build_rows(&stacks, &services);
 
@@ -84,13 +67,6 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
         println!("{}", out.trim_end());
     }
     Ok(())
-}
-
-fn build_url(base: &str, path: &str, fleet: Option<&str>) -> String {
-    match fleet {
-        Some(f) => format!("{base}{path}?fleet={f}"),
-        None => format!("{base}{path}"),
-    }
 }
 
 async fn fetch<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) -> Result<T> {

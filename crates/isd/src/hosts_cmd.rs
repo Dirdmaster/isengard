@@ -3,12 +3,11 @@
 //! Wave 5.B polish: before this surface existed, the canonical Crockford
 //! ULID for a host was only recoverable via `sqlite3 ... hex(id)` on the
 //! controller box (sled / pid namespace) plus a manual base32 decode.
-//! Operators on multi-host fleets had no way to learn `--host-id` from
+//! Operators on multi-host clusters had no way to learn `--host-id` from
 //! the CLI when commands like `isd deploy` rejected an ambiguous host.
 //!
-//! Talks to `GET /api/v1/hosts` (optionally `?fleet=<name>`). Renders a
-//! kubectl-style ASCII table by default; `--json` emits the raw rows for
-//! shell scripting.
+//! Talks to `GET /api/v1/hosts`. Renders a kubectl-style ASCII table by
+//! default; `--json` emits the raw rows for shell scripting.
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -37,10 +36,6 @@ pub struct ListArgs {
     /// stable across patch releases.
     #[arg(long)]
     pub json: bool,
-
-    /// Optional fleet filter. Mirrors the dashboard's `?fleet=` query param.
-    #[arg(long)]
-    pub fleet: Option<String>,
 }
 
 /// Subset of the dashboard's `HostDto` we render. Pre-0.5 fields are
@@ -50,7 +45,6 @@ pub struct ListArgs {
 pub struct HostRow {
     pub id: String,
     pub hostname: String,
-    pub fleet: String,
     pub enrolled_at: DateTime<Utc>,
 }
 
@@ -62,10 +56,7 @@ pub async fn run(args: HostsArgs, context: Option<&str>) -> Result<()> {
 
 async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
-    let mut url = format!("{}/api/v1/hosts", session.controller_url());
-    if let Some(f) = args.fleet.as_deref() {
-        url.push_str(&format!("?fleet={f}"));
-    }
+    let url = format!("{}/api/v1/hosts", session.controller_url());
     let resp = session
         .client
         .get(&url)
@@ -94,7 +85,7 @@ fn render_table(rows: &[HostRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["HOST ID", "NAME", "ENROLLED", "FLEET"]);
+        .set_header(vec!["HOST ID", "NAME", "ENROLLED"]);
     for row in rows {
         t.add_row(vec![
             row.id.as_str(),
@@ -105,7 +96,6 @@ fn render_table(rows: &[HostRow]) -> String {
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string()
                 .as_str(),
-            row.fleet.as_str(),
         ]);
     }
     t.to_string()
@@ -116,11 +106,10 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn host_row(id: &str, name: &str, fleet: &str) -> HostRow {
+    fn host_row(id: &str, name: &str) -> HostRow {
         HostRow {
             id: id.into(),
             hostname: name.into(),
-            fleet: fleet.into(),
             enrolled_at: Utc.with_ymd_and_hms(2026, 5, 11, 1, 35, 42).unwrap(),
         }
     }
@@ -128,14 +117,15 @@ mod tests {
     #[test]
     fn table_contains_header_and_each_row() {
         let rows = vec![
-            host_row("01KRA25CW1F263ETCNTJCGJJ59", "iso-fresh-1", "default"),
-            host_row("01KRA25YV3HFJG2EKEKW5KFKY3", "iso-fresh-2", "default"),
+            host_row("01KRA25CW1F263ETCNTJCGJJ59", "iso-fresh-1"),
+            host_row("01KRA25YV3HFJG2EKEKW5KFKY3", "iso-fresh-2"),
         ];
         let t = render_table(&rows);
         assert!(t.contains("HOST ID"), "header has HOST ID column");
         assert!(t.contains("NAME"), "header has NAME column");
         assert!(t.contains("ENROLLED"), "header has ENROLLED column");
-        assert!(t.contains("FLEET"), "header has FLEET column");
+        // kill-fleets: no FLEET column.
+        assert!(!t.contains("FLEET"));
         assert!(t.contains("01KRA25CW1F263ETCNTJCGJJ59"));
         assert!(t.contains("01KRA25YV3HFJG2EKEKW5KFKY3"));
         assert!(t.contains("iso-fresh-1"));
@@ -147,7 +137,6 @@ mod tests {
     fn empty_input_still_renders_header() {
         let t = render_table(&[]);
         assert!(t.contains("HOST ID"));
-        assert!(t.contains("FLEET"));
     }
 
     #[test]
@@ -163,7 +152,6 @@ mod tests {
             "arch": "x86_64",
             "agent_version": "0.3.0",
             "docker_version": "27.0",
-            "fleet": "default",
             "enrolled_at": "2026-05-11T01:35:42Z",
             "last_seen_at": "2026-05-11T01:36:00Z",
             "runtime_backend": "docker"
@@ -171,7 +159,6 @@ mod tests {
         let row: HostRow = serde_json::from_str(json).unwrap();
         assert_eq!(row.id, "01KRA25CW1F263ETCNTJCGJJ59");
         assert_eq!(row.hostname, "iso-fresh-1");
-        assert_eq!(row.fleet, "default");
     }
 
     #[tokio::test]
@@ -196,7 +183,6 @@ mod tests {
                 "arch": "x86_64",
                 "agent_version": "0.3.0",
                 "docker_version": "27.0",
-                "fleet": "default",
                 "enrolled_at": "2026-05-11T01:35:42Z",
                 "last_seen_at": "2026-05-11T01:36:00Z",
                 "runtime_backend": "docker"
@@ -232,14 +218,7 @@ url = "{}"
             std::env::set_var("ISD_CREDENTIALS_FILE", &creds_path);
         }
 
-        let result = run_list(
-            ListArgs {
-                json: true,
-                fleet: None,
-            },
-            None,
-        )
-        .await;
+        let result = run_list(ListArgs { json: true }, None).await;
 
         unsafe {
             std::env::remove_var("ISD_CREDENTIALS_FILE");

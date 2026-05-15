@@ -23,9 +23,9 @@ pub struct RouteArgs {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)] // CreateArgs is large but only one is alive at a time
 pub enum RouteCommand {
-    /// List every routing rule across the fleet.
+    /// List every routing rule across the cluster.
     List,
-    /// Create a routing rule. Defaults: fleet="default", protocol="http",
+    /// Create a routing rule. Defaults: protocol="http",
     /// adapter="none", tls-mode="acme". Override via flags.
     Create(CreateArgs),
     /// Delete a routing rule by id (the integer printed by `list`).
@@ -38,9 +38,9 @@ pub struct CreateArgs {
     /// e.g. `iso.vallee.casa`. Wildcards are not allowed in this field; an
     /// `*.example.com` cert covers any single-label subdomain when present.
     pub public_hostname: String,
-    /// Agent serving the upstream. Defaults to the only enrolled agent in
-    /// the fleet (the homelab single-host case). Pass either `--host-id`
-    /// (ULID) or `--host` (hostname) when more than one agent exists.
+    /// Agent serving the upstream. Defaults to the only enrolled agent
+    /// (the homelab single-host case). Pass either `--host-id` (ULID) or
+    /// `--host` (hostname) when more than one agent exists.
     #[arg(long, conflicts_with = "host")]
     pub host_id: Option<String>,
     /// Agent hostname (resolved client-side to a host_id). Mutually
@@ -55,9 +55,6 @@ pub struct CreateArgs {
     /// Upstream port on the container.
     #[arg(long)]
     pub port: u16,
-    /// Fleet scope. Most installs run a single fleet.
-    #[arg(long, default_value = "default")]
-    pub fleet: String,
     /// Upstream protocol. `http` is correct when the proxy terminates TLS
     /// and the upstream serves plain HTTP (the common homelab case).
     #[arg(long, default_value = "http")]
@@ -84,7 +81,6 @@ pub struct RmArgs {
 
 #[derive(Debug, Serialize)]
 struct CreateBody<'a> {
-    fleet: &'a str,
     host_id: &'a str,
     service_name: &'a str,
     container_port: u16,
@@ -107,7 +103,6 @@ struct RoutingRuleEntry {
     service_name: String,
     container_port: u16,
     host_id: String,
-    fleet: String,
     protocol: String,
     adapter: String,
     tls_mode: String,
@@ -120,7 +115,6 @@ struct RoutingRuleEntry {
 struct HostEntry {
     id: String,
     hostname: String,
-    fleet: String,
 }
 
 pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
@@ -143,7 +137,7 @@ async fn run_list(context: Option<&str>) -> Result<()> {
         .load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
         .set_header(vec![
-            "ID", "HOSTNAME", "UPSTREAM", "PORT", "TLS", "STATE", "SRC", "FLEET",
+            "ID", "HOSTNAME", "UPSTREAM", "PORT", "TLS", "STATE", "SRC",
         ]);
     for e in &entries {
         table.add_row(vec![
@@ -154,7 +148,6 @@ async fn run_list(context: Option<&str>) -> Result<()> {
             e.tls_mode.clone(),
             e.state.clone(),
             e.source.clone(),
-            e.fleet.clone(),
         ]);
     }
     println!("{table}");
@@ -167,11 +160,9 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
         &session,
         args.host_id.as_deref(),
         args.host.as_deref(),
-        &args.fleet,
     )
     .await?;
     let body = CreateBody {
-        fleet: &args.fleet,
         host_id: &host_id,
         service_name: &args.service,
         container_port: args.port,
@@ -189,20 +180,19 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
 
 /// Resolve the agent's host_id with this priority:
 ///   1. `--host-id <ulid>` -> use literally
-///   2. `--host <hostname>` -> look up the matching agent in the fleet
-///   3. neither -> if exactly one agent in the fleet, use it; otherwise
+///   2. `--host <hostname>` -> look up the matching agent
+///   3. neither -> if exactly one agent is enrolled, use it; otherwise
 ///      error with a numbered list so the operator can re-invoke with
 ///      `--host` or `--host-id`.
 async fn resolve_host_id(
     session: &Session,
     host_id: Option<&str>,
     host: Option<&str>,
-    fleet: &str,
 ) -> Result<String> {
     if let Some(id) = host_id {
         return Ok(id.to_string());
     }
-    let hosts = list_hosts(session, fleet).await?;
+    let hosts = list_hosts(session).await?;
     if let Some(name) = host {
         let lc = name.to_lowercase();
         let matches: Vec<&HostEntry> = hosts
@@ -211,16 +201,15 @@ async fn resolve_host_id(
             .collect();
         return match matches.len() {
             0 => Err(anyhow!(
-                "no agent in fleet {fleet:?} with hostname {name:?}; \
-                 known agents:\n{}",
+                "no agent with hostname {name:?}; known agents:\n{}",
                 hosts_table(&hosts),
             )),
             1 => Ok(matches[0].id.clone()),
             _ => {
                 let owned: Vec<HostEntry> = matches.into_iter().cloned().collect();
                 Err(anyhow!(
-                    "more than one agent in fleet {fleet:?} matches hostname \
-                     {name:?}; pass --host-id <ulid> instead. matches:\n{}",
+                    "more than one agent matches hostname {name:?}; pass \
+                     --host-id <ulid> instead. matches:\n{}",
                     hosts_table(&owned),
                 ))
             }
@@ -228,11 +217,11 @@ async fn resolve_host_id(
     }
     match hosts.len() {
         0 => Err(anyhow!(
-            "no agents enrolled in fleet {fleet:?}; enroll one before creating routes"
+            "no agents enrolled; enroll one before creating routes"
         )),
         1 => Ok(hosts[0].id.clone()),
         _ => Err(anyhow!(
-            "more than one agent in fleet {fleet:?}; pass --host <hostname> or \
+            "more than one agent; pass --host <hostname> or \
              --host-id <ulid>. enrolled agents:\n{}",
             hosts_table(&hosts),
         )),
@@ -243,13 +232,13 @@ fn hosts_table(hosts: &[HostEntry]) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     for h in hosts {
-        let _ = writeln!(&mut s, "  {}  {}  fleet={}", h.id, h.hostname, h.fleet);
+        let _ = writeln!(&mut s, "  {}  {}", h.id, h.hostname);
     }
     s
 }
 
-async fn list_hosts(session: &Session, fleet: &str) -> Result<Vec<HostEntry>> {
-    let url = format!("{}/api/v1/hosts?fleet={fleet}", session.controller_url());
+async fn list_hosts(session: &Session) -> Result<Vec<HostEntry>> {
+    let url = format!("{}/api/v1/hosts", session.controller_url());
     let resp = session
         .client
         .get(&url)
@@ -347,7 +336,6 @@ mod tests {
                 assert!(a.host.is_none());
                 assert_eq!(a.service, "iso-controller");
                 assert_eq!(a.port, 9418);
-                assert_eq!(a.fleet, "default");
                 assert_eq!(a.protocol, "http");
                 assert_eq!(a.adapter, "none");
                 assert_eq!(a.tls_mode, "acme");

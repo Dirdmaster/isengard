@@ -57,12 +57,6 @@ pub struct PsArgs {
     /// pre-0.18 scripts don't break.
     #[arg(long, hide = true)]
     pub json: bool,
-
-    /// Deprecated: legacy stack+service join honoured this. The new
-    /// container view filters fleet at the controller via
-    /// `--filter host=<id>` instead.
-    #[arg(long, hide = true)]
-    pub fleet: Option<String>,
 }
 
 /// One row from `GET /api/v1/containers`.
@@ -323,10 +317,7 @@ async fn run_legacy(args: PsArgs, context: Option<&str>) -> Result<()> {
         "isd ps --legacy: stack+service join is deprecated and will be removed in v0.6. Switch to the default container view."
     );
     let session = Session::open(context).await?;
-    let mut url = format!("{}/api/v1/stacks", session.controller_url());
-    if let Some(f) = args.fleet.as_deref() {
-        url.push_str(&format!("?fleet={f}"));
-    }
+    let url = format!("{}/api/v1/stacks", session.controller_url());
     let stacks: Vec<LegacyStackDto> = session
         .client
         .get(&url)
