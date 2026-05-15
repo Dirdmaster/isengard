@@ -201,8 +201,7 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
 
     // Parse the file to extract the stack name. Reuses the agent's
     // canonical parser so the wire shape stays consistent.
-    let dc = parse_compose_path(&path)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let dc = parse_compose_path(&path).with_context(|| format!("parse {}", path.display()))?;
     let stack_name = dc.name.clone().ok_or_else(|| {
         anyhow!(
             "stack file {} is missing a top-level `name` key",

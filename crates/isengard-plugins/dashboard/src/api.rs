@@ -974,7 +974,6 @@ async fn persist_stack_secrets(
     }
 }
 
-
 /// `POST /api/v1/stacks`.
 ///
 /// Create a new stack from a compose.yaml. Behaves like `PUT
@@ -2102,7 +2101,6 @@ mod tests {
         assert_eq!(parsed[0]["hostname"], "host-b");
     }
 
-
     /// Phase 0.13 wave 2.A follow-up: `PUT /stacks/{id}/compose` with no
     /// Content-Type returns 415 with the accepted types listed. Operators
     /// shouldn't ever land here in practice (curl/reqwest set the header
@@ -2431,5 +2429,4 @@ mod tests {
         // despite the charset suffix.
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
-
 }
