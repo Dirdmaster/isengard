@@ -344,5 +344,4 @@ mod tests {
         assert!(validate_name("").is_err());
         assert!(validate_name(&"x".repeat(65)).is_err());
     }
-
 }
