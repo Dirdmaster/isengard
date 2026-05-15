@@ -73,14 +73,13 @@ pub struct Host {
     pub last_seen_at: Option<i64>,
     /// Free-form JSON metadata. Defaults to `{}`.
     pub metadata: serde_json::Value,
-    /// Fleet tag this host belongs to. Defaults to `"default"`.
-    pub fleet: String,
 }
 
 /// Request shape for inserting a new host. The controller calls this; the
-/// storage layer assigns a fresh [`HostId`] and `enrolled_at`. The `fleet`
-/// is required — every host belongs to exactly one fleet, named by the user
-/// during onboarding. There is no auto-`default` fleet.
+/// storage layer assigns a fresh [`HostId`] and `enrolled_at`. Host grouping
+/// (previously the `fleet` column) is now expressed via labels: agents
+/// report `[labels]` in their config and the scheduler matches them with
+/// placement selectors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollHost {
     pub fingerprint: String,
@@ -89,7 +88,6 @@ pub struct EnrollHost {
     pub arch: String,
     pub agent_version: String,
     pub docker_version: String,
-    pub fleet: String,
 }
 
 #[cfg(test)]

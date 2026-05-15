@@ -70,10 +70,6 @@ pub struct Stack {
     /// per-service phase 10g labels drive behavior.
     #[serde(default)]
     pub deploy_strategy: Option<String>,
-    /// Phase 0.13: fleet name captured from the manifest. NULL when the
-    /// stack predates the manifest or the manifest didn't pin a fleet.
-    #[serde(default)]
-    pub manifest_fleet: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +107,6 @@ pub struct StackManifestBundle {
     pub manifest_sha256: Option<String>,
     pub manifest_imported_at: Option<String>,
     pub deploy_strategy: Option<String>,
-    pub manifest_fleet: Option<String>,
     pub secrets: Vec<String>,
     pub hooks: Vec<StackHook>,
 }

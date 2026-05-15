@@ -16,7 +16,6 @@ async fn upsert_then_get_returns_meta() {
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -57,7 +56,6 @@ async fn record_attempt_increments_count_and_clears_error_on_success() {
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();

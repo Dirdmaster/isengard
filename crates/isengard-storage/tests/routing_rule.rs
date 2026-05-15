@@ -11,7 +11,6 @@ async fn seed_host(inv: &Inventory) -> HostId {
         arch: "x86_64".into(),
         agent_version: "0.0.1".into(),
         docker_version: "27.0".into(),
-        fleet: "default".into(),
     })
     .await
     .unwrap()
@@ -27,7 +26,6 @@ async fn insert_then_list_by_host_returns_inserted() {
 
     let inserted = inv
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id,
             stack_id: None,
             service_name: "web".into(),
@@ -62,7 +60,6 @@ async fn insert_unique_violation_returns_err() {
     let host_id = seed_host(&inv).await;
 
     let make = |hostname: &str| InsertRoutingRule {
-        fleet: "default".into(),
         host_id,
         stack_id: None,
         service_name: "web".into(),
@@ -100,7 +97,6 @@ async fn delete_routing_rule_removes_row() {
 
     let r = inv
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id,
             stack_id: None,
             service_name: "web".into(),
@@ -142,7 +138,6 @@ async fn upsert_override_then_list_returns_value() {
 
     let r = inv
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id: host,
             stack_id: None,
             service_name: "web".into(),
