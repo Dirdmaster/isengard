@@ -9,16 +9,20 @@
 //! follow-ups. The diff logic here is what `isd diff` shows the operator
 //! before they say yes.
 //!
-//! Compose files are parsed in two formats:
-//! - YAML (`.yml` / `.yaml`): docker-compose-compatible, `services:` wrapper.
-//! - TOML (`.toml`): Isengard-native flat shape. Every top-level table IS
-//!   a service; there is no `services:` wrapper. Top-level scalars are
-//!   reserved for future metadata (version, description) and currently
-//!   ignored. Top-level arrays-of-tables (`[[foo]]`) are rejected.
+//! Compose files are parsed in two formats, both with the same shape:
+//! - YAML (`.yml` / `.yaml`): a top-level `services:` mapping plus
+//!   top-level `name` / `secrets` / `networks` / `volumes` keys.
+//! - TOML (`.toml`): the same shape in TOML (`[services.<name>]`
+//!   tables, top-level `name = "..."`). The TOML body is translated
+//!   structurally to the YAML shape and run through the one canonical
+//!   parser so env / ports / labels / networks / secrets all decode
+//!   the same way.
 //!
-//! The TOML path lifts every top-level table under a synthetic `services:`
-//! map and re-runs the existing YAML parser, so env / ports / labels /
-//! networks / secrets all use the same canonical decode.
+//! The wrapper shape was adopted in 2026-05-15 (one-file stack model
+//! design spec, Track A): with `name` / `secrets` / placement verbs
+//! sharing the top level, an explicit `services:` table keeps them
+//! unambiguous and matches the docker-compose surface operators
+//! already know.
 //!
 //! All YAML parsing uses `serde_yaml`. v0.3d still loses comments on
 //! round-trip; the dashboard editor's banner calls this out explicitly.
@@ -30,6 +34,7 @@ use bollard::secret::ContainerInspectResponse;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
+use crate::placement::{LabelSelector, Placement, Strategy};
 use crate::runtime::ContainerSnapshot;
 
 /// One service entry in `services:` after parsing. We keep the raw
@@ -66,6 +71,16 @@ pub struct DesiredService {
     /// container-create time. Empty = docker's default capability set
     /// applies.
     pub cap_add: Vec<String>,
+    /// Phase 0.14: native placement directive parsed from the service's
+    /// `spread:` / `global:` / `on:` / `where:` keys (or the Swarm-compat
+    /// `deploy:` block). `None` means "no placement verb supplied"; the
+    /// controller's scheduler treats that as `Singleton { selector: None }`.
+    pub placement: Option<Placement>,
+    /// Per-service deploy strategy from the stack file's `strategy:` key.
+    /// `None` means the stack file did not set one; the controller's
+    /// deployment supervisor applies its default. See the 2026-05-15
+    /// one-file stack model design spec (Track A).
+    pub strategy: Option<Strategy>,
 }
 
 /// One entry in a service's `secrets:` list.
@@ -91,6 +106,10 @@ pub struct DesiredCompose {
     /// v0.3.6: top-level `secrets:` map. Keys are secret names; the
     /// declared source determines how the agent resolves them.
     pub secrets: BTreeMap<String, TopLevelSecret>,
+    /// Stack name from the file's top-level `name:` key. `None` for a
+    /// bare compose file with no stack identity. See the 2026-05-15
+    /// one-file stack model design spec (Track A).
+    pub name: Option<String>,
 }
 
 /// One top-level `secrets:` entry.
@@ -223,8 +242,9 @@ impl DesiredCompose {
 pub enum ComposeFormat {
     /// `.yml` / `.yaml`: standard docker-compose, `services:` wrapper.
     Yaml,
-    /// `.toml`: Isengard-native flat shape; every top-level table is a
-    /// service.
+    /// `.toml`: same shape as YAML in TOML syntax, with a top-level
+    /// `[services.<name>]` table per service and scalar/table siblings
+    /// for `name` / `secrets` / `networks` / `volumes`.
     Toml,
 }
 
@@ -257,10 +277,10 @@ pub fn parse_compose_path(path: &Path) -> anyhow::Result<DesiredCompose> {
 ///
 /// For [`ComposeFormat::Yaml`] this is a straight passthrough to
 /// [`parse_compose`]. For [`ComposeFormat::Toml`] the content is parsed
-/// to a `toml::Value`, lifted into a synthetic `{services: <flat-map>}`
-/// shape, re-emitted as YAML, and run back through [`parse_compose`] so
-/// the canonical YAML path stays the only place that knows about env /
-/// ports / labels / networks / secrets shapes.
+/// to a `toml::Value`, translated structurally into the YAML shape, and
+/// run through [`parse_compose`] so the canonical YAML path stays the
+/// only place that knows about env / ports / labels / networks /
+/// secrets shapes.
 pub fn parse_compose_str(content: &str, format: ComposeFormat) -> anyhow::Result<DesiredCompose> {
     match format {
         ComposeFormat::Yaml => parse_compose(content),
@@ -273,49 +293,22 @@ pub fn parse_compose_str(content: &str, format: ComposeFormat) -> anyhow::Result
     }
 }
 
-/// Lift a parsed flat-shape TOML compose into the YAML shape the
-/// existing parser understands.
+/// Lift a parsed TOML stack file into the YAML shape the canonical
+/// parser understands.
 ///
-/// Rules:
-/// - Every top-level table becomes an entry under `services:`.
-/// - Top-level non-table values (scalars, arrays) are currently ignored.
-///   They are reserved for future metadata (e.g. `version`, `description`).
-/// - A top-level array-of-tables (`[[foo]]`) is rejected: it has no
-///   sensible mapping into compose semantics.
+/// The TOML shape mirrors the YAML shape: a top-level `services` table
+/// holds the service definitions, and top-level keys like `name` and
+/// `secrets` sit beside it. This is a straight structural translation
+/// (every TOML scalar / table / array maps 1:1 to its YAML twin);
+/// `parse_compose` then does the real decode.
 fn toml_to_compose_yaml(value: toml::Value) -> anyhow::Result<String> {
-    let toml::Value::Table(tbl) = value else {
+    if !matches!(value, toml::Value::Table(_)) {
         return Err(anyhow::anyhow!(
             "compose.toml root must be a table; got {value:?}"
         ));
-    };
-    let mut services_map = serde_json::Map::new();
-    for (k, v) in tbl {
-        match v {
-            toml::Value::Table(_) => {
-                services_map.insert(k, toml_value_to_json(v)?);
-            }
-            toml::Value::Array(ref arr)
-                if arr.iter().all(|x| matches!(x, toml::Value::Table(_))) =>
-            {
-                // Array-of-tables (`[[k]]`). Compose has no sensible
-                // mapping for this shape; reject loudly so an operator
-                // doesn't think it silently became a service.
-                return Err(anyhow::anyhow!(
-                    "compose.toml top-level `[[{k}]]` array-of-tables is not supported; \
-                     each service must be a single `[name]` table"
-                ));
-            }
-            _other => {
-                // Scalar or non-table-array. Reserved for future top-level
-                // metadata; ignore for now.
-                continue;
-            }
-        }
     }
-    let mut top = serde_json::Map::new();
-    top.insert("services".into(), serde_json::Value::Object(services_map));
-    serde_yaml::to_string(&serde_json::Value::Object(top))
-        .map_err(|e| anyhow::anyhow!("serialize toml-as-yaml: {e}"))
+    let json = toml_value_to_json(value)?;
+    serde_yaml::to_string(&json).map_err(|e| anyhow::anyhow!("serialize toml-as-yaml: {e}"))
 }
 
 /// Recursively translate a `toml::Value` into a `serde_json::Value`.
@@ -357,20 +350,38 @@ fn toml_value_to_json(v: toml::Value) -> anyhow::Result<serde_json::Value> {
 pub fn parse_compose(yaml: &str) -> anyhow::Result<DesiredCompose> {
     let root: Value =
         serde_yaml::from_str(yaml).map_err(|e| anyhow::anyhow!("parse compose.yaml: {e}"))?;
+
+    let mut out = DesiredCompose::default();
+
+    // 2026-05-15 stack file model: top-level `name:` keys the stack
+    // identity. Parsed before services so a name-only file (no services
+    // table) still carries the identity through to the reconciler.
+    if let Value::Mapping(root_map) = &root {
+        if let Some(name_value) = root_map.get(Value::String("name".into())) {
+            let Value::String(name) = name_value else {
+                return Err(anyhow::anyhow!("top-level `name:` must be a string"));
+            };
+            if name.trim().is_empty() {
+                return Err(anyhow::anyhow!("top-level `name:` must not be empty"));
+            }
+            out.name = Some(name.clone());
+        }
+    }
+
     let services_value = match &root {
         Value::Mapping(m) => m.get(Value::String("services".into())),
         _ => None,
     };
     let Some(services_value) = services_value else {
         // No services key means an empty compose. Useful for the "stop
-        // everything" case (delete the file -> reconcile says stop all).
-        return Ok(DesiredCompose::default());
+        // everything" case (delete the file -> reconcile says stop all)
+        // and for stack files that only set top-level keys (name only).
+        return Ok(out);
     };
     let Value::Mapping(services_map) = services_value else {
         return Err(anyhow::anyhow!("`services:` must be a mapping"));
     };
 
-    let mut out = DesiredCompose::default();
     for (k, v) in services_map {
         let Value::String(name) = k else { continue };
         let Value::Mapping(svc) = v else { continue };
@@ -607,7 +618,308 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
             }
         }
     }
+
+    // Phase 0.14: native placement verbs + swarm-compat `deploy:` block.
+    // See `compose_placement_for_service` for the surface; the parser is
+    // intentionally strict so a bad selector or conflicting verbs is a
+    // hard error at `isd deploy` rather than a silent default.
+    svc.placement = compose_placement_for_service(name, m)?;
+
+    // 2026-05-15 stack file model: per-service `strategy:` selects the
+    // deploy rollout behavior. Only the four kebab-case keywords are
+    // allowed; anything else is a hard parse error so typos surface at
+    // `isd deploy` instead of silently defaulting.
+    if let Some(value) = m.get(Value::String("strategy".into())) {
+        let Value::String(s) = value else {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: `strategy:` must be a string"
+            ));
+        };
+        svc.strategy =
+            Some(Strategy::parse(s).map_err(|e| anyhow::anyhow!("service {name:?}: {e}"))?);
+    }
+
     Ok(svc)
+}
+
+/// Inspect a service mapping for the placement keys and return the
+/// resolved [`Placement`]. Returns `Ok(None)` when the service uses no
+/// placement keys at all (and no `deploy:` block). Errors on:
+///
+/// - More than one of `spread`, `global`, `on`.
+/// - Native placement + a `deploy:` block in the same service.
+/// - Invalid types (e.g. `spread: "three"`).
+/// - Bad selector grammar in `where:` or `deploy.placement.constraints`.
+/// - Swarm `engine.labels.*` constraints (no Isengard equivalent).
+fn compose_placement_for_service(name: &str, m: &Mapping) -> anyhow::Result<Option<Placement>> {
+    let raw_spread = m.get(Value::String("spread".into()));
+    let raw_global = m.get(Value::String("global".into()));
+    let raw_on = m.get(Value::String("on".into()));
+    let raw_where = m.get(Value::String("where".into()));
+    let raw_deploy = m.get(Value::String("deploy".into()));
+
+    let native_count = [raw_spread.is_some(), raw_global.is_some(), raw_on.is_some()]
+        .iter()
+        .filter(|x| **x)
+        .count();
+    if native_count > 1 {
+        return Err(anyhow::anyhow!(
+            "service {name:?}: conflicting placement verbs; pick exactly one of \
+             `spread`, `global`, `on`"
+        ));
+    }
+    let has_native = native_count > 0 || raw_where.is_some();
+    if has_native && raw_deploy.is_some() {
+        return Err(anyhow::anyhow!(
+            "service {name:?}: cannot mix native placement verbs \
+             (`spread`/`global`/`on`/`where`) with a `deploy:` block; pick one form"
+        ));
+    }
+
+    // Native form takes precedence.
+    if has_native {
+        let selector = match raw_where {
+            Some(Value::String(s)) => Some(
+                LabelSelector::parse(s)
+                    .map_err(|e| anyhow::anyhow!("service {name:?}: where: {e}"))?,
+            ),
+            Some(Value::Null) | None => None,
+            Some(other) => {
+                return Err(anyhow::anyhow!(
+                    "service {name:?}: `where:` must be a string, got {other:?}"
+                ));
+            }
+        };
+        if let Some(v) = raw_spread {
+            let count = parse_unsigned(name, "spread", v)?;
+            if count == 0 {
+                return Err(anyhow::anyhow!(
+                    "service {name:?}: `spread:` must be >= 1; use no verb for default singleton"
+                ));
+            }
+            if count == 1 {
+                // Spec default: normalize `spread: 1` to Singleton at parse
+                // time so the scheduler sees one canonical form.
+                return Ok(Some(Placement::Singleton { selector }));
+            }
+            return Ok(Some(Placement::Spread { count, selector }));
+        }
+        if let Some(v) = raw_global {
+            let g = parse_bool(name, "global", v)?;
+            if !g {
+                return Err(anyhow::anyhow!(
+                    "service {name:?}: `global: false` is the same as no verb; remove it"
+                ));
+            }
+            return Ok(Some(Placement::Global { selector }));
+        }
+        if let Some(v) = raw_on {
+            let host = parse_string(name, "on", v)?;
+            if host.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "service {name:?}: `on:` must be a non-empty hostname"
+                ));
+            }
+            return Ok(Some(Placement::On { host, selector }));
+        }
+        // where: alone (no other verb).
+        return Ok(Some(Placement::Singleton { selector }));
+    }
+
+    // Swarm-compat: translate `deploy:` block to the same internal model.
+    if let Some(Value::Mapping(deploy_map)) = raw_deploy {
+        return translate_deploy_block(name, deploy_map).map(Some);
+    }
+    Ok(None)
+}
+
+fn translate_deploy_block(name: &str, deploy: &Mapping) -> anyhow::Result<Placement> {
+    // 1. Mode (replicated default; global supported).
+    let mode = match deploy.get(Value::String("mode".into())) {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Null) | None => None,
+        Some(other) => {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: deploy.mode must be a string, got {other:?}"
+            ));
+        }
+    };
+    // 2. Replicas (count).
+    let replicas = match deploy.get(Value::String("replicas".into())) {
+        Some(v) => Some(parse_unsigned(name, "deploy.replicas", v)?),
+        None => None,
+    };
+    // 3. Placement constraints.
+    let mut on_host: Option<String> = None;
+    let mut selector_clauses: Vec<String> = Vec::new();
+    if let Some(Value::Mapping(placement)) = deploy.get(Value::String("placement".into())) {
+        if let Some(Value::Sequence(seq)) = placement.get(Value::String("constraints".into())) {
+            for entry in seq {
+                let Value::String(s) = entry else {
+                    return Err(anyhow::anyhow!(
+                        "service {name:?}: deploy.placement.constraints entries must be strings"
+                    ));
+                };
+                let translated = translate_constraint(name, s)?;
+                match translated {
+                    DeployConstraint::Hostname(h) => {
+                        if on_host.is_some() {
+                            return Err(anyhow::anyhow!(
+                                "service {name:?}: multiple `node.hostname` constraints"
+                            ));
+                        }
+                        on_host = Some(h);
+                    }
+                    DeployConstraint::Selector(clause) => selector_clauses.push(clause),
+                }
+            }
+        }
+    }
+    let selector =
+        if selector_clauses.is_empty() {
+            None
+        } else {
+            let joined = selector_clauses.join(", ");
+            Some(LabelSelector::parse(&joined).map_err(|e| {
+                anyhow::anyhow!("service {name:?}: deploy.placement.constraints: {e}")
+            })?)
+        };
+
+    if mode.as_deref() == Some("global") {
+        if replicas.is_some() {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: deploy.mode=global cannot coexist with replicas"
+            ));
+        }
+        return Ok(Placement::Global { selector });
+    }
+    if let Some(host) = on_host {
+        if replicas.unwrap_or(1) > 1 {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: `node.hostname` constraint + replicas > 1 has no \
+                 equivalent in Isengard; remove one"
+            ));
+        }
+        return Ok(Placement::On { host, selector });
+    }
+    if let Some(count) = replicas {
+        if count == 0 {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: deploy.replicas must be >= 1"
+            ));
+        }
+        if count == 1 {
+            return Ok(Placement::Singleton { selector });
+        }
+        return Ok(Placement::Spread { count, selector });
+    }
+    // No replicas, no mode=global, no node.hostname: a deploy block with
+    // only labels-based constraints == Singleton with the selector.
+    Ok(Placement::Singleton { selector })
+}
+
+enum DeployConstraint {
+    Hostname(String),
+    /// A selector-shaped clause, e.g. `role==worker`.
+    Selector(String),
+}
+
+/// Translate one Docker Swarm placement constraint string into either a
+/// native `on:` host or a selector clause.
+fn translate_constraint(name: &str, raw: &str) -> anyhow::Result<DeployConstraint> {
+    // Swarm format: "<key> == <value>" or "<key> != <value>" with
+    // whitespace around the op. Examples:
+    //   "node.role == worker"
+    //   "node.hostname == alice"
+    //   "node.labels.tier == gpu"
+    //   "engine.labels.x == y"     (rejected)
+    let (key, op, value) = split_swarm_constraint(raw).ok_or_else(|| {
+        anyhow::anyhow!(
+            "service {name:?}: malformed deploy.placement.constraint {raw:?}; \
+             expected `<key> == <value>` or `<key> != <value>`"
+        )
+    })?;
+    if let Some(stripped) = key.strip_prefix("engine.labels.") {
+        return Err(anyhow::anyhow!(
+            "service {name:?}: engine.labels.{stripped} constraint has no Isengard \
+             equivalent; switch to a `node.labels.*` or `node.role` constraint"
+        ));
+    }
+    let stripped_key = if key == "node.hostname" {
+        if op != "==" {
+            return Err(anyhow::anyhow!(
+                "service {name:?}: `node.hostname` only supports `==`, got {op:?}"
+            ));
+        }
+        return Ok(DeployConstraint::Hostname(value.to_string()));
+    } else if let Some(rest) = key.strip_prefix("node.labels.") {
+        rest.to_string()
+    } else if key == "node.role" {
+        "role".to_string()
+    } else if key == "node.platform.os" {
+        "os".to_string()
+    } else if key == "node.platform.arch" {
+        "arch".to_string()
+    } else {
+        return Err(anyhow::anyhow!(
+            "service {name:?}: unsupported deploy.placement.constraint key {key:?}; \
+             supported: node.role, node.hostname, node.labels.*, node.platform.os, \
+             node.platform.arch"
+        ));
+    };
+    Ok(DeployConstraint::Selector(format!(
+        "{stripped_key}{op}{value}"
+    )))
+}
+
+/// Split `"key == value"` or `"key != value"` (whitespace-tolerant).
+/// Returns `(key, op, value)` on a match.
+fn split_swarm_constraint(s: &str) -> Option<(&str, &'static str, &str)> {
+    for op in ["==", "!="] {
+        if let Some(idx) = s.find(op) {
+            let key = s[..idx].trim();
+            let value = s[idx + op.len()..].trim();
+            if key.is_empty() || value.is_empty() {
+                continue;
+            }
+            // Map the op back to the canonical literal for caller.
+            let op_lit = if op == "==" { "==" } else { "!=" };
+            return Some((key, op_lit, value));
+        }
+    }
+    None
+}
+
+fn parse_unsigned(name: &str, field: &str, v: &Value) -> anyhow::Result<u32> {
+    match v {
+        Value::Number(n) => n
+            .as_u64()
+            .and_then(|x| u32::try_from(x).ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("service {name:?}: `{field}:` must be a non-negative u32")
+            }),
+        other => Err(anyhow::anyhow!(
+            "service {name:?}: `{field}:` must be an integer, got {other:?}"
+        )),
+    }
+}
+
+fn parse_bool(name: &str, field: &str, v: &Value) -> anyhow::Result<bool> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        other => Err(anyhow::anyhow!(
+            "service {name:?}: `{field}:` must be a bool, got {other:?}"
+        )),
+    }
+}
+
+fn parse_string(name: &str, field: &str, v: &Value) -> anyhow::Result<String> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        other => Err(anyhow::anyhow!(
+            "service {name:?}: `{field}:` must be a string, got {other:?}"
+        )),
+    }
 }
 
 /// Compose accepts both `command: foo bar` and `command: [foo, bar]`.
@@ -913,6 +1225,118 @@ mod tests {
     }
 
     #[test]
+    fn desired_service_carries_strategy_and_placement_defaults() {
+        let svc = DesiredService::default();
+        assert_eq!(svc.strategy, None);
+        assert_eq!(svc.placement, None);
+    }
+
+    #[test]
+    fn desired_compose_carries_optional_name() {
+        let dc = DesiredCompose::default();
+        assert_eq!(dc.name, None);
+    }
+
+    #[test]
+    fn parse_service_reads_strategy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:alpine
+    strategy: blue-green
+  db:
+    image: postgres:16
+"#;
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.services["web"].strategy, Some(Strategy::BlueGreen));
+        assert_eq!(dc.services["db"].strategy, None);
+    }
+
+    #[test]
+    fn parse_service_reads_each_strategy_value() {
+        for (kw, expected) in [
+            ("auto", Strategy::Auto),
+            ("blue-green", Strategy::BlueGreen),
+            ("rolling", Strategy::Rolling),
+            ("recreate", Strategy::Recreate),
+        ] {
+            let yaml = format!("services:\n  web:\n    image: nginx\n    strategy: {kw}\n");
+            let dc = parse_compose(&yaml).unwrap();
+            assert_eq!(dc.services["web"].strategy, Some(expected), "kw={kw}");
+        }
+    }
+
+    #[test]
+    fn parse_service_rejects_unknown_strategy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:alpine
+    strategy: sideways
+"#;
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("unknown strategy"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_service_rejects_non_string_strategy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    strategy: 42
+"#;
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("strategy"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_compose_reads_top_level_name() {
+        let yaml = r#"
+name: monitoring
+services:
+  web:
+    image: nginx:alpine
+"#;
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.name, Some("monitoring".to_string()));
+        assert!(dc.services.contains_key("web"));
+    }
+
+    #[test]
+    fn parse_compose_name_absent_is_none() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:alpine
+"#;
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.name, None);
+    }
+
+    #[test]
+    fn parse_compose_name_only_no_services() {
+        let yaml = "name: solo\n";
+        let dc = parse_compose(yaml).unwrap();
+        assert_eq!(dc.name, Some("solo".to_string()));
+        assert!(dc.services.is_empty());
+    }
+
+    #[test]
+    fn parse_compose_rejects_non_string_name() {
+        let yaml = "name: 42\nservices: {}\n";
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("name"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_compose_rejects_empty_name() {
+        let yaml = "name: \"  \"\nservices: {}\n";
+        let err = parse_compose(yaml).unwrap_err().to_string();
+        assert!(err.contains("name"), "got: {err}");
+    }
+
+    #[test]
     fn parse_compose_with_environment_map() {
         let yaml = "services:\n  web:\n    image: nginx\n    environment:\n      FOO: bar\n      BAZ: '1'\n";
         let parsed = parse_compose(yaml).unwrap();
@@ -1080,22 +1504,25 @@ mod tests {
     // ----- TOML flat-shape -----
 
     #[test]
-    fn parse_toml_flat_shape_with_one_service() {
-        // Flat-shape: top-level `[web]` table IS a service. No `services:`
-        // wrapper. Mirrors the basic YAML smoke shape (image, env, ports,
-        // labels) so the canonical decode path is exercised end-to-end.
+    fn parse_toml_wrapper_shape_with_one_service() {
+        // Wrapper shape (2026-05-15 stack file model): `[services.<name>]`
+        // tables. Top-level `name` keys stack identity. Mirrors the basic
+        // YAML smoke shape (image, env, ports, labels).
         let toml_str = r#"
-[web]
+name = "blog"
+
+[services.web]
 image = "nginx:1.27"
 ports = ["8080:80"]
 
-[web.environment]
+[services.web.environment]
 TZ = "Europe/Zurich"
 
-[web.labels]
+[services.web.labels]
 "isengard.expose" = "foo.example.com"
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(parsed.name, Some("blog".to_string()));
         assert_eq!(parsed.services.len(), 1);
         let web = &parsed.services["web"];
         assert_eq!(web.image.as_deref(), Some("nginx:1.27"));
@@ -1105,18 +1532,22 @@ TZ = "Europe/Zurich"
     }
 
     #[test]
-    fn parse_toml_with_multiple_services() {
+    fn parse_toml_wrapper_shape_with_multiple_services() {
         let toml_str = r#"
-[web]
+name = "stack"
+
+[services.web]
 image = "nginx"
 networks = ["frontend"]
 
-[api]
+[services.api]
 image = "alpine"
 networks = ["frontend", "backend"]
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
         assert_eq!(parsed.services.len(), 2);
+        assert!(parsed.services.contains_key("web"));
+        assert!(parsed.services.contains_key("api"));
         assert!(
             parsed.services["web"]
                 .networks
@@ -1126,57 +1557,452 @@ networks = ["frontend", "backend"]
     }
 
     #[test]
-    fn parse_toml_top_level_scalars_are_ignored_metadata() {
-        // Top-level scalars (version, description, etc.) are reserved
-        // for future metadata. Today they're ignored without error: the
-        // services list still parses cleanly.
-        let toml_str = r#"
-version = "1"
-description = "smoke"
-
-[web]
-image = "nginx"
-"#;
+    fn parse_toml_without_services_table_is_empty() {
+        // Name-only stack file is valid: it carries identity without
+        // declaring services yet. Mirrors the YAML same-shape behavior.
+        let toml_str = r#"name = "empty""#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
-        assert_eq!(parsed.services.len(), 1);
-        assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
+        assert_eq!(parsed.name, Some("empty".to_string()));
+        assert!(parsed.services.is_empty());
     }
 
     #[test]
-    fn parse_toml_rejects_top_level_array_of_tables() {
-        // `[[foo]]` is array-of-tables in TOML; there's no sensible
-        // mapping into compose. Reject loudly so an operator doesn't
-        // think it silently became a service.
+    fn parse_toml_with_conflicting_placement_verbs_errors() {
+        // Phase 0.14: native placement verbs are first-class. Mixing
+        // more than one of spread / global / on in a single service is
+        // a hard parse error in the wrapper shape too.
         let toml_str = r#"
-[[svc]]
-image = "nginx"
+name = "x"
 
-[[svc]]
-image = "alpine"
-"#;
-        let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
-        assert!(format!("{err}").contains("array-of-tables"));
-    }
-
-    #[test]
-    fn parse_toml_with_native_placement_verbs_passes_through() {
-        // Phase 0.9 marker: native placement verbs (`spread`, `global`,
-        // `on`, `where`) aren't yet wired into the reconciler. They
-        // should at least parse cleanly without rejection so an
-        // operator can author them today; the apply path picks them up
-        // when later phases land. TODO(phase 1.x): surface these on
-        // DesiredService.
-        let toml_str = r#"
-[web]
+[services.web]
 image = "nginx"
 spread = 2
 global = true
-on = "lausanne"
-where = "node.role==worker"
+"#;
+        let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
+        assert!(
+            format!("{err}").contains("conflicting placement verbs"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_toml_spread_n_populates_placement() {
+        let toml_str = r#"
+[services.web]
+image = "nginx"
+spread = 3
 "#;
         let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
-        assert_eq!(parsed.services.len(), 1);
-        assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
+        match &parsed.services["web"].placement {
+            Some(crate::placement::Placement::Spread { count, selector }) => {
+                assert_eq!(*count, 3);
+                assert!(selector.is_none());
+            }
+            other => panic!("expected Spread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_spread_one_normalizes_to_singleton() {
+        let toml_str = r#"
+[services.web]
+image = "nginx"
+spread = 1
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert!(matches!(
+            parsed.services["web"].placement,
+            Some(crate::placement::Placement::Singleton { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_toml_global_true_populates_placement() {
+        let toml_str = r#"
+[services.node-exporter]
+image = "prom/node-exporter"
+global = true
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert!(matches!(
+            parsed.services["node-exporter"].placement,
+            Some(crate::placement::Placement::Global { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_toml_on_host_populates_placement() {
+        let toml_str = r#"
+[services.postgres]
+image = "postgres:16"
+on = "alice"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        match &parsed.services["postgres"].placement {
+            Some(crate::placement::Placement::On { host, selector }) => {
+                assert_eq!(host, "alice");
+                assert!(selector.is_none());
+            }
+            other => panic!("expected On, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_where_alone_is_singleton_with_selector() {
+        let toml_str = r#"
+[services.prometheus]
+image = "prom/prometheus"
+where = "role==monitoring"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        match &parsed.services["prometheus"].placement {
+            Some(crate::placement::Placement::Singleton { selector }) => {
+                let sel = selector.as_ref().unwrap();
+                assert_eq!(sel.exprs.len(), 1);
+            }
+            other => panic!("expected Singleton with selector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_spread_with_where_combines() {
+        let toml_str = r#"
+[services.gpu-worker]
+image = "myorg/inference:v3"
+spread = 4
+where = "tier==gpu, role!=control"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        match &parsed.services["gpu-worker"].placement {
+            Some(crate::placement::Placement::Spread { count, selector }) => {
+                assert_eq!(*count, 4);
+                let sel = selector.as_ref().unwrap();
+                assert_eq!(sel.exprs.len(), 2);
+            }
+            other => panic!("expected Spread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_native_plus_deploy_block_errors() {
+        let toml_str = r#"
+[services.web]
+image = "nginx"
+spread = 2
+
+[services.web.deploy]
+replicas = 3
+"#;
+        let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
+        assert!(format!("{err}").contains("cannot mix native placement verbs"));
+    }
+
+    #[test]
+    fn parse_toml_bad_where_selector_errors() {
+        let toml_str = r#"
+[services.web]
+image = "nginx"
+where = "==value"
+"#;
+        let err = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap_err();
+        assert!(format!("{err}").contains("where:"));
+    }
+
+    #[test]
+    fn parse_toml_placement_verbs_parse_in_wrapper_shape() {
+        let toml_str = r#"
+name = "infra"
+
+[services.web]
+image = "nginx:alpine"
+spread = 2
+
+[services.agent]
+image = "telegraf:1.30"
+global = true
+where = "role==worker"
+"#;
+        let parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert!(matches!(
+            parsed.services["web"].placement,
+            Some(crate::placement::Placement::Spread {
+                count: 2,
+                selector: None
+            })
+        ));
+        match &parsed.services["agent"].placement {
+            Some(crate::placement::Placement::Global { selector }) => {
+                assert_eq!(selector.as_ref().unwrap().raw, "role==worker");
+            }
+            other => panic!("expected Global with selector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_native_placement_verbs() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    spread: 3
+    where: "role==worker, zone!=eu-west"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["web"].placement {
+            Some(crate::placement::Placement::Spread { count, selector }) => {
+                assert_eq!(*count, 3);
+                assert_eq!(selector.as_ref().unwrap().exprs.len(), 2);
+            }
+            other => panic!("expected Spread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_deploy_replicas_translates_to_spread() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    deploy:
+      replicas: 3
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["web"].placement {
+            Some(crate::placement::Placement::Spread { count, .. }) => assert_eq!(*count, 3),
+            other => panic!("expected Spread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_deploy_mode_global_translates_to_global() {
+        let yaml = r#"
+services:
+  exporter:
+    image: prom/node-exporter
+    deploy:
+      mode: global
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        assert!(matches!(
+            parsed.services["exporter"].placement,
+            Some(crate::placement::Placement::Global { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_yaml_deploy_node_hostname_translates_to_on() {
+        let yaml = r#"
+services:
+  db:
+    image: postgres
+    deploy:
+      placement:
+        constraints:
+          - "node.hostname == alice"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["db"].placement {
+            Some(crate::placement::Placement::On { host, .. }) => assert_eq!(host, "alice"),
+            other => panic!("expected On, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_deploy_node_role_translates_to_where() {
+        let yaml = r#"
+services:
+  worker:
+    image: x
+    deploy:
+      replicas: 3
+      placement:
+        constraints:
+          - "node.role == worker"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["worker"].placement {
+            Some(crate::placement::Placement::Spread { count, selector }) => {
+                assert_eq!(*count, 3);
+                let sel = selector.as_ref().unwrap();
+                assert_eq!(sel.exprs.len(), 1);
+            }
+            other => panic!("expected Spread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_deploy_node_labels_translates_to_where() {
+        let yaml = r#"
+services:
+  gpu:
+    image: x
+    deploy:
+      placement:
+        constraints:
+          - "node.labels.tier == gpu"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["gpu"].placement {
+            Some(crate::placement::Placement::Singleton { selector }) => {
+                let sel = selector.as_ref().unwrap();
+                match &sel.exprs[0] {
+                    crate::placement::SelectorExpr::Eq { key, value } => {
+                        assert_eq!(key, "tier");
+                        assert_eq!(value, "gpu");
+                    }
+                    _ => panic!("expected Eq"),
+                }
+            }
+            other => panic!("expected Singleton with selector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_deploy_engine_labels_errors() {
+        let yaml = r#"
+services:
+  bad:
+    image: x
+    deploy:
+      placement:
+        constraints:
+          - "engine.labels.gpu == true"
+"#;
+        let err = parse_compose(yaml).unwrap_err();
+        assert!(format!("{err}").contains("engine.labels"));
+    }
+
+    #[test]
+    fn parse_yaml_where_in_set() {
+        let yaml = r#"
+services:
+  worker:
+    image: x
+    where: "tier in (gpu, fast)"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["worker"].placement {
+            Some(crate::placement::Placement::Singleton { selector }) => {
+                match &selector.as_ref().unwrap().exprs[0] {
+                    crate::placement::SelectorExpr::In { values, .. } => {
+                        assert_eq!(values.len(), 2);
+                    }
+                    _ => panic!("expected In"),
+                }
+            }
+            other => panic!("expected Singleton, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_yaml_where_bare_key_is_exists() {
+        let yaml = r#"
+services:
+  worker:
+    image: x
+    where: "preempt"
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        match &parsed.services["worker"].placement {
+            Some(crate::placement::Placement::Singleton { selector }) => {
+                assert!(matches!(
+                    selector.as_ref().unwrap().exprs[0],
+                    crate::placement::SelectorExpr::Exists { .. }
+                ));
+            }
+            other => panic!("expected Singleton, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_and_yaml_equivalent_for_placement_verbs() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    spread: 3
+    where: "role==worker"
+"#;
+        let toml_str = r#"
+[services.web]
+image = "nginx"
+spread = 3
+where = "role==worker"
+"#;
+        let yaml_parsed = parse_compose_str(yaml, ComposeFormat::Yaml).unwrap();
+        let toml_parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(
+            yaml_parsed.services["web"].placement,
+            toml_parsed.services["web"].placement,
+        );
+    }
+
+    #[test]
+    fn parse_yaml_spread_zero_errors() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    spread: 0
+"#;
+        let err = parse_compose(yaml).unwrap_err();
+        assert!(format!("{err}").contains("spread"));
+    }
+
+    #[test]
+    fn parse_yaml_global_false_errors() {
+        // `global: false` is the same as no verb. Reject it so an
+        // operator doesn't think they've disabled scheduling for the
+        // service when in fact the parser silently treats it as a
+        // default singleton.
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    global: false
+"#;
+        let err = parse_compose(yaml).unwrap_err();
+        assert!(format!("{err}").contains("global"));
+    }
+
+    #[test]
+    fn parse_yaml_on_empty_string_errors() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    on: ""
+"#;
+        let err = parse_compose(yaml).unwrap_err();
+        assert!(format!("{err}").contains("non-empty hostname"));
+    }
+
+    #[test]
+    fn parse_yaml_deploy_hostname_with_replicas_errors() {
+        let yaml = r#"
+services:
+  db:
+    image: postgres
+    deploy:
+      replicas: 3
+      placement:
+        constraints:
+          - "node.hostname == alice"
+"#;
+        let err = parse_compose(yaml).unwrap_err();
+        assert!(format!("{err}").contains("node.hostname"));
+    }
+
+    #[test]
+    fn parse_yaml_service_without_any_placement_keys_has_none() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+"#;
+        let parsed = parse_compose(yaml).unwrap();
+        assert!(parsed.services["web"].placement.is_none());
     }
 
     #[test]
@@ -1189,7 +2015,7 @@ where = "node.role==worker"
         assert_eq!(parsed.services["web"].image.as_deref(), Some("nginx"));
 
         let toml_path = dir.path().join("compose.toml");
-        std::fs::write(&toml_path, "[web]\nimage = \"alpine\"\n").unwrap();
+        std::fs::write(&toml_path, "[services.web]\nimage = \"alpine\"\n").unwrap();
         let parsed = parse_compose_path(&toml_path).unwrap();
         assert_eq!(parsed.services["web"].image.as_deref(), Some("alpine"));
 
@@ -1224,35 +2050,64 @@ where = "node.role==worker"
 
     #[test]
     fn parse_toml_and_yaml_produce_equivalent_desired_compose() {
-        // Same logical compose expressed in both formats should
-        // round-trip into the same DesiredCompose. This is the smoke
-        // assertion that the TOML lift-to-YAML path doesn't lose
-        // information versus the canonical YAML path. (The Phase 0.9
-        // wisp e2e test runs the YAML form; this test proves the TOML
-        // form lands on the identical structural result.)
-        let yaml = r#"services:
-  hello:
-    image: docker.io/library/busybox:latest
-    container_name: hello-toml
-    command: ["/bin/sh", "-c", "sleep 60"]
-    labels:
-      isengard.expose: e2e.wisp.local
-    networks:
-      - frontend
+        // 2026-05-15 stack-file model: a single stack file expressing
+        // top-level `name`, per-service `strategy`, and the native
+        // placement verbs must round-trip identically through the TOML
+        // and YAML paths. Asserts structural equality of DesiredCompose
+        // plus a few spot checks on the new fields.
+        let yaml = r#"
+name: monitoring
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    where: "role==monitoring"
+    strategy: recreate
+  node-exporter:
+    image: prom/node-exporter:latest
+    global: true
+  grafana:
+    image: grafana/grafana:latest
+    spread: 2
+    strategy: blue-green
 "#;
         let toml_str = r#"
-[hello]
-image = "docker.io/library/busybox:latest"
-container_name = "hello-toml"
-command = ["/bin/sh", "-c", "sleep 60"]
-networks = ["frontend"]
+name = "monitoring"
 
-[hello.labels]
-"isengard.expose" = "e2e.wisp.local"
+[services.prometheus]
+image = "prom/prometheus:latest"
+where = "role==monitoring"
+strategy = "recreate"
+
+[services.node-exporter]
+image = "prom/node-exporter:latest"
+global = true
+
+[services.grafana]
+image = "grafana/grafana:latest"
+spread = 2
+strategy = "blue-green"
 "#;
-        let yaml_parsed = parse_compose_str(yaml, ComposeFormat::Yaml).unwrap();
-        let toml_parsed = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
-        assert_eq!(yaml_parsed, toml_parsed);
+        let from_yaml = parse_compose_str(yaml, ComposeFormat::Yaml).unwrap();
+        let from_toml = parse_compose_str(toml_str, ComposeFormat::Toml).unwrap();
+        assert_eq!(from_yaml, from_toml);
+        assert_eq!(from_yaml.name, Some("monitoring".to_string()));
+        assert_eq!(
+            from_yaml.services["prometheus"].strategy,
+            Some(Strategy::Recreate)
+        );
+        assert_eq!(
+            from_yaml.services["grafana"].placement,
+            Some(crate::placement::Placement::Spread {
+                count: 2,
+                selector: None,
+            })
+        );
+        match &from_yaml.services["node-exporter"].placement {
+            Some(crate::placement::Placement::Global { selector }) => {
+                assert!(selector.is_none());
+            }
+            other => panic!("expected Global, got {other:?}"),
+        }
     }
 
     #[test]
