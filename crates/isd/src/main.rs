@@ -25,7 +25,6 @@ use clap::{Parser, Subcommand};
 mod compose_cmd;
 mod context;
 mod credentials;
-mod gateway;
 mod hosts_cmd;
 mod logs;
 mod manifest_cmd;
@@ -89,9 +88,6 @@ enum Command {
     Open(open_cmd::OpenArgs),
     /// Tail logs for `<stack>/<service>` over the controller WebSocket.
     Logs(logs::LogsArgs),
-    /// v0.3.5: DNS + reverse proxy bridging the operator's Mac to
-    /// containerized stacks. Single foreground command; Ctrl+C tears down.
-    Gateway(gateway::GatewayArgs),
     /// v0.3.6: manage Isengard-managed secrets. `put` upserts, `list`
     /// shows names only (no values), `rm` deletes.
     #[command(subcommand)]
@@ -142,7 +138,6 @@ async fn main() {
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,
-        Command::Gateway(args) => gateway::run(args, cli.context.as_deref()).await,
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
         }
