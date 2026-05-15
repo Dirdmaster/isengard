@@ -17,7 +17,6 @@ pub struct HostDto {
     pub arch: String,
     pub agent_version: String,
     pub docker_version: String,
-    pub fleet: String,
     pub enrolled_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
     /// Phase 0.5 wisp: which runtime backend this host's agent is
@@ -46,7 +45,6 @@ impl From<Host> for HostDto {
             arch: h.arch,
             agent_version: h.agent_version,
             docker_version: h.docker_version,
-            fleet: h.fleet,
             enrolled_at: DateTime::<Utc>::from_timestamp(h.enrolled_at, 0).unwrap_or_else(Utc::now),
             last_seen_at: h
                 .last_seen_at
@@ -121,18 +119,6 @@ impl From<&Event> for LiveEventDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct FleetDto {
-    pub name: String,
-    pub host_count: u32,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateFleetBody {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct EnrollmentDto {
     pub agent_id: String,
     pub enrollment_token: String,
@@ -151,13 +137,15 @@ pub struct PatchSettingsBody {
 
 #[derive(Debug, Deserialize)]
 pub struct EnrollRequest {
-    pub fleet: Option<String>,
     pub hostname: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct PatchHostRequest {
-    pub fleet: Option<String>,
+    // No patchable fields after kill-fleets. Kept as a placeholder so the
+    // handler retains its JSON body extractor; future fields land here.
+    #[serde(default, skip_serializing)]
+    pub _placeholder: Option<()>,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,7 +165,6 @@ pub struct EventsQuery {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct HostsQuery {
-    pub fleet: Option<String>,
     pub state: Option<String>,
 }
 
@@ -291,12 +278,10 @@ mod tests {
             enrolled_at: 1714521600, // 2024-05-01T00:00:00Z
             last_seen_at: Some(1714525200),
             metadata: serde_json::json!({}),
-            fleet: "default".to_string(),
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.enrolled_at.timestamp(), 1714521600);
         assert_eq!(dto.last_seen_at.unwrap().timestamp(), 1714525200);
-        assert_eq!(dto.fleet, "default");
     }
 
     #[test]
@@ -336,7 +321,6 @@ mod tests {
             manifest_sha256: None,
             manifest_imported_at: None,
             deploy_strategy: None,
-            manifest_fleet: None,
         };
 
         let dto: StackDto = s.into();
@@ -344,27 +328,6 @@ mod tests {
         assert_eq!(dto.host_id, ulid::Ulid::from(host_id).to_string());
         assert_eq!(dto.name, "wordpress");
         assert_eq!(dto.source, "compose");
-    }
-
-    #[test]
-    fn host_dto_carries_real_fleet() {
-        use isengard_storage::{Host, HostId};
-        let h = Host {
-            id: HostId::new(),
-            fingerprint: "fp".into(),
-            hostname: "h".into(),
-            os: "linux".into(),
-            arch: "x86_64".into(),
-            agent_version: "0.1.0".into(),
-            docker_version: "27.0".into(),
-            enrolled_at: 0,
-            last_seen_at: None,
-            metadata: serde_json::json!({}),
-            fleet: "prod".into(),
-        };
-
-        let dto: HostDto = h.into();
-        assert_eq!(dto.fleet, "prod");
     }
 
     /// Phase 0.5 wisp: host metadata's `runtime_backend` key
@@ -385,7 +348,6 @@ mod tests {
             enrolled_at: 0,
             last_seen_at: None,
             metadata: serde_json::json!({"runtime_backend": "wisp"}),
-            fleet: "prod".into(),
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.runtime_backend, "wisp");
@@ -405,7 +367,6 @@ mod tests {
             enrolled_at: 0,
             last_seen_at: None,
             metadata: serde_json::json!({}),
-            fleet: "prod".into(),
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.runtime_backend, "docker");

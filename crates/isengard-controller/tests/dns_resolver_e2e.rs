@@ -67,7 +67,6 @@ async fn fixture_with_rule(
             arch: "x86_64".into(),
             agent_version: "0".into(),
             docker_version: "27".into(),
-            fleet: "default".into(),
         })
         .await
         .unwrap();
@@ -75,7 +74,6 @@ async fn fixture_with_rule(
     inv.set_host_lan_ip(host, lan_ip).await.unwrap();
 
     inv.insert_routing_rule(InsertRoutingRule {
-        fleet: "default".into(),
         host_id: host,
         stack_id: None,
         service_name: "svc".into(),

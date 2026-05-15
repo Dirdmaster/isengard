@@ -65,7 +65,7 @@ fn get_req(uri: &str) -> Request<Body> {
 }
 
 async fn enroll(handles: &ControllerHandles, hostname: &str, fleet: &str) -> HostId {
-    handles
+    let host_id = handles
         .inventory
         .enroll_host(EnrollHost {
             fingerprint: format!("fp-{hostname}"),
@@ -74,10 +74,20 @@ async fn enroll(handles: &ControllerHandles, hostname: &str, fleet: &str) -> Hos
             arch: "x86_64".into(),
             agent_version: "0.1.0".into(),
             docker_version: "27.0".into(),
-            fleet: fleet.into(),
         })
         .await
-        .unwrap()
+        .unwrap();
+    // kill-fleets: the `fleet` column is gone; tests that exercise fleet-
+    // scoped policy resolution write the value as a host label so the
+    // resolver still sees it via `list_agent_labels`.
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("fleet".to_string(), fleet.to_string());
+    handles
+        .inventory
+        .replace_agent_labels(host_id, &labels)
+        .await
+        .unwrap();
+    host_id
 }
 
 async fn seed_stack(
@@ -240,7 +250,6 @@ async fn service_detail_includes_attached_routing_rules() {
     handles
         .inventory
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id,
             stack_id: Some(stack_id),
             service_name: "web".into(),
@@ -264,7 +273,6 @@ async fn service_detail_includes_attached_routing_rules() {
     handles
         .inventory
         .insert_routing_rule(InsertRoutingRule {
-            fleet: "default".into(),
             host_id,
             stack_id: Some(stack_id),
             service_name: "api".into(),

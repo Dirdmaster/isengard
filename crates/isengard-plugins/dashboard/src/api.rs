@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use isengard_controller::ControllerHandles;
 use isengard_core::policy::{PolicyContext, resolve_policy};
@@ -60,8 +60,6 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         )
         .route("/events", get(list_events))
         .route("/events/{id}", get(get_event))
-        .route("/fleets", get(list_fleets).post(create_fleet))
-        .route("/fleets/{name}", delete(delete_fleet))
         .route("/settings", get(get_settings).patch(patch_settings))
         // Phase 0.14: placement scheduler readback. Returns every
         // placement row plus the host hostname so the CLI / dashboard
@@ -84,10 +82,7 @@ async fn list_hosts(
 ) -> Response {
     match handles.inventory.list_hosts().await {
         Ok(rows) => {
-            let mut dtos: Vec<HostDto> = rows.into_iter().map(HostDto::from).collect();
-            if let Some(fleet) = q.fleet {
-                dtos.retain(|h| h.fleet == fleet);
-            }
+            let dtos: Vec<HostDto> = rows.into_iter().map(HostDto::from).collect();
             // 5d wires real state filter; until then we accept and ignore.
             if let Some(state) = q.state {
                 debug!(
@@ -144,37 +139,12 @@ async fn enroll_host(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<EnrollRequest>,
 ) -> Response {
-    // Fleet is required. The wizard prompts for it; there is no implicit
-    // 'default' fleet. Trim and validate before doing anything else.
-    let fleet = body
-        .fleet
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let Some(fleet) = fleet else {
-        return json_err(
-            StatusCode::BAD_REQUEST,
-            "fleet is required (name a fleet to group your hosts)",
-        );
-    };
-
     let token = ulid::Ulid::new().to_string();
     let agent_id = ulid::Ulid::new().to_string();
-
-    // Create the fleet now so it shows up in /api/v1/fleets listings even
-    // before the agent first enrolls. Idempotent.
-    if let Err(e) = handles.inventory.create_fleet(&fleet).await {
-        return json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create_fleet: {e}"),
-        );
-    }
 
     // Persist token in settings (v1.x: dedicated enrollment_tokens table with TTL).
     let payload = serde_json::json!({
         "agent_id": agent_id,
-        "fleet": fleet,
         "hostname": body.hostname.clone(),
     });
     if let Err(e) = handles
@@ -284,26 +254,17 @@ async fn force_update_stack(
 async fn patch_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
-    Json(body): Json<PatchHostRequest>,
+    Json(_body): Json<PatchHostRequest>,
 ) -> Response {
     let host_id = match parse_host_id(&id) {
         Ok(h) => h,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
     };
 
-    if let Some(fleet) = body.fleet {
-        match handles.inventory.set_host_fleet(host_id, &fleet).await {
-            Ok(true) => {}
-            Ok(false) => return json_err(StatusCode::NOT_FOUND, "host not found"),
-            Err(e) => {
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("set_host_fleet: {e}"),
-                );
-            }
-        }
-    }
-
+    // kill-fleets: PATCH /hosts is currently a no-op. The only previously-
+    // supported field was `fleet`, which now lives on agent labels (reported
+    // from agent.toml `[labels]`, not server-mutated). Future patchable
+    // fields will land here.
     match handles.inventory.get_host(host_id).await {
         Ok(Some(h)) => Json(HostDto::from(h)).into_response(),
         Ok(None) => json_err(StatusCode::NOT_FOUND, "host not found"),
@@ -388,83 +349,6 @@ async fn get_event(
     }
 }
 
-async fn list_fleets(State(handles): State<Arc<ControllerHandles>>) -> Response {
-    let fleets = match handles.inventory.list_fleets().await {
-        Ok(v) => v,
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list_fleets: {e}"),
-            );
-        }
-    };
-    let hosts = match handles.inventory.list_hosts().await {
-        Ok(v) => v,
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list_hosts: {e}"),
-            );
-        }
-    };
-
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for h in hosts {
-        *counts.entry(h.fleet).or_default() += 1;
-    }
-
-    let dtos: Vec<FleetDto> = fleets
-        .into_iter()
-        .map(|f| FleetDto {
-            name: f.name.clone(),
-            host_count: counts.get(&f.name).copied().unwrap_or(0),
-            created_at: f.created_at,
-        })
-        .collect();
-
-    Json(dtos).into_response()
-}
-
-async fn create_fleet(
-    State(handles): State<Arc<ControllerHandles>>,
-    Json(body): Json<CreateFleetBody>,
-) -> Response {
-    if body.name.is_empty() || body.name.len() > 32 {
-        return json_err(StatusCode::BAD_REQUEST, "fleet name must be 1-32 chars");
-    }
-    match handles.inventory.create_fleet(&body.name).await {
-        Ok(_) => StatusCode::CREATED.into_response(),
-        Err(e) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create_fleet: {e}"),
-        ),
-    }
-}
-
-async fn delete_fleet(
-    State(handles): State<Arc<ControllerHandles>>,
-    Path(name): Path<String>,
-) -> Response {
-    if name == "default" {
-        return json_err(StatusCode::BAD_REQUEST, "cannot delete the default fleet");
-    }
-    match handles.inventory.delete_fleet(&name).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => json_err(StatusCode::NOT_FOUND, "fleet not found"),
-        Err(e) => {
-            // Distinguish Conflict (has hosts) -> 409
-            if matches!(&e, isengard_storage::Error::Conflict(_)) {
-                json_err(StatusCode::CONFLICT, e.to_string())
-            } else {
-                json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("delete_fleet: {e}"),
-                )
-            }
-        }
-    }
-}
-
 async fn get_settings(State(handles): State<Arc<ControllerHandles>>) -> Response {
     let all = match handles.inventory.list_settings().await {
         Ok(v) => v,
@@ -508,7 +392,6 @@ async fn patch_settings(
 
 #[derive(Debug, Deserialize)]
 struct ListStacksQuery {
-    fleet: Option<String>,
     host_id: Option<String>,
 }
 
@@ -524,7 +407,7 @@ async fn list_stacks(
         None => None,
     };
 
-    let mut stacks = match handles.inventory.list_stacks(host_filter).await {
+    let stacks = match handles.inventory.list_stacks(host_filter).await {
         Ok(v) => v,
         Err(e) => {
             return json_err(
@@ -533,24 +416,6 @@ async fn list_stacks(
             );
         }
     };
-
-    if let Some(fleet) = q.fleet.as_deref() {
-        let hosts = match handles.inventory.list_hosts().await {
-            Ok(v) => v,
-            Err(e) => {
-                return json_err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("list_hosts: {e}"),
-                );
-            }
-        };
-        let allowed: std::collections::HashSet<_> = hosts
-            .into_iter()
-            .filter(|h| h.fleet == fleet)
-            .map(|h| h.id)
-            .collect();
-        stacks.retain(|s| allowed.contains(&s.host_id));
-    }
 
     let dtos: Vec<StackDto> = stacks.into_iter().map(StackDto::from).collect();
     Json(dtos).into_response()
@@ -575,7 +440,6 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
             manifest_sha256: None,
             manifest_imported_at: None,
             deploy_strategy: None,
-            manifest_fleet: None,
             secrets: Vec::new(),
             hooks: Vec::new(),
         });
@@ -596,10 +460,6 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
         obj.insert(
             "deploy_strategy".into(),
             serde_json::to_value(&bundle.deploy_strategy).unwrap_or(serde_json::Value::Null),
-        );
-        obj.insert(
-            "manifest_fleet".into(),
-            serde_json::to_value(&bundle.manifest_fleet).unwrap_or(serde_json::Value::Null),
         );
         obj.insert(
             "secrets".into(),
@@ -1012,7 +872,6 @@ async fn get_stack_manifest(
         "manifest_sha256": bundle.manifest_sha256,
         "manifest_imported_at": bundle.manifest_imported_at,
         "deploy_strategy": bundle.deploy_strategy,
-        "manifest_fleet": bundle.manifest_fleet,
         "secrets": bundle.secrets,
         "hooks": hooks,
     }))
@@ -1222,32 +1081,12 @@ async fn phase_0_13_persist_manifest_bundle(
         } else {
             Some(parsed.strategy.as_str())
         };
-        // Wave 5.B: auto-create the manifest's fleet if it doesn't already
-        // exist. Before this, only the enroll path created fleets, so a
-        // stack.toml declaring `fleet = "local"` was silently captured as
-        // a dangling reference (no row in `fleets`); `isd ps --fleet local`
-        // returned empty and operators had to POST /fleets by hand.
-        // `create_fleet` uses INSERT OR IGNORE, so this is idempotent and
-        // a no-op when the fleet already exists. The fleet is a logical
-        // grouping; nothing in the schema prevents an empty fleet.
-        if let Some(fleet_name) = parsed.fleet.as_deref()
-            && !fleet_name.trim().is_empty()
-            && let Err(e) = handles.inventory.create_fleet(fleet_name).await
-        {
-            return Err(json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("create_fleet: {e}"),
-            ));
-        }
+        // kill-fleets: any `fleet = "<name>"` in the manifest is parsed but
+        // not persisted (the column is dropped). Operators express
+        // grouping via host labels + placement selectors instead.
         if let Err(e) = handles
             .inventory
-            .update_stack_manifest(
-                stack_id,
-                toml_body,
-                &sha,
-                strategy_str,
-                parsed.fleet.as_deref(),
-            )
+            .update_stack_manifest(stack_id, toml_body, &sha, strategy_str)
             .await
         {
             return Err(json_err(
@@ -1598,7 +1437,6 @@ async fn post_stack_diff(
 struct ListServicesQuery {
     stack_id: Option<i64>,
     host_id: Option<String>,
-    fleet: Option<String>,
 }
 
 async fn list_services(
@@ -1629,7 +1467,7 @@ async fn list_services(
         services.retain(|s| s.host_id == host_id);
     }
 
-    // Resolve hostnames once for both fleet filtering and DTO enrichment.
+    // Resolve hostnames for DTO enrichment.
     let hosts = match handles.inventory.list_hosts().await {
         Ok(v) => v,
         Err(e) => {
@@ -1639,15 +1477,6 @@ async fn list_services(
             );
         }
     };
-
-    if let Some(fleet) = q.fleet.as_deref() {
-        let allowed: std::collections::HashSet<_> = hosts
-            .iter()
-            .filter(|h| h.fleet == fleet)
-            .map(|h| h.id)
-            .collect();
-        services.retain(|s| allowed.contains(&s.host_id));
-    }
 
     let hostname_by_id: std::collections::HashMap<_, _> =
         hosts.into_iter().map(|h| (h.id, h.hostname)).collect();
@@ -1710,7 +1539,12 @@ async fn get_service_detail(
         Ok(h) => h,
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_host: {e}")),
     };
-    let fleet = primary_host.as_ref().map(|h| h.fleet.clone());
+    // kill-fleets: surface the migrated `fleet` label as the policy
+    // resolver's fleet seed so existing fleet-scoped policies still bind.
+    let fleet = match handles.inventory.list_agent_labels(service.host_id).await {
+        Ok(labels) => labels.get("fleet").cloned(),
+        Err(_) => None,
+    };
     let primary_hostname = primary_host.as_ref().map(|h| h.hostname.clone());
 
     // Other instances: services with the same name belonging to a stack
@@ -1951,10 +1785,6 @@ pub async fn install_sh(
         }
     };
 
-    let fleet = entry
-        .get("fleet")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
     let hostname = entry.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
     // TODO 5e+: derive controller_url from runtime config rather than hardcoding.
     let controller_url = "http://localhost:9418";
@@ -1962,7 +1792,6 @@ pub async fn install_sh(
     let body = INSTALL_SH_TEMPLATE
         .replace("{{controller_url}}", controller_url)
         .replace("{{token}}", &token)
-        .replace("{{fleet}}", fleet)
         .replace("{{hostname_or_default}}", hostname);
 
     (
@@ -2102,7 +1931,6 @@ mod tests {
             arch: "x86_64".into(),
             agent_version: "0.1.0".into(),
             docker_version: "27.0".into(),
-            fleet: "test".into(),
         }
     }
 
@@ -2133,7 +1961,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "v0.1.0".into(),
                 docker_version: "27".into(),
-                fleet: "test".into(),
             })
             .await
             .unwrap();
@@ -2183,7 +2010,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "v0.1.0".into(),
                 docker_version: "27".into(),
-                fleet: "test".into(),
             })
             .await
             .unwrap();
@@ -2239,30 +2065,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_host_updates_fleet() {
-        let handles = test_handles().await;
-        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
-
-        let app = router(handles.clone());
-        let id_str = ulid::Ulid::from(host_id).to_string();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(format!("/hosts/{id_str}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"fleet": "prod"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let host = handles.inventory.get_host(host_id).await.unwrap().unwrap();
-        assert_eq!(host.fleet, "prod");
-    }
-
-    #[tokio::test]
     async fn force_update_host_queues_action() {
         let handles = test_handles().await;
         let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
@@ -2290,39 +2092,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_fleet_then_delete_succeeds() {
-        let handles = test_handles().await;
-        let app = router(handles.clone());
-
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/fleets")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"name":"prod"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri("/fleets/prod")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    }
-
-    #[tokio::test]
     async fn enroll_host_returns_install_command() {
         let handles = test_handles().await;
         let app = router(handles);
@@ -2333,7 +2102,7 @@ mod tests {
                     .method("POST")
                     .uri("/hosts")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"fleet":"staging"}"#))
+                    .body(Body::from(r#"{}"#))
                     .unwrap(),
             )
             .await
@@ -2361,7 +2130,6 @@ mod tests {
                 "enrollment.token.01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 &serde_json::json!({
                     "agent_id": "01HX0000000000000000000001",
-                    "fleet": "staging",
                     "hostname": null,
                 }),
             )
@@ -2394,7 +2162,9 @@ mod tests {
         let body_str = std::str::from_utf8(&body).unwrap();
         assert!(body_str.starts_with("#!/usr/bin/env bash"));
         assert!(body_str.contains("ISENGARD_TOKEN=\"01ARZ3NDEKTSV4RRFFQ69G5FAV\""));
-        assert!(body_str.contains("ISENGARD_FLEET=\"staging\""));
+        // kill-fleets: ISENGARD_FLEET is no longer baked into the install
+        // script (no `--fleet` flag on enroll, no fleet column on hosts).
+        assert!(!body_str.contains("ISENGARD_FLEET"));
     }
 
     #[tokio::test]
@@ -2454,7 +2224,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "v0.1.0".into(),
                 docker_version: "27".into(),
-                fleet: "prod".into(),
             })
             .await
             .unwrap();
@@ -2467,7 +2236,6 @@ mod tests {
                 arch: "x86_64".into(),
                 agent_version: "v0.1.0".into(),
                 docker_version: "27".into(),
-                fleet: "staging".into(),
             })
             .await
             .unwrap();
@@ -2559,97 +2327,8 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["name"], "web");
 
-        // fleet filter: only services on hosts in the matching fleet.
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/services?fleet=staging")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["name"], "prom");
-        assert_eq!(parsed[0]["hostname"], "host-b");
     }
 
-    /// Wave 5.B: a stack.toml that declares `fleet = "<name>"` for a
-    /// fleet the controller doesn't know about must auto-create that
-    /// fleet row before the manifest persists. Before this fix, only
-    /// the enroll path created fleets, so manifest-only deploys (no
-    /// fresh host) left the fleet field dangling.
-    ///
-    /// We exercise `phase_0_13_persist_manifest_bundle` directly because
-    /// the full POST /stacks path also dispatches a WriteCompose RPC to
-    /// an agent connection that doesn't exist in the in-memory test
-    /// harness; the auto-create runs strictly before that dispatch and
-    /// is the only behaviour we care about here.
-    #[tokio::test]
-    async fn manifest_with_unknown_fleet_auto_creates_fleet_row() {
-        use isengard_storage::{InsertStack, StackSource};
-
-        let handles = test_handles().await;
-        let host_id = handles.inventory.enroll_host(test_enroll()).await.unwrap();
-        let stack_id = handles
-            .inventory
-            .insert_stack(InsertStack {
-                host_id,
-                name: "blog".into(),
-                source: StackSource::Compose,
-            })
-            .await
-            .unwrap();
-
-        // Pre-condition: no fleet named "local" exists yet (the enroll
-        // above pinned the host to "test").
-        let before = handles.inventory.list_fleets().await.unwrap();
-        assert!(
-            !before.iter().any(|f| f.name == "local"),
-            "test harness setup leaked a 'local' fleet"
-        );
-
-        let manifest_toml = "name = \"blog\"\nfleet = \"local\"\ncompose = [\"compose.yaml\"]\n";
-        phase_0_13_persist_manifest_bundle(
-            &handles,
-            stack_id,
-            "blog",
-            Some(manifest_toml),
-            None,
-            None,
-        )
-        .await
-        .expect("manifest with unknown fleet should auto-create the fleet row");
-
-        // Post-condition: the fleet row exists.
-        let after = handles.inventory.list_fleets().await.unwrap();
-        assert!(
-            after.iter().any(|f| f.name == "local"),
-            "expected `local` fleet auto-created by manifest persist; got {:?}",
-            after.iter().map(|f| &f.name).collect::<Vec<_>>(),
-        );
-
-        // Idempotency: re-running the same persist call must not error
-        // and must not duplicate the row.
-        phase_0_13_persist_manifest_bundle(
-            &handles,
-            stack_id,
-            "blog",
-            Some(manifest_toml),
-            None,
-            None,
-        )
-        .await
-        .expect("second persist call should be a no-op for the fleet");
-        let after_twice = handles.inventory.list_fleets().await.unwrap();
-        let count = after_twice.iter().filter(|f| f.name == "local").count();
-        assert_eq!(count, 1, "no duplicate fleet rows on repeated persist");
-    }
 
     /// Phase 0.13 wave 2.A follow-up: `PUT /stacks/{id}/compose` with no
     /// Content-Type returns 415 with the accepted types listed. Operators
@@ -3027,7 +2706,8 @@ mod tests {
         assert_eq!(parsed["stack_name"], "blog");
         assert_eq!(parsed["manifest_toml"], manifest_toml);
         assert!(parsed["manifest_sha256"].is_string());
-        assert_eq!(parsed["manifest_fleet"], "test");
+        // kill-fleets: manifest_fleet is no longer surfaced in the bundle.
+        assert!(parsed.get("manifest_fleet").is_none());
     }
 
     /// Phase 0.13 follow-up: legacy compose-only stacks (no manifest ever
