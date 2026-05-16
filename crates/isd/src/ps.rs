@@ -270,12 +270,17 @@ pub(crate) async fn open_docker_backend(
 /// Column layout for the docker-backend `isd ps` table. Order matches
 /// the spec mockup: #, CONTAINER ID, IMAGE, STATUS, PORTS, NAMES.
 fn docker_ps_columns() -> Vec<Column> {
+    // shrink_priority: lower shrinks first when the table is wider than
+    // the terminal. IMAGE is the noisiest column (registry path) and the
+    // safest to truncate; PORTS is operationally critical so it gets a
+    // higher priority + a generous min_width that fits a typical single
+    // mapping like `8080->80`.
     vec![
         Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
         Column::new("CONTAINER ID", Align::Left, CellStyle::Dim, 7, 12),
-        Column::new("IMAGE", Align::Left, CellStyle::Plain, 2, 10),
+        Column::new("IMAGE", Align::Left, CellStyle::Plain, 1, 10),
         Column::new("STATUS", Align::Left, CellStyle::State, 8, 10),
-        Column::new("PORTS", Align::Left, CellStyle::Plain, 1, 6),
+        Column::new("PORTS", Align::Left, CellStyle::Plain, 4, 14),
         Column::new("NAMES", Align::Left, CellStyle::Emphasis, 6, 8),
     ]
 }
