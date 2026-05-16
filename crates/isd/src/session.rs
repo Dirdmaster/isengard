@@ -12,8 +12,9 @@
 
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 
+use crate::context::NO_CONTROLLER_SENTINEL;
 use crate::credentials::{self, Backend, ContextEntry};
 use crate::ssh_tunnel::Tunnel;
 
@@ -50,6 +51,21 @@ impl Session {
     /// and for `isd context show` which inspects without dispatching to
     /// the wire.
     pub async fn from_context(ctx: ContextEntry) -> Result<Self> {
+        // Docker-only contexts park the NO_CONTROLLER_SENTINEL on the
+        // HTTP variant. Catching it here keeps the sentinel off the
+        // wire so controller-bound verbs surface a useful message
+        // instead of a DNS lookup failure on `no-controller.invalid`.
+        if let Backend::Http { url } = &ctx.backend
+            && url == NO_CONTROLLER_SENTINEL
+        {
+            return Err(anyhow!(
+                "context {:?} is docker-only and has no controller; this command needs one. \
+                 Either add a controller backend with `isd context create {} --ssh <target>` \
+                 (or `--http <url>`), or run against a different context via `--context <name>`.",
+                ctx.name,
+                ctx.name,
+            ));
+        }
         let (controller_url, tunnel) = match &ctx.backend {
             Backend::Http { url } => (url.trim_end_matches('/').to_string(), None),
             Backend::Ssh {
@@ -91,5 +107,32 @@ impl Session {
     #[allow(dead_code)]
     pub fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn docker_only_context_short_circuits_with_actionable_error() {
+        let ctx = ContextEntry {
+            name: "lausanne-direct".into(),
+            backend: Backend::Http {
+                url: NO_CONTROLLER_SENTINEL.into(),
+            },
+            docker: Some("ssh://user@host".into()),
+        };
+        let err = match Session::from_context(ctx).await {
+            Ok(_) => panic!("docker-only context should not yield a controller session"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("docker-only"), "msg: {msg}");
+        assert!(msg.contains("lausanne-direct"), "msg: {msg}");
+        assert!(
+            !msg.contains("no-controller.invalid"),
+            "sentinel leaked to operator: {msg}"
+        );
     }
 }
