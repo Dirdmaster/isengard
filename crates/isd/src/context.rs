@@ -11,6 +11,12 @@ use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
 use crate::credentials::{self, Backend, ContextEntry};
 
+/// Sentinel URL stored on Docker-only contexts (no controller backend).
+/// The `Backend` enum predates the docker shortcut, so docker-only
+/// entries park this placeholder on the HTTP variant. `isd context
+/// show / list` hides the sentinel and renders these as `kind: docker`.
+const NO_CONTROLLER_SENTINEL: &str = "http://no-controller.invalid";
+
 #[derive(Debug, Args)]
 pub struct ContextArgs {
     #[command(subcommand)]
@@ -135,9 +141,11 @@ async fn run_create(args: CreateArgs) -> Result<()> {
             }
             // Docker-only context. Placeholder Http URL so the existing
             // controller-using code paths fail loudly rather than reach
-            // a partial backend; Phase 0.21 will lift the requirement.
+            // a partial backend. The sentinel `NO_CONTROLLER_SENTINEL`
+            // is hidden from `isd context show` / `list`; they render
+            // these as `kind: docker` instead.
             Backend::Http {
-                url: "http://no-controller.invalid".to_string(),
+                url: NO_CONTROLLER_SENTINEL.to_string(),
             }
         }
     };
@@ -194,13 +202,7 @@ async fn run_list() -> Result<()> {
         } else {
             ""
         };
-        let (kind, target) = match &ctx.backend {
-            Backend::Http { url } => ("http", url.clone()),
-            Backend::Ssh {
-                target,
-                dashboard_port,
-            } => ("ssh", format!("{target}  (forward :{dashboard_port})")),
-        };
+        let (kind, target) = render_kind_and_target(ctx);
         table.add_row(vec![
             star.to_string(),
             ctx.name.clone(),
@@ -210,6 +212,25 @@ async fn run_list() -> Result<()> {
     }
     println!("{table}");
     Ok(())
+}
+
+/// Pick the operator-facing `kind` + `target` strings for a context.
+/// Docker-only contexts (the sentinel HTTP placeholder + a docker
+/// field) render as `docker` so the operator does not see the
+/// internal `no-controller.invalid` sentinel.
+fn render_kind_and_target(ctx: &ContextEntry) -> (&'static str, String) {
+    if let (Backend::Http { url }, Some(docker)) = (&ctx.backend, ctx.docker.as_deref())
+        && url == NO_CONTROLLER_SENTINEL
+    {
+        return ("docker", docker.to_string());
+    }
+    match &ctx.backend {
+        Backend::Http { url } => ("http", url.clone()),
+        Backend::Ssh {
+            target,
+            dashboard_port,
+        } => ("ssh", format!("{target}  (forward :{dashboard_port})")),
+    }
 }
 
 async fn run_rm(args: RmArgs) -> Result<()> {
@@ -230,6 +251,18 @@ async fn run_show(args: ShowArgs) -> Result<()> {
         .default_or_named(args.name.as_deref())
         .context("resolving context")?;
     println!("name:    {}", ctx.name);
+
+    let is_docker_only = matches!(&ctx.backend, Backend::Http { url } if url == NO_CONTROLLER_SENTINEL)
+        && ctx.docker.is_some();
+
+    if is_docker_only {
+        println!("kind:    docker");
+        if let Some(docker) = ctx.docker.as_deref() {
+            println!("docker:  {docker}");
+        }
+        return Ok(());
+    }
+
     match &ctx.backend {
         Backend::Http { url } => {
             println!("kind:    http");
@@ -243,6 +276,12 @@ async fn run_show(args: ShowArgs) -> Result<()> {
             println!("target:  {target}");
             println!("forward: 127.0.0.1:<ephemeral> -> {target}:{dashboard_port}");
         }
+    }
+    // A context can carry both a controller backend AND a docker
+    // shortcut; surface the docker line when present so the operator
+    // sees the full picture.
+    if let Some(docker) = ctx.docker.as_deref() {
+        println!("docker:  {docker}");
     }
     Ok(())
 }
