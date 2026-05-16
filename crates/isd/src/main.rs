@@ -17,7 +17,7 @@
 //!  - `isd gateway`: dev DNS + reverse proxy bridging the operator's Mac
 //!  - `isd secret put | list | rm`: managed-secret CRUD
 //!  - `isd route create | list | rm`: routing-rule CRUD
-//!  - `isd hosts list`: enumerate enrolled hosts (ULID, hostname, fleet)
+//!  - `isd hosts list`: enumerate enrolled hosts (ULID, hostname, labels)
 //!  - `isd update`: self-replace the operator binary from a GitHub Release
 
 use clap::{Parser, Subcommand};
@@ -53,7 +53,7 @@ mod watch;
 #[command(
     name = "isd",
     version = env!("ISENGARD_BUILD_VERSION"),
-    about = "Operate Docker fleets from your terminal",
+    about = "Operate Docker clusters from your terminal",
 )]
 pub(crate) struct Cli {
     /// Logging filter (e.g. "info", "debug,isd=trace").

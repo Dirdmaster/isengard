@@ -17,7 +17,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Stacks", &["stack", "open"]),
     (
-        "Fleet",
+        "Cluster",
         &["hosts", "service", "route", "secret", "placement"],
     ),
     ("Setup", &["context", "update"]),
@@ -34,7 +34,7 @@ pub fn render(cmd: &Command) -> String {
     let about = cmd
         .get_about()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "Operate Docker fleets from your terminal".into());
+        .unwrap_or_else(|| "Operate Docker clusters from your terminal".into());
     out.push_str(&about);
     out.push_str("\n\n");
     out.push_str(&style(&header, "Usage", color));

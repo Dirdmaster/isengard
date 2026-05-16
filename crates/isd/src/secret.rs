@@ -10,13 +10,13 @@
 //! pattern from `compose_cmd.rs`: load the credentials file, pin the CA
 //! fingerprint, send the request.
 //!
-//! Phase 0.15 adds a `--scope` flag (`fleet` | `global`). `fleet` (the
+//! Phase 0.15 adds a `--scope` flag (`context` | `global`). `context` (the
 //! default) keeps the historical single-context behaviour; `global` walks
 //! every context saved in the credentials file and applies the operation
 //! to each. Semantics are best-effort: per-context failures don't abort
 //! the run, and a summary line at the end names which contexts failed and
-//! why. Each fleet keeps its own encryption: the secret is re-encrypted
-//! under each controller's master.key as it lands. See
+//! why. Each context still encrypts the value under its own master.key;
+//! the global scope is a CLI-side fan-out, NOT a shared keystore. See
 //! `docs/RELEASE_NOTES_PHASE_0_15.md` for the full design.
 
 use std::io::{IsTerminal, Read};
@@ -33,18 +33,18 @@ use crate::session::Session;
 
 /// Where a `put` / `rm` / `ls` applies.
 ///
-/// `Fleet` is the historical single-context behaviour (default). `Global`
-/// iterates every context in the credentials file so the secret lands in
-/// every fleet the operator manages from this machine. Each fleet still
-/// encrypts the value under its own master.key; the global scope is a
-/// fan-out at the operator's CLI layer, NOT a shared keystore.
+/// `Context` is the default single-context behaviour. `Global` iterates
+/// every context in the credentials file so the secret lands in each
+/// one. Each context still encrypts the value under its own master.key;
+/// the global scope is a fan-out at the operator's CLI layer, NOT a
+/// shared keystore.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum Scope {
-    /// Apply to the current fleet only.
+    /// Apply to the current context only.
     #[default]
-    Fleet,
-    /// Apply to every saved fleet.
+    Context,
+    /// Apply to every saved context.
     Global,
 }
 
@@ -71,8 +71,8 @@ pub struct PutArgs {
     /// Read the value from this file (defaults to stdin).
     #[arg(long)]
     pub from_file: Option<PathBuf>,
-    /// Apply to one fleet or every saved fleet.
-    #[arg(long, value_enum, default_value_t = Scope::Fleet)]
+    /// Apply to one context or every saved context.
+    #[arg(long, value_enum, default_value_t = Scope::Context)]
     pub scope: Scope,
 }
 
@@ -80,15 +80,15 @@ pub struct PutArgs {
 pub struct RmArgs {
     /// Secret name to delete.
     pub name: String,
-    /// Apply to one fleet or every saved fleet.
-    #[arg(long, value_enum, default_value_t = Scope::Fleet)]
+    /// Apply to one context or every saved context.
+    #[arg(long, value_enum, default_value_t = Scope::Context)]
     pub scope: Scope,
 }
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// List secrets in one fleet or every saved fleet.
-    #[arg(long, value_enum, default_value_t = Scope::Fleet)]
+    /// List secrets in one context or every saved context.
+    #[arg(long, value_enum, default_value_t = Scope::Context)]
     pub scope: Scope,
 }
 
@@ -126,7 +126,7 @@ async fn run_put(args: PutArgs, context: Option<&str>) -> Result<()> {
         ));
     }
     match args.scope {
-        Scope::Fleet => {
+        Scope::Context => {
             let session = Session::open(context).await?;
             put_secret(&session, &args.name, value).await?;
             // Echo nothing about the value. Confirmation by name only.
@@ -175,12 +175,12 @@ async fn put_to_context(ctx: &ContextEntry, name: &str, value: String) -> Result
 
 async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
     match args.scope {
-        Scope::Fleet => run_list_fleet(context).await,
+        Scope::Context => run_list_context(context).await,
         Scope::Global => run_list_global().await,
     }
 }
 
-async fn run_list_fleet(context: Option<&str>) -> Result<()> {
+async fn run_list_context(context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let entries = list_secrets(&session).await?;
     if entries.is_empty() {
@@ -206,7 +206,7 @@ async fn run_list_fleet(context: Option<&str>) -> Result<()> {
 /// Aggregate secrets across every saved context. The scope column is
 /// derived purely from coverage: a secret present in every reachable
 /// context is `global`; in some but not all is `partial`; in exactly
-/// one is `fleet`. This is name-only: values are not fetched (and
+/// one is `context`. This is name-only: values are not fetched (and
 /// couldn't be — secrets are write-only from the operator side), so
 /// "partial" does NOT detect value divergence; it only detects name
 /// coverage. The operator decides what to do.
@@ -234,7 +234,7 @@ pub(crate) struct GlobalSnapshot {
     /// Number of contexts that responded successfully. Used to decide
     /// `global` vs `partial` (a name is `global` only when present in
     /// every reachable context, NOT every saved context, so an offline
-    /// fleet doesn't flip every entry to `partial`).
+    /// context doesn't flip every entry to `partial`).
     pub(crate) reachable: usize,
     /// `name -> list of context names that hold it`, sorted by name for
     /// stable output.
@@ -278,7 +278,7 @@ async fn list_from_context(ctx: &ContextEntry) -> Result<Vec<SecretEntry>> {
     list_secrets(&session).await
 }
 
-/// Render `name / scope / fleets` table for `secret ls --scope global`.
+/// Render `name / scope / contexts` table for `secret ls --scope global`.
 /// Pure formatter so it stays testable without any HTTP scaffolding.
 pub(crate) fn print_global_listing(snapshot: &GlobalSnapshot) {
     if snapshot.coverage.is_empty() {
@@ -292,10 +292,10 @@ pub(crate) fn print_global_listing(snapshot: &GlobalSnapshot) {
         table
             .load_preset(NOTHING)
             .set_content_arrangement(ContentArrangement::Disabled)
-            .set_header(vec!["NAME", "SCOPE", "FLEETS"]);
-        for (name, fleets) in &snapshot.coverage {
-            let scope = classify_coverage(fleets.len(), snapshot.reachable);
-            table.add_row(vec![name.clone(), scope.into(), fleets.join(", ")]);
+            .set_header(vec!["NAME", "SCOPE", "CONTEXTS"]);
+        for (name, contexts) in &snapshot.coverage {
+            let scope = classify_coverage(contexts.len(), snapshot.reachable);
+            table.add_row(vec![name.clone(), scope.into(), contexts.join(", ")]);
         }
         println!("{table}");
     }
@@ -315,7 +315,7 @@ pub(crate) fn print_global_listing(snapshot: &GlobalSnapshot) {
 }
 
 /// Classify a name's coverage relative to the reachable context count.
-/// - `fleet`: only one reachable context has the secret (or there's only
+/// - `context`: only one reachable context has the secret (or there's only
 ///   one context to consider in total).
 /// - `global`: present in every reachable context, and there's more than
 ///   one reachable context.
@@ -323,10 +323,10 @@ pub(crate) fn print_global_listing(snapshot: &GlobalSnapshot) {
 ///   contexts.
 pub(crate) fn classify_coverage(present_in: usize, reachable: usize) -> &'static str {
     // With zero or one reachable context, "global" loses meaning;
-    // treat everything as "fleet" so the operator isn't misled into
-    // thinking a single-fleet secret is synced anywhere.
+    // treat everything as "context" so the operator isn't misled into
+    // thinking a single-context secret is synced anywhere.
     if reachable <= 1 || present_in <= 1 {
-        "fleet"
+        "context"
     } else if present_in >= reachable {
         "global"
     } else {
@@ -336,7 +336,7 @@ pub(crate) fn classify_coverage(present_in: usize, reachable: usize) -> &'static
 
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
     match args.scope {
-        Scope::Fleet => {
+        Scope::Context => {
             let session = Session::open(context).await?;
             delete_secret(&session, &args.name).await?;
             println!("Removed secret {:?}.", args.name);
@@ -479,7 +479,7 @@ async fn delete_secret(session: &Session, name: &str) -> Result<()> {
 }
 
 /// Load every saved context. Used by `--scope global` to fan-out a
-/// put / rm / ls across the operator's fleets. Returns an empty Vec when
+/// put / rm / ls across the operator.s saved contexts. Returns an empty Vec when
 /// the credentials file is missing (the caller surfaces a friendlier
 /// message).
 pub(crate) fn load_all_contexts() -> Result<Vec<ContextEntry>> {
@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn put_args_scope_defaults_to_fleet() {
+    fn put_args_scope_defaults_to_context() {
         use clap::Parser;
         #[derive(Parser, Debug)]
         struct Wrap {
@@ -651,7 +651,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "put", "cf_token"]).unwrap();
         match w.c {
-            SecretCommand::Put(a) => assert_eq!(a.scope, Scope::Fleet),
+            SecretCommand::Put(a) => assert_eq!(a.scope, Scope::Context),
             other => panic!("expected Put, got {other:?}"),
         }
     }
@@ -672,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn list_args_scope_defaults_to_fleet() {
+    fn list_args_scope_defaults_to_context() {
         use clap::Parser;
         #[derive(Parser, Debug)]
         struct Wrap {
@@ -681,7 +681,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "list"]).unwrap();
         match w.c {
-            SecretCommand::List(a) => assert_eq!(a.scope, Scope::Fleet),
+            SecretCommand::List(a) => assert_eq!(a.scope, Scope::Context),
             other => panic!("expected List, got {other:?}"),
         }
     }
@@ -713,11 +713,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_coverage_fleet_when_only_one() {
-        // Single context: everything is "fleet" (no concept of global with N=1).
-        assert_eq!(classify_coverage(1, 1), "fleet");
+    fn classify_coverage_context_when_only_one() {
+        // Single context: everything is "context" (no concept of global with N=1).
+        assert_eq!(classify_coverage(1, 1), "context");
         // Multi context, only one has it.
-        assert_eq!(classify_coverage(1, 3), "fleet");
+        assert_eq!(classify_coverage(1, 3), "context");
     }
 
     #[test]
@@ -793,7 +793,7 @@ mod tests {
 
     // ===================================================================
     // Phase 0.15 integration test: spin up two stub controllers (one
-    // wiremock instance per "fleet"), point a temp credentials file at
+    // wiremock instance per "context"), point a temp credentials file at
     // them, run `secret put --scope global` through the dispatch path,
     // and verify both controllers received the PUT.
     //
