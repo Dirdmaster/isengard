@@ -5,10 +5,16 @@
 //! Requires OpenSSH 7+ on PATH (modern dev machines). Forward syntax
 //! `-L <port>:/var/run/docker.sock` routes local TCP to a remote UNIX
 //! socket; supported since OpenSSH 6.7 (released 2014).
+//!
+//! Uses ssh ControlMaster multiplexing so back-to-back invocations
+//! (e.g. `isd ps; isd ps`) reuse one ssh connection instead of paying
+//! the handshake cost every call. First call: ~1-2s (handshake).
+//! Subsequent calls within ControlPersist window: ~100ms.
 
 use std::net::{SocketAddr, TcpListener};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 
@@ -16,12 +22,18 @@ use crate::{Error, Result};
 
 const REMOTE_DOCKER_SOCK: &str = "/var/run/docker.sock";
 
-/// How long to wait between spawning ssh and returning the tunnel.
-/// ssh -L binds the local port asynchronously; callers connecting too
-/// early would race the bind. 750ms covers typical SSH handshakes on
-/// a LAN. Remote hosts over high-latency links need a connect-retry
-/// layer above this.
-const READINESS_DELAY: Duration = Duration::from_millis(750);
+/// Upper bound on how long we poll the local port for tunnel readiness
+/// before giving up. The poll exits the moment a TCP connect succeeds,
+/// so on a fast LAN we return in tens of ms; this cap only matters for
+/// slow links or a misconfigured target.
+const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How long ssh keeps an idle multiplex master alive after the last
+/// client exits. Long enough that an operator running `isd ps` then
+/// `isd stop 0` reuses the connection; short enough that a forgotten
+/// session does not linger forever.
+const CONTROL_PERSIST: &str = "10m";
 
 #[derive(Debug)]
 pub struct SshTunnel {
@@ -47,9 +59,14 @@ impl SshTunnel {
     /// TCP port to the remote docker socket. Returned struct owns the
     /// ssh child; Drop kills it. `ssh_target` accepts any form OpenSSH
     /// accepts: `user@host`, an entry from `~/.ssh/config`, `host:port`.
+    ///
+    /// Uses ControlMaster multiplexing per `ssh_target`: subsequent
+    /// `open()` calls for the same target within the ControlPersist
+    /// window reuse one ssh connection.
     pub async fn open(ssh_target: &str) -> Result<Self> {
         let local_port = Self::acquire_local_port()?;
         let forward = format!("{local_port}:{REMOTE_DOCKER_SOCK}");
+        let control_path = control_path_for(ssh_target);
         let child = Command::new("ssh")
             .arg("-N")
             .arg("-T")
@@ -57,6 +74,12 @@ impl SshTunnel {
             .arg("ExitOnForwardFailure=yes")
             .arg("-o")
             .arg("ServerAliveInterval=15")
+            .arg("-o")
+            .arg("ControlMaster=auto")
+            .arg("-o")
+            .arg(format!("ControlPath={control_path}"))
+            .arg("-o")
+            .arg(format!("ControlPersist={CONTROL_PERSIST}"))
             .arg("-L")
             .arg(&forward)
             .arg(ssh_target)
@@ -64,7 +87,7 @@ impl SshTunnel {
             .spawn()
             .map_err(|e| Error::SshTunnel(format!("spawn ssh: {e}")))?;
 
-        sleep(READINESS_DELAY).await;
+        wait_for_port_ready(local_port).await?;
 
         Ok(Self {
             child: Some(child),
@@ -87,8 +110,47 @@ impl Drop for SshTunnel {
         if let Some(mut child) = self.child.take() {
             // start_kill is fire-and-forget; the tokio runtime may
             // still be alive at Drop time so we cannot await the
-            // child here. The kernel reaps the process.
+            // child here. The kernel reaps the process. The master
+            // ssh connection survives via ControlPersist so the next
+            // open() call against the same target can reuse it.
             let _ = child.start_kill();
         }
     }
+}
+
+/// Poll the local port until a TCP connect succeeds or the timeout
+/// elapses. Returns immediately on the first success (typically tens
+/// of ms once the multiplexed master is warm).
+async fn wait_for_port_ready(port: u16) -> Result<()> {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("static");
+    let start = Instant::now();
+    loop {
+        if TcpStream::connect(&addr).await.is_ok() {
+            return Ok(());
+        }
+        if start.elapsed() >= READINESS_TIMEOUT {
+            return Err(Error::SshTunnel(format!(
+                "ssh tunnel on 127.0.0.1:{port} did not become ready within {:?}",
+                READINESS_TIMEOUT
+            )));
+        }
+        sleep(READINESS_POLL_INTERVAL).await;
+    }
+}
+
+/// Per-target ControlPath under the user's temp dir. The path's
+/// uniqueness comes from a stable hash of the target string so a
+/// second `isd` invocation against the same target finds the existing
+/// master socket. We avoid `%r@%h:%p` ssh tokens because the operator
+/// may pass any of `user@host`, a bare alias from ~/.ssh/config, or
+/// `host:port`; the tokens expand inconsistently across those forms.
+fn control_path_for(ssh_target: &str) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    ssh_target.hash(&mut h);
+    let hex = format!("{:x}", h.finish());
+    let dir = std::env::temp_dir();
+    dir.join(format!("isd-ssh-{hex}.sock"))
+        .to_string_lossy()
+        .into_owned()
 }
