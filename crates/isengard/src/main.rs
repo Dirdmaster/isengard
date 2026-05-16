@@ -74,10 +74,32 @@ enum Command {
     /// boot, no master key, just installs the agent unit and starts it
     /// with the operator-supplied token + CA.
     Join(init::JoinArgs),
-    /// Run in controller mode: aggregates agent state, hosts the dashboard
-    /// and notifier plugins, distributes config. With no subcommand the
-    /// controller boots and serves; subcommands provide operator tooling
-    /// (mint enrollment tokens, revoke / list agent certs).
+    /// Mint an enrollment token for a new agent (alias for
+    /// `controller token mint`, mirroring `docker swarm join-token`).
+    JoinToken {
+        /// Role to mint for. Only "agent" is supported today.
+        #[arg(default_value = "agent")]
+        role: String,
+        /// State directory holding the controller's CA + inventory.
+        #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
+        state_dir: std::path::PathBuf,
+        /// Token TTL (e.g. "15m", "1h", "24h").
+        #[arg(long, default_value = "15m")]
+        ttl: humantime::Duration,
+        /// Public host:port for agents to dial. Falls back to
+        /// $ISENGARD_PUBLIC_ADDR, then `controller.local:9417`.
+        #[arg(long, env = "ISENGARD_PUBLIC_ADDR")]
+        public_addr: Option<String>,
+        /// Agent image reference to embed in the join command.
+        #[arg(long, default_value = "ghcr.io/dirdmaster/isengard:next")]
+        image: String,
+        /// Output format. `text` prints the join block, `token` prints
+        /// just the bare token.
+        #[arg(long, value_enum, default_value_t = MintFormat::Text)]
+        format: MintFormat,
+    },
+    /// Run in controller mode. With no subcommand the controller boots
+    /// and serves; subcommands provide operator tooling.
     Controller {
         /// HTTP/gRPC listen address.
         #[arg(long, env = "ISENGARD_LISTEN", default_value = "0.0.0.0:9417")]
@@ -214,17 +236,18 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ControllerAction {
-    /// Token management (mint enrollment tokens for new agents).
+    /// Mint enrollment tokens. Prefer the top-level `isengard
+    /// join-token` shortcut.
     Token {
         #[command(subcommand)]
         op: TokenOp,
     },
-    /// Agent management (revoke certs, list enrolled agents).
+    /// Revoke certs, list enrolled agents.
     Agent {
         #[command(subcommand)]
         op: AgentOp,
     },
-    /// Internal CA management (export the root cert PEM).
+    /// Export the controller's CA root cert PEM.
     Ca {
         #[command(subcommand)]
         op: CaOp,
@@ -233,29 +256,24 @@ enum ControllerAction {
 
 #[derive(Debug, Subcommand)]
 enum TokenOp {
-    /// Mint a new one-time-use enrollment token. By default prints a
-    /// copy-pasteable `docker run` join command (Swarm-style); use
-    /// `--format token` for the bare token (scripts, CI). Only the
-    /// SHA-256 hash of the token is persisted on the controller.
+    /// Mint a one-time enrollment token. Prints a copy-pasteable
+    /// `docker run` join block by default; `--format token` prints
+    /// only the bare token.
     Mint {
-        /// Role for the minted token. Currently only "agent" is supported.
+        /// Role to mint for. Only "agent" is supported today.
         #[arg(long, default_value = "agent")]
         role: String,
-        /// TTL in human-readable form (e.g. "15m", "1h", "24h").
+        /// Token TTL (e.g. "15m", "1h", "24h").
         #[arg(long, default_value = "15m")]
         ttl: humantime::Duration,
-        /// Public address (host:port) where agents should reach the
-        /// controller. Embedded in the join-command output. Required for
-        /// cross-host setups; falls back to `ISENGARD_PUBLIC_ADDR` env then
-        /// to `controller.local:9417`.
+        /// Public host:port for agents to dial. Falls back to
+        /// $ISENGARD_PUBLIC_ADDR, then `controller.local:9417`.
         #[arg(long, env = "ISENGARD_PUBLIC_ADDR")]
         public_addr: Option<String>,
-        /// Image reference to embed in the join command.
+        /// Agent image reference to embed in the join command.
         #[arg(long, default_value = "ghcr.io/dirdmaster/isengard:next")]
         image: String,
-        /// Output format. `text` (default) prints the join-command block;
-        /// `token` prints just the bare token (back-compat with pre-Phase-15
-        /// flows and CI scripts).
+        /// Output format.
         #[arg(long, value_enum, default_value_t = MintFormat::Text)]
         format: MintFormat,
     },
@@ -263,9 +281,9 @@ enum TokenOp {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MintFormat {
-    /// Full Docker Swarm-style join block (default).
+    /// Copy-pasteable join block (default).
     Text,
-    /// Bare token, one line, no other output.
+    /// Bare token, one line.
     Token,
 }
 
@@ -340,6 +358,7 @@ async fn main() {
         Command::Update { .. } => "update",
         Command::Init(_) => "init",
         Command::Join(_) => "join",
+        Command::JoinToken { .. } => "join-token",
     };
     tracing_init::init(mode, cli.log.as_deref());
 
@@ -394,6 +413,14 @@ async fn dispatch(command: Command) -> Result<()> {
             Some(ControllerAction::Agent { op: AgentOp::List }) => run_agent_list(state_dir).await,
             Some(ControllerAction::Ca { op: CaOp::Export }) => run_ca_export(state_dir).await,
         },
+        Command::JoinToken {
+            role,
+            state_dir,
+            ttl,
+            public_addr,
+            image,
+            format,
+        } => run_token_mint(state_dir, role, ttl, public_addr, image, format).await,
         Command::Agent {
             controller,
             state_dir,
