@@ -14,8 +14,10 @@ use crate::credentials::{self, Backend, ContextEntry};
 /// Sentinel URL stored on Docker-only contexts (no controller backend).
 /// The `Backend` enum predates the docker shortcut, so docker-only
 /// entries park this placeholder on the HTTP variant. `isd context
-/// show / list` hides the sentinel and renders these as `kind: docker`.
-const NO_CONTROLLER_SENTINEL: &str = "http://no-controller.invalid";
+/// show / list` hides the sentinel and renders these as `kind: docker`;
+/// `Session::from_context` short-circuits with a clear error so the
+/// sentinel never reaches the wire.
+pub(crate) const NO_CONTROLLER_SENTINEL: &str = "http://no-controller.invalid";
 
 #[derive(Debug, Args)]
 pub struct ContextArgs {
