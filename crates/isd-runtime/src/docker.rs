@@ -164,18 +164,27 @@ fn format_ports(ports: &[bollard::models::Port]) -> String {
     ports
         .iter()
         .map(|p| {
-            let proto = p
+            // Drop noise that's true for ~every row: `0.0.0.0:` (default
+            // "all interfaces" IP) and `/tcp` (default protocol).
+            // Non-default IPs and protos still render explicitly.
+            let proto_raw = p
                 .typ
                 .map(|t| format!("{t:?}").to_lowercase())
                 .unwrap_or_else(|| "tcp".to_string());
-            match (p.ip.as_deref(), p.public_port) {
-                (Some(ip), Some(public)) => {
-                    format!("{ip}:{public}->{}/{proto}", p.private_port)
+            let proto_suffix = if proto_raw == "tcp" {
+                String::new()
+            } else {
+                format!("/{proto_raw}")
+            };
+            let ip_prefix = match p.ip.as_deref() {
+                None | Some("") | Some("0.0.0.0") | Some("::") => String::new(),
+                Some(ip) => format!("{ip}:"),
+            };
+            match p.public_port {
+                Some(public) => {
+                    format!("{ip_prefix}{public}->{}{proto_suffix}", p.private_port)
                 }
-                (None, Some(public)) => {
-                    format!("{public}->{}/{proto}", p.private_port)
-                }
-                _ => format!("{}/{proto}", p.private_port),
+                None => format!("{}{proto_suffix}", p.private_port),
             }
         })
         .collect::<Vec<_>>()
@@ -205,7 +214,9 @@ mod tests {
     use bollard::models::{Port, PortTypeEnum};
 
     #[test]
-    fn format_ports_renders_published_and_private() {
+    fn format_ports_drops_default_ip_and_proto() {
+        // 0.0.0.0 IP and tcp proto are the boring defaults; format
+        // suppresses both to keep the PORTS column readable.
         let ports = vec![
             Port {
                 ip: Some("0.0.0.0".into()),
@@ -220,8 +231,26 @@ mod tests {
                 typ: Some(PortTypeEnum::TCP),
             },
         ];
-        let rendered = format_ports(&ports);
-        assert_eq!(rendered, "0.0.0.0:8080->80/tcp, 5432/tcp");
+        assert_eq!(format_ports(&ports), "8080->80, 5432");
+    }
+
+    #[test]
+    fn format_ports_keeps_non_default_ip_and_proto() {
+        let ports = vec![
+            Port {
+                ip: Some("192.168.1.1".into()),
+                private_port: 80,
+                public_port: Some(8080),
+                typ: Some(PortTypeEnum::TCP),
+            },
+            Port {
+                ip: None,
+                private_port: 53,
+                public_port: None,
+                typ: Some(PortTypeEnum::UDP),
+            },
+        ];
+        assert_eq!(format_ports(&ports), "192.168.1.1:8080->80, 53/udp");
     }
 
     #[test]
