@@ -169,9 +169,10 @@ fn pad(text: &str, width: usize, align: Align) -> String {
 }
 
 /// Truncate `text` to at most `max` display columns. Generic strings
-/// middle-truncate (`ab...ij`). When `is_image` is true, the suffix is
-/// preserved instead (`...isengard-agent:next`): for an image ref the
-/// tag end is the meaningful part, the registry prefix is droppable.
+/// middle-truncate (`ab...ij`). When `is_image` is true, progressively
+/// strip leftmost path segments (registry, namespace) before falling
+/// back to middle-truncate, so an image ref keeps its meaningful tail
+/// (`bazarr:latest` from `lscr.io/linuxserver/bazarr:latest`).
 fn truncate_cell(text: &str, max: usize, is_image: bool) -> String {
     let w = console::measure_text_width(text);
     if w <= max {
@@ -180,21 +181,36 @@ fn truncate_cell(text: &str, max: usize, is_image: bool) -> String {
     if max <= 3 {
         return ".".repeat(max);
     }
-    let chars: Vec<char> = text.chars().collect();
     if is_image {
-        // Keep the last `max - 3` chars, prefix with "...".
-        let keep = max - 3;
-        let tail: String = chars[chars.len() - keep..].iter().collect();
-        format!("...{tail}")
-    } else {
-        // Middle-truncate: head + "..." + tail.
+        // Strip leftmost path segments one by one until it fits.
+        let mut s = text.to_string();
+        while console::measure_text_width(&s) > max {
+            match s.find('/') {
+                Some(pos) => s = s[pos + 1..].to_string(),
+                None => break,
+            }
+        }
+        if console::measure_text_width(&s) <= max {
+            return s;
+        }
+        // No more path segments to strip and still too long. Middle-
+        // truncate the final segment so the tag end survives.
+        let chars: Vec<char> = s.chars().collect();
         let budget = max - 3;
         let head_len = budget.div_ceil(2);
         let tail_len = budget - head_len;
         let head: String = chars[..head_len].iter().collect();
         let tail: String = chars[chars.len() - tail_len..].iter().collect();
-        format!("{head}...{tail}")
+        return format!("{head}...{tail}");
     }
+    // Generic middle-truncate.
+    let chars: Vec<char> = text.chars().collect();
+    let budget = max - 3;
+    let head_len = budget.div_ceil(2);
+    let tail_len = budget - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head}...{tail}")
 }
 
 /// Decide the rendered width of each column given a terminal cap.
@@ -444,20 +460,34 @@ mod tests {
         assert_eq!(truncate_cell("abcdefghij", 7, false), "ab...ij");
         // Already short enough: unchanged.
         assert_eq!(truncate_cell("abc", 7, false), "abc");
-        // Image refs preserve the meaningful suffix (tag end). `max` is
-        // the total budget including the leading ellipsis: keep is
-        // `max - 3` tail chars.
+    }
+
+    #[test]
+    fn truncate_image_strips_path_segments() {
+        // Final segment fits in max: strip registry + namespace, keep
+        // `name:tag` intact (no ellipsis needed).
         assert_eq!(
-            truncate_cell("ghcr.io/weavers/isengard-agent:next", 20, true),
-            "...engard-agent:next"
+            truncate_cell("lscr.io/linuxserver/bazarr:latest", 20, true),
+            "bazarr:latest"
         );
+        // The intermediate `namespace/name:tag` form fits: keep it
+        // (only the registry gets stripped).
         assert_eq!(
-            console::measure_text_width(&truncate_cell(
-                "ghcr.io/weavers/isengard-agent:next",
-                20,
-                true
-            )),
-            20
+            truncate_cell("ghcr.io/weavers/isengard-agent:next", 30, true),
+            "weavers/isengard-agent:next"
+        );
+        // Already-short refs pass through.
+        assert_eq!(truncate_cell("nginx:latest", 20, true), "nginx:latest");
+    }
+
+    #[test]
+    fn truncate_image_falls_back_to_middle_when_final_segment_is_too_long() {
+        // Final segment is still too long for max: middle-truncate it.
+        let out = truncate_cell("ghcr.io/weavers/isengard-agent-very-long:next", 15, true);
+        assert!(out.contains("..."), "should middle-truncate: {out:?}");
+        assert!(
+            console::measure_text_width(&out) <= 15,
+            "must respect max width: {out:?}"
         );
     }
 

@@ -161,34 +161,44 @@ pub struct ContainerSummary {
 /// column: `ip:public->private/proto` for published ports,
 /// `private/proto` for unpublished. Comma-joined.
 fn format_ports(ports: &[bollard::models::Port]) -> String {
-    ports
-        .iter()
-        .map(|p| {
-            // Drop noise that's true for ~every row: `0.0.0.0:` (default
-            // "all interfaces" IP) and `/tcp` (default protocol).
-            // Non-default IPs and protos still render explicitly.
-            let proto_raw = p
-                .typ
-                .map(|t| format!("{t:?}").to_lowercase())
-                .unwrap_or_else(|| "tcp".to_string());
-            let proto_suffix = if proto_raw == "tcp" {
-                String::new()
-            } else {
-                format!("/{proto_raw}")
-            };
-            let ip_prefix = match p.ip.as_deref() {
-                None | Some("") | Some("0.0.0.0") | Some("::") => String::new(),
-                Some(ip) => format!("{ip}:"),
-            };
-            match p.public_port {
-                Some(public) => {
-                    format!("{ip_prefix}{public}->{}{proto_suffix}", p.private_port)
-                }
-                None => format!("{}{proto_suffix}", p.private_port),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+    use std::collections::HashSet;
+    // bollard returns IPv4 (`0.0.0.0`) and IPv6 (`[::]`) bindings as
+    // separate Port entries. After default-IP suppression both collapse
+    // to the same string; dedupe so the column does not double-render
+    // every published port.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for p in ports {
+        let s = format_one_port(p);
+        if !s.is_empty() && seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+    out.join(", ")
+}
+
+/// Render one `Port` entry. Drops noise that's true for ~every row:
+/// `0.0.0.0:` / `[::]:` (default "all interfaces" IPs) and `/tcp`
+/// (default protocol). Non-default IPs and protos still render
+/// explicitly.
+fn format_one_port(p: &bollard::models::Port) -> String {
+    let proto_raw = p
+        .typ
+        .map(|t| format!("{t:?}").to_lowercase())
+        .unwrap_or_else(|| "tcp".to_string());
+    let proto_suffix = if proto_raw == "tcp" {
+        String::new()
+    } else {
+        format!("/{proto_raw}")
+    };
+    let ip_prefix = match p.ip.as_deref() {
+        None | Some("") | Some("0.0.0.0") | Some("::") => String::new(),
+        Some(ip) => format!("{ip}:"),
+    };
+    match p.public_port {
+        Some(public) => format!("{ip_prefix}{public}->{}{proto_suffix}", p.private_port),
+        None => format!("{}{proto_suffix}", p.private_port),
+    }
 }
 
 /// Flatten a bollard `ContainerSummary` into the CLI-facing DTO.
@@ -251,6 +261,27 @@ mod tests {
             },
         ];
         assert_eq!(format_ports(&ports), "192.168.1.1:8080->80, 53/udp");
+    }
+
+    #[test]
+    fn format_ports_dedupes_ipv4_and_ipv6_bindings() {
+        // bollard ships IPv4 + IPv6 bindings as separate entries. After
+        // default-IP suppression both render the same string; dedupe.
+        let ports = vec![
+            Port {
+                ip: Some("0.0.0.0".into()),
+                private_port: 6767,
+                public_port: Some(6767),
+                typ: Some(PortTypeEnum::TCP),
+            },
+            Port {
+                ip: Some("::".into()),
+                private_port: 6767,
+                public_port: Some(6767),
+                typ: Some(PortTypeEnum::TCP),
+            },
+        ];
+        assert_eq!(format_ports(&ports), "6767->6767");
     }
 
     #[test]
