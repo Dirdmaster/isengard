@@ -12,6 +12,7 @@
 //! Subsequent calls within ControlPersist window: ~100ms.
 
 use std::net::{SocketAddr, TcpListener};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -83,6 +84,12 @@ impl SshTunnel {
             .arg("-L")
             .arg(&forward)
             .arg(ssh_target)
+            // Silence the remote MOTD / login banner / PAM session
+            // messages: ssh's stdout inherits ours by default, so any
+            // bytes it writes land in `isd ps`'s table output.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| Error::SshTunnel(format!("spawn ssh: {e}")))?;
