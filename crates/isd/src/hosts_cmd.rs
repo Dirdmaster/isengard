@@ -1,5 +1,5 @@
 //! `isd hosts list`: enumerate every host enrolled on the controller.
-//! Talks to `GET /api/v1/hosts` (optionally `?fleet=<name>`).
+//! Talks to `GET /api/v1/hosts`.
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
