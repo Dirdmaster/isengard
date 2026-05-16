@@ -278,7 +278,7 @@ fn docker_ps_columns() -> Vec<Column> {
     vec![
         Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
         Column::new("CONTAINER ID", Align::Left, CellStyle::Dim, 7, 12),
-        Column::new("IMAGE", Align::Left, CellStyle::Plain, 1, 10),
+        Column::new("IMAGE", Align::Left, CellStyle::Plain, 1, 13),
         Column::new("STATUS", Align::Left, CellStyle::State, 8, 10),
         Column::new("PORTS", Align::Left, CellStyle::Plain, 4, 14),
         Column::new("NAMES", Align::Left, CellStyle::Emphasis, 6, 8),
