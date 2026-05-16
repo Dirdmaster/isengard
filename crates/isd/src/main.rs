@@ -108,9 +108,9 @@ enum Command {
     /// List services across stacks.
     #[command(subcommand)]
     Service(service_cmd::ServiceCommand),
-    /// Phase 0.14: show the placement scheduler's grid (one row per
-    /// replica). `--stack-id N` filters; `--json` emits raw rows.
-    Placement(placement_cmd::PlacementArgs),
+    /// Show the placement grid (one row per replica).
+    #[command(subcommand)]
+    Placement(placement_cmd::PlacementCommand),
 }
 
 #[tokio::main]
@@ -175,7 +175,13 @@ async fn main() {
             )
             .await
         }
-        Command::Placement(args) => placement_cmd::run(args, cli.context.as_deref()).await,
+        Command::Placement(cmd) => {
+            placement_cmd::run(
+                placement_cmd::PlacementArgs { command: cmd },
+                cli.context.as_deref(),
+            )
+            .await
+        }
     };
 
     if let Err(e) = result {

@@ -1,14 +1,4 @@
-//! `isd placement show [<stack>]`: print the controller's placement
-//! grid for one stack (or all stacks if no name is given).
-//!
-//! Phase 0.14. Talks to `GET /api/v1/placements` (or
-//! `GET /api/v1/placements/by-stack/<stack_id>`) and renders a
-//! kubectl-style table. `--json` emits the raw rows.
-//!
-//! The `placement explain` subcommand from the spec is deferred: it
-//! requires a per-host eligibility walk on the controller side that
-//! depends on a stack -> Placement resolver (the compose broker
-//! plumbing). For 0.14 `show` is enough to verify operator decisions.
+//! `isd placement show`: print the controller's placement grid.
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
@@ -26,20 +16,18 @@ pub struct PlacementArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PlacementCommand {
-    /// Print the placement grid for all stacks (or filter by stack id
-    /// with `--stack-id`). Output is a kubectl-style table; `--json`
-    /// emits a JSON array.
+    /// Print the placement grid (one row per replica).
     Show(ShowArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
-    /// Filter by stack id (numeric, as shown in `isd ps`).
+    /// Filter by stack id.
     #[arg(long)]
     pub stack_id: Option<i64>,
-    /// Emit JSON instead of the table. Shape matches [`PlacementRow`].
-    #[arg(long)]
-    pub json: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
+    pub format: crate::output::Format,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -82,37 +70,39 @@ async fn run_show(args: ShowArgs, context: Option<&str>) -> Result<()> {
         .json()
         .await
         .context("decoding placements JSON")?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-        return Ok(());
+
+    match args.format {
+        crate::output::Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        crate::output::Format::Table => {
+            if rows.is_empty() {
+                eprintln!("no placements");
+                return Ok(());
+            }
+            let mut table = Table::new();
+            table
+                .load_preset(NOTHING)
+                .set_content_arrangement(ContentArrangement::Dynamic);
+            table.set_header(vec![
+                "STACK", "SERVICE", "REPLICA", "HOST", "STATE", "ASSIGNED",
+            ]);
+            for row in &rows {
+                table.add_row(vec![
+                    row.stack_id
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    row.service_name
+                        .clone()
+                        .unwrap_or_else(|| row.service_id.to_string()),
+                    row.replica_index.to_string(),
+                    row.hostname.clone().unwrap_or_else(|| row.host_id.clone()),
+                    row.state.clone(),
+                    row.assigned_at.to_rfc3339(),
+                ]);
+            }
+            println!("{table}");
+        }
     }
-    if rows.is_empty() {
-        eprintln!(
-            "no placements (the scheduler is the planner for 0.14; the dispatch path lands later)"
-        );
-        return Ok(());
-    }
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    table.set_header(vec![
-        "STACK", "SERVICE", "REPLICA", "HOST", "STATE", "ASSIGNED",
-    ]);
-    for row in &rows {
-        table.add_row(vec![
-            row.stack_id
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".into()),
-            row.service_name
-                .clone()
-                .unwrap_or_else(|| row.service_id.to_string()),
-            row.replica_index.to_string(),
-            row.hostname.clone().unwrap_or_else(|| row.host_id.clone()),
-            row.state.clone(),
-            row.assigned_at.to_rfc3339(),
-        ]);
-    }
-    println!("{table}");
     Ok(())
 }
