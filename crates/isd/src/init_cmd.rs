@@ -325,21 +325,121 @@ async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
     Ok(token)
 }
 
-// === Step stubs (Phase 5 implements these) ===
+// === Step 7: docker compose up -d agent with ISENGARD_ENROLL_TOKEN ===
 
-async fn step_compose_up_agent(_docker_uri: &str, _token: &str) -> Result<()> {
-    Err(anyhow!(
-        "isd init: step_compose_up_agent not implemented yet (Phase 5)"
-    ))
+async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
+    use std::io::Write;
+
+    let mut tmp =
+        tempfile::NamedTempFile::new().context("creating tmp file for embedded compose")?;
+    tmp.write_all(EMBEDDED_COMPOSE.as_bytes())
+        .context("writing embedded compose to tmp")?;
+    tmp.flush().ok();
+
+    // The embedded recipe references ${ISENGARD_ENROLL_TOKEN} on the agent
+    // service (install/compose.yaml line 164). docker compose interpolates
+    // from the parent process env, so we pass the freshly-minted token via
+    // .env() here. DOCKER_HOST routes the spawn to the operator's context.
+    let status = tokio::process::Command::new("docker")
+        .env("DOCKER_HOST", docker_uri)
+        .env("ISENGARD_ENROLL_TOKEN", token)
+        .arg("compose")
+        .arg("-f")
+        .arg(tmp.path())
+        .arg("up")
+        .arg("-d")
+        .arg("agent")
+        .status()
+        .await
+        .context("docker compose up -d agent")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "docker compose up -d agent failed (exit {:?})",
+            status.code()
+        ));
+    }
+    Ok(())
 }
-async fn step_wait_for_agent_enrolled(_docker_uri: &str) -> Result<()> {
-    Err(anyhow!(
-        "isd init: step_wait_for_agent_enrolled not implemented yet (Phase 5)"
-    ))
+
+// === Step 8: poll the controller until the agent has enrolled ===
+
+async fn step_wait_for_agent_enrolled(docker_uri: &str) -> Result<()> {
+    use tokio::time::{Duration, Instant, sleep};
+
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let endpoint = isd_runtime::discover(docker.client())
+        .await
+        .context("rediscovering controller for enrol-wait")?;
+    let url = format!(
+        "http://{}:{}/api/v1/hosts",
+        endpoint.host_ip, endpoint.host_port
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+
+    eprint!("isd init: waiting for agent to enrol");
+    loop {
+        if Instant::now() > deadline {
+            eprintln!();
+            return Err(anyhow!(
+                "agent did not enrol within 60s. Check `docker logs iso-agent`."
+            ));
+        }
+        if let Ok(resp) = reqwest::get(&url).await
+            && resp.status().is_success()
+            && let Ok(rows) = resp.json::<serde_json::Value>().await
+            && rows.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+        {
+            eprintln!(" enrolled");
+            return Ok(());
+        }
+        eprint!(".");
+        sleep(Duration::from_secs(2)).await;
+    }
 }
-async fn step_render_join_block(_docker_uri: &str, _token: &str) -> Result<String> {
-    Err(anyhow!(
-        "isd init: step_render_join_block not implemented yet (Phase 5)"
+// === Step 9: render the swarm-style join-block for ADDITIONAL hosts ===
+
+async fn step_render_join_block(docker_uri: &str, _token_already_used: &str) -> Result<String> {
+    use bollard::exec::{CreateExecOptions, StartExecResults};
+    use futures_util::StreamExt;
+
+    // Mint a NEW token: the one threaded through step 7 was consumed by
+    // the local agent. Default `--format text` prints the full
+    // swarm-style join block (header + token + controller address +
+    // CA fingerprint) which we then frame for the operator.
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let exec = docker
+        .client()
+        .create_exec(
+            "iso-controller",
+            CreateExecOptions::<String> {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(vec![
+                    "isengard".into(),
+                    "controller".into(),
+                    "token".into(),
+                    "mint".into(),
+                    "--role".into(),
+                    "agent".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("creating exec for join-block render")?;
+
+    let mut output = String::new();
+    if let StartExecResults::Attached {
+        output: mut stream, ..
+    } = docker.client().start_exec(&exec.id, None).await?
+    {
+        while let Some(item) = stream.next().await {
+            let chunk = item.context("reading join-block stdout")?;
+            output.push_str(&chunk.to_string());
+        }
+    }
+    Ok(format!(
+        "\nCluster ready. To enrol additional hosts:\n\n{output}"
     ))
 }
 
