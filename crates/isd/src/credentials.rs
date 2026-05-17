@@ -159,13 +159,12 @@ impl<'de> Deserialize<'de> for ContextEntry {
 }
 
 impl ContextEntry {
-    /// Rewrite a legacy `Backend::Http { url == NO_CONTROLLER_SENTINEL }`
-    /// + `docker: Some(...)` pair into a single `Backend::Docker { url }`.
-    /// No-op for entries already in the post-Track-D shape.
+    /// Rewrite a legacy `Backend::Http { url == NO_CONTROLLER_SENTINEL }` +
+    /// `docker: Some(...)` pair into a single `Backend::Docker { url }`. No-op
+    /// for entries already in the post-Track-D shape.
     pub fn migrate_legacy_sentinel(&self) -> Self {
         use crate::context::NO_CONTROLLER_SENTINEL;
-        if let (Backend::Http { url }, Some(docker_url)) =
-            (&self.backend, self.docker.as_deref())
+        if let (Backend::Http { url }, Some(docker_url)) = (&self.backend, self.docker.as_deref())
             && url == NO_CONTROLLER_SENTINEL
         {
             return Self {
