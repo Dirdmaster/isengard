@@ -13,11 +13,13 @@
 //! Phase 0.20 ships the transport plumbing. Phase 0.21 swaps `isd ps`
 //! over to use this in place of the controller round-trip.
 
+pub mod controller_discovery;
 pub mod discovery_labels;
 mod docker;
 mod error;
 mod ssh_tunnel;
 
+pub use controller_discovery::{ControllerEndpoint, DiscoveryError, discover};
 pub use docker::{ContainerSummary, DockerBackend};
 pub use error::{Error, Result};
 pub use ssh_tunnel::SshTunnel;
