@@ -22,4 +22,4 @@ mod ssh_tunnel;
 pub use controller_discovery::{ControllerEndpoint, DiscoveryError, discover};
 pub use docker::{ContainerSummary, DockerBackend};
 pub use error::{Error, Result};
-pub use ssh_tunnel::SshTunnel;
+pub use ssh_tunnel::{SshTunnel, control_path_for};

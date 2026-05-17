@@ -123,6 +123,96 @@ impl Tunnel {
         }
     }
 
+    /// Open a port-forward from a fresh local TCP port to
+    /// `remote_host:remote_port` on the SSH `target`, piggybacking on the
+    /// ControlMaster the isd-runtime docker tunnel set up against the
+    /// same target. Used by Phase 4 to forward the controller container's
+    /// published REST port (typically `127.0.0.1:9418` on the remote) to
+    /// a local loopback port reqwest can hit.
+    ///
+    /// The ControlPath is the same hash isd-runtime uses
+    /// ([`isd_runtime::control_path_for`]) so multiple LocalForwards
+    /// against the same SSH target share one underlying SSH connection.
+    /// ControlPersist on the master keeps the connection warm for
+    /// subsequent invocations.
+    pub async fn open_local_forward(
+        target: &str,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> Result<Self> {
+        let local_port = pick_ephemeral_port().await?;
+        let forward_arg = format!("{local_port}:{remote_host}:{remote_port}");
+        let control_path = isd_runtime::control_path_for(target);
+
+        let mut child = Command::new("ssh")
+            .arg("-N")
+            .arg("-T")
+            .arg("-o")
+            .arg("ExitOnForwardFailure=yes")
+            .arg("-o")
+            .arg("ServerAliveInterval=15")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ControlMaster=auto")
+            .arg("-o")
+            .arg(format!("ControlPath={control_path}"))
+            .arg("-o")
+            .arg("ControlPersist=10m")
+            .arg("-L")
+            .arg(&forward_arg)
+            .arg(target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawning `ssh` for LocalForward (is it installed and on $PATH?)")?;
+
+        let stderr_buf = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let buf = std::sync::Arc::clone(&stderr_buf);
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let mut guard = buf.lock().await;
+                    guard.push_str(&line);
+                    guard.push('\n');
+                }
+            });
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                let stderr = stderr_buf.lock().await.clone();
+                anyhow::bail!(
+                    "ssh LocalForward to {target:?} (-> {remote_host}:{remote_port}) failed (exit {status}): {}",
+                    stderr.trim().lines().last().unwrap_or("(no stderr)")
+                );
+            }
+            if tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+                .await
+                .is_ok()
+            {
+                return Ok(Tunnel {
+                    child,
+                    local_port,
+                    stderr_buf,
+                });
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.start_kill();
+                let stderr = stderr_buf.lock().await.clone();
+                anyhow::bail!(
+                    "ssh LocalForward to {target:?} (-> {remote_host}:{remote_port}) did not come up within 5s. Last stderr: {}",
+                    stderr.trim().lines().last().unwrap_or("(none)")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// HTTP base URL for the locally-forwarded port. Subcommands can
     /// build REST URLs by appending `/api/v1/...`.
     pub fn local_url(&self) -> String {
