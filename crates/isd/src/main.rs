@@ -31,6 +31,7 @@ mod help_render;
 mod hosts_cmd;
 mod index_cache;
 mod index_resolve;
+mod init_cmd;
 mod lifecycle_cmd;
 mod logs;
 mod manifest_cmd;
@@ -74,6 +75,8 @@ enum Command {
     /// Manage saved controller contexts.
     #[command(subcommand)]
     Context(context::ContextCommand),
+    /// Bootstrap a controller (and first agent) on this host. Swarm-style.
+    Init(init_cmd::InitArgs),
     /// List containers.
     Ps(ps::PsArgs),
     /// Open a stack in the browser.
@@ -140,6 +143,7 @@ async fn main() {
 
     let result = match command {
         Command::Context(cmd) => context::run(context::ContextArgs { command: cmd }).await,
+        Command::Init(args) => init_cmd::run(args, cli.context.as_deref()).await,
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,
         Command::Logs(args) => logs::run(args, cli.context.as_deref()).await,

@@ -48,6 +48,23 @@ fn main() {
 
     let version = resolve_version();
     println!("cargo:rustc-env=ISENGARD_BUILD_VERSION={version}");
+
+    // Track E: assert the embedded compose recipe carries the discovery
+    // labels `isd_runtime::discovery_labels` reads. `isd init` writes this
+    // file to a tmp path and runs `docker compose up -f <tmp>`; if the
+    // recipe drifts from the constants, discovery breaks silently.
+    let compose = include_str!("../../install/compose.yaml");
+    assert!(
+        compose.contains("io.isengard.role: controller"),
+        "install/compose.yaml is missing io.isengard.role: controller label; \
+         isd init relies on this for discovery"
+    );
+    assert!(
+        compose.contains("io.isengard.api.version: \"1\""),
+        "install/compose.yaml api.version label does not match \
+         isd_runtime::discovery_labels::API_VERSION"
+    );
+    println!("cargo:rerun-if-changed=../../install/compose.yaml");
 }
 
 fn resolve_version() -> String {
