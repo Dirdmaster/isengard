@@ -396,9 +396,50 @@ async fn step_wait_for_agent_enrolled(docker_uri: &str) -> Result<()> {
         sleep(Duration::from_secs(2)).await;
     }
 }
-async fn step_render_join_block(_docker_uri: &str, _token: &str) -> Result<String> {
-    Err(anyhow!(
-        "isd init: step_render_join_block not implemented yet (Phase 5)"
+// === Step 9: render the swarm-style join-block for ADDITIONAL hosts ===
+
+async fn step_render_join_block(docker_uri: &str, _token_already_used: &str) -> Result<String> {
+    use bollard::exec::{CreateExecOptions, StartExecResults};
+    use futures_util::StreamExt;
+
+    // Mint a NEW token: the one threaded through step 7 was consumed by
+    // the local agent. Default `--format text` prints the full
+    // swarm-style join block (header + token + controller address +
+    // CA fingerprint) which we then frame for the operator.
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let exec = docker
+        .client()
+        .create_exec(
+            "iso-controller",
+            CreateExecOptions::<String> {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(vec![
+                    "isengard".into(),
+                    "controller".into(),
+                    "token".into(),
+                    "mint".into(),
+                    "--role".into(),
+                    "agent".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("creating exec for join-block render")?;
+
+    let mut output = String::new();
+    if let StartExecResults::Attached {
+        output: mut stream, ..
+    } = docker.client().start_exec(&exec.id, None).await?
+    {
+        while let Some(item) = stream.next().await {
+            let chunk = item.context("reading join-block stdout")?;
+            output.push_str(&chunk.to_string());
+        }
+    }
+    Ok(format!(
+        "\nCluster ready. To enrol additional hosts:\n\n{output}"
     ))
 }
 
