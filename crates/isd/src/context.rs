@@ -227,6 +227,7 @@ fn render_kind_and_target(ctx: &ContextEntry) -> (&'static str, String) {
         return ("docker", docker.to_string());
     }
     match &ctx.backend {
+        Backend::Docker { url } => ("docker", url.clone()),
         Backend::Http { url } => ("http", url.clone()),
         Backend::Ssh {
             target,
@@ -266,6 +267,11 @@ async fn run_show(args: ShowArgs) -> Result<()> {
     }
 
     match &ctx.backend {
+        Backend::Docker { url } => {
+            println!("kind:    docker");
+            println!("docker:  {url}");
+            println!("controller: auto (discovered via io.isengard.role label)");
+        }
         Backend::Http { url } => {
             println!("kind:    http");
             println!("url:     {url}");

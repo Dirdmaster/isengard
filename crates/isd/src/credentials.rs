@@ -57,6 +57,15 @@ pub enum Backend {
         #[serde(default = "default_dashboard_port")]
         dashboard_port: u16,
     },
+    /// Docker socket as the sole transport. The controller is discovered
+    /// by querying `docker ps --filter label=io.isengard.role=controller`;
+    /// no separate dashboard port is configured. This is the Track D path.
+    Docker {
+        /// Docker endpoint URL (e.g. `ssh://user@host`, `tcp://host:2375`,
+        /// `unix:///var/run/docker.sock`). Same shape `docker context create`
+        /// accepts.
+        url: String,
+    },
 }
 
 fn default_dashboard_port() -> u16 {
@@ -121,9 +130,14 @@ impl<'de> Deserialize<'de> for ContextEntry {
                     .ok_or_else(|| serde::de::Error::custom("kind=ssh requires `target`"))?,
                 dashboard_port: raw.dashboard_port.unwrap_or_else(default_dashboard_port),
             },
+            Some("docker") => Backend::Docker {
+                url: raw
+                    .url
+                    .ok_or_else(|| serde::de::Error::custom("kind=docker requires `url`"))?,
+            },
             Some(other) => {
                 return Err(serde::de::Error::custom(format!(
-                    "unknown context kind {other:?} (expected `http` or `ssh`)"
+                    "unknown context kind {other:?} (expected `http`, `ssh`, or `docker`)"
                 )));
             }
             None => {
@@ -141,6 +155,28 @@ impl<'de> Deserialize<'de> for ContextEntry {
             backend,
             docker: raw.docker,
         })
+    }
+}
+
+impl ContextEntry {
+    /// Rewrite a legacy `Backend::Http { url == NO_CONTROLLER_SENTINEL }`
+    /// + `docker: Some(...)` pair into a single `Backend::Docker { url }`.
+    /// No-op for entries already in the post-Track-D shape.
+    pub fn migrate_legacy_sentinel(&self) -> Self {
+        use crate::context::NO_CONTROLLER_SENTINEL;
+        if let (Backend::Http { url }, Some(docker_url)) =
+            (&self.backend, self.docker.as_deref())
+            && url == NO_CONTROLLER_SENTINEL
+        {
+            return Self {
+                name: self.name.clone(),
+                backend: Backend::Docker {
+                    url: docker_url.to_string(),
+                },
+                docker: None,
+            };
+        }
+        self.clone()
     }
 }
 
@@ -236,8 +272,15 @@ pub fn load(path: &Path) -> Result<CredentialsFile> {
     }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading credentials at {}", path.display()))?;
-    let parsed: CredentialsFile = toml::from_str(&text)
+    let mut parsed: CredentialsFile = toml::from_str(&text)
         .with_context(|| format!("parsing credentials at {}", path.display()))?;
+    // Track D: rewrite NO_CONTROLLER_SENTINEL + docker shortcut entries into
+    // first-class Backend::Docker so the rest of the code sees the modern
+    // shape. On-disk state stays as-is until the next `save` (e.g. via
+    // `context import`, `context use`, or `context rm`).
+    for ctx in parsed.contexts.iter_mut() {
+        *ctx = ctx.migrate_legacy_sentinel();
+    }
     Ok(parsed)
 }
 
@@ -437,6 +480,57 @@ target = "dirdmaster@10.17.0.125"
         assert!(
             !toml.contains("docker ="),
             "docker key should be omitted when None: {toml}"
+        );
+    }
+
+    #[test]
+    fn docker_backend_serializes_and_deserializes() {
+        let toml_in = r#"
+default_context = "lausanne"
+
+[[contexts]]
+name = "lausanne"
+kind = "docker"
+url = "ssh://dirdmaster@10.17.0.125"
+"#;
+        let file: CredentialsFile = toml::from_str(toml_in).unwrap();
+        assert_eq!(file.default_context.as_deref(), Some("lausanne"));
+        assert_eq!(file.contexts.len(), 1);
+        match &file.contexts[0].backend {
+            Backend::Docker { url } => assert_eq!(url, "ssh://dirdmaster@10.17.0.125"),
+            other => panic!("expected Docker, got {other:?}"),
+        }
+        // Round-trip.
+        let toml_out = toml::to_string(&file).unwrap();
+        assert!(toml_out.contains("kind = \"docker\""));
+        assert!(toml_out.contains("url = \"ssh://dirdmaster@10.17.0.125\""));
+    }
+
+    #[test]
+    fn legacy_no_controller_sentinel_migrates_to_docker_on_load() {
+        use crate::context::NO_CONTROLLER_SENTINEL;
+        let toml_in = format!(
+            r#"
+default_context = "lausanne-direct"
+
+[[contexts]]
+name = "lausanne-direct"
+kind = "http"
+url = "{}"
+docker = "ssh://dirdmaster@10.17.0.125"
+"#,
+            NO_CONTROLLER_SENTINEL
+        );
+        let file: CredentialsFile = toml::from_str(&toml_in).unwrap();
+        // The HTTP-sentinel + docker shortcut is rewritten to Docker on load.
+        let migrated = file.contexts[0].migrate_legacy_sentinel();
+        match &migrated.backend {
+            Backend::Docker { url } => assert_eq!(url, "ssh://dirdmaster@10.17.0.125"),
+            other => panic!("expected migrated Docker, got {other:?}"),
+        }
+        assert!(
+            migrated.docker.is_none(),
+            "docker field cleared post-migration"
         );
     }
 }
