@@ -9,11 +9,9 @@
 //!    [`API_VERSION`].
 //! 5. Return the reachable URL (caller handles SSH-LocalForward if needed).
 //!
-//! The label constants below are duplicated inline pending Phase 1 of Track
-//! D landing its `discovery_labels` module. Once that PR merges, the
-//! follow-up Phase 4 work imports from `crate::discovery_labels` and drops
-//! these local copies. Values match the Phase 1 spec exactly so the swap is
-//! a pure rename.
+//! Label name + value constants live in [`crate::discovery_labels`]; this
+//! module imports them rather than redeclaring so the compose recipe + the
+//! discovery call site stay in lock-step.
 
 use std::collections::HashMap;
 
@@ -21,18 +19,7 @@ use bollard::Docker;
 use bollard::container::ListContainersOptions;
 use thiserror::Error;
 
-/// Reverse-DNS label namespace for Isengard container metadata.
-pub const ROLE_LABEL: &str = "io.isengard.role";
-
-/// Value of [`ROLE_LABEL`] on the controller container.
-pub const ROLE_CONTROLLER: &str = "controller";
-
-/// Label carrying the discovery-contract schema version.
-pub const API_VERSION_LABEL: &str = "io.isengard.api.version";
-
-/// Discovery schema version `isd` speaks. Compared against the value of
-/// [`API_VERSION_LABEL`] on the controller container.
-pub const API_VERSION: u32 = 1;
+use crate::discovery_labels::{API_VERSION, API_VERSION_LABEL, ROLE_CONTROLLER, ROLE_LABEL};
 
 /// Controller's REST listener port inside the container. The host-side
 /// mapping is read from the bollard `Port` entries.
