@@ -361,10 +361,40 @@ async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
-async fn step_wait_for_agent_enrolled(_docker_uri: &str) -> Result<()> {
-    Err(anyhow!(
-        "isd init: step_wait_for_agent_enrolled not implemented yet (Phase 5)"
-    ))
+// === Step 8: poll the controller until the agent has enrolled ===
+
+async fn step_wait_for_agent_enrolled(docker_uri: &str) -> Result<()> {
+    use tokio::time::{Duration, Instant, sleep};
+
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let endpoint = isd_runtime::discover(docker.client())
+        .await
+        .context("rediscovering controller for enrol-wait")?;
+    let url = format!(
+        "http://{}:{}/api/v1/hosts",
+        endpoint.host_ip, endpoint.host_port
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+
+    eprint!("isd init: waiting for agent to enrol");
+    loop {
+        if Instant::now() > deadline {
+            eprintln!();
+            return Err(anyhow!(
+                "agent did not enrol within 60s. Check `docker logs iso-agent`."
+            ));
+        }
+        if let Ok(resp) = reqwest::get(&url).await
+            && resp.status().is_success()
+            && let Ok(rows) = resp.json::<serde_json::Value>().await
+            && rows.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+        {
+            eprintln!(" enrolled");
+            return Ok(());
+        }
+        eprint!(".");
+        sleep(Duration::from_secs(2)).await;
+    }
 }
 async fn step_render_join_block(_docker_uri: &str, _token: &str) -> Result<String> {
     Err(anyhow!(
