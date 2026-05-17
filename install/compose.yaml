@@ -38,6 +38,13 @@ services:
     # arm64 manifests are healthy.
     platform: linux/amd64
     container_name: iso-controller
+    labels:
+      # Discovery anchor: isd does `docker ps --filter label=io.isengard.role=controller`
+      # to find this container; constants live in crates/isd-runtime/src/discovery_labels.rs.
+      io.isengard.role: controller
+      # Schema version for the discovery contract; bump on breaking changes
+      # (port relocation, auth path, label rename, ...).
+      io.isengard.api.version: "1"
     # Run as root: the distroless image defaults to nonroot, but the
     # controller bind-mounts /etc/isengard/master.key (mode 0600 root).
     # A nonroot reader gets EACCES on boot and the secrets store fails
