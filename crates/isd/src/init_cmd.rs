@@ -325,13 +325,42 @@ async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
     Ok(token)
 }
 
-// === Step stubs (Phase 5 implements these) ===
+// === Step 7: docker compose up -d agent with ISENGARD_ENROLL_TOKEN ===
 
-async fn step_compose_up_agent(_docker_uri: &str, _token: &str) -> Result<()> {
-    Err(anyhow!(
-        "isd init: step_compose_up_agent not implemented yet (Phase 5)"
-    ))
+async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
+    use std::io::Write;
+
+    let mut tmp =
+        tempfile::NamedTempFile::new().context("creating tmp file for embedded compose")?;
+    tmp.write_all(EMBEDDED_COMPOSE.as_bytes())
+        .context("writing embedded compose to tmp")?;
+    tmp.flush().ok();
+
+    // The embedded recipe references ${ISENGARD_ENROLL_TOKEN} on the agent
+    // service (install/compose.yaml line 164). docker compose interpolates
+    // from the parent process env, so we pass the freshly-minted token via
+    // .env() here. DOCKER_HOST routes the spawn to the operator's context.
+    let status = tokio::process::Command::new("docker")
+        .env("DOCKER_HOST", docker_uri)
+        .env("ISENGARD_ENROLL_TOKEN", token)
+        .arg("compose")
+        .arg("-f")
+        .arg(tmp.path())
+        .arg("up")
+        .arg("-d")
+        .arg("agent")
+        .status()
+        .await
+        .context("docker compose up -d agent")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "docker compose up -d agent failed (exit {:?})",
+            status.code()
+        ));
+    }
+    Ok(())
 }
+
 async fn step_wait_for_agent_enrolled(_docker_uri: &str) -> Result<()> {
     Err(anyhow!(
         "isd init: step_wait_for_agent_enrolled not implemented yet (Phase 5)"
