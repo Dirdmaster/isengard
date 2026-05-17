@@ -386,10 +386,11 @@ enum RmOutcome {
 
 async fn rm_from_context(ctx: &ContextEntry, name: &str) -> Result<RmOutcome> {
     let session = Session::from_context(ctx.clone()).await?;
+    let controller_url = session.require_controller()?;
     // delete_secret returns an error on 404. For global scope that's a
     // success-ish state (already gone). Re-classify by re-checking the
     // status here so callers can attribute it.
-    let url = format!("{}/api/v1/secrets/{name}", session.controller_url());
+    let url = format!("{controller_url}/api/v1/secrets/{name}");
     let resp = session
         .client
         .delete(&url)
@@ -431,7 +432,8 @@ fn read_value(from_file: Option<&std::path::Path>) -> Result<String> {
 }
 
 async fn put_secret(session: &Session, name: &str, value: String) -> Result<()> {
-    let url = format!("{}/api/v1/secrets/{name}", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/secrets/{name}");
     let resp = session
         .client
         .put(&url)
@@ -448,7 +450,8 @@ async fn put_secret(session: &Session, name: &str, value: String) -> Result<()> 
 }
 
 async fn list_secrets(session: &Session) -> Result<Vec<SecretEntry>> {
-    let url = format!("{}/api/v1/secrets", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/secrets");
     let resp = session
         .client
         .get(&url)
@@ -460,7 +463,8 @@ async fn list_secrets(session: &Session) -> Result<Vec<SecretEntry>> {
 }
 
 async fn delete_secret(session: &Session, name: &str) -> Result<()> {
-    let url = format!("{}/api/v1/secrets/{name}", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/secrets/{name}");
     let resp = session
         .client
         .delete(&url)

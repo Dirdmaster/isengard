@@ -46,7 +46,8 @@ pub async fn run(args: HostsArgs, context: Option<&str>) -> Result<()> {
 
 async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
-    let url = format!("{}/api/v1/hosts", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/hosts");
     let resp = session
         .client
         .get(&url)

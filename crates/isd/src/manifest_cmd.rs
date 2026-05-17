@@ -198,7 +198,8 @@ async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
 }
 
 async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
-    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks");
     let resp = session
         .client
         .get(&url)
@@ -214,10 +215,8 @@ async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
 }
 
 async fn fetch_manifest(session: &Session, stack_id: &str) -> Result<ManifestResponse> {
-    let url = format!(
-        "{}/api/v1/stacks/{stack_id}/manifest",
-        session.controller_url()
-    );
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks/{stack_id}/manifest");
     let resp = session
         .client
         .get(&url)
@@ -275,10 +274,8 @@ async fn put_manifest(
     body: &str,
     expected_sha256: &str,
 ) -> std::result::Result<String, PutError> {
-    let url = format!(
-        "{}/api/v1/stacks/{stack_id}/manifest",
-        session.controller_url()
-    );
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks/{stack_id}/manifest");
     let mut req = session.client.put(&url).json(&PutManifestBody {
         manifest_toml: body,
     });

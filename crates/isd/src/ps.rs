@@ -69,7 +69,8 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
     }
 
     let session = Session::open(context).await?;
-    let url = build_url(session.controller_url(), &args)?;
+    let controller_url = session.require_controller()?;
+    let url = build_url(controller_url, &args)?;
 
     let resp = session
         .client
