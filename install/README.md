@@ -1,13 +1,35 @@
 # Isengard production install
 
-The supported way to put Isengard on a server. Two flows:
+The supported way to put Isengard on a server. As of Track D (2026-05-17) the docker compose recipe is the documented default; the systemd-native flow stays around for one more release before being removed in v0.7.
 
-1. **Phase 0.10 default: systemd-native, Rust-driven.** `install/install.sh` is a thin bootstrap that downloads the static musl binary from GitHub Releases, verifies its sha256, drops it at `/usr/local/bin/isengard`, and prints a usage hint. The operator then runs `isengard init` (becomes a controller) or `isengard join` (enrolls as an agent in an existing fleet). Both are Rust subcommands with an interactive cliclack TUI. The init flow generates the master key, bootstraps secrets, writes the systemd unit files, brings up the controller, and enrolls the local agent. Operators add extra hosts via `isengard join`.
-2. **Legacy: docker compose.** `install/install-docker.sh` is the pre-0.8 flow. Pulls images from GHCR and brings up controller + agent as containers via `docker compose`. Stays around for operators who haven't migrated. Phase 0.11+ removes it.
+## Quick start (controller host)
+
+```sh
+# 1. Fetch the compose recipe.
+sudo mkdir -p /etc/isengard
+curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/compose.yaml \
+  -o /etc/isengard/compose.yaml
+
+# 2. Create the shared proxy network the controller and operator stacks share.
+sudo docker network create isengard-proxy 2>/dev/null || true
+
+# 3. Bring up the controller.
+sudo docker compose -f /etc/isengard/compose.yaml up -d controller
+
+# 4. (Optional) Mint a join token to enroll additional agent hosts.
+sudo docker compose -f /etc/isengard/compose.yaml exec controller \
+  isengard controller token mint --role agent
+```
+
+The controller container is labelled `io.isengard.role=controller` so the operator CLI (`isd`) discovers it automatically over a docker context: `isd context import <docker-context-name>` mirrors a docker context into `isd`'s credentials, then every `isd` verb works against that host. See [`crates/isd-runtime/src/discovery_labels.rs`](../crates/isd-runtime/src/discovery_labels.rs) for the discovery contract.
+
+The legacy systemd flow (`install.sh` + `isengard init`) still works for one more release. See [Legacy systemd-native install](#legacy-systemd-native-install) below for the sunset path.
+
+## Legacy systemd-native install
+
+> **Deprecated as of Track D (2026-05-17).** Sunset in v0.7. The compose recipe above is the supported path. This section is kept for operators mid-migration.
 
 Both flows share the same secrets model (master key on disk, encrypted SQLite for everything else), the same env file shape, and the same operator CLI (`isd`).
-
-## Phase 0.10 systemd-native install
 
 ### Quick install (interactive)
 

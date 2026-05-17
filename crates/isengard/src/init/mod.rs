@@ -386,6 +386,18 @@ pub async fn run(args: InitArgs) -> Result<()> {
 async fn run_interactive(args: InitArgs, host_ip: String) -> Result<()> {
     cliclack::intro(format!("isengard init  {}", env!("ISENGARD_BUILD_VERSION")))?;
 
+    // Track D deprecation banner (2026-05-17). Mirrors the wording in
+    // install/install.sh. cliclack::note renders the body inside a rounded
+    // ASCII box under the intro, which is the right shape for an advisory
+    // that the operator should read once and move past.
+    cliclack::note(
+        "Deprecated",
+        "systemd-native install is deprecated as of Track D (2026-05-17). \
+         The new flow ships the controller as a docker container: \
+         `docker compose -f /etc/isengard/compose.yaml up -d`. \
+         This command still works for one more release (sunset in v0.7).",
+    )?;
+
     let host = probe_host();
     // `cliclack::note` would render the body inside a rounded ASCII box;
     // the mockup is just a `◇  Detected host` header followed by free
@@ -431,6 +443,14 @@ async fn run_interactive(args: InitArgs, host_ip: String) -> Result<()> {
 /// Non-interactive flow: plain `[step]` lines, no `│` connector.
 async fn run_non_interactive(args: InitArgs, host_ip: String) -> Result<()> {
     println!("isengard init {}", env!("ISENGARD_BUILD_VERSION"));
+    // Track D deprecation banner (2026-05-17). Plain stdout to match the
+    // non-interactive flow's chrome-free style; mirrors the install.sh
+    // banner and the cliclack::note in run_interactive.
+    println!();
+    println!("DEPRECATED: systemd-native install is deprecated as of Track D (2026-05-17).");
+    println!("The new flow uses `docker compose -f /etc/isengard/compose.yaml up -d`.");
+    println!("This command still works for one more release (sunset in v0.7).");
+    println!();
     println!("Using flag-driven config.");
     let plan = Plan::from_args(&args, host_ip)?;
     let token = plan.execute_plain().await?;

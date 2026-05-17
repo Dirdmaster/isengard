@@ -4,31 +4,34 @@
 >
 > **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
 
-## Production install (two commands)
+## Production install (docker compose)
 
-For a fresh server: drop the binary, then pick a role for the host. The bootstrap is intentionally two steps so `curl | bash` cannot silently turn an agent host into a second controller.
-
-```sh
-# Step 1: download + verify + drop the binary at /usr/local/bin/isengard.
-curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/install.sh | sudo bash
-
-# Step 2a (first host, becomes the controller):
-sudo isengard init
-
-# Step 2b (every other host, enrolls as an agent):
-sudo isengard join --token <token> --ca-pem-path /etc/isengard/ca.pem https://<controller-host>:9417
-```
-
-Both `init` and `join` are interactive cliclack TUIs with `--non-interactive` modes for scripted setups. The init success banner prints a copy-pasteable join command for the agent hosts.
-
-If you prefer a true one-liner, bake the subcommand into the pipe:
+As of Track D (2026-05-17) the controller ships as a docker container. Bring up a fresh host in three commands:
 
 ```sh
-curl ... | sudo bash -s -- init [init flags...]
-curl ... | sudo bash -s -- join --token <t> https://<ctrl>:9417
+# 1. Fetch the compose recipe.
+sudo mkdir -p /etc/isengard
+curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/compose.yaml \
+  -o /etc/isengard/compose.yaml
+
+# 2. Create the shared proxy network.
+sudo docker network create isengard-proxy 2>/dev/null || true
+
+# 3. Bring up the controller.
+sudo docker compose -f /etc/isengard/compose.yaml up -d controller
 ```
 
-See [`install/README.md`](./install/README.md) for the full guide, flag reference, and uninstall.
+Point the operator CLI at it by importing the host's docker context:
+
+```sh
+docker context create lausanne --docker host=ssh://operator@lausanne.example.com
+isd context import lausanne --use
+isd ps
+```
+
+`isd context import` reads the docker context store directly, so the controller is discovered automatically via the `io.isengard.role=controller` label the compose recipe applies. See [`install/README.md`](./install/README.md) for the full guide, including additional-host enrollment and the day-to-day operations cheatsheet.
+
+> **Legacy systemd-native install:** `install/install.sh` + `isengard init` still work for one more release (sunset in v0.7). The script prints a deprecation banner pointing at the compose flow. See [`install/README.md`](./install/README.md#legacy-systemd-native-install) if you need it during migration.
 
 The recipe in [`docker/`](./docker/) remains the dev story: source build, named volumes, `just dev`. Use `install/` for any host you want to keep running.
 
