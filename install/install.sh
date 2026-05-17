@@ -38,6 +38,24 @@
 
 set -euo pipefail
 
+# Track D deprecation banner (2026-05-17). Print this first so the operator
+# sees it before any download or install work begins. Plain ASCII; no em or
+# en dashes (vault lefthook rule + downstream tooling friendliness).
+cat >&2 <<'WARN'
+
+  Heads up: systemd-native install is deprecated as of Track D (2026-05-17).
+  The new flow ships the controller as a docker container:
+
+      sudo mkdir -p /etc/isengard
+      curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/compose.yaml \
+        -o /etc/isengard/compose.yaml
+      sudo docker compose -f /etc/isengard/compose.yaml up -d
+
+  This script still works for one more release (sunset in v0.7). Open an
+  issue if the new flow does not fit your setup.
+
+WARN
+
 ISENGARD_VERSION="${ISENGARD_VERSION:-latest}"
 ISENGARD_RELEASE_BASE_REPO="${ISENGARD_RELEASE_BASE_REPO:-https://github.com/Weavers-Engineering/Isengard}"
 ISENGARD_BIN="${ISENGARD_BIN:-/usr/local/bin/isengard}"
