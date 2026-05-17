@@ -45,9 +45,7 @@ const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose.yaml");
 pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
     // Resolve docker URI from context; error early if missing.
     let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!(
-            "context has no docker endpoint; create one with `isd context import <name>` first"
-        )
+        anyhow!("context has no docker endpoint; create one with `isd context import <name>` first")
     })?;
 
     eprintln!("isd init: bootstrapping controller on {docker_uri}");
