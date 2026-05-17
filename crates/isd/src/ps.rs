@@ -233,6 +233,11 @@ pub(crate) fn resolve_docker_uri(context: Option<&str>) -> Result<Option<String>
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow::anyhow!("context {name:?} not found"))?;
+    // Track E: Backend::Docker is the post-Track-D shape; ctx.docker is
+    // the legacy side-field kept for back-compat. Either populates the URI.
+    if let crate::credentials::Backend::Docker { url } = &ctx.backend {
+        return Ok(Some(url.clone()));
+    }
     Ok(ctx.docker.clone())
 }
 
@@ -509,6 +514,48 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0]["id"], "abc");
         assert_eq!(parsed[1]["id"], "def");
+    }
+
+    /// Track E Phase 1: `resolve_docker_uri` must read the post-Track-D
+    /// `Backend::Docker { url }` shape; before the fix it only consulted
+    /// the legacy `ctx.docker` side field and returned `None` for
+    /// docker-only contexts created via `isd context import`.
+    #[test]
+    fn resolve_docker_uri_reads_backend_docker() {
+        use crate::credentials::{Backend, ContextEntry, CredentialsFile};
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let creds_path = tmp.path().join("credentials.toml");
+        let file = CredentialsFile {
+            default_context: Some("lausanne".into()),
+            contexts: vec![ContextEntry {
+                name: "lausanne".into(),
+                backend: Backend::Docker {
+                    url: "ssh://dirdmaster@10.17.0.125".into(),
+                },
+                docker: None,
+            }],
+        };
+        let toml = toml::to_string(&file).unwrap();
+        std::fs::File::create(&creds_path)
+            .unwrap()
+            .write_all(toml.as_bytes())
+            .unwrap();
+
+        // SAFETY: tests touching ISD_CREDENTIALS_FILE coordinate via the
+        // single-threaded `--test-threads=1` convention noted on the
+        // ignored e2e test below; this one runs fast and resets the env
+        // before returning.
+        unsafe {
+            std::env::set_var("ISD_CREDENTIALS_FILE", &creds_path);
+        }
+        let got = resolve_docker_uri(None).unwrap();
+        unsafe {
+            std::env::remove_var("ISD_CREDENTIALS_FILE");
+        }
+
+        assert_eq!(got, Some("ssh://dirdmaster@10.17.0.125".into()));
     }
 
     /// Phase 0.18: `--filter k=v` round-trips through build_url with
