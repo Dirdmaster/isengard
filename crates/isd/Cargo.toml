@@ -16,6 +16,10 @@ path = "src/main.rs"
 isengard-manifest.workspace = true
 isd-runtime.workspace = true
 anyhow.workspace = true
+# Track E: `isd init` calls bollard directly for volume create, exec, and the
+# bootstrap container that seeds /state/master.key. Same version pin as
+# isd-runtime.
+bollard.workspace = true
 chrono.workspace = true
 clap.workspace = true
 # v0.5.3: `tty` brings in `crossterm` so `Cell::fg` is available for the
