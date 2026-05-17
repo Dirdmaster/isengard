@@ -51,12 +51,10 @@ pub async fn run(args: PlacementArgs, context: Option<&str>) -> Result<()> {
 
 async fn run_show(args: ShowArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
     let url = match args.stack_id {
-        Some(id) => format!(
-            "{}/api/v1/placements/by-stack/{id}",
-            session.controller_url()
-        ),
-        None => format!("{}/api/v1/placements", session.controller_url()),
+        Some(id) => format!("{controller_url}/api/v1/placements/by-stack/{id}"),
+        None => format!("{controller_url}/api/v1/placements"),
     };
     let resp = session
         .client

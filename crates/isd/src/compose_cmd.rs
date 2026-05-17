@@ -739,7 +739,8 @@ async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
 /// the create-from-scratch path when the operator deploys a stack that
 /// isn't yet in the controller's inventory.
 async fn resolve_stack_id_opt(session: &Session, name: &str) -> Result<Option<String>> {
-    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks");
     let resp = session
         .client
         .get(&url)
@@ -772,7 +773,8 @@ async fn create_stack(
     compose_yaml: &str,
     host_id: Option<&str>,
 ) -> Result<CreateStackOk> {
-    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks");
     let resp = session
         .client
         .post(&url)
@@ -827,7 +829,8 @@ async fn create_stack_with_manifest(
     session: &Session,
     body: &CreateStackManifestBody,
 ) -> Result<CreateStackOk> {
-    let url = format!("{}/api/v1/stacks", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks");
     let resp = session
         .client
         .post(&url)
@@ -878,10 +881,8 @@ async fn put_compose_json(
     stack_id: &str,
     body: &PutComposeJsonBody,
 ) -> Result<PutOk> {
-    let url = format!(
-        "{}/api/v1/stacks/{stack_id}/compose",
-        session.controller_url()
-    );
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
     let resp = session
         .client
         .put(&url)
@@ -907,10 +908,8 @@ async fn put_compose_json(
 }
 
 async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<ComposeResponse>> {
-    let url = format!(
-        "{}/api/v1/stacks/{stack_id}/compose",
-        session.controller_url()
-    );
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
     let resp = session
         .client
         .get(&url)
@@ -925,7 +924,8 @@ async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<Compo
 }
 
 async fn preview_diff(session: &Session, stack_id: &str, proposed: &str) -> Result<ReconcilePlan> {
-    let url = format!("{}/api/v1/stacks/{stack_id}/diff", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/stacks/{stack_id}/diff");
     let resp = session
         .client
         .post(&url)
@@ -945,10 +945,8 @@ async fn put_compose(
     expected_sha256: &str,
     force: bool,
 ) -> Result<PutOk> {
-    let mut url = format!(
-        "{}/api/v1/stacks/{stack_id}/compose",
-        session.controller_url()
-    );
+    let controller_url = session.require_controller()?;
+    let mut url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
     if force {
         url.push_str("?force=true");
     }

@@ -47,17 +47,12 @@ pub async fn run(args: ServiceArgs, context: Option<&str>) -> Result<()> {
 
 async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
 
-    let stacks: Vec<StackApiRow> = fetch(
-        &session,
-        &format!("{}/api/v1/stacks", session.controller_url()),
-    )
-    .await?;
-    let services: Vec<ServiceApiRow> = fetch(
-        &session,
-        &format!("{}/api/v1/services", session.controller_url()),
-    )
-    .await?;
+    let stacks: Vec<StackApiRow> =
+        fetch(&session, &format!("{controller_url}/api/v1/stacks")).await?;
+    let services: Vec<ServiceApiRow> =
+        fetch(&session, &format!("{controller_url}/api/v1/services")).await?;
 
     let rows = build_rows(&stacks, &services);
 

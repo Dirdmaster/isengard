@@ -221,7 +221,8 @@ fn hosts_table(hosts: &[HostEntry]) -> String {
 }
 
 async fn list_hosts(session: &Session) -> Result<Vec<HostEntry>> {
-    let url = format!("{}/api/v1/hosts", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/hosts");
     let resp = session
         .client
         .get(&url)
@@ -240,7 +241,8 @@ async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
 }
 
 async fn list_rules(session: &Session) -> Result<Vec<RoutingRuleEntry>> {
-    let url = format!("{}/api/v1/routing/rules", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/routing/rules");
     let resp = session
         .client
         .get(&url)
@@ -252,7 +254,8 @@ async fn list_rules(session: &Session) -> Result<Vec<RoutingRuleEntry>> {
 }
 
 async fn create_rule(session: &Session, body: &CreateBody<'_>) -> Result<i64> {
-    let url = format!("{}/api/v1/routing/rules", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/routing/rules");
     let resp = session
         .client
         .post(&url)
@@ -270,7 +273,8 @@ async fn create_rule(session: &Session, body: &CreateBody<'_>) -> Result<i64> {
 }
 
 async fn delete_rule(session: &Session, id: i64) -> Result<()> {
-    let url = format!("{}/api/v1/routing/rules/{id}", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/routing/rules/{id}");
     let resp = session
         .client
         .delete(&url)

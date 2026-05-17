@@ -277,11 +277,9 @@ impl<'a> WatchPoller for HttpPoller<'a> {
         // The dashboard's `list_services` accepts `?stack_id=<i64>`; the
         // ULID-shaped contexts can't reach here (StackId is i64) so we
         // pass the string straight through.
-        let url = format!(
-            "{}/api/v1/services?stack_id={}",
-            self.session.controller_url(),
-            self.stack_id
-        );
+        let controller_url = self.session.require_controller()?;
+        let stack_id = &self.stack_id;
+        let url = format!("{controller_url}/api/v1/services?stack_id={stack_id}");
         let resp = self
             .session
             .client
@@ -315,7 +313,8 @@ pub async fn fetch_stack_header(session: &Session, stack_id: &str) -> Result<Sta
         id: String,
         hostname: String,
     }
-    let stacks_url = format!("{}/api/v1/stacks", session.controller_url());
+    let controller_url = session.require_controller()?;
+    let stacks_url = format!("{controller_url}/api/v1/stacks");
     let stacks: Vec<StackDto> = session
         .client
         .get(&stacks_url)
@@ -334,7 +333,7 @@ pub async fn fetch_stack_header(session: &Session, stack_id: &str) -> Result<Sta
     // Hostname lookup is best-effort; pre-0.5 controllers may 404 or
     // return an empty array on /api/v1/hosts. Fall back to a short
     // suffix of the ULID so the header is never empty.
-    let hosts_url = format!("{}/api/v1/hosts", session.controller_url());
+    let hosts_url = format!("{controller_url}/api/v1/hosts");
     let hostname = match session.client.get(&hosts_url).send().await {
         Ok(resp) => match resp.error_for_status() {
             Ok(ok) => ok

@@ -6,9 +6,12 @@
 //! lifetime; dropping the session closes the tunnel.
 //!
 //! Subcommands now take `&Session` instead of `(&ContextEntry,
-//! &reqwest::Client)`. The base URL is `session.controller_url()`; for
-//! HTTP backends that's the saved URL, for SSH backends it's the local
-//! loopback port the tunnel forwards to.
+//! &reqwest::Client)`. The base URL is `session.require_controller()?`;
+//! for HTTP backends that's the saved URL, for SSH backends it's the
+//! local loopback port the tunnel forwards to. Container verbs that
+//! route through `DockerBackend` directly should not call
+//! `require_controller`: they don't need the controller and the call
+//! returns the actionable `isd init` error when no controller is found.
 
 use std::time::Duration;
 
@@ -29,11 +32,21 @@ pub struct Session {
     pub client: reqwest::Client,
     /// Base URL for REST calls. For HTTP backends, equals the saved URL.
     /// For SSH backends, equals `http://127.0.0.1:<tunnel.local_port>`.
-    controller_url: String,
+    /// For Docker backends with a discovered controller, equals the
+    /// LocalForward / direct URL. `None` when the Docker context has no
+    /// controller on the host: container verbs still work via the
+    /// docker_uri side-channel; orchestration verbs call
+    /// `require_controller` and surface the actionable `isd init` error.
+    controller_url: Option<String>,
     /// SSH tunnel held alive for the session. `None` for HTTP backends.
     /// Field is read via `Drop` only; allow_dead_code keeps clippy quiet.
     #[allow(dead_code)]
     tunnel: Option<Tunnel>,
+    /// `Some` when discovery succeeded against a Docker context. Always
+    /// `None` for Http / Ssh backends (those imply a deliberately
+    /// configured controller, so missing-controller is an error).
+    #[allow(dead_code)]
+    discovered_endpoint: Option<isd_runtime::ControllerEndpoint>,
 }
 
 impl Session {
@@ -66,8 +79,8 @@ impl Session {
                 ctx.name,
             ));
         }
-        let (controller_url, tunnel) = match &ctx.backend {
-            Backend::Http { url } => (url.trim_end_matches('/').to_string(), None),
+        let (controller_url, tunnel, discovered_endpoint) = match &ctx.backend {
+            Backend::Http { url } => (Some(url.trim_end_matches('/').to_string()), None, None),
             Backend::Ssh {
                 target,
                 dashboard_port,
@@ -77,50 +90,73 @@ impl Session {
                     .with_context(|| {
                         format!("opening SSH tunnel to {target} (context {:?})", ctx.name)
                     })?;
-                (tunnel.local_url(), Some(tunnel))
+                (Some(tunnel.local_url()), Some(tunnel), None)
             }
             // Track D Phase 4: connect to docker via the configured URL,
             // discover the controller container by label, and (for SSH-
             // backed docker URLs) open a second LocalForward via the
             // existing ControlMaster so reqwest can hit the controller's
             // published REST port over loopback.
+            //
+            // Track E: when discovery returns NotFound, fall through to
+            // a controller-less session so container verbs still work.
+            // Other discovery failures (Multiple, version skew, missing
+            // labels, docker API errors) still propagate as hard errors:
+            // those indicate a misconfigured host, not a fresh one.
             Backend::Docker { url } => {
                 let backend = isd_runtime::DockerBackend::from_uri(url)
                     .await
                     .with_context(|| {
                         format!("connecting to docker at {url} for context {:?}", ctx.name)
                     })?;
-                let endpoint =
-                    isd_runtime::discover(backend.client())
-                        .await
-                        .with_context(|| {
-                            format!("discovering isengard controller via docker at {url}",)
-                        })?;
-                if let Some(target) = url.strip_prefix("ssh://") {
-                    // ssh://[user@]host[:port][/path] -> [user@]host[:port].
-                    // docker's URL form does not carry a path, but strip
-                    // defensively in case an operator pasted one.
-                    let target = target.split('/').next().unwrap_or(target);
-                    let tunnel =
-                        Tunnel::open_local_forward(target, &endpoint.host_ip, endpoint.host_port)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "opening SSH LocalForward to controller \
-                                     {}:{} via {target} (context {:?})",
-                                    endpoint.host_ip, endpoint.host_port, ctx.name
+                match isd_runtime::discover(backend.client()).await {
+                    Ok(endpoint) => {
+                        let (controller_url, tunnel) =
+                            if let Some(target) = url.strip_prefix("ssh://") {
+                                // ssh://[user@]host[:port][/path] -> [user@]host[:port].
+                                // docker's URL form does not carry a path, but strip
+                                // defensively in case an operator pasted one.
+                                let target = target.split('/').next().unwrap_or(target);
+                                let tunnel = Tunnel::open_local_forward(
+                                    target,
+                                    &endpoint.host_ip,
+                                    endpoint.host_port,
                                 )
-                            })?;
-                    (tunnel.local_url(), Some(tunnel))
-                } else {
-                    // tcp:// or unix:// docker context: the discovered
-                    // host:port is reachable from this machine directly
-                    // (the operator's docker context already worked).
-                    // Caveat: the compose recipe binds 127.0.0.1:9418 by
-                    // default, so a unix-socket docker context only
-                    // works when this machine *is* the controller host.
-                    let url = format!("http://{}:{}", endpoint.host_ip, endpoint.host_port);
-                    (url, None)
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "opening SSH LocalForward to controller \
+                                     {}:{} via {target} (context {:?})",
+                                        endpoint.host_ip, endpoint.host_port, ctx.name
+                                    )
+                                })?;
+                                (tunnel.local_url(), Some(tunnel))
+                            } else {
+                                // tcp:// or unix:// docker context: the discovered
+                                // host:port is reachable from this machine directly
+                                // (the operator's docker context already worked).
+                                // Caveat: the compose recipe binds 127.0.0.1:9418 by
+                                // default, so a unix-socket docker context only
+                                // works when this machine *is* the controller host.
+                                (
+                                    format!("http://{}:{}", endpoint.host_ip, endpoint.host_port),
+                                    None,
+                                )
+                            };
+                        (Some(controller_url), tunnel, Some(endpoint))
+                    }
+                    Err(isd_runtime::DiscoveryError::NotFound) => {
+                        // Track E: container verbs work without a controller.
+                        // Orchestration verbs call session.require_controller()
+                        // and receive the actionable "run isd init" message
+                        // there.
+                        (None, None, None)
+                    }
+                    Err(other) => {
+                        return Err(anyhow::Error::from(other).context(format!(
+                            "discovering isengard controller via docker at {url}",
+                        )));
+                    }
                 }
             }
         };
@@ -135,12 +171,29 @@ impl Session {
             client,
             controller_url,
             tunnel,
+            discovered_endpoint,
         })
     }
 
-    /// Base URL for REST calls. Subcommands append `/api/v1/...`.
-    pub fn controller_url(&self) -> &str {
-        &self.controller_url
+    /// Return the controller URL or an actionable error pointing at
+    /// `isd init`. Use this in orchestration verbs that require a
+    /// controller. Container verbs that route through `DockerBackend`
+    /// directly should NOT call this: they don't need the controller.
+    pub fn require_controller(&self) -> Result<&str> {
+        self.controller_url.as_deref().ok_or_else(|| {
+            anyhow!(
+                "no isengard controller on this host. \
+                 Run `isd init` to bootstrap one, or point at a different \
+                 context via --context <name>."
+            )
+        })
+    }
+
+    /// Return the controller URL if discovery succeeded, else `None`.
+    /// Allows callers that want to gracefully degrade without erroring.
+    #[allow(dead_code)]
+    pub fn controller_url_opt(&self) -> Option<&str> {
+        self.controller_url.as_deref()
     }
 
     /// Apply per-context auth to a request builder. Both backends are
@@ -159,11 +212,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn docker_backend_session_open_fails_when_no_docker_available() {
-        // Without a real docker socket the test asserts the error path
-        // (we don't have docker in CI). The error must reference docker
-        // so the operator sees a useful breadcrumb (vs. a generic "could
-        // not connect" lower in the stack).
+    async fn docker_backend_session_open_yields_no_controller_or_docker_error() {
+        // Track E: when discovery returns NotFound we now produce a
+        // controller-less Session instead of erroring (container verbs
+        // still work via DockerBackend; orchestration verbs call
+        // require_controller). When the docker socket itself is
+        // unreachable, discover returns DiscoveryError::Docker which we
+        // still propagate as a hard error. Both outcomes are acceptable
+        // here: this machine may or may not have a local docker daemon.
         let ctx = ContextEntry {
             name: "lausanne".into(),
             backend: Backend::Docker {
@@ -171,12 +227,74 @@ mod tests {
             },
             docker: None,
         };
-        let err = match Session::from_context(ctx).await {
-            Ok(_) => panic!("expected error when docker socket is unreachable"),
-            Err(e) => e,
+        match Session::from_context(ctx).await {
+            Ok(session) => {
+                // Docker reachable, no controller container: orchestration
+                // verbs should see the actionable error from require_controller.
+                assert!(
+                    session.controller_url_opt().is_none(),
+                    "no controller container should mean no controller_url"
+                );
+                let err = session.require_controller().unwrap_err();
+                let msg = format!("{err}");
+                assert!(msg.contains("no isengard controller"), "msg: {msg}");
+                assert!(msg.contains("isd init"), "msg: {msg}");
+            }
+            Err(e) => {
+                // Docker unreachable: the error chain mentions docker so
+                // the operator sees a useful breadcrumb.
+                let msg = format!("{e:#}");
+                assert!(msg.contains("docker"), "msg: {msg}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn require_controller_returns_actionable_error_when_unset() {
+        // Build a Session by hand so the test doesn't need a live docker
+        // socket. The shape exercises the require_controller helper
+        // directly: when controller_url is None, the error string must
+        // mention both `no isengard controller` and `isd init`.
+        let session = Session {
+            context: ContextEntry {
+                name: "lausanne".into(),
+                backend: Backend::Docker {
+                    url: "ssh://op@host".into(),
+                },
+                docker: None,
+            },
+            client: reqwest::Client::new(),
+            controller_url: None,
+            tunnel: None,
+            discovered_endpoint: None,
         };
-        let msg = format!("{err:#}");
-        assert!(msg.contains("docker"), "msg: {msg}");
+        let err = session
+            .require_controller()
+            .expect_err("controller_url is None; require_controller should error");
+        let msg = format!("{err}");
+        assert!(msg.contains("no isengard controller"), "msg: {msg}");
+        assert!(msg.contains("isd init"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn require_controller_returns_url_when_set() {
+        let session = Session {
+            context: ContextEntry {
+                name: "lausanne".into(),
+                backend: Backend::Http {
+                    url: "https://controller.example".into(),
+                },
+                docker: None,
+            },
+            client: reqwest::Client::new(),
+            controller_url: Some("https://controller.example".into()),
+            tunnel: None,
+            discovered_endpoint: None,
+        };
+        assert_eq!(
+            session.require_controller().unwrap(),
+            "https://controller.example"
+        );
     }
 
     #[tokio::test]

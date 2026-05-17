@@ -43,10 +43,11 @@ struct RoutingRuleDto {
 
 pub async fn run(args: OpenArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
 
     let stacks_resp = session
         .client
-        .get(format!("{}/api/v1/stacks", session.controller_url()))
+        .get(format!("{controller_url}/api/v1/stacks"))
         .send()
         .await
         .context("GET /api/v1/stacks")?;
@@ -71,7 +72,7 @@ pub async fn run(args: OpenArgs, context: Option<&str>) -> Result<()> {
 
     let rules_resp = session
         .client
-        .get(format!("{}/api/v1/routing/rules", session.controller_url()))
+        .get(format!("{controller_url}/api/v1/routing/rules"))
         .send()
         .await
         .context("GET /api/v1/routing/rules")?;

@@ -65,11 +65,12 @@ struct LogLine {
 pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
     let (stack, service) = parse_target(&args.target)?;
     let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
 
     // Resolve stack name -> stack id.
     let stacks: Vec<StackDto> = session
         .client
-        .get(format!("{}/api/v1/stacks", session.controller_url()))
+        .get(format!("{controller_url}/api/v1/stacks"))
         .send()
         .await
         .context("GET /api/v1/stacks")?
@@ -84,7 +85,7 @@ pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
         .map(|s| s.id.clone())
         .ok_or_else(|| anyhow!("no stack named {stack:?}"))?;
 
-    let ws_url = controller_to_ws_url(session.controller_url(), &stack_id, &service);
+    let ws_url = controller_to_ws_url(controller_url, &stack_id, &service);
     eprintln!("Streaming {} from {} (^C to stop)", args.target, ws_url);
 
     // Build the WS request. We piggyback the bearer token in the

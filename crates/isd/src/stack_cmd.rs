@@ -141,19 +141,14 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
 
 async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
 
-    let stacks: Vec<StackApiRow> = fetch_json(
-        &session,
-        &format!("{}/api/v1/stacks", session.controller_url()),
-    )
-    .await?;
+    let stacks: Vec<StackApiRow> =
+        fetch_json(&session, &format!("{controller_url}/api/v1/stacks")).await?;
 
     // Services for aggregation.
-    let services: Vec<ServiceApiRow> = fetch_json(
-        &session,
-        &format!("{}/api/v1/services", session.controller_url()),
-    )
-    .await?;
+    let services: Vec<ServiceApiRow> =
+        fetch_json(&session, &format!("{controller_url}/api/v1/services")).await?;
 
     let rows = build_ls_rows(&stacks, &services);
 
@@ -171,12 +166,10 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
 
 async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
 
-    let stacks: Vec<StackApiRow> = fetch_json(
-        &session,
-        &format!("{}/api/v1/stacks", session.controller_url()),
-    )
-    .await?;
+    let stacks: Vec<StackApiRow> =
+        fetch_json(&session, &format!("{controller_url}/api/v1/stacks")).await?;
 
     let stack = stacks
         .iter()
@@ -192,11 +185,7 @@ async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
 
     let services: Vec<ServiceApiRow> = fetch_json(
         &session,
-        &format!(
-            "{}/api/v1/services?stack_id={}",
-            session.controller_url(),
-            stack_id
-        ),
+        &format!("{controller_url}/api/v1/services?stack_id={stack_id}"),
     )
     .await?;
 
