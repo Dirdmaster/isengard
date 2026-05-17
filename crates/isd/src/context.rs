@@ -229,9 +229,13 @@ async fn run_list() -> Result<()> {
 }
 
 /// Pick the operator-facing `kind` + `target` strings for a context.
-/// Docker-only contexts (the sentinel HTTP placeholder + a docker
-/// field) render as `docker` so the operator does not see the
-/// internal `no-controller.invalid` sentinel.
+/// Track D `Backend::Docker` entries render directly as
+/// `kind = docker`. Legacy `Backend::Http { url = NO_CONTROLLER_SENTINEL }`
+/// + `docker = Some(...)` entries also render as `docker` for one
+/// release: the load-time migration in `credentials::load` rewrites
+/// these into the modern shape, but a freshly-written legacy file
+/// from an older isd binary on the same machine may still trip this
+/// path before the next save flushes the migration to disk.
 fn render_kind_and_target(ctx: &ContextEntry) -> (&'static str, String) {
     if let (Backend::Http { url }, Some(docker)) = (&ctx.backend, ctx.docker.as_deref())
         && url == NO_CONTROLLER_SENTINEL
