@@ -37,6 +37,8 @@ pub enum ContextCommand {
     Rm(RmArgs),
     /// Print one context's full backend details.
     Show(ShowArgs),
+    /// Import a docker context by name as a Track D `Backend::Docker` entry.
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +84,15 @@ pub struct ShowArgs {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Docker context name (matches `docker context ls` first column).
+    pub name: String,
+    /// Mark the imported context as the default.
+    #[arg(long)]
+    pub r#use: bool,
+}
+
 pub async fn run(args: ContextArgs) -> Result<()> {
     match args.command {
         ContextCommand::Create(a) => run_create(a).await,
@@ -89,6 +100,7 @@ pub async fn run(args: ContextArgs) -> Result<()> {
         ContextCommand::List => run_list().await,
         ContextCommand::Rm(a) => run_rm(a).await,
         ContextCommand::Show(a) => run_show(a).await,
+        ContextCommand::Import(a) => run_import(a).await,
     }
 }
 
@@ -244,6 +256,33 @@ async fn run_rm(args: RmArgs) -> Result<()> {
     }
     credentials::save(&path, &file)?;
     println!("Removed context {:?}.", args.name);
+    Ok(())
+}
+
+async fn run_import(args: ImportArgs) -> Result<()> {
+    validate_name(&args.name)?;
+    let docker_config = std::env::var("DOCKER_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .expect("home directory available")
+                .join(".docker")
+        });
+    let entry = crate::context_import::import_from_docker(&args.name, &docker_config)?;
+    let path = credentials::default_credentials_path()?;
+    let mut file = credentials::load(&path)?;
+    let was_first = file.contexts.is_empty();
+    file.upsert(entry);
+    if args.r#use {
+        file.set_default(&args.name)?;
+    }
+    credentials::save(&path, &file)?;
+    let suffix = if was_first || args.r#use {
+        " (set as default)"
+    } else {
+        ""
+    };
+    println!("Imported docker context {:?}{suffix}.", args.name);
     Ok(())
 }
 
