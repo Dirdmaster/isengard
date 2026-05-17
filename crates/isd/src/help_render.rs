@@ -20,7 +20,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
         "Cluster",
         &["hosts", "service", "route", "secret", "placement"],
     ),
-    ("Setup", &["context", "update"]),
+    ("Setup", &["init", "context", "update"]),
 ];
 
 /// Build the styled grouped help string from a clap `Command`. Honors
