@@ -79,6 +79,18 @@ impl Session {
                     })?;
                 (tunnel.local_url(), Some(tunnel))
             }
+            // Track D Phase 2: the variant exists so contexts can be
+            // imported, but Session::open does not yet know how to
+            // discover the controller container. Phase 4 wires this
+            // through isd_runtime::controller_discovery.
+            Backend::Docker { .. } => {
+                return Err(anyhow!(
+                    "context {:?} uses the Track D Backend::Docker transport; \
+                     controller discovery is not wired up yet (lands in Phase 4). \
+                     Use a Backend::Http or Backend::Ssh context for now.",
+                    ctx.name,
+                ));
+            }
         };
 
         let client = reqwest::Client::builder()

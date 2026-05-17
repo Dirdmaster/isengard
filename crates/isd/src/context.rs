@@ -37,6 +37,8 @@ pub enum ContextCommand {
     Rm(RmArgs),
     /// Print one context's full backend details.
     Show(ShowArgs),
+    /// Import a docker context by name as a Track D `Backend::Docker` entry.
+    Import(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +84,15 @@ pub struct ShowArgs {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Docker context name (matches `docker context ls` first column).
+    pub name: String,
+    /// Mark the imported context as the default.
+    #[arg(long)]
+    pub r#use: bool,
+}
+
 pub async fn run(args: ContextArgs) -> Result<()> {
     match args.command {
         ContextCommand::Create(a) => run_create(a).await,
@@ -89,6 +100,7 @@ pub async fn run(args: ContextArgs) -> Result<()> {
         ContextCommand::List => run_list().await,
         ContextCommand::Rm(a) => run_rm(a).await,
         ContextCommand::Show(a) => run_show(a).await,
+        ContextCommand::Import(a) => run_import(a).await,
     }
 }
 
@@ -217,9 +229,12 @@ async fn run_list() -> Result<()> {
 }
 
 /// Pick the operator-facing `kind` + `target` strings for a context.
-/// Docker-only contexts (the sentinel HTTP placeholder + a docker
-/// field) render as `docker` so the operator does not see the
-/// internal `no-controller.invalid` sentinel.
+/// Track D `Backend::Docker` entries render directly as `kind = docker`.
+/// Legacy `Backend::Http { url = NO_CONTROLLER_SENTINEL }` + `docker = Some(...)`
+/// entries also render as `docker` for one release: the load-time migration
+/// in `credentials::load` rewrites these into the modern shape, but a
+/// freshly-written legacy file from an older isd binary on the same machine
+/// may still trip this path before the next save flushes the migration to disk.
 fn render_kind_and_target(ctx: &ContextEntry) -> (&'static str, String) {
     if let (Backend::Http { url }, Some(docker)) = (&ctx.backend, ctx.docker.as_deref())
         && url == NO_CONTROLLER_SENTINEL
@@ -227,6 +242,7 @@ fn render_kind_and_target(ctx: &ContextEntry) -> (&'static str, String) {
         return ("docker", docker.to_string());
     }
     match &ctx.backend {
+        Backend::Docker { url } => ("docker", url.clone()),
         Backend::Http { url } => ("http", url.clone()),
         Backend::Ssh {
             target,
@@ -243,6 +259,33 @@ async fn run_rm(args: RmArgs) -> Result<()> {
     }
     credentials::save(&path, &file)?;
     println!("Removed context {:?}.", args.name);
+    Ok(())
+}
+
+async fn run_import(args: ImportArgs) -> Result<()> {
+    validate_name(&args.name)?;
+    let docker_config = std::env::var("DOCKER_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .expect("home directory available")
+                .join(".docker")
+        });
+    let entry = crate::context_import::import_from_docker(&args.name, &docker_config)?;
+    let path = credentials::default_credentials_path()?;
+    let mut file = credentials::load(&path)?;
+    let was_first = file.contexts.is_empty();
+    file.upsert(entry);
+    if args.r#use {
+        file.set_default(&args.name)?;
+    }
+    credentials::save(&path, &file)?;
+    let suffix = if was_first || args.r#use {
+        " (set as default)"
+    } else {
+        ""
+    };
+    println!("Imported docker context {:?}{suffix}.", args.name);
     Ok(())
 }
 
@@ -266,6 +309,11 @@ async fn run_show(args: ShowArgs) -> Result<()> {
     }
 
     match &ctx.backend {
+        Backend::Docker { url } => {
+            println!("kind:    docker");
+            println!("docker:  {url}");
+            println!("controller: auto (discovered via io.isengard.role label)");
+        }
         Backend::Http { url } => {
             println!("kind:    http");
             println!("url:     {url}");

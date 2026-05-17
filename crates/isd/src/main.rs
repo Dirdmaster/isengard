@@ -25,6 +25,7 @@ use clap::{Parser, Subcommand};
 mod compose_cmd;
 mod confirm;
 mod context;
+mod context_import;
 mod credentials;
 mod help_render;
 mod hosts_cmd;
