@@ -79,17 +79,49 @@ impl Session {
                     })?;
                 (tunnel.local_url(), Some(tunnel))
             }
-            // Track D Phase 2: the variant exists so contexts can be
-            // imported, but Session::open does not yet know how to
-            // discover the controller container. Phase 4 wires this
-            // through isd_runtime::controller_discovery.
-            Backend::Docker { .. } => {
-                return Err(anyhow!(
-                    "context {:?} uses the Track D Backend::Docker transport; \
-                     controller discovery is not wired up yet (lands in Phase 4). \
-                     Use a Backend::Http or Backend::Ssh context for now.",
-                    ctx.name,
-                ));
+            // Track D Phase 4: connect to docker via the configured URL,
+            // discover the controller container by label, and (for SSH-
+            // backed docker URLs) open a second LocalForward via the
+            // existing ControlMaster so reqwest can hit the controller's
+            // published REST port over loopback.
+            Backend::Docker { url } => {
+                let backend = isd_runtime::DockerBackend::from_uri(url)
+                    .await
+                    .with_context(|| {
+                        format!("connecting to docker at {url} for context {:?}", ctx.name)
+                    })?;
+                let endpoint =
+                    isd_runtime::discover(backend.client())
+                        .await
+                        .with_context(|| {
+                            format!("discovering isengard controller via docker at {url}",)
+                        })?;
+                if let Some(target) = url.strip_prefix("ssh://") {
+                    // ssh://[user@]host[:port][/path] -> [user@]host[:port].
+                    // docker's URL form does not carry a path, but strip
+                    // defensively in case an operator pasted one.
+                    let target = target.split('/').next().unwrap_or(target);
+                    let tunnel =
+                        Tunnel::open_local_forward(target, &endpoint.host_ip, endpoint.host_port)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "opening SSH LocalForward to controller \
+                                     {}:{} via {target} (context {:?})",
+                                    endpoint.host_ip, endpoint.host_port, ctx.name
+                                )
+                            })?;
+                    (tunnel.local_url(), Some(tunnel))
+                } else {
+                    // tcp:// or unix:// docker context: the discovered
+                    // host:port is reachable from this machine directly
+                    // (the operator's docker context already worked).
+                    // Caveat: the compose recipe binds 127.0.0.1:9418 by
+                    // default, so a unix-socket docker context only
+                    // works when this machine *is* the controller host.
+                    let url = format!("http://{}:{}", endpoint.host_ip, endpoint.host_port);
+                    (url, None)
+                }
             }
         };
 
@@ -125,6 +157,27 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn docker_backend_session_open_fails_when_no_docker_available() {
+        // Without a real docker socket the test asserts the error path
+        // (we don't have docker in CI). The error must reference docker
+        // so the operator sees a useful breadcrumb (vs. a generic "could
+        // not connect" lower in the stack).
+        let ctx = ContextEntry {
+            name: "lausanne".into(),
+            backend: Backend::Docker {
+                url: "unix:///nonexistent/docker.sock".into(),
+            },
+            docker: None,
+        };
+        let err = match Session::from_context(ctx).await {
+            Ok(_) => panic!("expected error when docker socket is unreachable"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("docker"), "msg: {msg}");
+    }
 
     #[tokio::test]
     async fn docker_only_context_short_circuits_with_actionable_error() {

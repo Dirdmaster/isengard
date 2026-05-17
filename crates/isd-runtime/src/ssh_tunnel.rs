@@ -151,7 +151,13 @@ async fn wait_for_port_ready(port: u16) -> Result<()> {
 /// master socket. We avoid `%r@%h:%p` ssh tokens because the operator
 /// may pass any of `user@host`, a bare alias from ~/.ssh/config, or
 /// `host:port`; the tokens expand inconsistently across those forms.
-fn control_path_for(ssh_target: &str) -> String {
+///
+/// Exposed pub(crate)-style via the [`control_path_for`] helper module
+/// re-export: Phase 4 (`isd::ssh_tunnel::Tunnel::open_local_forward`)
+/// reuses the exact same hash so the controller-REST LocalForward
+/// piggybacks on the docker-socket forward's ControlMaster instead of
+/// opening a second TCP handshake to the same host.
+pub fn control_path_for(ssh_target: &str) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut h = DefaultHasher::new();
     ssh_target.hash(&mut h);
