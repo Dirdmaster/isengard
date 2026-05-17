@@ -13,6 +13,7 @@
 //! Phase 0.20 ships the transport plumbing. Phase 0.21 swaps `isd ps`
 //! over to use this in place of the controller round-trip.
 
+pub mod discovery_labels;
 mod docker;
 mod error;
 mod ssh_tunnel;
