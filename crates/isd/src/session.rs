@@ -111,39 +111,38 @@ impl Session {
                     })?;
                 match isd_runtime::discover(backend.client()).await {
                     Ok(endpoint) => {
-                        let (controller_url, tunnel) = if let Some(target) =
-                            url.strip_prefix("ssh://")
-                        {
-                            // ssh://[user@]host[:port][/path] -> [user@]host[:port].
-                            // docker's URL form does not carry a path, but strip
-                            // defensively in case an operator pasted one.
-                            let target = target.split('/').next().unwrap_or(target);
-                            let tunnel = Tunnel::open_local_forward(
-                                target,
-                                &endpoint.host_ip,
-                                endpoint.host_port,
-                            )
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "opening SSH LocalForward to controller \
-                                     {}:{} via {target} (context {:?})",
-                                    endpoint.host_ip, endpoint.host_port, ctx.name
+                        let (controller_url, tunnel) =
+                            if let Some(target) = url.strip_prefix("ssh://") {
+                                // ssh://[user@]host[:port][/path] -> [user@]host[:port].
+                                // docker's URL form does not carry a path, but strip
+                                // defensively in case an operator pasted one.
+                                let target = target.split('/').next().unwrap_or(target);
+                                let tunnel = Tunnel::open_local_forward(
+                                    target,
+                                    &endpoint.host_ip,
+                                    endpoint.host_port,
                                 )
-                            })?;
-                            (tunnel.local_url(), Some(tunnel))
-                        } else {
-                            // tcp:// or unix:// docker context: the discovered
-                            // host:port is reachable from this machine directly
-                            // (the operator's docker context already worked).
-                            // Caveat: the compose recipe binds 127.0.0.1:9418 by
-                            // default, so a unix-socket docker context only
-                            // works when this machine *is* the controller host.
-                            (
-                                format!("http://{}:{}", endpoint.host_ip, endpoint.host_port),
-                                None,
-                            )
-                        };
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "opening SSH LocalForward to controller \
+                                     {}:{} via {target} (context {:?})",
+                                        endpoint.host_ip, endpoint.host_port, ctx.name
+                                    )
+                                })?;
+                                (tunnel.local_url(), Some(tunnel))
+                            } else {
+                                // tcp:// or unix:// docker context: the discovered
+                                // host:port is reachable from this machine directly
+                                // (the operator's docker context already worked).
+                                // Caveat: the compose recipe binds 127.0.0.1:9418 by
+                                // default, so a unix-socket docker context only
+                                // works when this machine *is* the controller host.
+                                (
+                                    format!("http://{}:{}", endpoint.host_ip, endpoint.host_port),
+                                    None,
+                                )
+                            };
                         (Some(controller_url), tunnel, Some(endpoint))
                     }
                     Err(isd_runtime::DiscoveryError::NotFound) => {
