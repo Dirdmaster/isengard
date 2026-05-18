@@ -19,3 +19,37 @@ pub const API_VERSION_LABEL: &str = "io.isengard.api.version";
 /// Discovery schema version `isd` speaks. Compared against the value of
 /// `API_VERSION_LABEL` on the controller container.
 pub const API_VERSION: u32 = 1;
+
+/// Role values that mark a container as protected: removal/stop/restart/kill
+/// from `isd` refuses these without an explicit `--force-system` override.
+pub const ROLE_VALUES_PROTECTED: &[&str] = &["controller", "agent"];
+
+/// Returns true when the given `io.isengard.role` label value identifies a
+/// protected system container. Operator-side guards (in `isd ps` filter,
+/// `isd rm/stop/restart/kill` pre-execute) call this against the container's
+/// label map.
+pub fn is_protected_label_value(role: &str) -> bool {
+    ROLE_VALUES_PROTECTED.contains(&role)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_is_protected() {
+        assert!(is_protected_label_value("controller"));
+    }
+
+    #[test]
+    fn agent_is_protected() {
+        assert!(is_protected_label_value("agent"));
+    }
+
+    #[test]
+    fn other_roles_are_not_protected() {
+        assert!(!is_protected_label_value("registry"));
+        assert!(!is_protected_label_value(""));
+        assert!(!is_protected_label_value("controller-old"));
+    }
+}
