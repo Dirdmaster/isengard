@@ -3,6 +3,7 @@
 
 use comfy_table::{Cell, Color, ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Phase 0.18: container-first row used by the rewritten `isd ps`.
 /// Columns: CONTAINER ID, IMAGE, COMMAND, STATUS, HOST, STACK, NAMES.
@@ -18,6 +19,12 @@ pub struct ContainerPsRow {
     pub host: String,
     pub stack: String,
     pub names: String,
+    /// Container labels surfaced by the source (bollard direct path or
+    /// controller DTO when available). Empty when the source omits them.
+    /// Used by the Track G protection guard to detect
+    /// `io.isengard.role=controller|agent`.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 /// Render container rows. Header preserves docker-ps casing (`CONTAINER
@@ -106,6 +113,7 @@ mod tests {
             host: "homelab-01".into(),
             stack: "hello".into(),
             names: "hello-web.1".into(),
+            labels: HashMap::new(),
         }];
         let table = render_container_table(&rows);
         assert!(table.contains("a1b2c3d4e5f6"));

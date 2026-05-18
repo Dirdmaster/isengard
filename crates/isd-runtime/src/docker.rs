@@ -3,6 +3,7 @@
 
 use crate::{Error, Result, SshTunnel};
 use bollard::{API_DEFAULT_VERSION, Docker};
+use std::collections::HashMap;
 
 /// Backend handle the rest of `isd` uses to talk to a Docker daemon.
 /// Owns the optional [`SshTunnel`] so the connection's lifetime is
@@ -155,6 +156,10 @@ pub struct ContainerSummary {
     pub ports: String,
     /// First container name, leading `/` stripped.
     pub names: String,
+    /// Container labels passed through from bollard. Used by the
+    /// operator-side protection guard to detect `io.isengard.role`
+    /// values. Empty when the daemon omits labels.
+    pub labels: HashMap<String, String>,
 }
 
 /// Format a bollard `Port` list the way `docker ps` renders the PORTS
@@ -215,6 +220,7 @@ fn map_summary(c: &bollard::models::ContainerSummary) -> ContainerSummary {
         status: c.status.clone().unwrap_or_default(),
         ports: c.ports.as_deref().map(format_ports).unwrap_or_default(),
         names,
+        labels: c.labels.clone().unwrap_or_default(),
     }
 }
 
