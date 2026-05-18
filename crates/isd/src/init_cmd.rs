@@ -10,11 +10,14 @@
 //!   4. docker compose up -d controller (embedded recipe)
 //!   5. wait for controller to become discoverable + healthy
 //!   6. mint first agent join-token via `docker exec controller isengard join-token`
-//!   7. docker compose up -d agent (with ISENGARD_ENROLL_TOKEN)
-//!   8. wait for agent to enrol (GET /api/v1/hosts returns one)
-//!   9. render swarm-style join-block for ADDITIONAL hosts
+//!   7. export controller CA PEM via `docker exec` + base64-encode (agent
+//!      supports inline CA via env, so no bind-mount needed)
+//!   8. docker compose up -d agent (with token + CA env passed through)
+//!   9. wait for agent to enrol (GET /api/v1/hosts returns one)
+//!   10. render swarm-style join-block for ADDITIONAL hosts
 //!
-//! Phase 4 implements steps 1-6. Phase 5 fills in steps 7-9.
+//! Track E follow-up (2026-05-18): added CA export step + docker-native
+//! compose rewrite (named volumes, env-driven CA, no env_file).
 
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
@@ -58,7 +61,8 @@ pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
     let join_token = step_mint_first_join_token(&docker_uri).await?;
 
     if !args.no_agent {
-        step_compose_up_agent(&docker_uri, &join_token).await?;
+        let ca_pem_base64 = step_export_controller_ca(&docker_uri).await?;
+        step_compose_up_agent(&docker_uri, &join_token, &ca_pem_base64).await?;
         step_wait_for_agent_enrolled(&docker_uri).await?;
     }
 
@@ -325,9 +329,60 @@ async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
     Ok(token)
 }
 
-// === Step 7: docker compose up -d agent with ISENGARD_ENROLL_TOKEN ===
+// === Step 6.5: export the controller's CA PEM (base64) for the agent ===
 
-async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
+/// The agent verifies the controller's self-signed cert against the CA the
+/// controller booted with. We pin it via `ISENGARD_CONTROLLER_CA_PEM_BASE64`
+/// env so the recipe stays bind-mount-free. `isengard controller ca export`
+/// already prints the PEM to stdout; base64 it for the env-var transport.
+async fn step_export_controller_ca(docker_uri: &str) -> Result<String> {
+    use base64::Engine as _;
+    use bollard::exec::{CreateExecOptions, StartExecResults};
+    use futures_util::StreamExt;
+
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let exec = docker
+        .client()
+        .create_exec(
+            "iso-controller",
+            CreateExecOptions::<String> {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(vec![
+                    "isengard".into(),
+                    "controller".into(),
+                    "ca".into(),
+                    "export".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("creating exec for ca export")?;
+
+    let mut pem = String::new();
+    if let StartExecResults::Attached {
+        output: mut stream, ..
+    } = docker.client().start_exec(&exec.id, None).await?
+    {
+        while let Some(item) = stream.next().await {
+            let chunk = item.context("reading ca export stdout")?;
+            pem.push_str(&chunk.to_string());
+        }
+    }
+    if !pem.contains("BEGIN CERTIFICATE") {
+        return Err(anyhow!(
+            "controller ca export did not return a PEM; got {} bytes: {}",
+            pem.len(),
+            pem.lines().take(2).collect::<Vec<_>>().join(" / ")
+        ));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(pem.as_bytes()))
+}
+
+// === Step 7: docker compose up -d agent with token + CA pin via env ===
+
+async fn step_compose_up_agent(docker_uri: &str, token: &str, ca_pem_base64: &str) -> Result<()> {
     use std::io::Write;
 
     let mut tmp =
@@ -336,13 +391,14 @@ async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
         .context("writing embedded compose to tmp")?;
     tmp.flush().ok();
 
-    // The embedded recipe references ${ISENGARD_ENROLL_TOKEN} on the agent
-    // service (install/compose.yaml line 164). docker compose interpolates
-    // from the parent process env, so we pass the freshly-minted token via
-    // .env() here. DOCKER_HOST routes the spawn to the operator's context.
+    // The embedded recipe references ${ISENGARD_ENROLL_TOKEN} and
+    // ${ISENGARD_CONTROLLER_CA_PEM_BASE64} on the agent service. docker
+    // compose interpolates from the parent process env. DOCKER_HOST routes
+    // the spawn to the operator's context.
     let status = tokio::process::Command::new("docker")
         .env("DOCKER_HOST", docker_uri)
         .env("ISENGARD_ENROLL_TOKEN", token)
+        .env("ISENGARD_CONTROLLER_CA_PEM_BASE64", ca_pem_base64)
         .arg("compose")
         .arg("-f")
         .arg(tmp.path())

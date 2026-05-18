@@ -16,6 +16,7 @@ path = "src/main.rs"
 isengard-manifest.workspace = true
 isd-runtime.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 # Track E: `isd init` calls bollard directly for volume create, exec, and the
 # bootstrap container that seeds /state/master.key. Same version pin as
 # isd-runtime.
