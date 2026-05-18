@@ -67,6 +67,7 @@ async fn setup_app() -> (axum::Router, Arc<Inventory>, HostId, StackId) {
         secrets: Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
             inv.clone(),
         )),
+        ca,
     });
 
     let app = deployments::router(handles);

@@ -442,6 +442,7 @@ mod tests {
             secrets: Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
                 inv.clone(),
             )),
+            ca,
         })
     }
 

@@ -45,6 +45,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
         secrets: Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
             inv.clone(),
         )),
+        ca,
     });
     let app = policies::router(handles.clone());
     (app, handles)

@@ -67,6 +67,7 @@ async fn setup_app() -> (Router, Router, Arc<Inventory>, HostId, StackId) {
         secrets: Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
             inv.clone(),
         )),
+        ca,
     });
 
     let groups_app = isengard_plugin_dashboard::deployment_groups::router(handles.clone());
