@@ -32,6 +32,7 @@ mod hosts_cmd;
 mod index_cache;
 mod index_resolve;
 mod init_cmd;
+mod join_token_cmd;
 mod lifecycle_cmd;
 mod logs;
 mod manifest_cmd;
@@ -115,6 +116,8 @@ enum Command {
     /// Show the placement grid (one row per replica).
     #[command(subcommand)]
     Placement(placement_cmd::PlacementCommand),
+    /// Mint a join-token (run against the controller-host context).
+    JoinToken(join_token_cmd::JoinTokenArgs),
 }
 
 #[tokio::main]
@@ -187,6 +190,7 @@ async fn main() {
             )
             .await
         }
+        Command::JoinToken(args) => join_token_cmd::run(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {

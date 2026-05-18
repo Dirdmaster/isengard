@@ -18,7 +18,14 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ("Stacks", &["stack", "open"]),
     (
         "Cluster",
-        &["hosts", "service", "route", "secret", "placement"],
+        &[
+            "hosts",
+            "service",
+            "route",
+            "secret",
+            "placement",
+            "join-token",
+        ],
     ),
     ("Setup", &["init", "context", "update"]),
 ];
@@ -60,8 +67,10 @@ pub fn render(cmd: &Command) -> String {
             let about = about_by_name.get(*name).cloned().unwrap_or_default();
             out.push_str("  ");
             out.push_str(&style(&cmd_name, name, color));
-            // Pad command name column to 10 chars for alignment.
-            for _ in name.len()..10 {
+            // Pad command name column to 12 chars for alignment. The
+            // 12-char width keeps at least one space separator after the
+            // longest current name (`join-token` = 10).
+            for _ in name.len()..12 {
                 out.push(' ');
             }
             out.push_str(&about);
