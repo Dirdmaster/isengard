@@ -3,7 +3,7 @@
 
 use comfy_table::{Cell, Color, ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Phase 0.18: container-first row used by the rewritten `isd ps`.
 /// Columns: CONTAINER ID, IMAGE, COMMAND, STATUS, HOST, STACK, NAMES.
@@ -30,7 +30,70 @@ pub struct ContainerPsRow {
 /// Render container rows. Header preserves docker-ps casing (`CONTAINER
 /// ID` with the space). Empty input still emits the header so scripts
 /// piping into `wc -l` see a stable shape.
-pub fn render_container_table(rows: &[ContainerPsRow]) -> String {
+///
+/// Track G Phase 2: when `group_by_host` is true and the row set spans
+/// more than one distinct host, output is grouped per host with a
+/// `HOST: <name>` section header. Hosts render in alphabetical order
+/// (BTreeMap iteration). When `group_by_host` is false, or when the row
+/// set is single-host, the flat docker-style table is emitted. Index
+/// assignment (if any caller adds an index column upstream) is done
+/// BEFORE grouping so the index stays globally monotonic across
+/// sections.
+pub fn render_container_table(rows: &[ContainerPsRow], group_by_host: bool) -> String {
+    let distinct_hosts: HashSet<&str> = rows.iter().map(|r| r.host.as_str()).collect();
+    if !group_by_host || distinct_hosts.len() <= 1 {
+        return render_flat(rows);
+    }
+
+    // Group by host, sorted alphabetically via BTreeMap iteration.
+    let mut by_host: BTreeMap<&str, Vec<&ContainerPsRow>> = BTreeMap::new();
+    for row in rows {
+        by_host.entry(row.host.as_str()).or_default().push(row);
+    }
+
+    let mut out = String::new();
+    for (i, (host, host_rows)) in by_host.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("HOST: {host}\n"));
+        out.push_str(&render_flat_slice(host_rows));
+    }
+    out
+}
+
+/// Flat docker-style table. The original `render_container_table` shape
+/// before Track G Phase 2; kept here as the inner renderer.
+fn render_flat(rows: &[ContainerPsRow]) -> String {
+    let mut t = Table::new();
+    t.load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Disabled)
+        .set_header(vec![
+            "CONTAINER ID",
+            "IMAGE",
+            "COMMAND",
+            "STATUS",
+            "HOST",
+            "STACK",
+            "NAMES",
+        ]);
+    for row in rows {
+        t.add_row(vec![
+            Cell::new(row.container_id.as_str()),
+            Cell::new(row.image.as_str()),
+            Cell::new(row.command.as_str()),
+            container_status_cell(row.status.as_str()),
+            Cell::new(row.host.as_str()),
+            Cell::new(row.stack.as_str()),
+            Cell::new(row.names.as_str()),
+        ]);
+    }
+    t.to_string()
+}
+
+/// Same as `render_flat` but accepts a slice of references so the
+/// grouping path can render each host's subset without cloning rows.
+fn render_flat_slice(rows: &[&ContainerPsRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
@@ -96,12 +159,25 @@ pub fn render_container_json<T: Serialize>(rows: &[T]) -> anyhow::Result<String>
 mod tests {
     use super::*;
 
+    fn make_row_with_host(name: &str, host: &str) -> ContainerPsRow {
+        ContainerPsRow {
+            container_id: format!("{name}-id"),
+            image: "test:latest".into(),
+            command: "sh".into(),
+            status: "Up 1m".into(),
+            host: host.into(),
+            stack: "".into(),
+            names: name.into(),
+            labels: HashMap::new(),
+        }
+    }
+
     /// Phase 0.18: container-first table renders the docker-ps header
     /// row even with no rows, and inserts each row's content when
     /// populated.
     #[test]
     fn container_table_renders_header_and_rows() {
-        let table = render_container_table(&[]);
+        let table = render_container_table(&[], false);
         assert!(table.contains("CONTAINER ID"));
         assert!(table.contains("STATUS"));
 
@@ -115,10 +191,60 @@ mod tests {
             names: "hello-web.1".into(),
             labels: HashMap::new(),
         }];
-        let table = render_container_table(&rows);
+        let table = render_container_table(&rows, false);
         assert!(table.contains("a1b2c3d4e5f6"));
         assert!(table.contains("nginx:alpine"));
         assert!(table.contains("homelab-01"));
         assert!(table.contains("hello-web.1"));
+    }
+
+    /// Track G Phase 2: when group_by_host is true and rows span more
+    /// than one distinct host, emit a `HOST: <name>` section per host
+    /// in alphabetical order. lausanne sorts before lyon.
+    #[test]
+    fn render_groups_when_multiple_hosts() {
+        let rows = vec![
+            make_row_with_host("bazarr", "lausanne"),
+            make_row_with_host("plex", "lausanne"),
+            make_row_with_host("qbit", "lyon"),
+        ];
+        let out = render_container_table(&rows, true);
+        assert!(out.contains("HOST: lausanne"));
+        assert!(out.contains("HOST: lyon"));
+        // lausanne first (alphabetical), so "bazarr" appears before "qbit".
+        let bazarr_pos = out.find("bazarr").expect("bazarr present");
+        let qbit_pos = out.find("qbit").expect("qbit present");
+        assert!(
+            bazarr_pos < qbit_pos,
+            "lausanne section should render before lyon section"
+        );
+        // The HOST headers themselves should also sort alphabetically.
+        let lausanne_hdr = out.find("HOST: lausanne").unwrap();
+        let lyon_hdr = out.find("HOST: lyon").unwrap();
+        assert!(lausanne_hdr < lyon_hdr);
+    }
+
+    /// Track G Phase 2: a single-host row set never grows a HOST: header
+    /// even when group_by_host is true. Single-operator vaults stay flat.
+    #[test]
+    fn render_flat_when_one_host() {
+        let rows = vec![make_row_with_host("bazarr", "lausanne")];
+        let out = render_container_table(&rows, true);
+        assert!(!out.contains("HOST:"));
+        assert!(out.contains("bazarr"));
+    }
+
+    /// Track G Phase 2: `--no-group` (group_by_host=false) forces flat
+    /// rendering even when the row set spans multiple hosts.
+    #[test]
+    fn render_no_group_flag_forces_flat() {
+        let rows = vec![
+            make_row_with_host("bazarr", "lausanne"),
+            make_row_with_host("qbit", "lyon"),
+        ];
+        let out = render_container_table(&rows, false);
+        assert!(!out.contains("HOST:"));
+        assert!(out.contains("bazarr"));
+        assert!(out.contains("qbit"));
     }
 }

@@ -213,6 +213,8 @@ fn default_command() -> Command {
         filters: Vec::new(),
         format: output::Format::Table,
         all_system: false,
+        no_group: false,
+        host: None,
     })
 }
 
