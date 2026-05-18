@@ -212,6 +212,7 @@ fn default_command() -> Command {
         no_trunc: false,
         filters: Vec::new(),
         format: output::Format::Table,
+        all_system: false,
     })
 }
 

@@ -7,7 +7,9 @@
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
+use isd_runtime::discovery_labels::{ROLE_LABEL, is_protected_label_value};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::index_cache::{IndexCache, IndexRow};
 use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
@@ -35,6 +37,10 @@ pub struct PsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
+
+    /// Show system containers (io.isengard.role=controller|agent). Hidden by default.
+    #[arg(long)]
+    pub all_system: bool,
 }
 
 /// One row from `GET /api/v1/containers`.
@@ -57,6 +63,11 @@ pub struct ContainerApiDto {
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub removed_at: Option<DateTime<Utc>>,
+    /// Container labels surfaced by the controller. Optional: controllers
+    /// that predate Track G omit this field. Used by the operator-side
+    /// `isd ps` system-container filter.
+    #[serde(default)]
+    pub labels: Option<HashMap<String, String>>,
 }
 
 pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
@@ -86,6 +97,11 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         .await
         .context("decoding containers JSON")?;
 
+    // Track G: hide system containers (io.isengard.role=controller|agent)
+    // unless `--all-system` is set. Applied here, before render and
+    // before any downstream consumer sees the row list.
+    let rows = filter_system_dtos(rows, args.all_system);
+
     match args.format {
         crate::output::Format::Json => {
             println!("{}", render_container_json(&rows)?);
@@ -97,6 +113,50 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Track G protection filter for the docker-direct path. Drops any
+/// `ContainerSummary` whose `io.isengard.role` label is in the protected
+/// set when `all_system` is false. With `all_system=true` returns the
+/// input unchanged so `--all-system` shows everything.
+pub(crate) fn filter_system(
+    rows: Vec<isd_runtime::ContainerSummary>,
+    all_system: bool,
+) -> Vec<isd_runtime::ContainerSummary> {
+    if all_system {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|c| {
+            c.labels
+                .get(ROLE_LABEL)
+                .map(|role| !is_protected_label_value(role))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+/// Track G protection filter for the controller-backed path. Drops any
+/// `ContainerApiDto` whose `io.isengard.role` label is protected when
+/// `all_system` is false. Controllers that predate Track G omit the
+/// label map; those rows pass through unchanged (the controller is the
+/// authority on what it surfaces).
+pub(crate) fn filter_system_dtos(
+    rows: Vec<ContainerApiDto>,
+    all_system: bool,
+) -> Vec<ContainerApiDto> {
+    if all_system {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|c| {
+            c.labels
+                .as_ref()
+                .and_then(|lbls| lbls.get(ROLE_LABEL))
+                .map(|role| !is_protected_label_value(role))
+                .unwrap_or(true)
+        })
+        .collect()
 }
 
 /// Build a `ContainerPsRow` per row, applying ID + COMMAND truncation
@@ -131,6 +191,7 @@ pub fn build_ps_rows(rows: &[ContainerApiDto], no_trunc: bool) -> Vec<ContainerP
                 host,
                 stack: row.stack.clone().unwrap_or_default(),
                 names: row.names.clone(),
+                labels: row.labels.clone().unwrap_or_default(),
             }
         })
         .collect()
@@ -343,6 +404,13 @@ async fn run_docker_backend(args: PsArgs, docker_uri: String, context: Option<&s
         .await
         .context("listing containers")?;
 
+    // Track G: hide system containers (io.isengard.role=controller|agent)
+    // unless `--all-system`. Applied BEFORE index-cache write + render so
+    // the `#` column is dense (0..N) over the visible rows and a
+    // downstream `isd stop <#>` never targets a system container by
+    // index.
+    let containers = filter_system(containers, args.all_system);
+
     // JSON output: the raw DTO list, no index cache write (the `#`
     // column is a TTY affordance, not part of the JSON contract).
     if args.format == crate::output::Format::Json {
@@ -405,6 +473,7 @@ mod tests {
                 status: "Up 2 hours".into(),
                 ports: "0.0.0.0:80->80/tcp".into(),
                 names: "web-proxy".into(),
+                labels: HashMap::new(),
             },
             ContainerSummary {
                 id: "7f8e9d0c1b2acafef00dbabe".into(),
@@ -412,8 +481,89 @@ mod tests {
                 status: "Exited (0) 12 minutes ago".into(),
                 ports: String::new(),
                 names: "app-db".into(),
+                labels: HashMap::new(),
             },
         ]
+    }
+
+    /// Helper for Track G filter tests: build a `ContainerSummary` with
+    /// a given name and an optional `io.isengard.role` label value.
+    fn make_row(name: &str, role: Option<&str>) -> isd_runtime::ContainerSummary {
+        let mut labels = HashMap::new();
+        if let Some(r) = role {
+            labels.insert(ROLE_LABEL.to_string(), r.to_string());
+        }
+        isd_runtime::ContainerSummary {
+            id: format!("{name}-id"),
+            image: "test:latest".into(),
+            status: "Up 1m".into(),
+            ports: String::new(),
+            names: name.into(),
+            labels,
+        }
+    }
+
+    /// Track G: `isd ps` filters out containers labelled
+    /// `io.isengard.role=controller|agent` unless `--all-system` is set.
+    /// The index column re-numbers over the visible rows so
+    /// `isd stop <#>` never targets a system container by index.
+    #[test]
+    fn ps_hides_system_containers_by_default() {
+        let rows = vec![
+            make_row("iso-controller", Some("controller")),
+            make_row("bazarr", None),
+            make_row("iso-agent", Some("agent")),
+            make_row("plex", None),
+        ];
+        let filtered = filter_system(rows, false);
+        let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
+        assert_eq!(names, vec!["bazarr", "plex"]);
+        // Build the display rows + index cache rows. The `#` column is
+        // the render-order index of the *visible* rows, so it is dense
+        // (0..N) over the user-visible set.
+        let display = build_docker_rows(&filtered);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0][0], "0");
+        assert_eq!(display[1][0], "1");
+        let index_rows = build_index_rows(&filtered, "lausanne");
+        assert_eq!(index_rows.len(), 2);
+        assert_eq!(index_rows[0].index, 0);
+        assert_eq!(index_rows[1].index, 1);
+    }
+
+    /// Track G: `--all-system` returns everything unfiltered so the
+    /// operator can still see the controller/agent rows when they ask.
+    #[test]
+    fn ps_all_system_shows_everything() {
+        let rows = vec![
+            make_row("iso-controller", Some("controller")),
+            make_row("bazarr", None),
+            make_row("iso-agent", Some("agent")),
+        ];
+        let filtered = filter_system(rows, true);
+        assert_eq!(filtered.len(), 3);
+        let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
+        assert_eq!(names, vec!["iso-controller", "bazarr", "iso-agent"]);
+    }
+
+    /// Track G controller-backed path: filter_system_dtos drops
+    /// system rows when the DTO carries labels, passes them through when
+    /// it does not (controllers predating Track G omit the field).
+    #[test]
+    fn ps_dto_filter_drops_system_rows_when_labels_present() {
+        let mut sys = sample_dto("iso-controller");
+        sys.labels = Some(HashMap::from([(
+            ROLE_LABEL.to_string(),
+            "controller".to_string(),
+        )]));
+        let user = sample_dto("bazarr");
+        let filtered = filter_system_dtos(vec![sys.clone(), user.clone()], false);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "bazarr");
+
+        // --all-system shows everything.
+        let all = filter_system_dtos(vec![sys, user], true);
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
@@ -463,6 +613,7 @@ mod tests {
             first_seen_at: Utc::now(),
             last_seen_at: Utc::now(),
             removed_at: None,
+            labels: None,
         }
     }
 
