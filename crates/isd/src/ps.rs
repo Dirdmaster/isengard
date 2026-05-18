@@ -41,6 +41,16 @@ pub struct PsArgs {
     /// Show system containers (io.isengard.role=controller|agent). Hidden by default.
     #[arg(long)]
     pub all_system: bool,
+
+    /// Force flat output (no per-host grouping). Default groups when
+    /// the controller has more than one enrolled host.
+    #[arg(long)]
+    pub no_group: bool,
+
+    /// Filter to a single host by name. Implies flat output (grouping
+    /// only makes sense across multiple hosts).
+    #[arg(long, value_name = "NAME")]
+    pub host: Option<String>,
 }
 
 /// One row from `GET /api/v1/containers`.
@@ -108,7 +118,18 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
         }
         crate::output::Format::Table => {
             let ps_rows = build_ps_rows(&rows, args.no_trunc);
-            let out = render_container_table(&ps_rows);
+            // Track G Phase 2: `--host <name>` filters rows in place
+            // (and implies flat output); `--no-group` forces flat even
+            // with multiple hosts; otherwise auto-group when >1 distinct
+            // host. `render_container_table` falls back to flat on its
+            // own when the resulting row set is single-host.
+            let ps_rows = if let Some(host) = &args.host {
+                ps_rows.into_iter().filter(|r| r.host == *host).collect()
+            } else {
+                ps_rows
+            };
+            let group = !args.no_group && args.host.is_none();
+            let out = render_container_table(&ps_rows, group);
             println!("{}", out.trim_end());
         }
     }
@@ -744,6 +765,10 @@ mod tests {
         assert!(!args.no_trunc);
         assert!(args.filters.is_empty());
         assert_eq!(args.format, crate::output::Format::Table);
+        // Track G Phase 2: grouping defaults to on (auto-enabled when
+        // >1 host present); --host filter unset by default.
+        assert!(!args.no_group);
+        assert!(args.host.is_none());
     }
 
     /// Phase 0.18: end-to-end against a wiremock controller. The handler
