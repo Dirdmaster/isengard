@@ -174,7 +174,7 @@ services:
     command:
       - agent
       - --controller
-      - https://controller.local:9417
+      - ${ISENGARD_CONTROLLER_URL:-https://controller.local:9417}
       - --state-dir
       - /var/lib/isengard
     restart: unless-stopped

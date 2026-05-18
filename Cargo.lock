@@ -2681,6 +2681,7 @@ dependencies = [
  "humantime",
  "indicatif",
  "isd-runtime",
+ "isengard-core",
  "isengard-manifest",
  "open",
  "predicates",
