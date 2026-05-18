@@ -55,6 +55,7 @@ mod session;
 mod ssh_tunnel;
 mod stack_cmd;
 mod table;
+mod uninit_cmd;
 mod update_cmd;
 mod watch;
 
@@ -84,6 +85,8 @@ enum Command {
     Context(context::ContextCommand),
     /// Bootstrap a controller (and first agent) on this host. Swarm-style.
     Init(init_cmd::InitArgs),
+    /// Tear down a cluster (stops + removes iso-controller and iso-agent).
+    Uninit(uninit_cmd::UninitArgs),
     /// Join this host to an existing cluster.
     Join(join_cmd::JoinArgs),
     /// List containers.
@@ -159,6 +162,7 @@ async fn main() {
     let result = match command {
         Command::Context(cmd) => context::run(context::ContextArgs { command: cmd }).await,
         Command::Init(args) => init_cmd::run(args, cli.context.as_deref()).await,
+        Command::Uninit(args) => uninit_cmd::run(args, cli.context.as_deref()).await,
         Command::Join(args) => join_cmd::run(args, cli.context.as_deref()).await,
         Command::Ps(args) => ps::run(args, cli.context.as_deref()).await,
         Command::Open(args) => open_cmd::run(args, cli.context.as_deref()).await,

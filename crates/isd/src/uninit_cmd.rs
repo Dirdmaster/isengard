@@ -1,0 +1,100 @@
+//! `isd uninit`: tear down the cluster created by `isd init`.
+//!
+//! Stops + removes iso-controller and iso-agent. Preserves the
+//! iso-controller-state, iso-agent-state, iso-stacks docker volumes by
+//! default so a subsequent `isd init` (idempotent) or `isd restore <backup>`
+//! brings the cluster back with all data intact. Pass `--wipe-state` to
+//! also delete the volumes: UNRECOVERABLE without a prior `isd backup`.
+//!
+//! This is the deliberate teardown path for the system containers
+//! protected by the Phase 1 lifecycle guard. The guard is not invoked
+//! here: `uninit` calls `docker remove_container` directly via bollard,
+//! the same override the `--force-system` flag exposes on `isd rm` /
+//! `isd stop` / etc.
+
+use anyhow::{Context, Result, anyhow};
+use bollard::container::RemoveContainerOptions;
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct UninitArgs {
+    /// Skip the y/N prompt.
+    #[arg(long)]
+    pub yes: bool,
+    /// Also remove the iso-controller-state / iso-agent-state / iso-stacks
+    /// docker volumes. UNRECOVERABLE without a prior backup.
+    #[arg(long)]
+    pub wipe_state: bool,
+    /// Take an encrypted backup before tearing down.
+    #[arg(long)]
+    pub backup_first: bool,
+}
+
+const VOLUMES: &[&str] = &["iso-controller-state", "iso-agent-state", "iso-stacks"];
+const CONTAINERS: &[&str] = &["iso-controller", "iso-agent"];
+
+pub async fn run(args: UninitArgs, context: Option<&str>) -> Result<()> {
+    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
+        anyhow!(
+            "context has no docker endpoint; add one with `isd context create ... --docker ...`"
+        )
+    })?;
+
+    if args.backup_first {
+        eprintln!("isd uninit: taking backup before teardown...");
+        crate::backup_cmd::run(crate::backup_cmd::BackupArgs::default_for_uninit(), context)
+            .await?;
+    }
+
+    if !args.yes {
+        eprintln!("isd uninit: will stop + remove iso-controller and iso-agent on {docker_uri}.");
+        if args.wipe_state {
+            eprintln!(
+                "isd uninit: --wipe-state WILL DELETE volumes: {}",
+                VOLUMES.join(", ")
+            );
+            eprintln!("isd uninit: this is UNRECOVERABLE without a prior `isd backup`.");
+        } else {
+            eprintln!("isd uninit: volumes will be PRESERVED.");
+        }
+        eprint!("Continue? [y/N]: ");
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("reading confirm")?;
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            eprintln!("isd uninit: aborted.");
+            return Ok(());
+        }
+    }
+
+    let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;
+    for name in CONTAINERS {
+        let _ = docker
+            .client()
+            .remove_container(
+                name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await; // ignore not-found
+        eprintln!("isd uninit: removed {name}");
+    }
+
+    if args.wipe_state {
+        for vol in VOLUMES {
+            let _ = docker.client().remove_volume(vol, None).await;
+            eprintln!("isd uninit: removed volume {vol}");
+        }
+    }
+
+    println!("Cluster torn down on {docker_uri}.");
+    if args.wipe_state {
+        println!("State volumes wiped. Restart from scratch: `isd init`.");
+    } else {
+        println!("State preserved. Restore with `isd restore <backup>` or `isd init`.");
+    }
+    Ok(())
+}
