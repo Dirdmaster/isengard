@@ -92,3 +92,6 @@ wiremock.workspace = true
 # update URLs at a wiremock, assert the in-place rename + sha verify path.
 assert_cmd = "2.0.16"
 predicates = "3.1.3"
+# Track G Phase 5: backup/restore round-trip test detects whether `docker`
+# is on PATH so CI without docker skips cleanly instead of erroring.
+which.workspace = true
