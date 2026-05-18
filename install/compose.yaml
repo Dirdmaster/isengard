@@ -160,12 +160,12 @@ services:
       # in a docker compose override file.
       - iso-stacks:/etc/isengard/stacks:rw
     environment:
-      # Track F: CA pin is now handled via the fingerprint-in-token flow.
+      # Track F + G: CA pin is handled via the fingerprint-in-token flow.
       # Agent fetches CA from GET /api/v1/ca/pem on first connect and
-      # verifies SHA-256 against the embedded fingerprint. The legacy
-      # ISENGARD_CONTROLLER_CA_PEM_BASE64 env still works in the agent
-      # binary (for the systemd-installed flow); this compose service no
-      # longer sets it.
+      # verifies SHA-256 against the embedded fingerprint. Legacy
+      # ISENGARD_CONTROLLER_CA_PEM_* env paths were removed in Track G;
+      # the packed `TK<bytes>.<fingerprint>` token is now the only
+      # supported trust anchor.
       #
       # Mint a token via:
       #   docker exec iso-controller isengard controller token mint --role agent

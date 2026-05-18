@@ -147,18 +147,11 @@ enum Command {
         #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
         state_dir: std::path::PathBuf,
         /// One-time enrollment token. Required for first-time enrollment;
-        /// ignored once the agent has a persisted cert bundle.
+        /// ignored once the agent has a persisted cert bundle. Track G:
+        /// the packed `TK<bytes>.<fingerprint>` shape is mandatory; the
+        /// agent verifies the controller CA fingerprint before enrol.
         #[arg(long, env = "ISENGARD_ENROLL_TOKEN")]
         enroll_token: Option<String>,
-        /// Path to a PEM file holding the controller's CA root cert. Pinned
-        /// as the bootstrap channel's trust anchor for the Enroll RPC.
-        /// REQUIRED when the controller serves a self-signed cert (the
-        /// default for an Isengard-managed CA). For a publicly-signed
-        /// controller cert, leave unset to fall back to the platform's
-        /// native root store. Get the PEM via
-        /// `isengard controller ca export` on the controller host.
-        #[arg(long, env = "ISENGARD_CONTROLLER_CA_PEM_PATH")]
-        controller_ca_pem_path: Option<std::path::PathBuf>,
         /// Network interface name the mDNS responder advertises on (v0.3a).
         /// Defaults to the first non-loopback IPv4 interface. Pass this on
         /// hosts with multiple NICs where the wrong one would be picked
@@ -361,18 +354,8 @@ async fn dispatch(command: Command) -> Result<()> {
             controller,
             state_dir,
             enroll_token,
-            controller_ca_pem_path,
             advertise_iface,
-        } => {
-            run_agent_mode(
-                controller,
-                state_dir,
-                enroll_token,
-                controller_ca_pem_path,
-                advertise_iface,
-            )
-            .await
-        }
+        } => run_agent_mode(controller, state_dir, enroll_token, advertise_iface).await,
         Command::Secret { op } => match op {
             SecretOp::Bootstrap {
                 name,
@@ -760,7 +743,6 @@ async fn run_agent_mode(
     controller: String,
     state_dir: std::path::PathBuf,
     enroll_token: Option<String>,
-    controller_ca_pem_path: Option<std::path::PathBuf>,
     advertise_iface: Option<String>,
 ) -> Result<()> {
     std::fs::create_dir_all(&state_dir)
@@ -781,11 +763,7 @@ async fn run_agent_mode(
                 .unwrap_or_else(|_| isengard_agent::tls::LE_STAGING_URL.to_string()),
         }),
         enroll_token,
-        bootstrap_trust: isengard_agent::enroll::BootstrapTrust {
-            ca_pem_path: controller_ca_pem_path,
-            ca_pem: None,
-            verified_ca_pem: None,
-        },
+        bootstrap_trust: isengard_agent::enroll::BootstrapTrust::default(),
         advertise_iface,
     })
     .await
