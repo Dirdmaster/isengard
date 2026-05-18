@@ -24,6 +24,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
             "route",
             "secret",
             "placement",
+            "join",
             "join-token",
         ],
     ),
