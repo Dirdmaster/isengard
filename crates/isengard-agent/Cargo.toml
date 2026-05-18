@@ -64,3 +64,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # session is built. Required since instant-acme 0.8 transitively pulled in a
 # rustls-platform-verifier path that panics without an explicit provider.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Track F Phase 3: `fingerprint_enroll` test spawns a wiremock server to
+# stand in for the controller's `GET /api/v1/ca/pem` endpoint so the
+# pre-enroll fingerprint-verify path can be exercised in isolation.
+wiremock = { workspace = true }

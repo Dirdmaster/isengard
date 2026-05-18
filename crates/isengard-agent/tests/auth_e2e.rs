@@ -145,6 +145,7 @@ async fn full_auth_lifecycle_in_process() {
     let trust = BootstrapTrust {
         ca_pem_path: None,
         ca_pem: Some(harness.ca.root_cert_pem().to_string()),
+        verified_ca_pem: None,
     };
     let host_info = HostInfo {
         hostname: "agent-e2e".into(),
