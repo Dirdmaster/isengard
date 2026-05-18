@@ -13,11 +13,18 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result, anyhow};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::backup_credentials::S3Creds;
+
+/// Image used for the tar / cat one-shot containers that bridge the
+/// iso-controller-state volume into a stdin / stdout byte stream.
+/// Same tag as `init_cmd::BOOTSTRAP_IMAGE` so cached layers stay shared.
+const HELPER_IMAGE: &str = "alpine:3.21";
 
 #[derive(Debug, Clone)]
 pub enum BackupDestination {
@@ -128,9 +135,11 @@ pub async fn open_writer(dest: &BackupDestination) -> Result<Box<dyn AsyncWrite 
                 .with_context(|| format!("creating {}", path.display()))?;
             Ok(Box::new(f))
         }
-        BackupDestination::Volume { .. } => {
-            Err(anyhow!("volume destination not implemented yet (Task 5.5)"))
-        }
+        BackupDestination::Volume {
+            docker_uri,
+            volume,
+            filename,
+        } => open_volume_writer(docker_uri, volume, filename).await,
         BackupDestination::S3 { .. } => {
             Err(anyhow!("s3 destination not implemented yet (Task 5.6)"))
         }
@@ -148,11 +157,171 @@ pub async fn open_reader(dest: &BackupDestination) -> Result<Box<dyn AsyncRead +
                 .with_context(|| format!("opening {}", path.display()))?;
             Ok(Box::new(f))
         }
-        BackupDestination::Volume { .. } => {
-            Err(anyhow!("volume source not implemented yet (Task 5.5)"))
-        }
+        BackupDestination::Volume {
+            docker_uri,
+            volume,
+            filename,
+        } => open_volume_reader(docker_uri, volume, filename).await,
         BackupDestination::S3 { .. } => Err(anyhow!("s3 source not implemented yet (Task 5.6)")),
     }
+}
+
+// === Volume destination (Task 5.5) ============================================
+//
+// Each side spawns a one-shot alpine container with the iso-controller-state
+// volume mounted at /dst and attaches to its stdin (writer) or stdout (reader).
+// `auto_remove: true` means the container vanishes after exit; we don't need to
+// track its ID after attach. The bollard image-pull is skipped here on the
+// assumption that `isd init` (which uses the same image tag) has already pulled
+// it. If not, the create_container call will fail with a clear error and the
+// operator can `docker pull alpine:3.21` once on their context's docker host.
+
+/// Wrap bollard's `input: Pin<Box<dyn AsyncWrite + Send>>` so we can return
+/// it as the concrete `Box<dyn AsyncWrite + Unpin + Send>` the pipeline
+/// expects. The inner `Pin<Box<...>>` is already `Unpin` at the outer
+/// pointer level (a pinned box is itself unpin-able).
+struct VolumeSink {
+    inner: Pin<Box<dyn AsyncWrite + Send>>,
+}
+
+impl AsyncWrite for VolumeSink {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.inner.as_mut().poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        self.inner.as_mut().poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.inner.as_mut().poll_shutdown(cx)
+    }
+}
+
+async fn open_volume_writer(
+    docker_uri: &str,
+    volume: &str,
+    filename: &str,
+) -> Result<Box<dyn AsyncWrite + Unpin + Send>> {
+    use bollard::container::{
+        AttachContainerOptions, Config, CreateContainerOptions, StartContainerOptions,
+    };
+    use bollard::models::HostConfig;
+
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let cmd = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("cat > /dst/{filename}"),
+    ];
+    let config = Config::<String> {
+        image: Some(HELPER_IMAGE.into()),
+        cmd: Some(cmd),
+        attach_stdin: Some(true),
+        open_stdin: Some(true),
+        stdin_once: Some(true),
+        host_config: Some(HostConfig {
+            binds: Some(vec![format!("{volume}:/dst")]),
+            auto_remove: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let created = docker
+        .client()
+        .create_container(None::<CreateContainerOptions<String>>, config)
+        .await
+        .with_context(|| format!("creating alpine writer container for volume {volume:?}"))?;
+    let attach = docker
+        .client()
+        .attach_container(
+            &created.id,
+            Some(AttachContainerOptions::<String> {
+                stdin: Some(true),
+                stream: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .with_context(|| format!("attaching to alpine writer container for volume {volume:?}"))?;
+    docker
+        .client()
+        .start_container(&created.id, None::<StartContainerOptions<String>>)
+        .await
+        .with_context(|| format!("starting alpine writer container for volume {volume:?}"))?;
+    Ok(Box::new(VolumeSink {
+        inner: attach.input,
+    }))
+}
+
+async fn open_volume_reader(
+    docker_uri: &str,
+    volume: &str,
+    filename: &str,
+) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    use bollard::container::{
+        AttachContainerOptions, Config, CreateContainerOptions, StartContainerOptions,
+    };
+    use bollard::models::HostConfig;
+    use futures_util::StreamExt;
+    use tokio_util::bytes::Bytes;
+    use tokio_util::io::StreamReader;
+
+    let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
+    let cmd = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("cat /dst/{filename}"),
+    ];
+    let config = Config::<String> {
+        image: Some(HELPER_IMAGE.into()),
+        cmd: Some(cmd),
+        attach_stdout: Some(true),
+        host_config: Some(HostConfig {
+            binds: Some(vec![format!("{volume}:/dst")]),
+            auto_remove: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let created = docker
+        .client()
+        .create_container(None::<CreateContainerOptions<String>>, config)
+        .await
+        .with_context(|| format!("creating alpine reader container for volume {volume:?}"))?;
+    let attach = docker
+        .client()
+        .attach_container(
+            &created.id,
+            Some(AttachContainerOptions::<String> {
+                stdout: Some(true),
+                stream: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .with_context(|| format!("attaching to alpine reader container for volume {volume:?}"))?;
+    docker
+        .client()
+        .start_container(&created.id, None::<StartContainerOptions<String>>)
+        .await
+        .with_context(|| format!("starting alpine reader container for volume {volume:?}"))?;
+
+    // Map bollard's Stream<LogOutput> into a Stream<Bytes> for StreamReader.
+    // Stderr is folded into the same byte stream: a non-zero `cat` (file
+    // missing) emits its error to stderr, and the upstream age::decrypt
+    // catches a malformed header and surfaces it. We still surface bollard
+    // transport errors as io::Errors so StreamReader can propagate them.
+    let mapped = attach.output.map(|item| -> std::io::Result<Bytes> {
+        item.map(|log| log.into_bytes())
+            .map_err(|e| std::io::Error::other(format!("bollard volume attach: {e}")))
+    });
+    Ok(Box::new(StreamReader::new(mapped)))
 }
 
 #[cfg(test)]
