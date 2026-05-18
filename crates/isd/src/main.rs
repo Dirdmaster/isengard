@@ -12,7 +12,7 @@
 //!  - `isd context create | use | list | rm | show`
 //!  - `isd ps`: list stacks + services
 //!  - `isd open <stack>`: open the stack's primary host in a browser
-//!  - `isd logs <stack>/<svc> -f`: tail service logs over the WebSocket
+//!  - `isd logs <selector> -f`: tail container logs (#N, name, ID, range)
 //!  - `isd deploy | diff | edit`: stack-level compose-as-truth
 //!  - `isd gateway`: dev DNS + reverse proxy bridging the operator's Mac
 //!  - `isd secret put | list | rm`: managed-secret CRUD
