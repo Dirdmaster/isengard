@@ -137,6 +137,17 @@ impl DockerBackend {
         self.docker.remove_container(id, Some(opts)).await?;
         Ok(())
     }
+
+    /// Fetch a container's labels by ID or name. Used by the Track G
+    /// protection guard (`isd rm/stop/restart/kill`) to detect
+    /// `io.isengard.role=controller|agent` on resolved targets without
+    /// listing every container on the host. Returns an empty map when
+    /// the daemon omits labels (a label-less container is, by
+    /// definition, not protected).
+    pub async fn inspect_labels(&self, id: &str) -> Result<HashMap<String, String>> {
+        let info = self.docker.inspect_container(id, None).await?;
+        Ok(info.config.and_then(|c| c.labels).unwrap_or_default())
+    }
 }
 
 /// A container row as the `isd` CLI consumes it: bollard's
