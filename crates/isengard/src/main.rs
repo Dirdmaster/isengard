@@ -16,9 +16,7 @@ use isengard_storage::host::HostId;
 
 #[cfg(feature = "dev")]
 mod dev_plugin;
-mod init;
 mod tracing_init;
-mod update;
 
 // Force-link the notifier plugin so its `inventory::submit!` registration is
 // picked up at controller startup. The `as _` import keeps the symbol live
@@ -63,17 +61,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Phase 0.10: bootstrap a fresh host. Generates the master key,
-    /// bootstraps secrets, writes the systemd units + env files, brings
-    /// up the controller and the local agent. Replaces the legacy
-    /// `install/install.sh` bash flow. Interactive when stdin is a TTY,
-    /// flag-driven (`--non-interactive`) for scripted installs.
-    Init(init::InitArgs),
-    /// Phase 0.10: enrol THIS host as an agent against an existing
-    /// controller running elsewhere. Smaller than `init`: no controller
-    /// boot, no master key, just installs the agent unit and starts it
-    /// with the operator-supplied token + CA.
-    Join(init::JoinArgs),
     /// Mint an enrollment token for a new agent (alias for
     /// `controller token mint`, mirroring `docker swarm join-token`).
     JoinToken {
@@ -148,60 +135,6 @@ enum Command {
     Secret {
         #[command(subcommand)]
         op: SecretOp,
-    },
-    /// Phase 0.18 friendly auto-update. Zero-args: queries GitHub
-    /// Releases for the latest tag, downloads + verifies the binary
-    /// for this host's target triple, atomic-renames onto
-    /// `/usr/local/bin/isengard`, and restarts both
-    /// `iso-controller.service` and `iso-agent.service`.
-    ///
-    /// For scripted / pinned upgrades use `--version vX.Y.Z`. For
-    /// dry-run discovery use `--check`. For unattended use `--yes`.
-    /// The low-level `self-update` subcommand is still available for
-    /// callers that already know the URL + sha256.
-    Update {
-        /// Dry-run mode: print "current vX, latest vY" and exit
-        /// without downloading or restarting anything.
-        #[arg(long)]
-        check: bool,
-        /// Pin to a specific release tag (e.g. `v0.5.1`). When unset
-        /// the latest release is resolved from the GitHub API.
-        #[arg(long)]
-        version: Option<String>,
-        /// Skip the y/N confirmation prompt. Useful for cron / CI.
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Phase 0.8 binary self-update. Downloads a new isengard binary,
-    /// verifies its sha256 against `--sha256`, atomically replaces the
-    /// running binary on disk, and triggers `systemctl restart` on the
-    /// named unit (default: `iso-agent.service` for the agent updating
-    /// itself; pass `--no-restart` to skip and orchestrate manually).
-    ///
-    /// Designed for the systemd-native install. The legacy
-    /// docker-compose path uses the rename-and-recreate flow in
-    /// `crates/isengard-plugins/updater/src/self_update.rs` instead.
-    /// For zero-args operator UX use the `update` subcommand instead.
-    SelfUpdate {
-        /// HTTPS URL of the new binary. Typically a GitHub Releases
-        /// asset URL (e.g.
-        /// https://github.com/Weavers-Engineering/Isengard/releases/download/vX.Y.Z/isengard-x86_64-unknown-linux-musl).
-        #[arg(long)]
-        url: String,
-        /// Lowercase-hex sha256 of the expected bytes. Matches the
-        /// format the release pipeline writes to `<asset>.sha256`.
-        #[arg(long)]
-        sha256: String,
-        /// systemd unit to restart after the rename. Default
-        /// `iso-agent.service`. Set to an empty string or pass
-        /// `--no-restart` to skip the restart entirely.
-        #[arg(long, default_value = "iso-agent.service")]
-        unit: String,
-        /// Skip the post-install systemctl restart. The new binary is
-        /// in place but the old process keeps running until the next
-        /// manual restart.
-        #[arg(long)]
-        no_restart: bool,
     },
     /// Run in agent mode: registers with a controller, runs agent-side plugins
     /// (updater).
@@ -361,10 +294,6 @@ async fn main() {
         Command::Controller { .. } => "controller",
         Command::Agent { .. } => "agent",
         Command::Secret { .. } => "secret",
-        Command::SelfUpdate { .. } => "self-update",
-        Command::Update { .. } => "update",
-        Command::Init(_) => "init",
-        Command::Join(_) => "join",
         Command::JoinToken { .. } => "join-token",
     };
     tracing_init::init(mode, cli.log.as_deref());
@@ -455,45 +384,7 @@ async fn dispatch(command: Command) -> Result<()> {
                 state_dir,
             } => run_secret_list_bootstrap(master_key_file, state_dir).await,
         },
-        Command::SelfUpdate {
-            url,
-            sha256,
-            unit,
-            no_restart,
-        } => run_self_update(url, sha256, unit, no_restart).await,
-        Command::Update {
-            check,
-            version,
-            yes,
-        } => {
-            update::run(update::UpdateArgs {
-                check,
-                version,
-                yes,
-            })
-            .await
-        }
-        Command::Init(args) => init::run(args).await,
-        Command::Join(args) => init::run_join(args).await,
     }
-}
-
-/// Phase 0.8 binary self-update entry point. Thin wrapper that picks
-/// the right `restart_unit` argument based on the CLI flags and
-/// delegates to [`isengard_agent::self_update::run_self_update`].
-async fn run_self_update(
-    url: String,
-    sha256: String,
-    unit: String,
-    no_restart: bool,
-) -> Result<()> {
-    let unit_ref = unit.as_str();
-    let units: &[&str] = if no_restart || unit_ref.is_empty() {
-        &[]
-    } else {
-        std::slice::from_ref(&unit_ref)
-    };
-    isengard_agent::self_update::run_self_update(&url, &sha256, units).await
 }
 
 /// Read the master key from `master_key_file`, open the controller's

@@ -25,7 +25,6 @@ pub mod placement;
 pub mod proxy;
 pub mod runtime;
 pub mod secret_fetch;
-pub mod self_update;
 pub mod stack_secrets;
 pub mod sync;
 pub mod tls;
