@@ -83,10 +83,11 @@ pub fn fingerprint(ca_pem: &[u8]) -> [u8; 32] {
     Sha256::digest(ca_pem).into()
 }
 
-/// Re-encode raw token bytes back to the legacy bare-token string form
-/// (RFC 4648 unpadded uppercase base32). The controller's enrollment-token
-/// storage hashes this string for lookup; new packed tokens get decomposed
-/// here so they hash to the same row as the pre-Track-F mint side wrote.
+/// Re-encode a 32-byte token back to the bare base32 string used by the
+/// controller's storage hash. Only useful inside the controller's
+/// `EnrollmentService::redeem` to keep storage hash format unchanged
+/// across the Track F format bump. Not for general use; if you need a
+/// base32 encoder, use `data-encoding` directly.
 pub fn encode_bytes(token_bytes: &[u8; 32]) -> String {
     ALPHABET.encode(token_bytes)
 }

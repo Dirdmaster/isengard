@@ -57,6 +57,7 @@ hickory-proto.workspace = true
 
 [dev-dependencies]
 tempfile = "3.14.0"
+data-encoding.workspace = true
 hickory-resolver.workspace = true
 wiremock.workspace = true
 # Tests must install a process-level rustls CryptoProvider before any TLS

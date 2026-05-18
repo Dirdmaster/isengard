@@ -31,6 +31,7 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
+data-encoding.workspace = true
 hex = "0.4"
 humantime = "2.1"
 if-addrs = { workspace = true }

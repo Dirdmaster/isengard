@@ -93,8 +93,9 @@ enum Command {
         /// Agent image reference to embed in the join command.
         #[arg(long, default_value = "ghcr.io/dirdmaster/isengard:next")]
         image: String,
-        /// Output format. `text` prints the join block, `token` prints
-        /// just the bare token.
+        /// Output format. `text` prints the legacy join block, `token`
+        /// prints just the packed token, `joincmd` prints a single-line
+        /// `isd join --controller ... --token ...` invocation.
         #[arg(long, value_enum, default_value_t = MintFormat::Text)]
         format: MintFormat,
     },
@@ -258,7 +259,8 @@ enum ControllerAction {
 enum TokenOp {
     /// Mint a one-time enrollment token. Prints a copy-pasteable
     /// `docker run` join block by default; `--format token` prints
-    /// only the bare token.
+    /// only the packed token; `--format joincmd` prints a single-line
+    /// `isd join --controller ... --token ...` invocation.
     Mint {
         /// Role to mint for. Only "agent" is supported today.
         #[arg(long, default_value = "agent")]
@@ -281,10 +283,15 @@ enum TokenOp {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MintFormat {
-    /// Copy-pasteable join block (default).
+    /// Copy-pasteable `docker run` join block (legacy, kept for one
+    /// release while scripts migrate). Embeds the new Track F packed
+    /// token so newer agents still verify the CA fingerprint.
     Text,
-    /// Bare token, one line.
+    /// Single-line packed token: `TK<base32(bytes)>.<base32(sha256(ca))>`.
     Token,
+    /// Single-line `isd join --controller ... --token ...` invocation
+    /// (recommended Track F format; what `isd join-token` prints).
+    Joincmd,
 }
 
 #[derive(Debug, Subcommand)]
@@ -702,18 +709,36 @@ async fn run_token_mint(
     let minted_at = chrono::Utc::now();
     let token = enr.mint(role_parsed, chrono_ttl).await?;
 
+    // Track F: decompose the legacy base32 bare token back into the raw
+    // 32 bytes so we can pack a (bytes, ca_fingerprint) tuple for the
+    // operator-visible string. Storage still keys on the legacy string
+    // (sha256(token_b32)) so the round-trip via base32 keeps verify
+    // logic unchanged when an agent presents the packed form.
+    let token_bytes = decode_legacy_token_bytes(&token)?;
+    let packed_token = isengard_core::join_token::pack(&token_bytes, ca_pem.as_bytes());
+
     match format {
         MintFormat::Token => {
-            // Legacy mode: bare token, one line. Scripts and CI rely on this.
-            println!("{token}");
+            // Single-line packed token. Scripts that previously parsed the
+            // bare base32 string need to migrate; the packed form is what
+            // newer agents (and `isd join --token ...`) expect.
+            println!("{packed_token}");
+        }
+        MintFormat::Joincmd => {
+            // Track F default. One line, ready to paste on the Mac.
+            let host_port = resolve_public_addr(public_addr.as_deref());
+            println!("isd join --controller https://{host_port} --token {packed_token}");
         }
         MintFormat::Text => {
+            // Legacy `docker run` join block. The embedded token is now the
+            // packed Track F form, so newer agents verify the CA fingerprint
+            // even when the operator pasted the old-style block.
             let host_port = resolve_public_addr(public_addr.as_deref());
             let ca_b64 = base64::engine::general_purpose::STANDARD.encode(ca_pem.as_bytes());
             let expires_at = minted_at + chrono_ttl;
             let block = render_join_command(JoinCommandArgs {
                 ttl: ttl.to_string(),
-                token: &token,
+                token: &packed_token,
                 ca_b64: &ca_b64,
                 image: &image,
                 public_addr: &host_port,
@@ -723,6 +748,23 @@ async fn run_token_mint(
         }
     }
     Ok(())
+}
+
+/// Decode the legacy base32 (RFC 4648 unpadded, uppercase) bare-token
+/// string back to its raw 32 bytes. `EnrollmentService::mint` returns the
+/// base32 form and persists `sha256(b32_string)`; the Track F packed
+/// shape needs the raw bytes so we can wrap them with the CA fingerprint
+/// for the operator-visible string.
+fn decode_legacy_token_bytes(token_b32: &str) -> Result<[u8; 32]> {
+    let bytes_vec = data_encoding::BASE32_NOPAD
+        .decode(token_b32.as_bytes())
+        .map_err(|e| anyhow!("internal: mint returned unexpected token format; this is a bug, please report it ({e})"))?;
+    bytes_vec.as_slice().try_into().map_err(|_| {
+        anyhow!(
+            "internal: mint returned {} bytes, expected 32; this is a bug, please report it",
+            bytes_vec.len()
+        )
+    })
 }
 
 /// Resolve the controller's public address (host:port) for the join command.

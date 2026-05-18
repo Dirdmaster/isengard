@@ -46,6 +46,8 @@ async fn mint_returns_base32_token_of_expected_length() {
     );
 }
 
+// Legacy fallback regression guard: bare base32 token (no TK prefix)
+// must still redeem successfully via the redeem() Err(_) arm.
 #[tokio::test]
 async fn redeem_valid_token_returns_signed_cert() {
     let (_, svc) = fixture().await;
@@ -80,6 +82,28 @@ async fn redeem_twice_errors_second_time() {
     svc.redeem(&token, host_info()).await.unwrap();
     let err = svc.redeem(&token, host_info()).await.unwrap_err();
     assert!(format!("{err}").to_lowercase().contains("token"));
+}
+
+/// Track F: a packed token (TK<base32(bytes)>.<base32(sha256(ca_pem))>)
+/// must redeem successfully against the same storage row the legacy bare
+/// base32 token uses. The verify path is responsible for decomposing the
+/// packed shape back to the bare-bytes base32 form for the hash lookup.
+#[tokio::test]
+async fn redeem_track_f_packed_token_round_trips() {
+    let (_, svc) = fixture().await;
+    let bare = svc
+        .mint(TokenRole::Agent, Duration::minutes(15))
+        .await
+        .unwrap();
+    let bytes_vec = data_encoding::BASE32_NOPAD.decode(bare.as_bytes()).unwrap();
+    let bytes: [u8; 32] = bytes_vec.as_slice().try_into().unwrap();
+
+    // Any PEM works here: the fingerprint half is opaque to the controller.
+    let fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+    let packed = isengard_core::join_token::pack(&bytes, fake_ca_pem);
+
+    let resp = svc.redeem(&packed, host_info()).await.unwrap();
+    assert!(resp.agent_cert_pem.contains("BEGIN CERTIFICATE"));
 }
 
 /// Regression: two distinct hosts enrolling back-to-back must both land in
