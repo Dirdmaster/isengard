@@ -422,18 +422,39 @@ impl AsyncWrite for S3MultipartSink {
         cx: &mut TaskContext<'_>,
     ) -> Poll<std::io::Result<()>> {
         // Drain remaining buffer to the channel (final part, any size).
-        if let Some(tx) = self.tx.take() {
-            if !self.buf.is_empty() {
-                let final_part = std::mem::take(&mut self.buf).freeze();
-                // try_send with retry; the channel is now closed for new
-                // senders once we drop `tx`, but the receiver still drains.
-                if let Err(e) = tx.try_send(final_part) {
-                    return Poll::Ready(Err(std::io::Error::other(format!(
-                        "s3 sink final part: {e}"
-                    ))));
+        // Mirror the poll_write backpressure pattern: on a full channel,
+        // put the bytes back, register the waker, and return Pending so
+        // the runtime retries once the receiver drains a slot. This prevents
+        // the final part from being silently dropped when the channel is
+        // at capacity exactly at EOF.
+        if !self.buf.is_empty() {
+            let Some(tx) = self.tx.as_ref() else {
+                return Poll::Ready(Err(std::io::Error::other("s3 sink already shut down")));
+            };
+            let tx = tx.clone();
+            let final_part = std::mem::take(&mut self.buf).freeze();
+            match tx.try_send(final_part) {
+                Ok(()) => {
+                    // Sent successfully. Drop the sender to signal end-of-stream.
+                    self.tx = None;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(part)) => {
+                    // Channel full: restore the buffer, wake ourselves, return
+                    // Pending. The uploader task will free a slot and the
+                    // runtime will retry poll_shutdown.
+                    self.buf = tokio_util::bytes::BytesMut::from(part.as_ref());
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Poll::Ready(Err(std::io::Error::other(
+                        "s3 uploader task closed before final part could be sent",
+                    )));
                 }
             }
-            drop(tx); // close the channel; the uploader sees end-of-stream
+        } else {
+            // Buffer already empty: close the channel if we haven't yet.
+            self.tx = None;
         }
         // Drive the join handle to completion.
         let Some(handle) = self.join.as_mut() else {
@@ -566,6 +587,31 @@ async fn open_s3_reader(
 // Pull `Future` into scope for the JoinHandle poll in S3MultipartSink.
 use std::future::Future;
 
+/// Attempt to send `part` on `tx` without blocking.
+///
+/// Returns `Ok(())` on success, `Err(part)` when the channel is full
+/// (caller should restore the buffer and return `Poll::Pending`), or
+/// an `io::Error` when the channel is closed.
+///
+/// Extracted from `S3MultipartSink::poll_shutdown` so the backpressure
+/// logic can be unit-tested without a live S3 endpoint.
+fn try_send_part(
+    tx: &tokio::sync::mpsc::Sender<tokio_util::bytes::Bytes>,
+    part: tokio_util::bytes::Bytes,
+) -> Result<(), TrySendPartError> {
+    match tx.try_send(part) {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(b)) => Err(TrySendPartError::Full(b)),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(TrySendPartError::Closed),
+    }
+}
+
+#[derive(Debug)]
+enum TrySendPartError {
+    Full(tokio_util::bytes::Bytes),
+    Closed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +725,52 @@ mod tests {
         w.shutdown().await.unwrap();
         let read = tokio::fs::read(&path).await.unwrap();
         assert_eq!(read, b"hello");
+    }
+
+    // Verify that try_send_part correctly signals Full when the channel is
+    // saturated, rather than silently dropping the final part.
+    //
+    // The test saturates a capacity-1 channel, then calls try_send_part for
+    // the "final part" that poll_shutdown would send. It must come back as
+    // Full (not Ok / Closed), and the bytes must be preserved intact so the
+    // caller can restore the buffer and retry.
+    #[tokio::test]
+    async fn try_send_part_returns_full_on_saturated_channel() {
+        use tokio_util::bytes::Bytes;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+
+        // Fill the single slot.
+        tx.try_send(Bytes::from_static(b"slot-filler")).unwrap();
+
+        // The channel is now full. try_send_part must NOT drop the payload.
+        let final_bytes = Bytes::from_static(b"final-part-must-not-be-lost");
+        match try_send_part(&tx, final_bytes.clone()) {
+            Err(TrySendPartError::Full(returned)) => {
+                assert_eq!(
+                    returned, final_bytes,
+                    "payload must be returned intact on Full"
+                );
+            }
+            Ok(()) => {
+                panic!("expected Full, got Ok: final part would have been sent to a dropped slot")
+            }
+            Err(TrySendPartError::Closed) => panic!("channel should not be closed yet"),
+        }
+    }
+
+    // Verify that try_send_part succeeds when the channel has capacity, and
+    // that the receiver gets exactly the bytes that were sent.
+    #[tokio::test]
+    async fn try_send_part_delivers_bytes_when_channel_has_capacity() {
+        use tokio_util::bytes::Bytes;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        let payload = Bytes::from_static(b"some-final-chunk");
+        try_send_part(&tx, payload.clone()).expect("send should succeed with capacity available");
+
+        let received = rx.recv().await.expect("receiver should have one item");
+        assert_eq!(received, payload);
     }
 }

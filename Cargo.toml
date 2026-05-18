@@ -44,8 +44,13 @@ age = { version = "0.11", default-features = false }
 # Track G Phase 5: S3-API backup destination (AWS, R2, MinIO, B2, Wasabi).
 # `behavior-version-latest` silences the runtime warning the SDK prints when no
 # behavior version is pinned, and locks our calls to the current contract.
-aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
-aws-config = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+# We deliberately use `default-https-client` (rustls + aws-lc via the modern
+# hyper-1 path) instead of the SDK's `rustls` feature, which pulls in the
+# `legacy-rustls-ring` flag and drags rustls 0.21 + rustls-webpki 0.101 into
+# the tree (RUSTSEC-2026-0098 / 0099 / 0104). aws-lc satisfies the AWS rustls
+# audit story without dropping us back to the deprecated 0.21 line.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 
 # plugin registration
 inventory = "0.3.15"
