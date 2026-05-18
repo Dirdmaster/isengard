@@ -72,6 +72,16 @@ semver.workspace = true
 async-trait.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
+# Track G Phase 5: backup/restore pipeline.
+# `age` does the passphrase encryption, `aws-sdk-s3` + `aws-config` cover the
+# S3-API destination (works against AWS, R2, MinIO, B2, Wasabi via custom
+# endpoint URL). `tokio-util` needs the `io` feature for `SyncIoBridge`, which
+# bridges bollard's async streams into `age`'s blocking Read/Write API.
+age.workspace = true
+aws-sdk-s3.workspace = true
+aws-config.workspace = true
+tokio-util = { workspace = true, features = ["io", "io-util"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 # Phase 0.15: integration test for `secret --scope global` spins up two
@@ -82,3 +92,6 @@ wiremock.workspace = true
 # update URLs at a wiremock, assert the in-place rename + sha verify path.
 assert_cmd = "2.0.16"
 predicates = "3.1.3"
+# Track G Phase 5: backup/restore round-trip test detects whether `docker`
+# is on PATH so CI without docker skips cleanly instead of erroring.
+which.workspace = true

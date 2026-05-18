@@ -22,6 +22,10 @@
 
 use clap::{Parser, Subcommand};
 
+mod backup_cmd;
+mod backup_credentials;
+mod backup_crypto;
+mod backup_storage;
 mod compose_cmd;
 mod confirm;
 mod context;
@@ -42,6 +46,7 @@ mod output;
 mod placement_cmd;
 mod ps;
 mod render;
+mod restore_cmd;
 mod route;
 mod secret;
 mod selector;
@@ -121,6 +126,10 @@ enum Command {
     Placement(placement_cmd::PlacementCommand),
     /// Mint a join-token (run against the controller-host context).
     JoinToken(join_token_cmd::JoinTokenArgs),
+    /// Snapshot the controller state volume to fs / volume / s3 (encrypted).
+    Backup(backup_cmd::BackupArgs),
+    /// Restore the controller state volume from an encrypted backup.
+    Restore(restore_cmd::RestoreArgs),
 }
 
 #[tokio::main]
@@ -195,6 +204,8 @@ async fn main() {
             .await
         }
         Command::JoinToken(args) => join_token_cmd::run(args, cli.context.as_deref()).await,
+        Command::Backup(args) => backup_cmd::run(args, cli.context.as_deref()).await,
+        Command::Restore(args) => restore_cmd::run(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {

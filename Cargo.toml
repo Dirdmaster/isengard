@@ -32,8 +32,25 @@ homepage = "https://isengard.app"
 [workspace.dependencies]
 # async runtime
 tokio = { version = "1.42", features = ["full"] }
-tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt", "io"] }
 async-trait = "0.1.83"
+
+# Track G Phase 5: encrypted backup pipeline (`isd backup` / `isd restore`).
+# `age` 0.11 is the pure-Rust scrypt passphrase encryptor (`Encryptor::with_user_passphrase`).
+# Pinned to 0.11 because 0.10 predates the current `secrecy` re-export
+# surface and 0.11.x is the stable line; the conceptual API (wrap_output / finish,
+# decrypt + Identity iterator) is what the spec calls for.
+age = { version = "0.11", default-features = false }
+# Track G Phase 5: S3-API backup destination (AWS, R2, MinIO, B2, Wasabi).
+# `behavior-version-latest` silences the runtime warning the SDK prints when no
+# behavior version is pinned, and locks our calls to the current contract.
+# We deliberately use `default-https-client` (rustls + aws-lc via the modern
+# hyper-1 path) instead of the SDK's `rustls` feature, which pulls in the
+# `legacy-rustls-ring` flag and drags rustls 0.21 + rustls-webpki 0.101 into
+# the tree (RUSTSEC-2026-0098 / 0099 / 0104). aws-lc satisfies the AWS rustls
+# audit story without dropping us back to the deprecated 0.21 line.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 
 # plugin registration
 inventory = "0.3.15"
