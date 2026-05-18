@@ -316,12 +316,8 @@ pub(crate) fn resolve_docker_uri(context: Option<&str>) -> Result<Option<String>
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow::anyhow!("context {name:?} not found"))?;
-    // Track E: Backend::Docker is the post-Track-D shape; ctx.docker is
-    // the legacy side-field kept for back-compat. Either populates the URI.
-    if let crate::credentials::Backend::Docker { url } = &ctx.backend {
-        return Ok(Some(url.clone()));
-    }
-    Ok(ctx.docker.clone())
+    let crate::credentials::Backend::Docker { url } = &ctx.backend;
+    Ok(Some(url.clone()))
 }
 
 /// Resolve the context name actually in use (the `--context` override
@@ -707,7 +703,6 @@ mod tests {
                 backend: Backend::Docker {
                     url: "ssh://dirdmaster@10.17.0.125".into(),
                 },
-                docker: None,
             }],
         };
         let toml = toml::to_string(&file).unwrap();
@@ -771,120 +766,6 @@ mod tests {
         assert!(args.host.is_none());
     }
 
-    /// Phase 0.18: end-to-end against a wiremock controller. The handler
-    /// issues exactly one `GET /api/v1/containers` and renders the row
-    /// to stdout. Marked `#[ignore]` so it doesn't race with other
-    /// credentials-file-touching tests; run with
-    /// `cargo test -p isd -- --ignored`.
-    #[tokio::test]
-    #[ignore]
-    async fn ps_hits_containers_endpoint_against_wiremock() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/containers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {
-                    "id": "a1b2c3d4e5f6a7b8",
-                    "runtime_container_id": "rt-1",
-                    "image": "nginx:alpine",
-                    "command": "nginx -g 'daemon off;'",
-                    "state": "running",
-                    "status_message": "Up 5m",
-                    "names": "hello-web.1",
-                    "stack": "hello",
-                    "service": "web",
-                    "host_id": "01HXABCDEFGHJKMNPQRSTVWXYZ",
-                    "host_name": "homelab-01",
-                    "host_offline": false,
-                    "host_offline_secs": 0,
-                    "created_at": "2026-05-13T12:00:00Z",
-                    "first_seen_at": "2026-05-13T12:00:01Z",
-                    "last_seen_at": "2026-05-13T12:05:42Z",
-                    "removed_at": null
-                }
-            ])))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds_path = dir.path().join("credentials.toml");
-        std::fs::write(
-            &creds_path,
-            format!(
-                r#"default_context = "alice"
-
-[[contexts]]
-name = "alice"
-kind = "http"
-url = "{}"
-"#,
-                server.uri()
-            ),
-        )
-        .unwrap();
-        // SAFETY: matches manifest_cmd.rs's ignored-test pattern.
-        unsafe {
-            std::env::set_var("ISD_CREDENTIALS_FILE", &creds_path);
-        }
-
-        let args = PsArgs {
-            format: crate::output::Format::Table,
-            ..Default::default()
-        };
-        run(args, None).await.expect("ps should succeed");
-    }
-
-    /// Phase 0.18: `--filter` round-trips into query-string params on
-    /// the GET to the controller. Marked `#[ignore]` for the same
-    /// reason as the previous test.
-    #[tokio::test]
-    #[ignore]
-    async fn ps_passes_filters_in_query_string() {
-        use wiremock::matchers::{method, path, query_param};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/containers"))
-            .and(query_param("stack", "hello"))
-            .and(query_param("state", "running"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds_path = dir.path().join("credentials.toml");
-        std::fs::write(
-            &creds_path,
-            format!(
-                r#"default_context = "alice"
-
-[[contexts]]
-name = "alice"
-kind = "http"
-url = "{}"
-"#,
-                server.uri()
-            ),
-        )
-        .unwrap();
-        unsafe {
-            std::env::set_var("ISD_CREDENTIALS_FILE", &creds_path);
-        }
-
-        let args = PsArgs {
-            filters: vec!["stack=hello".into(), "state=running".into()],
-            format: crate::output::Format::Table,
-            ..Default::default()
-        };
-        run(args, None).await.expect("ps should succeed");
-    }
-
     /// End-to-end: a docker-backed context renders the boxed table and
     /// writes the index cache. Ignored because it needs a real docker
     /// daemon on the local socket. Run with
@@ -900,9 +781,8 @@ url = "{}"
 
 [[contexts]]
 name = "local"
-kind = "http"
-url = "http://no-controller.invalid"
-docker = "local"
+kind = "docker"
+url = "local"
 "#,
         )
         .unwrap();
