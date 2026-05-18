@@ -22,6 +22,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod backup_credentials;
 mod compose_cmd;
 mod confirm;
 mod context;
