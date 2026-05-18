@@ -1,0 +1,142 @@
+//! Track F join-token format: `TK<base32(32-bytes)>.<base32(sha256(ca_pem))>`
+//!
+//! Used end-to-end:
+//!   - `isengard controller token mint` packs (bytes, ca_fingerprint) into
+//!     a single string for the operator.
+//!   - `isd join-token` prints `isd join --token <packed>` so operators
+//!     paste one line.
+//!   - `isengard-agent::enroll` parses the packed token: extracts the
+//!     fingerprint for pre-enroll CA verify, sends the bytes portion to
+//!     the controller's Enroll RPC for token validation.
+
+use sha2::{Digest, Sha256};
+
+/// Token prefix. Makes leaked tokens greppable (same role as `sk_`, `ghp_`).
+pub const PREFIX: &str = "TK";
+
+/// Separator between the random bytes portion and the CA fingerprint.
+pub const SEP: char = '.';
+
+/// Base32 alphabet without padding: A-Z2-7. RFC 4648 unpadded.
+const ALPHABET: data_encoding::Encoding = data_encoding::BASE32_NOPAD;
+
+/// Pack a 32-byte token and a CA PEM into the operator-visible string.
+/// The fingerprint is `sha256(ca_pem)` so the agent can independently
+/// verify the CA it fetches matches what the controller minted against.
+pub fn pack(token_bytes: &[u8; 32], ca_pem: &[u8]) -> String {
+    let fingerprint = Sha256::digest(ca_pem);
+    let bytes_b32 = ALPHABET.encode(token_bytes);
+    let fp_b32 = ALPHABET.encode(&fingerprint);
+    format!("{PREFIX}{bytes_b32}{SEP}{fp_b32}")
+}
+
+/// Parsed parts of a join token. The agent uses both halves; the controller
+/// only uses `bytes` for token validation (fingerprint stays opaque to it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedToken {
+    pub bytes: [u8; 32],
+    pub fingerprint: [u8; 32],
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("token missing required `TK` prefix")]
+    MissingPrefix,
+    #[error("token missing required `.` separator between bytes and fingerprint")]
+    MissingSeparator,
+    #[error("token bytes portion failed base32 decode: {0}")]
+    BadBytesEncoding(data_encoding::DecodeError),
+    #[error("token bytes portion is {0} bytes, expected 32")]
+    WrongBytesLength(usize),
+    #[error("token fingerprint portion failed base32 decode: {0}")]
+    BadFingerprintEncoding(data_encoding::DecodeError),
+    #[error("token fingerprint portion is {0} bytes, expected 32")]
+    WrongFingerprintLength(usize),
+}
+
+pub fn parse(s: &str) -> Result<ParsedToken, ParseError> {
+    let body = s.strip_prefix(PREFIX).ok_or(ParseError::MissingPrefix)?;
+    let (bytes_part, fp_part) = body.split_once(SEP).ok_or(ParseError::MissingSeparator)?;
+
+    let bytes_vec = ALPHABET
+        .decode(bytes_part.as_bytes())
+        .map_err(ParseError::BadBytesEncoding)?;
+    let bytes: [u8; 32] = bytes_vec
+        .as_slice()
+        .try_into()
+        .map_err(|_| ParseError::WrongBytesLength(bytes_vec.len()))?;
+
+    let fp_vec = ALPHABET
+        .decode(fp_part.as_bytes())
+        .map_err(ParseError::BadFingerprintEncoding)?;
+    let fingerprint: [u8; 32] = fp_vec
+        .as_slice()
+        .try_into()
+        .map_err(|_| ParseError::WrongFingerprintLength(fp_vec.len()))?;
+
+    Ok(ParsedToken { bytes, fingerprint })
+}
+
+/// Compute the SHA-256 of an arbitrary PEM blob, returning the raw 32-byte
+/// digest. Used on the agent side to compare against `ParsedToken.fingerprint`.
+pub fn fingerprint(ca_pem: &[u8]) -> [u8; 32] {
+    Sha256::digest(ca_pem).into()
+}
+
+/// Re-encode raw token bytes back to the legacy bare-token string form
+/// (RFC 4648 unpadded uppercase base32). The controller's enrollment-token
+/// storage hashes this string for lookup; new packed tokens get decomposed
+/// here so they hash to the same row as the pre-Track-F mint side wrote.
+pub fn encode_bytes(token_bytes: &[u8; 32]) -> String {
+    ALPHABET.encode(token_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn pack_roundtrip_recovers_bytes_and_fingerprint() {
+        let bytes = [0xABu8; 32];
+        let packed = pack(&bytes, FIXTURE_PEM);
+        let parsed = parse(&packed).unwrap();
+        assert_eq!(parsed.bytes, bytes);
+        assert_eq!(parsed.fingerprint, fingerprint(FIXTURE_PEM));
+    }
+
+    #[test]
+    fn pack_uses_tk_prefix_and_dot_separator() {
+        let bytes = [0xFFu8; 32];
+        let packed = pack(&bytes, FIXTURE_PEM);
+        assert!(packed.starts_with("TK"));
+        assert_eq!(packed.matches('.').count(), 1);
+    }
+
+    #[test]
+    fn parse_rejects_missing_prefix() {
+        let err = parse("AAAAAAAA.BBBBBBBB").unwrap_err();
+        assert!(matches!(err, ParseError::MissingPrefix));
+    }
+
+    #[test]
+    fn parse_rejects_missing_separator() {
+        let err = parse("TKabcdef").unwrap_err();
+        assert!(matches!(err, ParseError::MissingSeparator));
+    }
+
+    #[test]
+    fn parse_rejects_bad_base32() {
+        let err = parse("TK!!!.AAA").unwrap_err();
+        assert!(matches!(err, ParseError::BadBytesEncoding(_)));
+    }
+
+    #[test]
+    fn parse_rejects_wrong_length_bytes() {
+        let short = ALPHABET.encode(&[0u8; 16]);
+        let fp = ALPHABET.encode(&[0u8; 32]);
+        let err = parse(&format!("TK{short}.{fp}")).unwrap_err();
+        assert!(matches!(err, ParseError::WrongBytesLength(16)));
+    }
+}

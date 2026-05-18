@@ -87,6 +87,10 @@ mime_guess = "2.0.5"
 subtle = "2.6.1"
 sha2 = "0.10"
 
+# Base32 encoder/decoder (RFC 4648 unpadded). Used by the Track F join-token
+# packer in `isengard-core::join_token`.
+data-encoding = "2.6"
+
 # YAML emitter for v0.3c compose import (deterministic key ordering).
 serde_yaml = "0.9"
 

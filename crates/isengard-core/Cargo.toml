@@ -14,9 +14,11 @@ async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 croner.workspace = true
+data-encoding.workspace = true
 inventory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
 

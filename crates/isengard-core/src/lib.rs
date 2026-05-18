@@ -6,6 +6,7 @@ pub mod context;
 pub mod error;
 pub mod event;
 pub mod hooks;
+pub mod join_token;
 pub mod labels;
 pub mod networking;
 pub mod placement;
