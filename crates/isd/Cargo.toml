@@ -30,6 +30,9 @@ comfy-table = { workspace = true, features = ["tty"] }
 dirs.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+# Track F Phase 4: `isd join-token --ttl 15m` parses humantime durations and
+# stringifies them back for the `isengard controller token mint --ttl` argv.
+humantime = "2.1"
 open.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 rpassword.workspace = true

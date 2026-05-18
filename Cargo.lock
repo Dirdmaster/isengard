@@ -2678,6 +2678,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "hex",
+ "humantime",
  "indicatif",
  "isd-runtime",
  "isengard-manifest",
