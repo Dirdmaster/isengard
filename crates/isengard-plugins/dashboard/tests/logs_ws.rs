@@ -60,6 +60,7 @@ async fn make_handles() -> Arc<ControllerHandles> {
             isengard_controller::compose_broker::ComposeBroker::new(),
         ),
         secrets,
+        ca,
     })
 }
 

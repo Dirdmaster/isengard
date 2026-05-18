@@ -56,6 +56,7 @@ async fn setup_app(unlocked: bool) -> (axum::Router, Arc<ControllerHandles>) {
         log_fanout: isengard_controller::log_fanout::LogFanout::new(),
         compose_broker: Arc::new(isengard_controller::compose_broker::ComposeBroker::new()),
         secrets: secrets_store,
+        ca,
     });
 
     let app = secrets::router(handles.clone());

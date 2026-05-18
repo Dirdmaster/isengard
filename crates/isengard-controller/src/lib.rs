@@ -83,6 +83,11 @@ pub struct ControllerHandles {
     /// `/run/secrets/master.key`) is readable and 32 bytes long;
     /// otherwise the controller refuses to start.
     pub secrets: Arc<secrets::SecretsStore>,
+    /// Track F: controller's internal CA. Surfaced so the dashboard
+    /// plugin can expose the unauthenticated `GET /api/v1/ca/pem`
+    /// endpoint agents call during pre-enroll fingerprint verification.
+    /// Same `Authority` instance already passed to `EnrollmentService`.
+    pub ca: Arc<Authority>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -275,6 +280,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         log_fanout: log_fanout.clone(),
         compose_broker: compose_broker.clone(),
         secrets: secrets_store.clone(),
+        ca: ca.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
