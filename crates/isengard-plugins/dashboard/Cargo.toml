@@ -37,6 +37,7 @@ sha2.workspace = true
 serde_yaml.workspace = true
 
 [dev-dependencies]
+data-encoding.workspace = true
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 rand.workspace = true
 # Phase 13B: WebSocket client for the logs WS integration tests + tonic for

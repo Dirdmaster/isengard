@@ -4,36 +4,24 @@
 >
 > **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
 
-## Production install (docker compose)
+## Production install
 
-As of Track D (2026-05-17) the controller ships as a docker container. Bring up a fresh host in three commands:
-
-```sh
-# 1. Fetch the compose recipe.
-sudo mkdir -p /etc/isengard
-curl -fsSL https://raw.githubusercontent.com/Weavers-Engineering/Isengard/next/install/compose.yaml \
-  -o /etc/isengard/compose.yaml
-
-# 2. Create the shared proxy network.
-sudo docker network create isengard-proxy 2>/dev/null || true
-
-# 3. Bring up the controller.
-sudo docker compose -f /etc/isengard/compose.yaml up -d controller
-```
-
-Point the operator CLI at it by importing the host's docker context:
+Bring up a cluster with one command on your operator machine:
 
 ```sh
-docker context create lausanne --docker host=ssh://operator@lausanne.example.com
-isd context import lausanne --use
-isd ps
+isd init
 ```
 
-`isd context import` reads the docker context store directly, so the controller is discovered automatically via the `io.isengard.role=controller` label the compose recipe applies. See [`install/README.md`](./install/README.md) for the full guide, including additional-host enrollment and the day-to-day operations cheatsheet.
+This brings up the controller + first agent on the docker host your
+current docker context points at. To add more hosts:
 
-> **Legacy systemd-native install:** `install/install.sh` + `isengard init` still work for one more release (sunset in v0.7). The script prints a deprecation banner pointing at the compose flow. See [`install/README.md`](./install/README.md#legacy-systemd-native-install) if you need it during migration.
+```sh
+isd join-token        # mints a paste-able join command
+isd join --controller <url> --token <packed> --context <new-host>
+```
 
-The recipe in [`docker/`](./docker/) remains the dev story: source build, named volumes, `just dev`. Use `install/` for any host you want to keep running.
+See [`install/README.md`](./install/README.md) for the full pointer; the
+recipe in [`docker/`](./docker/) is the source-build dev story (`just dev`).
 
 ## Rust rewrite quick start (controller + agent)
 

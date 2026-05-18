@@ -113,16 +113,23 @@ async fn renewal_swaps_endpoint_in_holder() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let (url, ca, enrollment) = boot_controller().await;
-    let token = enrollment
+    let bare = enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
+    // Track G: redeem requires a packed token; pack the bare bytes the
+    // mint returned and seed verified_ca_pem with the harness's CA so
+    // the agent skips fetch_and_verify_ca but stays on the Track F flow.
+    let bytes_vec = data_encoding::BASE32_NOPAD
+        .decode(bare.as_bytes())
+        .expect("mint returns base32");
+    let bytes: [u8; 32] = bytes_vec.as_slice().try_into().expect("32 bytes");
+    let ca_pem = ca.root_cert_pem().to_string();
+    let token = isengard_core::join_token::pack(&bytes, ca_pem.as_bytes());
 
     // Enroll the agent + persist the bundle, mirroring lib.rs first-boot.
     let trust = BootstrapTrust {
-        ca_pem_path: None,
-        ca_pem: Some(ca.root_cert_pem().to_string()),
-        verified_ca_pem: None,
+        verified_ca_pem: Some(ca_pem.into_bytes()),
     };
     let host_info = HostInfo {
         hostname: "agent-renewal".into(),

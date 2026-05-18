@@ -123,16 +123,14 @@ impl EnrollmentService {
     /// id at insert time. We work around the chicken-and-egg by pre-minting
     /// a `HostId` and passing it to both `sign_agent_leaf` and `enroll_host`.
     pub async fn redeem(&self, token: &str, host_info: HostInfo) -> Result<EnrollResponse> {
-        // Track F: incoming token may be packed (TK<bytes>.<fingerprint>)
-        // or legacy bare base32. Parse the packed form first; on failure
-        // fall back to hashing the input as-is (the pre-Track-F path).
-        // Storage keys on `sha256(bare_b32_string)` either way, so packed
-        // tokens get decomposed back to their bare-bytes base32 form for
-        // the lookup. The fingerprint half stays opaque to the controller.
-        let lookup_token: String = match isengard_core::join_token::parse(token) {
-            Ok(parsed) => isengard_core::join_token::encode_bytes(&parsed.bytes),
-            Err(_) => token.to_string(),
-        };
+        // Track G: incoming token MUST be packed (TK<bytes>.<fingerprint>).
+        // Storage keys on `sha256(bare_b32_string)`, so the packed token
+        // gets decomposed back to its bare-bytes base32 form for the
+        // lookup; the fingerprint half stays opaque to the controller.
+        // Legacy bare-base32 tokens are rejected with a clear error.
+        let parsed = isengard_core::join_token::parse(token)
+            .map_err(|e| anyhow!("invalid enrollment token: {e}"))?;
+        let lookup_token = isengard_core::join_token::encode_bytes(&parsed.bytes);
         let hash = Sha256::digest(lookup_token.as_bytes()).to_vec();
         let _record = self
             .inventory

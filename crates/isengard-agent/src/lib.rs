@@ -25,7 +25,6 @@ pub mod placement;
 pub mod proxy;
 pub mod runtime;
 pub mod secret_fetch;
-pub mod self_update;
 pub mod stack_secrets;
 pub mod sync;
 pub mod tls;
@@ -168,23 +167,25 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                 })?;
             let host_info = enroll::HostInfo::detect();
 
-            // Track F: when the join token is in the new packed format
-            // (`TK<base32-bytes>.<base32-fingerprint>`), fetch the
-            // controller's CA via skip-verify TLS and check its SHA-256
-            // against the fingerprint embedded in the token. The verified
-            // PEM is then pinned as the bootstrap trust root for the real
-            // Enroll RPC. Legacy bare tokens fall through to the existing
-            // env-var driven CA path inside `enroll::enroll`.
-            let mut bootstrap_trust = opts.bootstrap_trust.clone();
-            if isengard_core::join_token::parse(&enroll_token).is_ok() {
-                match enroll::fetch_and_verify_ca(&opts.controller_url, &enroll_token).await {
-                    Ok(pem) => {
-                        info!("enroll: fingerprint-verified controller CA via packed token");
-                        bootstrap_trust.verified_ca_pem = Some(pem);
-                    }
-                    Err(e) => return Err(e),
-                }
+            // Track F + G: the join token MUST be in the packed format
+            // (`TK<base32-bytes>.<base32-fingerprint>`). The agent
+            // fetches the controller's CA via skip-verify TLS, checks
+            // its SHA-256 against the fingerprint embedded in the
+            // token, and pins the verified PEM as the bootstrap trust
+            // root for the real Enroll RPC. A non-packed token is a
+            // hard error: legacy env-var CA fallbacks were removed in
+            // Track G.
+            if isengard_core::join_token::parse(&enroll_token).is_err() {
+                return Err(anyhow::anyhow!(
+                    "Track F fingerprint flow required; got a legacy token. \
+                     Mint a new token with `isd join-token` and re-run `isd join`."
+                ));
             }
+            let pem = enroll::fetch_and_verify_ca(&opts.controller_url, &enroll_token).await?;
+            info!("enroll: fingerprint-verified controller CA via packed token");
+            let bootstrap_trust = enroll::BootstrapTrust {
+                verified_ca_pem: Some(pem),
+            };
 
             let outcome = match enroll::enroll(
                 &opts.controller_url,

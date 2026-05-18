@@ -1,23 +1,14 @@
-//! `isd context create | use | list | rm | show`.
+//! `isd context create | use | list | rm | show | import`.
 //!
-//! Each context records a [`Backend`](crate::credentials::Backend): either
-//! an HTTP URL the operator can reach directly, or an SSH target whose
-//! `~/.ssh/config` handles authentication and the controller's dashboard
-//! port is tunneled per-command. Modeled on `docker context create`.
+//! Each context records a docker endpoint URL ([`Backend::Docker`]); the
+//! controller is discovered by `io.isengard.role=controller` label on
+//! that host. Modeled on `docker context create --docker host=ssh://...`.
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand};
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
 use crate::credentials::{self, Backend, ContextEntry};
-
-/// Sentinel URL stored on Docker-only contexts (no controller backend).
-/// The `Backend` enum predates the docker shortcut, so docker-only
-/// entries park this placeholder on the HTTP variant. `isd context
-/// show / list` hides the sentinel and renders these as `kind: docker`;
-/// `Session::from_context` short-circuits with a clear error so the
-/// sentinel never reaches the wire.
-pub(crate) const NO_CONTROLLER_SENTINEL: &str = "http://no-controller.invalid";
 
 #[derive(Debug, Args)]
 pub struct ContextArgs {
@@ -37,7 +28,7 @@ pub enum ContextCommand {
     Rm(RmArgs),
     /// Print one context's full backend details.
     Show(ShowArgs),
-    /// Import a docker context by name as a Track D `Backend::Docker` entry.
+    /// Import a docker context by name as a `Backend::Docker` entry.
     Import(ImportArgs),
 }
 
@@ -46,25 +37,13 @@ pub struct CreateArgs {
     /// Context name.
     pub name: String,
 
-    /// SSH target (e.g. user@host).
-    #[arg(long, conflicts_with = "http")]
-    pub ssh: Option<String>,
-
-    /// Dashboard URL (e.g. http://127.0.0.1:9418).
-    #[arg(long, conflicts_with = "ssh")]
-    pub http: Option<String>,
-
-    /// Remote dashboard port to forward over SSH.
-    #[arg(long, default_value_t = 9418, requires = "ssh")]
-    pub dashboard_port: u16,
+    /// Docker endpoint (ssh://, tcp://, unix://, or local).
+    #[arg(long)]
+    pub docker: String,
 
     /// Set as the default context.
     #[arg(long)]
     pub r#use: bool,
-
-    /// Docker endpoint (ssh://, tcp://, unix://, or local).
-    #[arg(long)]
-    pub docker: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -124,44 +103,8 @@ fn validate_name(name: &str) -> Result<()> {
 async fn run_create(args: CreateArgs) -> Result<()> {
     validate_name(&args.name)?;
 
-    // Phase 0.20: a docker-only context (no controller) is valid for the
-    // direct-bollard path. When `--docker` is the only transport given,
-    // we still need a Backend value to satisfy ContextEntry's shape; we
-    // pick an Http placeholder that the controller-using verbs will
-    // reject explicitly when invoked against a no-controller context.
-    let backend = match (args.ssh.as_deref(), args.http.as_deref()) {
-        (Some(target), None) => Backend::Ssh {
-            target: target.to_string(),
-            dashboard_port: args.dashboard_port,
-        },
-        (None, Some(url)) => {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(anyhow!("--http URL must start with http:// or https://"));
-            }
-            Backend::Http {
-                url: url.trim_end_matches('/').to_string(),
-            }
-        }
-        (Some(_), Some(_)) => {
-            // clap's conflicts_with should have caught this; defensive
-            // belt for the unlikely case.
-            return Err(anyhow!("--ssh and --http are mutually exclusive"));
-        }
-        (None, None) => {
-            if args.docker.is_none() {
-                return Err(anyhow!(
-                    "exactly one of --ssh <target>, --http <url>, or --docker <uri> is required"
-                ));
-            }
-            // Docker-only context. Placeholder Http URL so the existing
-            // controller-using code paths fail loudly rather than reach
-            // a partial backend. The sentinel `NO_CONTROLLER_SENTINEL`
-            // is hidden from `isd context show` / `list`; they render
-            // these as `kind: docker` instead.
-            Backend::Http {
-                url: NO_CONTROLLER_SENTINEL.to_string(),
-            }
-        }
+    let backend = Backend::Docker {
+        url: args.docker.clone(),
     };
 
     let path = credentials::default_credentials_path()?;
@@ -169,7 +112,6 @@ async fn run_create(args: CreateArgs) -> Result<()> {
     let ctx = ContextEntry {
         name: args.name.clone(),
         backend,
-        docker: args.docker.clone(),
     };
     let was_first = file.contexts.is_empty();
 
@@ -201,7 +143,7 @@ async fn run_list() -> Result<()> {
     let path = credentials::default_credentials_path()?;
     let file = credentials::load(&path)?;
     if file.contexts.is_empty() {
-        println!("No contexts saved. Create one with `isd context create <name> --ssh <target>`.");
+        println!("No contexts saved. Create one with `isd context create <name> --docker <uri>`.");
         return Ok(());
     }
     let mut table = Table::new();
@@ -228,26 +170,9 @@ async fn run_list() -> Result<()> {
     Ok(())
 }
 
-/// Pick the operator-facing `kind` + `target` strings for a context.
-/// Track D `Backend::Docker` entries render directly as `kind = docker`.
-/// Legacy `Backend::Http { url = NO_CONTROLLER_SENTINEL }` + `docker = Some(...)`
-/// entries also render as `docker` for one release: the load-time migration
-/// in `credentials::load` rewrites these into the modern shape, but a
-/// freshly-written legacy file from an older isd binary on the same machine
-/// may still trip this path before the next save flushes the migration to disk.
 fn render_kind_and_target(ctx: &ContextEntry) -> (&'static str, String) {
-    if let (Backend::Http { url }, Some(docker)) = (&ctx.backend, ctx.docker.as_deref())
-        && url == NO_CONTROLLER_SENTINEL
-    {
-        return ("docker", docker.to_string());
-    }
     match &ctx.backend {
         Backend::Docker { url } => ("docker", url.clone()),
-        Backend::Http { url } => ("http", url.clone()),
-        Backend::Ssh {
-            target,
-            dashboard_port,
-        } => ("ssh", format!("{target}  (forward :{dashboard_port})")),
     }
 }
 
@@ -297,41 +222,12 @@ async fn run_show(args: ShowArgs) -> Result<()> {
         .context("resolving context")?;
     println!("name:    {}", ctx.name);
 
-    let is_docker_only = matches!(&ctx.backend, Backend::Http { url } if url == NO_CONTROLLER_SENTINEL)
-        && ctx.docker.is_some();
-
-    if is_docker_only {
-        println!("kind:    docker");
-        if let Some(docker) = ctx.docker.as_deref() {
-            println!("docker:  {docker}");
-        }
-        return Ok(());
-    }
-
     match &ctx.backend {
         Backend::Docker { url } => {
             println!("kind:    docker");
             println!("docker:  {url}");
             println!("controller: auto (discovered via io.isengard.role label)");
         }
-        Backend::Http { url } => {
-            println!("kind:    http");
-            println!("url:     {url}");
-        }
-        Backend::Ssh {
-            target,
-            dashboard_port,
-        } => {
-            println!("kind:    ssh");
-            println!("target:  {target}");
-            println!("forward: 127.0.0.1:<ephemeral> -> {target}:{dashboard_port}");
-        }
-    }
-    // A context can carry both a controller backend AND a docker
-    // shortcut; surface the docker line when present so the operator
-    // sees the full picture.
-    if let Some(docker) = ctx.docker.as_deref() {
-        println!("docker:  {docker}");
     }
     Ok(())
 }
@@ -342,20 +238,24 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn create_with_ssh_parses() {
+    fn create_with_docker_parses() {
         #[derive(Parser, Debug)]
         struct Wrap {
             #[command(subcommand)]
             c: ContextCommand,
         }
-        let w =
-            Wrap::try_parse_from(["x", "create", "lausanne", "--ssh", "dirdmaster@10.17.0.125"])
-                .unwrap();
+        let w = Wrap::try_parse_from([
+            "x",
+            "create",
+            "lausanne",
+            "--docker",
+            "ssh://dirdmaster@10.17.0.125",
+        ])
+        .unwrap();
         match w.c {
             ContextCommand::Create(a) => {
                 assert_eq!(a.name, "lausanne");
-                assert_eq!(a.ssh.as_deref(), Some("dirdmaster@10.17.0.125"));
-                assert_eq!(a.dashboard_port, 9418);
+                assert_eq!(a.docker, "ssh://dirdmaster@10.17.0.125");
                 assert!(!a.r#use);
             }
             other => panic!("expected Create, got {other:?}"),
@@ -363,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn create_with_http_parses() {
+    fn create_with_use_sets_default_flag() {
         #[derive(Parser, Debug)]
         struct Wrap {
             #[command(subcommand)]
@@ -373,14 +273,14 @@ mod tests {
             "x",
             "create",
             "local",
-            "--http",
-            "http://127.0.0.1:9418",
+            "--docker",
+            "unix:///var/run/docker.sock",
             "--use",
         ])
         .unwrap();
         match w.c {
             ContextCommand::Create(a) => {
-                assert_eq!(a.http.as_deref(), Some("http://127.0.0.1:9418"));
+                assert_eq!(a.docker, "unix:///var/run/docker.sock");
                 assert!(a.r#use);
             }
             other => panic!("expected Create, got {other:?}"),
@@ -388,22 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_both_backends() {
+    fn create_requires_docker_flag() {
         #[derive(Parser, Debug)]
         struct Wrap {
             #[command(subcommand)]
             c: ContextCommand,
         }
-        let res = Wrap::try_parse_from([
-            "x",
-            "create",
-            "x",
-            "--ssh",
-            "user@host",
-            "--http",
-            "http://x",
-        ]);
-        assert!(res.is_err(), "ssh + http should conflict");
+        let res = Wrap::try_parse_from(["x", "create", "x"]);
+        assert!(res.is_err(), "missing --docker should fail clap parse");
     }
 
     #[test]

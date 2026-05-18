@@ -1,15 +1,10 @@
 //! Credentials store at `~/.config/isengard/credentials.toml`.
 //!
-//! Each saved context selects a backend that determines how `isd` reaches
-//! the controller:
-//!
-//! - **`http`**: direct HTTP/HTTPS to a URL the operator can reach. Used
-//!   for local dev (`http://127.0.0.1:9418`).
-//! - **`ssh`**: tunnel to the controller via SSH. The operator's existing
-//!   SSH config (Hosts, IdentityFile, ProxyJump, agent forwarding)
-//!   handles authentication; isd shells out to system `ssh` to set up a
-//!   port forward for each command's lifetime. Modeled on
-//!   `docker context create --docker host=ssh://...`.
+//! Each saved context selects a docker backend that determines how `isd`
+//! reaches the controller. After Track G the only supported shape is
+//! `kind = "docker"` with a docker endpoint URL: the controller is
+//! discovered automatically by querying for the
+//! `io.isengard.role=controller` container on that host.
 //!
 //! TOML shape:
 //!
@@ -18,48 +13,28 @@
 //!
 //! [[contexts]]
 //! name = "lausanne"
-//! kind = "ssh"
-//! target = "dirdmaster@10.17.0.125"
-//! dashboard_port = 9418
-//!
-//! [[contexts]]
-//! name = "local"
-//! kind = "http"
-//! url = "http://127.0.0.1:9418"
+//! kind = "docker"
+//! url = "ssh://dirdmaster@10.17.0.125"
 //! ```
 //!
-//! Legacy entries (pre-context-redesign) used `controller_url` + `token`
-//!     + `ca_fingerprint_sha256` fields with no `kind`. Those are auto-
-//!     migrated to `kind = "http"` on read; the token + fingerprint
-//!     fields are dropped.
+//! Legacy entries (pre-Track-G `kind = "http"` or `kind = "ssh"`, or the
+//! pre-context-redesign `controller_url` + `token` shape) are no longer
+//! accepted. Re-create them with `isd context import <docker-context>`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// How `isd` reaches the controller for a given context.
+/// How `isd` reaches the controller for a given context. After Track G the
+/// only supported transport is a docker endpoint: the controller container
+/// is discovered by label on that host.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Backend {
-    /// Direct HTTP/HTTPS to a URL.
-    Http {
-        /// Full URL including scheme + port (e.g. `http://127.0.0.1:9418`).
-        url: String,
-    },
-    /// SSH tunnel. `target` is whatever `ssh` understands (`user@host`,
-    /// `host`, or a `Host` alias from `~/.ssh/config`).
-    Ssh {
-        target: String,
-        /// Port the controller's dashboard listens on inside the SSH
-        /// destination. Tunnel forwards `localhost:<ephemeral>` ->
-        /// `127.0.0.1:<dashboard_port>` on the remote.
-        #[serde(default = "default_dashboard_port")]
-        dashboard_port: u16,
-    },
     /// Docker socket as the sole transport. The controller is discovered
     /// by querying `docker ps --filter label=io.isengard.role=controller`;
-    /// no separate dashboard port is configured. This is the Track D path.
+    /// no separate dashboard port is configured.
     Docker {
         /// Docker endpoint URL (e.g. `ssh://user@host`, `tcp://host:2375`,
         /// `unix:///var/run/docker.sock`). Same shape `docker context create`
@@ -68,28 +43,17 @@ pub enum Backend {
     },
 }
 
-fn default_dashboard_port() -> u16 {
-    9418
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ContextEntry {
     pub name: String,
     #[serde(flatten)]
     pub backend: Backend,
-    /// Phase 0.20: optional Docker Engine endpoint for direct-bollard
-    /// access. Accepts `ssh://user@host`, `tcp://host:port`, or
-    /// `unix:///path`. Coexists with the controller-backed `kind`/`url`
-    /// / `target` fields; one or both may be set. When present, `isd ps
-    /// --backend docker` uses this instead of the controller round-trip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub docker: Option<String>,
 }
 
 /// Custom deserialize so legacy entries (with `controller_url` + `token` +
-/// `ca_fingerprint_sha256` and no `kind`) migrate cleanly to the new
-/// `Http`-backend shape on first read. Operators don't have to re-run
-/// `isd login` (which is gone) just because they upgraded.
+/// `ca_fingerprint_sha256` and no `kind`, or `kind = "http"` / `kind =
+/// "ssh"`) surface an actionable error pointing at `isd context import`
+/// instead of an opaque serde mismatch.
 impl<'de> Deserialize<'de> for ContextEntry {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -100,12 +64,17 @@ impl<'de> Deserialize<'de> for ContextEntry {
             // new-shape fields
             #[serde(default)]
             url: Option<String>,
+            // legacy-shape fields (read-only, dropped on next save). Kept
+            // so we can surface a precise error pointing at the
+            // deprecated key rather than a generic "missing field".
             #[serde(default)]
+            #[allow(dead_code)]
             target: Option<String>,
             #[serde(default)]
+            #[allow(dead_code)]
             dashboard_port: Option<u16>,
-            // legacy-shape fields (read-only, dropped on next save)
             #[serde(default)]
+            #[allow(dead_code)]
             controller_url: Option<String>,
             #[serde(default)]
             #[allow(dead_code)]
@@ -113,69 +82,39 @@ impl<'de> Deserialize<'de> for ContextEntry {
             #[serde(default)]
             #[allow(dead_code)]
             ca_fingerprint_sha256: Option<String>,
-            // Phase 0.20: direct-bollard endpoint (independent of kind).
             #[serde(default)]
+            #[allow(dead_code)]
             docker: Option<String>,
         }
         let raw = Raw::deserialize(de)?;
         let backend = match raw.kind.as_deref() {
-            Some("http") => Backend::Http {
-                url: raw
-                    .url
-                    .ok_or_else(|| serde::de::Error::custom("kind=http requires `url`"))?,
-            },
-            Some("ssh") => Backend::Ssh {
-                target: raw
-                    .target
-                    .ok_or_else(|| serde::de::Error::custom("kind=ssh requires `target`"))?,
-                dashboard_port: raw.dashboard_port.unwrap_or_else(default_dashboard_port),
-            },
             Some("docker") => Backend::Docker {
                 url: raw
                     .url
                     .ok_or_else(|| serde::de::Error::custom("kind=docker requires `url`"))?,
             },
+            Some(legacy @ ("http" | "ssh")) => {
+                return Err(serde::de::Error::custom(format!(
+                    "context {:?} uses legacy {legacy} backend; recreate with `isd context import <name>`",
+                    raw.name
+                )));
+            }
             Some(other) => {
                 return Err(serde::de::Error::custom(format!(
-                    "unknown context kind {other:?} (expected `http`, `ssh`, or `docker`)"
+                    "unknown context kind {other:?} (expected `docker`)"
                 )));
             }
             None => {
-                // Legacy: controller_url -> Http migration.
-                let url = raw.controller_url.ok_or_else(|| {
-                    serde::de::Error::custom(
-                        "legacy context missing both `kind` and `controller_url`",
-                    )
-                })?;
-                Backend::Http { url }
+                return Err(serde::de::Error::custom(format!(
+                    "context {:?} predates Track D; recreate with `isd context import <name>`",
+                    raw.name
+                )));
             }
         };
         Ok(ContextEntry {
             name: raw.name,
             backend,
-            docker: raw.docker,
         })
-    }
-}
-
-impl ContextEntry {
-    /// Rewrite a legacy `Backend::Http { url == NO_CONTROLLER_SENTINEL }` +
-    /// `docker: Some(...)` pair into a single `Backend::Docker { url }`. No-op
-    /// for entries already in the post-Track-D shape.
-    pub fn migrate_legacy_sentinel(&self) -> Self {
-        use crate::context::NO_CONTROLLER_SENTINEL;
-        if let (Backend::Http { url }, Some(docker_url)) = (&self.backend, self.docker.as_deref())
-            && url == NO_CONTROLLER_SENTINEL
-        {
-            return Self {
-                name: self.name.clone(),
-                backend: Backend::Docker {
-                    url: docker_url.to_string(),
-                },
-                docker: None,
-            };
-        }
-        self.clone()
     }
 }
 
@@ -201,7 +140,7 @@ impl CredentialsFile {
             }),
             None => {
                 let want = self.default_context.as_deref().with_context(
-                    || "no default context set; run `isd context create <name> --ssh <target>` first",
+                    || "no default context set; run `isd context create <name> --docker <uri>` first",
                 )?;
                 self.contexts
                     .iter()
@@ -271,15 +210,8 @@ pub fn load(path: &Path) -> Result<CredentialsFile> {
     }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading credentials at {}", path.display()))?;
-    let mut parsed: CredentialsFile = toml::from_str(&text)
+    let parsed: CredentialsFile = toml::from_str(&text)
         .with_context(|| format!("parsing credentials at {}", path.display()))?;
-    // Track D: rewrite NO_CONTROLLER_SENTINEL + docker shortcut entries into
-    // first-class Backend::Docker so the rest of the code sees the modern
-    // shape. On-disk state stays as-is until the next `save` (e.g. via
-    // `context import`, `context use`, or `context rm`).
-    for ctx in parsed.contexts.iter_mut() {
-        *ctx = ctx.migrate_legacy_sentinel();
-    }
     Ok(parsed)
 }
 
@@ -317,44 +249,67 @@ fn set_owner_only_perms(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn http_entry(name: &str) -> ContextEntry {
+    fn docker_entry(name: &str, url: &str) -> ContextEntry {
         ContextEntry {
             name: name.into(),
-            backend: Backend::Http {
-                url: "http://127.0.0.1:9418".into(),
-            },
-            docker: None,
-        }
-    }
-
-    fn ssh_entry(name: &str, target: &str) -> ContextEntry {
-        ContextEntry {
-            name: name.into(),
-            backend: Backend::Ssh {
-                target: target.into(),
-                dashboard_port: 9418,
-            },
-            docker: None,
+            backend: Backend::Docker { url: url.into() },
         }
     }
 
     #[test]
-    fn round_trip_preserves_http_and_ssh_contexts() {
+    fn round_trip_preserves_docker_contexts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let mut file = CredentialsFile::default();
-        file.upsert(http_entry("local"));
-        file.upsert(ssh_entry("lausanne", "dirdmaster@10.17.0.125"));
+        file.upsert(docker_entry("local", "unix:///var/run/docker.sock"));
+        file.upsert(docker_entry("lausanne", "ssh://dirdmaster@10.17.0.125"));
         save(&path, &file).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded, file);
     }
 
     #[test]
-    fn legacy_controller_url_migrates_to_http_backend() {
+    fn legacy_http_kind_rejected_with_actionable_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
-        // Hand-write the old TOML shape to simulate a pre-redesign file.
+        let legacy = r#"
+default_context = "default"
+
+[[contexts]]
+name = "default"
+kind = "http"
+url = "http://127.0.0.1:9418"
+"#;
+        std::fs::write(&path, legacy).unwrap();
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("legacy http backend"), "msg: {msg}");
+        assert!(msg.contains("isd context import"), "msg: {msg}");
+    }
+
+    #[test]
+    fn legacy_ssh_kind_rejected_with_actionable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.toml");
+        let legacy = r#"
+default_context = "lausanne"
+
+[[contexts]]
+name = "lausanne"
+kind = "ssh"
+target = "dirdmaster@10.17.0.125"
+"#;
+        std::fs::write(&path, legacy).unwrap();
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("legacy ssh backend"), "msg: {msg}");
+        assert!(msg.contains("isd context import"), "msg: {msg}");
+    }
+
+    #[test]
+    fn legacy_controller_url_rejected_with_actionable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.toml");
         let legacy = r#"
 default_context = "default"
 
@@ -365,13 +320,10 @@ token = "abc"
 ca_fingerprint_sha256 = ""
 "#;
         std::fs::write(&path, legacy).unwrap();
-        let loaded = load(&path).unwrap();
-        assert_eq!(loaded.contexts.len(), 1);
-        assert_eq!(loaded.contexts[0].name, "default");
-        match &loaded.contexts[0].backend {
-            Backend::Http { url } => assert_eq!(url, "http://127.0.0.1:9418"),
-            other => panic!("expected Http backend, got {other:?}"),
-        }
+        let err = load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("predates Track D"), "msg: {msg}");
+        assert!(msg.contains("isd context import"), "msg: {msg}");
     }
 
     #[test]
@@ -385,7 +337,7 @@ ca_fingerprint_sha256 = ""
     #[test]
     fn default_or_named_resolves_in_both_modes() {
         let mut file = CredentialsFile::default();
-        file.upsert(http_entry("home"));
+        file.upsert(docker_entry("home", "unix:///var/run/docker.sock"));
         let resolved = file.default_or_named(None).unwrap();
         assert_eq!(resolved.name, "home");
         let by_name = file.default_or_named(Some("home")).unwrap();
@@ -396,9 +348,9 @@ ca_fingerprint_sha256 = ""
     #[test]
     fn upsert_only_promotes_default_when_unset() {
         let mut file = CredentialsFile::default();
-        file.upsert(http_entry("home"));
+        file.upsert(docker_entry("home", "unix:///var/run/docker.sock"));
         assert_eq!(file.default_context.as_deref(), Some("home"));
-        file.upsert(ssh_entry("work", "user@work"));
+        file.upsert(docker_entry("work", "ssh://user@work"));
         // Default stays "home" because it was already set.
         assert_eq!(file.default_context.as_deref(), Some("home"));
         file.set_default("work").unwrap();
@@ -408,32 +360,12 @@ ca_fingerprint_sha256 = ""
     #[test]
     fn remove_clears_default_when_removing_the_default() {
         let mut file = CredentialsFile::default();
-        file.upsert(http_entry("home"));
-        file.upsert(ssh_entry("work", "user@work"));
+        file.upsert(docker_entry("home", "unix:///var/run/docker.sock"));
+        file.upsert(docker_entry("work", "ssh://user@work"));
         file.set_default("work").unwrap();
         assert!(file.remove("work"));
         assert_eq!(file.default_context, None);
         assert!(!file.remove("nonexistent"));
-    }
-
-    #[test]
-    fn ssh_dashboard_port_defaults_to_9418_when_omitted() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("creds.toml");
-        let raw = r#"
-default_context = "lausanne"
-
-[[contexts]]
-name = "lausanne"
-kind = "ssh"
-target = "dirdmaster@10.17.0.125"
-"#;
-        std::fs::write(&path, raw).unwrap();
-        let loaded = load(&path).unwrap();
-        match &loaded.contexts[0].backend {
-            Backend::Ssh { dashboard_port, .. } => assert_eq!(*dashboard_port, 9418),
-            other => panic!("expected Ssh backend, got {other:?}"),
-        }
     }
 
     #[test]
@@ -443,43 +375,10 @@ target = "dirdmaster@10.17.0.125"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let mut file = CredentialsFile::default();
-        file.upsert(http_entry("home"));
+        file.upsert(docker_entry("home", "unix:///var/run/docker.sock"));
         save(&path, &file).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-    }
-
-    #[test]
-    fn context_entry_with_docker_field_roundtrips() {
-        let entry = ContextEntry {
-            name: "lausanne".into(),
-            backend: Backend::Ssh {
-                target: "dirdmaster@10.17.0.125".into(),
-                dashboard_port: 9418,
-            },
-            docker: Some("ssh://dirdmaster@10.17.0.125".into()),
-        };
-        let mut file = CredentialsFile::default();
-        file.upsert(entry.clone());
-        let toml = toml::to_string(&file).expect("encode");
-        assert!(
-            toml.contains("docker = \"ssh://dirdmaster@10.17.0.125\""),
-            "docker field should serialize to TOML: {toml}"
-        );
-        let back: CredentialsFile = toml::from_str(&toml).expect("decode");
-        assert_eq!(back.contexts[0].docker, entry.docker);
-    }
-
-    #[test]
-    fn context_entry_without_docker_field_does_not_serialize_it() {
-        let entry = http_entry("plain");
-        let mut file = CredentialsFile::default();
-        file.upsert(entry);
-        let toml = toml::to_string(&file).expect("encode");
-        assert!(
-            !toml.contains("docker ="),
-            "docker key should be omitted when None: {toml}"
-        );
     }
 
     #[test]
@@ -497,39 +396,10 @@ url = "ssh://dirdmaster@10.17.0.125"
         assert_eq!(file.contexts.len(), 1);
         match &file.contexts[0].backend {
             Backend::Docker { url } => assert_eq!(url, "ssh://dirdmaster@10.17.0.125"),
-            other => panic!("expected Docker, got {other:?}"),
         }
         // Round-trip.
         let toml_out = toml::to_string(&file).unwrap();
         assert!(toml_out.contains("kind = \"docker\""));
         assert!(toml_out.contains("url = \"ssh://dirdmaster@10.17.0.125\""));
-    }
-
-    #[test]
-    fn legacy_no_controller_sentinel_migrates_to_docker_on_load() {
-        use crate::context::NO_CONTROLLER_SENTINEL;
-        let toml_in = format!(
-            r#"
-default_context = "lausanne-direct"
-
-[[contexts]]
-name = "lausanne-direct"
-kind = "http"
-url = "{}"
-docker = "ssh://dirdmaster@10.17.0.125"
-"#,
-            NO_CONTROLLER_SENTINEL
-        );
-        let file: CredentialsFile = toml::from_str(&toml_in).unwrap();
-        // The HTTP-sentinel + docker shortcut is rewritten to Docker on load.
-        let migrated = file.contexts[0].migrate_legacy_sentinel();
-        match &migrated.backend {
-            Backend::Docker { url } => assert_eq!(url, "ssh://dirdmaster@10.17.0.125"),
-            other => panic!("expected migrated Docker, got {other:?}"),
-        }
-        assert!(
-            migrated.docker.is_none(),
-            "docker field cleared post-migration"
-        );
     }
 }

@@ -66,7 +66,6 @@ pub fn import_from_docker(name: &str, docker_config_dir: &Path) -> Result<Contex
         backend: Backend::Docker {
             url: meta.endpoints.docker.host,
         },
-        docker: None,
     })
 }
 
@@ -98,11 +97,8 @@ mod tests {
         write_docker_meta(tmp.path(), "lausanne", "ssh://dirdmaster@10.17.0.125");
         let entry = import_from_docker("lausanne", tmp.path()).unwrap();
         assert_eq!(entry.name, "lausanne");
-        match entry.backend {
-            Backend::Docker { url } => assert_eq!(url, "ssh://dirdmaster@10.17.0.125"),
-            other => panic!("expected Docker, got {other:?}"),
-        }
-        assert!(entry.docker.is_none());
+        let Backend::Docker { url } = entry.backend;
+        assert_eq!(url, "ssh://dirdmaster@10.17.0.125");
     }
 
     #[test]
