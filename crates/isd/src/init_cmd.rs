@@ -38,7 +38,7 @@ pub struct InitArgs {
     pub no_agent: bool,
 }
 
-const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose.yaml");
+pub(crate) const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose.yaml");
 
 /// Image used for the one-shot bootstrap container that seeds
 /// `/state/master.key` in the iso-controller-state volume. Pinned to a

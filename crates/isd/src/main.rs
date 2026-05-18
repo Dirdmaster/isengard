@@ -19,6 +19,7 @@
 //!  - `isd route create | list | rm`: routing-rule CRUD
 //!  - `isd hosts list`: enumerate enrolled hosts (ULID, hostname, labels)
 //!  - `isd update`: self-replace the operator binary from a GitHub Release
+//!  - `isd upgrade`: pull a new controller + agent image tag, recreate
 
 use clap::{Parser, Subcommand};
 
@@ -57,6 +58,7 @@ mod stack_cmd;
 mod table;
 mod uninit_cmd;
 mod update_cmd;
+mod upgrade_cmd;
 mod watch;
 
 #[derive(Parser, Debug)]
@@ -133,6 +135,8 @@ enum Command {
     Backup(backup_cmd::BackupArgs),
     /// Restore the controller state volume from an encrypted backup.
     Restore(restore_cmd::RestoreArgs),
+    /// Upgrade controller + agent to a new image tag (auto-backup first).
+    Upgrade(upgrade_cmd::UpgradeArgs),
 }
 
 #[tokio::main]
@@ -210,6 +214,7 @@ async fn main() {
         Command::JoinToken(args) => join_token_cmd::run(args, cli.context.as_deref()).await,
         Command::Backup(args) => backup_cmd::run(args, cli.context.as_deref()).await,
         Command::Restore(args) => restore_cmd::run(args, cli.context.as_deref()).await,
+        Command::Upgrade(args) => upgrade_cmd::run(args, cli.context.as_deref()).await,
     };
 
     if let Err(e) = result {

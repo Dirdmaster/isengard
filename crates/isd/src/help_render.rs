@@ -28,7 +28,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
             "join-token",
         ],
     ),
-    ("Setup", &["init", "uninit", "context", "update"]),
+    ("Setup", &["init", "uninit", "upgrade", "context", "update"]),
     ("Backup", &["backup", "restore"]),
 ];
 
