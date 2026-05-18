@@ -167,11 +167,30 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                     )
                 })?;
             let host_info = enroll::HostInfo::detect();
+
+            // Track F: when the join token is in the new packed format
+            // (`TK<base32-bytes>.<base32-fingerprint>`), fetch the
+            // controller's CA via skip-verify TLS and check its SHA-256
+            // against the fingerprint embedded in the token. The verified
+            // PEM is then pinned as the bootstrap trust root for the real
+            // Enroll RPC. Legacy bare tokens fall through to the existing
+            // env-var driven CA path inside `enroll::enroll`.
+            let mut bootstrap_trust = opts.bootstrap_trust.clone();
+            if isengard_core::join_token::parse(&enroll_token).is_ok() {
+                match enroll::fetch_and_verify_ca(&opts.controller_url, &enroll_token).await {
+                    Ok(pem) => {
+                        info!("enroll: fingerprint-verified controller CA via packed token");
+                        bootstrap_trust.verified_ca_pem = Some(pem);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
             let outcome = match enroll::enroll(
                 &opts.controller_url,
                 &enroll_token,
                 host_info,
-                opts.bootstrap_trust.clone(),
+                bootstrap_trust,
             )
             .await
             {

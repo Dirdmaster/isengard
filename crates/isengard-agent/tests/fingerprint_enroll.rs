@@ -38,6 +38,7 @@ async fn fingerprint_mismatch_hard_fails() {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(
             b"-----BEGIN CERTIFICATE-----\nWRONG\n-----END CERTIFICATE-----\n" as &[u8],
         ))
+        .expect(1)
         .mount(&server)
         .await;
 

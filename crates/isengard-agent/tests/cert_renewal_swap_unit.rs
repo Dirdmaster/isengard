@@ -122,6 +122,7 @@ async fn renewal_swaps_endpoint_in_holder() {
     let trust = BootstrapTrust {
         ca_pem_path: None,
         ca_pem: Some(ca.root_cert_pem().to_string()),
+        verified_ca_pem: None,
     };
     let host_info = HostInfo {
         hostname: "agent-renewal".into(),

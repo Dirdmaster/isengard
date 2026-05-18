@@ -44,7 +44,8 @@ pub const CONTROLLER_CA_PEM_BASE64_ENV: &str = "ISENGARD_CONTROLLER_CA_PEM_BASE6
 pub const CONTROLLER_CA_PEM_ENV: &str = "ISENGARD_CONTROLLER_CA_PEM";
 
 /// Optional pinned CA material for the bootstrap channel. Resolution order
-/// inside [`enroll`] is path env > inline env > caller-supplied > native roots.
+/// inside [`enroll`] is verified > path env > inline env > caller-supplied >
+/// native roots.
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapTrust {
     /// Path to a PEM file holding the controller CA. Equivalent to setting
@@ -52,6 +53,12 @@ pub struct BootstrapTrust {
     pub ca_pem_path: Option<std::path::PathBuf>,
     /// Inline PEM bytes. Equivalent to `ISENGARD_CONTROLLER_CA_PEM`.
     pub ca_pem: Option<String>,
+    /// Track F: CA PEM that has already been fingerprint-verified against
+    /// the join token's embedded SHA-256. When set, this wins over every
+    /// env-var path: a verified PEM is the cryptographic source of truth
+    /// and must not be overridden by a stale `ISENGARD_CONTROLLER_CA_PEM_*`
+    /// left over from a previous mint.
+    pub verified_ca_pem: Option<Vec<u8>>,
 }
 
 /// Resolved host metadata included in the EnrollRequest.
@@ -135,10 +142,15 @@ pub async fn enroll(
 }
 
 /// Resolve a [`ClientTlsConfig`] for the bootstrap channel. Precedence:
-/// path env > base64 env > inline-pem env > caller-provided path >
-/// caller-provided inline > native roots fallback. The first source that
-/// yields a non-empty PEM wins.
+/// fingerprint-verified PEM > path env > base64 env > inline-pem env >
+/// caller-provided path > caller-provided inline > native roots fallback.
+/// The first source that yields a non-empty PEM wins.
 fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
+    if let Some(pem) = trust.verified_ca_pem.as_ref() {
+        if !pem.is_empty() {
+            return Ok(ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)));
+        }
+    }
     if let Ok(path) = std::env::var(CONTROLLER_CA_PEM_PATH_ENV) {
         if !path.is_empty() {
             let pem = std::fs::read_to_string(&path).with_context(|| {
@@ -231,20 +243,16 @@ pub async fn fetch_and_verify_ca(
         return Err(anyhow!(
             "controller CA fingerprint mismatch: token says {} but controller served CA with fingerprint {}. \
              Token was either (a) minted against a different controller, (b) intercepted, or (c) the controller's CA was rotated since the token was minted",
-            hex_short(&parsed.fingerprint),
-            hex_short(&actual)
+            hex_full(&parsed.fingerprint),
+            hex_full(&actual)
         ));
     }
 
     Ok(pem)
 }
 
-fn hex_short(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
+fn hex_full(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Decode the value of `ISENGARD_CONTROLLER_CA_PEM_BASE64` into a PEM string.
@@ -282,6 +290,7 @@ mod bootstrap_tls_tests {
         let trust = BootstrapTrust {
             ca_pem_path: Some(path),
             ca_pem: None,
+            verified_ca_pem: None,
         };
         // Just asserting the function doesn't error on a real file. The CA is
         // not parsed here — tonic does that lazily when the channel handshakes.
@@ -293,6 +302,7 @@ mod bootstrap_tls_tests {
         let trust = BootstrapTrust {
             ca_pem_path: Some("/nonexistent/path/ca.pem".into()),
             ca_pem: None,
+            verified_ca_pem: None,
         };
         let err = build_bootstrap_tls(&trust).unwrap_err();
         assert!(format!("{err:#}").contains("bootstrap CA"));

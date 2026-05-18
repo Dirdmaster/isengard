@@ -893,6 +893,7 @@ async fn run_agent_mode(
         bootstrap_trust: isengard_agent::enroll::BootstrapTrust {
             ca_pem_path: controller_ca_pem_path,
             ca_pem: None,
+            verified_ca_pem: None,
         },
         advertise_iface,
     })
