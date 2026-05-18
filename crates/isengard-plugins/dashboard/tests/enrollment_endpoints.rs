@@ -224,8 +224,10 @@ async fn delete_host_cert_revokes_active_cert() {
     let (app, handles) = setup_app().await;
 
     // Enroll a host via the EnrollmentService so we have a real cert row to
-    // revoke (rather than just a host row with no cert).
-    let token = handles
+    // revoke (rather than just a host row with no cert). Track G: redeem
+    // requires the packed `TK<bytes>.<fingerprint>` shape; pack the bare
+    // base32 token mint returns before redeeming.
+    let bare = handles
         .enrollment
         .mint(
             isengard_storage::enrollment_token::TokenRole::Agent,
@@ -233,6 +235,12 @@ async fn delete_host_cert_revokes_active_cert() {
         )
         .await
         .unwrap();
+    let bytes_vec = data_encoding::BASE32_NOPAD
+        .decode(bare.as_bytes())
+        .expect("mint returns base32");
+    let bytes: [u8; 32] = bytes_vec.as_slice().try_into().expect("32 bytes");
+    let fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+    let token = isengard_core::join_token::pack(&bytes, fake_ca_pem);
     let bundle = handles
         .enrollment
         .redeem(

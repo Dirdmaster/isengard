@@ -2918,6 +2918,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "chrono",
+ "data-encoding",
  "ed25519-dalek",
  "futures-util",
  "hex",

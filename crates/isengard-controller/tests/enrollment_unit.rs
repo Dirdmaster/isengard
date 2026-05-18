@@ -46,17 +46,22 @@ async fn mint_returns_base32_token_of_expected_length() {
     );
 }
 
-// Legacy fallback regression guard: bare base32 token (no TK prefix)
-// must still redeem successfully via the redeem() Err(_) arm.
+/// Track G: redeem requires the packed `TK<bytes>.<fingerprint>` shape;
+/// bare-base32 tokens are rejected. Pack the freshly-minted token and
+/// confirm the signed-cert bundle comes back.
 #[tokio::test]
-async fn redeem_valid_token_returns_signed_cert() {
+async fn redeem_packed_token_returns_signed_cert() {
     let (_, svc) = fixture().await;
-    let token = svc
+    let bare = svc
         .mint(TokenRole::Agent, Duration::minutes(15))
         .await
         .unwrap();
-    let resp = svc.redeem(&token, host_info()).await.unwrap();
+    let bytes_vec = data_encoding::BASE32_NOPAD.decode(bare.as_bytes()).unwrap();
+    let bytes: [u8; 32] = bytes_vec.as_slice().try_into().unwrap();
+    let fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+    let packed = isengard_core::join_token::pack(&bytes, fake_ca_pem);
 
+    let resp = svc.redeem(&packed, host_info()).await.unwrap();
     assert!(resp.agent_cert_pem.contains("BEGIN CERTIFICATE"));
     assert!(resp.agent_key_pem.contains("BEGIN PRIVATE KEY"));
     assert!(resp.ca_root_pem.contains("BEGIN CERTIFICATE"));
@@ -64,6 +69,20 @@ async fn redeem_valid_token_returns_signed_cert() {
 
 #[tokio::test]
 async fn redeem_unknown_token_errors() {
+    let (_, svc) = fixture().await;
+    // A well-formed packed token whose bytes were never minted.
+    let bytes = [0xAAu8; 32];
+    let fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+    let packed = isengard_core::join_token::pack(&bytes, fake_ca_pem);
+    let err = svc.redeem(&packed, host_info()).await.unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("token"));
+}
+
+#[tokio::test]
+async fn redeem_bare_legacy_token_rejected_with_clear_error() {
+    // Track G: legacy bare-base32 tokens (the pre-Track-F shape) are
+    // rejected. The error message names "token" so callers can match on
+    // it (existing `enroll_e2e` regression guard).
     let (_, svc) = fixture().await;
     let err = svc
         .redeem("INVALID-TOKEN-XXXX", host_info())
@@ -75,12 +94,16 @@ async fn redeem_unknown_token_errors() {
 #[tokio::test]
 async fn redeem_twice_errors_second_time() {
     let (_, svc) = fixture().await;
-    let token = svc
+    let bare = svc
         .mint(TokenRole::Agent, Duration::minutes(15))
         .await
         .unwrap();
-    svc.redeem(&token, host_info()).await.unwrap();
-    let err = svc.redeem(&token, host_info()).await.unwrap_err();
+    let bytes_vec = data_encoding::BASE32_NOPAD.decode(bare.as_bytes()).unwrap();
+    let bytes: [u8; 32] = bytes_vec.as_slice().try_into().unwrap();
+    let fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+    let packed = isengard_core::join_token::pack(&bytes, fake_ca_pem);
+    svc.redeem(&packed, host_info()).await.unwrap();
+    let err = svc.redeem(&packed, host_info()).await.unwrap_err();
     assert!(format!("{err}").to_lowercase().contains("token"));
 }
 
@@ -117,14 +140,23 @@ async fn redeem_track_f_packed_token_round_trips() {
 async fn two_back_to_back_enrollments_get_distinct_fingerprints() {
     let (inv, svc) = fixture().await;
 
-    let token_a = svc
-        .mint(TokenRole::Agent, Duration::minutes(15))
-        .await
-        .unwrap();
-    let token_b = svc
-        .mint(TokenRole::Agent, Duration::minutes(15))
-        .await
-        .unwrap();
+    let fake_ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+    let pack = |bare: &str| -> String {
+        let bytes_vec = data_encoding::BASE32_NOPAD.decode(bare.as_bytes()).unwrap();
+        let bytes: [u8; 32] = bytes_vec.as_slice().try_into().unwrap();
+        isengard_core::join_token::pack(&bytes, fake_ca_pem)
+    };
+
+    let token_a = pack(
+        &svc.mint(TokenRole::Agent, Duration::minutes(15))
+            .await
+            .unwrap(),
+    );
+    let token_b = pack(
+        &svc.mint(TokenRole::Agent, Duration::minutes(15))
+            .await
+            .unwrap(),
+    );
 
     let resp_a = svc
         .redeem(
