@@ -2802,6 +2802,7 @@ dependencies = [
  "tonic",
  "tracing",
  "ulid",
+ "wiremock",
  "x509-parser 0.16.0",
 ]
 
