@@ -80,7 +80,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 age.workspace = true
 aws-sdk-s3.workspace = true
 aws-config.workspace = true
-tokio-util = { workspace = true, features = ["io"] }
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 
 [dev-dependencies]
 tempfile.workspace = true
