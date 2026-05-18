@@ -119,14 +119,25 @@ fn mtls(ca_root_pem: &str, cert_pem: &str, key_pem: &str) -> ClientTlsConfig {
         .domain_name(CONTROLLER_DNS)
 }
 
+/// Track G: redeem requires the packed `TK<bytes>.<fingerprint>` shape;
+/// wrap a bare-base32 token (the mint output) with the harness's CA.
+fn pack(bare: &str, ca_pem: &str) -> String {
+    let bytes_vec = data_encoding::BASE32_NOPAD
+        .decode(bare.as_bytes())
+        .expect("mint returns base32");
+    let bytes: [u8; 32] = bytes_vec.as_slice().try_into().expect("32 bytes");
+    isengard_core::join_token::pack(&bytes, ca_pem.as_bytes())
+}
+
 #[tokio::test]
 async fn enroll_then_mtls_heartbeat_succeeds() {
     let boot = boot_controller().await;
-    let token = boot
+    let bare = boot
         .enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
+    let token = pack(&bare, boot.ca.root_cert_pem());
 
     // Phase 1: bootstrap channel (no client cert) → enroll. The interceptor
     // bypasses the cert check for the Enroll method, so this succeeds.
@@ -176,11 +187,12 @@ async fn enroll_then_mtls_heartbeat_succeeds() {
 #[tokio::test]
 async fn revoked_cert_rejected() {
     let boot = boot_controller().await;
-    let token = boot
+    let bare = boot
         .enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
+    let token = pack(&bare, boot.ca.root_cert_pem());
 
     // Bootstrap → enroll
     let channel = Channel::from_shared(boot.url.clone())
@@ -246,11 +258,12 @@ async fn revoked_cert_rejected() {
 async fn renew_cert_uses_caller_cert_cn_not_request_body() {
     let boot = boot_controller().await;
 
-    let token = boot
+    let bare = boot
         .enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
+    let token = pack(&bare, boot.ca.root_cert_pem());
 
     // Bootstrap → enroll agent A.
     let channel = Channel::from_shared(boot.url.clone())

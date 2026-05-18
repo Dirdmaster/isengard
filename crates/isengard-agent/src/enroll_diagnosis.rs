@@ -71,13 +71,12 @@ pub fn render(diagnosis: EnrollmentDiagnosis, controller_url: &str) -> String {
             "x Failed to enroll with controller at {controller_url}\n\n\
              \x20 Reason: HTTP/2 protocol error during the enrollment handshake.\n\n\
              \x20 Most likely cause: the controller listens on TLS but the URL uses http://\n\
-             \x20 (not https://). Phase 14 added mTLS enrollment.\n\n\
+             \x20 (not https://).\n\n\
              \x20 Fix:\n\
              \x20   1. Check the controller URL scheme. Should be https:// for 9417.\n\
-             \x20   2. Make sure ISENGARD_CONTROLLER_CA_PEM_PATH or _PEM is set, since\n\
-             \x20      the controller uses a self-signed CA by default.\n\
-             \x20      Export the CA: docker exec iso-controller isengard controller ca export\n\
-             \x20   3. Re-run.\n\n\
+             \x20   2. Mint a fresh join-token with `isd join-token` (it embeds the CA\n\
+             \x20      fingerprint so the agent can verify the controller automatically).\n\
+             \x20   3. Re-run with the token from step 2.\n\n\
              \x20 For full error chain: rerun with RUST_LOG=debug",
         ),
         EnrollmentDiagnosis::TokenRejected => format!(

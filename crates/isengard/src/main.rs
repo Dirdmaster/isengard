@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use base64::Engine;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use isengard_controller::ca::Authority;
@@ -608,12 +607,10 @@ async fn run_token_mint(
             // packed Track F form, so newer agents verify the CA fingerprint
             // even when the operator pasted the old-style block.
             let host_port = resolve_public_addr(public_addr.as_deref());
-            let ca_b64 = base64::engine::general_purpose::STANDARD.encode(ca_pem.as_bytes());
             let expires_at = minted_at + chrono_ttl;
             let block = render_join_command(JoinCommandArgs {
                 ttl: ttl.to_string(),
                 token: &packed_token,
-                ca_b64: &ca_b64,
                 image: &image,
                 public_addr: &host_port,
                 expires_at,
@@ -656,7 +653,6 @@ fn resolve_public_addr(public_addr: Option<&str>) -> String {
 struct JoinCommandArgs<'a> {
     ttl: String,
     token: &'a str,
-    ca_b64: &'a str,
     image: &'a str,
     public_addr: &'a str,
     expires_at: chrono::DateTime<chrono::Utc>,
@@ -678,10 +674,6 @@ fn render_join_command(a: JoinCommandArgs<'_>) -> String {
     out.push_str("      -v iso-agent-state:/var/lib/isengard \\\n");
     out.push_str("      -v /var/run/docker.sock:/var/run/docker.sock \\\n");
     out.push_str(&format!("      -e ISENGARD_ENROLL_TOKEN={} \\\n", a.token));
-    out.push_str(&format!(
-        "      -e ISENGARD_CONTROLLER_CA_PEM_BASE64={} \\\n",
-        a.ca_b64
-    ));
     out.push_str(&format!("      {} \\\n", a.image));
     out.push_str(&format!(
         "      agent --controller https://{} --state-dir /var/lib/isengard\n\n",
