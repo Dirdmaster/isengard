@@ -37,10 +37,8 @@ pub struct BackupArgs {
 }
 
 impl BackupArgs {
-    /// Default args for Phase 4's `isd uninit --backup` integration: just
+    /// Default args for the `isd uninit --backup-first` integration: just
     /// the fs destination with the default-generated filename in `cwd`.
-    /// Wired by `uninit_cmd` in a separate phase; allow_dead until then.
-    #[allow(dead_code)]
     pub fn default_for_uninit() -> Self {
         Self::default()
     }
