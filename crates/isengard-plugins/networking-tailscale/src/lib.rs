@@ -75,7 +75,7 @@ impl NetworkingAdapter for TailscaleAdapter {
         // hostname doesn't 503. Caller (controller's RoutingPusher or agent
         // equivalent) reads the cert from adapter_data and writes it to the
         // agent's CertStore via the existing install API. The cert pump
-        // hookup is a separate Phase 8c+ follow-up; for now the adapter just
+        // hookup is a separate follow-up; for now the adapter just
         // surfaces the cert.
         let (cert_pem, key_pem) = cli::fetch_cert(&spec.public_hostname).await?;
 

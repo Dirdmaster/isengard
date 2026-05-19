@@ -1,4 +1,4 @@
-//! Real-Docker e2e: Phase 9F rollback failure handler.
+//! Real-Docker e2e: rollback failure handler.
 //!
 //! Same shape as `deployment_blue_green_aborts_on_healthcheck` but with a
 //! Rollback-policy seeded `previous_digest`. The deployment fails its

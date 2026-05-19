@@ -94,7 +94,7 @@ impl FromStr for PolicyScopeType {
 ///
 /// `Pinned` is the strongest constraint: never update. `TagOnly` updates only
 /// when the resolved tag's digest changes (no semver shift). `Minor` allows
-/// patch+minor bumps once Phase 9i lands. `Any` is the loosest: take whatever
+/// patch+minor bumps once lands. `Any` is the loosest: take whatever
 /// the registry serves for the configured tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -109,7 +109,7 @@ pub enum UpdateStrategy {
 /// approval, or is blocked entirely.
 ///
 /// `Approval` is data-modeled here but not yet enforced: enforcement lands in
-/// Phase 9e. Until then, REST writes that set `gate=Approval` are rejected at
+/// Until then, REST writes that set `gate=Approval` are rejected at
 /// the API layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -121,8 +121,8 @@ pub enum UpdateGate {
 
 /// What to do when an update fails health checks.
 ///
-/// `Rollback` couples with Phase 10's blue-green collapse recovery and lands
-/// in Phase 9j. `Keep` leaves the broken green up for forensic inspection.
+/// `Rollback` couples with blue-green collapse recovery.
+/// `Keep` leaves the broken green up for forensic inspection.
 /// `Notify` is the safe default: emit an event, leave the previous container
 /// in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +137,7 @@ pub enum FailureHandling {
 /// optional IANA timezone name. `None` timezone resolves as UTC.
 ///
 /// The cron expression is standard 5-field syntax:
-/// `minute hour day-of-month month day-of-week`. Phase 9d uses the `croner`
+/// `minute hour day-of-month month day-of-week`. Uses the `croner`
 /// crate, which accepts both 5- and 6-field forms; the UI and validation
 /// helper text only document 5-field for clarity.
 ///
@@ -166,11 +166,11 @@ pub struct Policy {
     pub on_failure: Option<FailureHandling>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub approver_channel: Option<String>,
-    /// Phase 9d: maintenance window. `None` means "no window constraint";
+    /// Maintenance window. `None` means "no window constraint";
     /// updates may apply at any time.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub window: Option<MaintenanceWindow>,
-    /// Phase 12c: external-action gate. `None` means "no gate"; the
+    /// External-action gate. `None` means "no gate"; the
     /// updater applies the existing post-policy logic. `Some(...)` makes
     /// the updater consult the gate URL before any update.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(p, back);
     }
 
-    /// Phase 12c: external_gate round-trips through JSON.
+    /// External_gate round-trips through JSON.
     #[test]
     fn policy_with_external_gate_round_trips() {
         let p = Policy {
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(p, back);
     }
 
-    /// Backwards-compat: rows persisted before Phase 12c (no `external_gate`
+    /// Backwards-compat: rows persisted (no `external_gate`
     /// key) decode cleanly with `external_gate = None`.
     #[test]
     fn policy_without_external_gate_field_deserializes() {
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(p, back);
     }
 
-    /// Backwards-compat: rows persisted before Phase 9d (no `window` key)
+    /// Backwards-compat: rows persisted (no `window` key)
     /// must deserialize cleanly with `window = None`.
     #[test]
     fn policy_without_window_field_deserializes() {

@@ -1,4 +1,4 @@
-//! Phase 12b T2 acceptance tests for the container_hooks DAO.
+//! Acceptance tests for the container_hooks DAO.
 
 use isengard_storage::{ContainerHooks, EnrollHost, HostId, Inventory, UpsertContainerHooks};
 

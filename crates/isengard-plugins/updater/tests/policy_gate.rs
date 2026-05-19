@@ -1,4 +1,4 @@
-//! Phase 12c integration tests for external-action gates (#55).
+//! Integration tests for external-action gates (#55).
 //!
 //! Composes `evaluate_gate` (HTTP, wiremock-driven) with
 //! `policy_decision_from_gate` to confirm the whole pipeline collapses to

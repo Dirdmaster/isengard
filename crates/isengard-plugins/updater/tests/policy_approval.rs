@@ -1,4 +1,4 @@
-//! Phase 9e T2 integration tests for the updater's `gate=Approval` branch.
+//! Integration tests for the updater's `gate=Approval` branch.
 //!
 //! See plan §"T2: Updater integration" of
 //! `docs/superpowers/plans/2026-05-06-phase-9e-9f-approval-flow.md`.

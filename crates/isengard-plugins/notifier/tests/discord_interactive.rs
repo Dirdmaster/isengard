@@ -1,4 +1,4 @@
-//! Phase 9c: Discord interactive messages + signature verify.
+//! Discord interactive messages + signature verify.
 //!
 //! Boundaries are mocked at the HTTP layer with `wiremock`. The
 //! subscriber-style test uses the real `Inventory` (in-memory sqlite) so the

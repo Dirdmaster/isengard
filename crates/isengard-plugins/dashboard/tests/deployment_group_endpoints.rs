@@ -1,5 +1,5 @@
 //! REST endpoint coverage for `/api/v1/deployment-groups` + the per-stack
-//! parallelism setter. Phase 10c (T3, refs #50).
+//! parallelism setter. (T3, refs #50).
 
 use std::sync::Arc;
 

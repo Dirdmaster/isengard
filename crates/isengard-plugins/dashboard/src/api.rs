@@ -44,7 +44,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         )
         .route("/services", get(list_services))
         .route("/services/{id}", get(get_service))
-        // Phase 0.18: container-first projection of the agent heartbeat.
+        // Container-first projection of the agent heartbeat.
         // `isd ps` and the dashboard container view both read from here.
         .route(
             "/containers",
@@ -61,7 +61,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .route("/events", get(list_events))
         .route("/events/{id}", get(get_event))
         .route("/settings", get(get_settings).patch(patch_settings))
-        // Phase 0.14: placement scheduler readback. Returns every
+        // Placement scheduler readback. Returns every
         // placement row plus the host hostname so the CLI / dashboard
         // can render the grid without a second hosts call.
         .route("/placements", get(list_placements))
@@ -69,7 +69,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
             "/placements/by-stack/{stack_id}",
             get(list_placements_by_stack),
         )
-        // Track F: serve the controller's CA PEM unauthenticated. The
+        // Serve the controller's CA PEM unauthenticated. The
         // endpoint is only reachable on the loopback-bound listener
         // (compose maps 127.0.0.1:9418); trust-the-transport already
         // covers access control. Agents fetch this during pre-enroll
@@ -78,11 +78,11 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .with_state(handles)
 }
 
-/// Track F: return the controller's root CA in PEM form so an
+/// Return the controller's root CA in PEM form so an
 /// enrolling agent can verify its operator-printed fingerprint before
 /// trusting the cert for the actual enroll RPC. No auth check here;
 /// see the route comment above for why (loopback-bound listener,
-/// trust-the-transport per Track D).
+/// trust-the-transport per).
 async fn get_ca_pem(State(handles): State<Arc<ControllerHandles>>) -> impl IntoResponse {
     let pem = handles.ca.root_cert_pem().to_string();
     (
@@ -315,7 +315,7 @@ async fn list_events(
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     // When a `deployment_id` filter is set, widen the journal scan so we
     // don't lose events behind newer unrelated rows. Cap at 5000 rows for
-    // safety. Phase 10c (T4 refs #50).
+    // safety. (T4 refs #50).
     let scan_limit = if q.deployment_id.is_some() {
         limit.clamp(500, 5000)
     } else {
@@ -448,7 +448,7 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}"));
         }
     };
-    // Phase 0.13: include the manifest bundle inline. Legacy compose-only
+    // Include the manifest bundle inline. Legacy compose-only
     // stacks get null / empty fields back; the dashboard JS ignores them.
     let bundle = handles
         .inventory
@@ -530,7 +530,7 @@ async fn get_stack_compose(
     }
 }
 
-/// `PUT /api/v1/stacks/:id/compose` (v0.3d + Phase 0.13 wave 2.A follow-up).
+/// `PUT /api/v1/stacks/:id/compose` (v0.3d + wave 2.A follow-up).
 ///
 /// Two body shapes, selected by `Content-Type`:
 ///
@@ -538,7 +538,7 @@ async fn get_stack_compose(
 ///   The compose is written; manifest / secrets / hooks state is left
 ///   unchanged. `If-Match: <sha256>` provides optimistic concurrency.
 ///
-/// - `application/json` (Phase 0.13 follow-up to wave 2.A): structured
+/// - `application/json` (follow-up to wave 2.A): structured
 ///   body that mirrors `POST /api/v1/stacks`:
 ///   ```json
 ///   {
@@ -768,7 +768,7 @@ async fn put_stack_compose(
     }
 }
 
-/// Phase 0.13 (wave 2.A follow-up): JSON body for `PUT /stacks/:id/compose`.
+/// JSON body for `PUT /stacks/:id/compose`.
 /// Same shape as the manifest fields on `POST /stacks` plus a renamed
 /// `compose` (no `_yaml` suffix; the field is the YAML body verbatim).
 #[derive(Debug, Deserialize)]
@@ -817,7 +817,7 @@ struct PutComposeQuery {
     force: Option<bool>,
 }
 
-/// Phase 0.13 follow-up: hook shape in `GET /stacks/{id}/manifest` responses.
+/// Follow-up: hook shape in `GET /stacks/{id}/manifest` responses.
 /// Mirrors the request-body shape on POST /stacks (`HookBody`) so the client
 /// can round-trip a manifest cleanly. `on` and `on_event` track the same
 /// field; we expose `on` here to match the manifest TOML schema operators see.
@@ -840,7 +840,7 @@ impl From<isengard_storage::StackHook> for ManifestHookDto {
     }
 }
 
-/// `GET /api/v1/stacks/:id/manifest` (Phase 0.13 follow-up).
+/// `GET /api/v1/stacks/:id/manifest`.
 ///
 /// Returns the persisted `stack.toml` body for `stack_id`, plus the
 /// secrets + hooks bound at deploy time. The operator-side `isd manifest
@@ -912,7 +912,7 @@ struct PutManifestBody {
     hooks: Option<Vec<HookBody>>,
 }
 
-/// `PUT /api/v1/stacks/:id/manifest` (Phase 0.13 follow-up).
+/// `PUT /api/v1/stacks/:id/manifest`.
 ///
 /// Replaces the persisted manifest body (and optionally secrets + hooks)
 /// for `stack_id`. Optimistic concurrency: the `If-Match` header carries
@@ -1016,21 +1016,21 @@ struct CreateStackBody {
     /// auto-selected. With multiple hosts, the operator must specify.
     #[serde(default)]
     host_id: Option<String>,
-    /// Phase 0.13: verbatim `stack.toml` body. When present, the
+    /// Verbatim `stack.toml` body. When present, the
     /// controller asserts manifest.name == body.name and stores it
     /// alongside the compose.
     #[serde(default)]
     manifest_toml: Option<String>,
-    /// Phase 0.13: per-fleet secret names to bind to this stack. Unknown
+    /// Per-fleet secret names to bind to this stack. Unknown
     /// names yield 422 with the missing list.
     #[serde(default)]
     secrets: Option<Vec<String>>,
-    /// Phase 0.13: lifecycle hooks shaped like the manifest.
+    /// Lifecycle hooks shaped like the manifest.
     #[serde(default)]
     hooks: Option<Vec<HookBody>>,
 }
 
-/// Phase 0.13: hook shape on POST /stacks. Mirrors the TOML manifest.
+/// Hook shape on POST /stacks. Mirrors the TOML manifest.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct HookBody {
     on: String,
@@ -1056,7 +1056,7 @@ struct CreateStackResponse {
     written_sha256: String,
 }
 
-/// Phase 0.13: validate + persist a manifest bundle for `stack_id`.
+/// Validate + persist a manifest bundle for `stack_id`.
 /// Returns the verbatim manifest_toml the controller should ship to the
 /// agent in the WriteCompose payload (empty when no manifest was sent).
 /// Errors return a fully-formed HTTP response (400 / 422 / 500) the
@@ -1213,7 +1213,7 @@ fn sha256_hex_of(s: &str) -> String {
 /// when the stack name isn't yet in the controller's inventory; the
 /// dashboard will use it for the future "new stack" button.
 ///
-/// Phase 0.13: optional `manifest_toml`, `secrets`, `hooks` body fields
+/// Optional `manifest_toml`, `secrets`, `hooks` body fields
 /// persist orchestration metadata at the same time. Unknown secret
 /// names yield 422 with `{ missing: [...] }`; manifest-name mismatch
 /// yields 400.
@@ -1298,7 +1298,7 @@ async fn create_stack(
         }
     };
 
-    // Phase 0.13: persist manifest body + secrets + hooks BEFORE the
+    // Persist manifest body + secrets + hooks BEFORE the
     // WriteCompose goes out. This keeps the controller's view consistent
     // with what we're about to ship: if the manifest persist fails the
     // operator gets the error and no WriteCompose is dispatched.
@@ -1517,7 +1517,7 @@ async fn get_service(
     json_err(StatusCode::NOT_FOUND, "service not found")
 }
 
-/// `GET /api/v1/services/:stack_id/:service_name` (Phase 13A).
+/// `GET /api/v1/services/:stack_id/:service_name`.
 ///
 /// Returns the everything-in-one envelope the service detail page renders:
 /// the primary `Service` row for `(stack.host_id, stack_id, service_name)`,
@@ -1824,7 +1824,7 @@ pub async fn install_sh(
         .into_response()
 }
 
-// ============== Phase 0.14: placement scheduler endpoints ==============
+// ============== placement scheduler endpoints ==============
 
 #[derive(Debug, Clone, Serialize)]
 struct PlacementRowDto {
@@ -2376,7 +2376,7 @@ mod tests {
         assert_eq!(parsed[0]["name"], "web");
     }
 
-    /// Phase 0.13 wave 2.A follow-up: `PUT /stacks/{id}/compose` with no
+    /// Wave 2.A follow-up: `PUT /stacks/{id}/compose` with no
     /// Content-Type returns 415 with the accepted types listed. Operators
     /// shouldn't ever land here in practice (curl/reqwest set the header
     /// when given a body), but a tight 415 keeps the failure mode legible.
@@ -2418,7 +2418,7 @@ mod tests {
         assert!(err.contains("application/json"), "got: {err}");
     }
 
-    /// Phase 0.13 wave 2.A follow-up: unknown content-type (e.g. plain
+    /// Wave 2.A follow-up: unknown content-type (e.g. plain
     /// text) is 415 with the same error shape.
     #[tokio::test]
     async fn put_compose_unknown_content_type_returns_415() {
@@ -2451,7 +2451,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
-    /// Phase 0.13 wave 2.A follow-up: YAML content-type (legacy v0.3d
+    /// Wave 2.A follow-up: YAML content-type (legacy v0.3d
     /// shape) still routes through. Without an agent attached, the
     /// dispatch reaches the routing layer and bounces with 503: that's
     /// the proof the body shape was accepted and the YAML branch ran.
@@ -2490,7 +2490,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    /// Phase 0.13 wave 2.A follow-up: JSON variant with manifest body +
+    /// Wave 2.A follow-up: JSON variant with manifest body +
     /// secrets + hooks is accepted. Reaches the routing layer (503 here)
     /// only after the manifest bundle has been validated and persisted;
     /// post-condition: the manifest_toml row is set on the stack.
@@ -2541,7 +2541,7 @@ mod tests {
         assert_eq!(s.manifest_toml.as_deref(), Some(manifest));
     }
 
-    /// Phase 0.13 wave 2.A follow-up: 422 with `missing: [...]` when the
+    /// Wave 2.A follow-up: 422 with `missing: [.]` when the
     /// JSON body's `secrets` references a name the controller doesn't
     /// know about. Validation runs before the WriteCompose dispatch so
     /// no agent traffic is generated.
@@ -2587,7 +2587,7 @@ mod tests {
         assert_eq!(parsed["missing"][0], "nonexistent_secret");
     }
 
-    /// Phase 0.13 wave 2.A follow-up: 400 when the JSON body's hook has
+    /// Wave 2.A follow-up: 400 when the JSON body's hook has
     /// an invalid `on_error` value. The validation runs through the
     /// shared `phase_0_13_persist_manifest_bundle` helper.
     #[tokio::test]
@@ -2631,7 +2631,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// Phase 0.13 wave 2.A follow-up: JSON body with an empty `compose`
+    /// Wave 2.A follow-up: JSON body with an empty `compose`
     /// field is 400 (the field is required and non-empty).
     #[tokio::test]
     async fn put_compose_json_empty_compose_returns_400() {
@@ -2665,7 +2665,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// Phase 0.13 wave 2.A follow-up: content-type with a charset suffix
+    /// Wave 2.A follow-up: content-type with a charset suffix
     /// (`application/json; charset=utf-8`) still routes to the JSON
     /// branch. Browsers and many HTTP clients add the suffix by default.
     #[tokio::test]
@@ -2705,7 +2705,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    /// Phase 0.13 follow-up: `GET /stacks/{id}/manifest` returns the
+    /// Follow-up: `GET /stacks/{id}/manifest` returns the
     /// persisted manifest body when one was deployed.
     #[tokio::test]
     async fn get_manifest_returns_persisted_bundle() {
@@ -2756,7 +2756,7 @@ mod tests {
         assert!(parsed.get("manifest_fleet").is_none());
     }
 
-    /// Phase 0.13 follow-up: legacy compose-only stacks (no manifest ever
+    /// Follow-up: legacy compose-only stacks (no manifest ever
     /// deployed) return 204, not an empty 200 that would look editable.
     #[tokio::test]
     async fn get_manifest_returns_no_content_for_legacy_stack() {
@@ -2787,7 +2787,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
-    /// Phase 0.13 follow-up: unknown stack id yields 404 with a JSON error.
+    /// Follow-up: unknown stack id yields 404 with a JSON error.
     #[tokio::test]
     async fn get_manifest_returns_404_for_unknown_stack() {
         let handles = test_handles().await;
@@ -2804,7 +2804,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    /// Phase 0.13 follow-up: `PUT /stacks/{id}/manifest` rewrites the
+    /// Follow-up: `PUT /stacks/{id}/manifest` rewrites the
     /// persisted manifest. The first PUT skips optimistic concurrency
     /// (empty If-Match) and lands the body verbatim.
     #[tokio::test]
@@ -2858,7 +2858,7 @@ mod tests {
         assert_eq!(bundle.manifest_toml.as_deref(), Some(manifest_toml));
     }
 
-    /// Phase 0.13 follow-up: `If-Match` mismatch yields 409 with the
+    /// Follow-up: `If-Match` mismatch yields 409 with the
     /// current sha + body so the caller can diff and re-edit.
     #[tokio::test]
     async fn put_manifest_conflict_on_stale_if_match() {
@@ -2906,7 +2906,7 @@ mod tests {
         assert_eq!(parsed["current_toml"], original);
     }
 
-    /// Phase 0.13 follow-up: empty `manifest_toml` body is rejected with
+    /// Follow-up: empty `manifest_toml` body is rejected with
     /// 400 so operators don't accidentally wipe their manifest by saving
     /// an empty editor buffer.
     #[tokio::test]
@@ -2941,7 +2941,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// Phase 0.13 follow-up: name mismatch (body says `blog`, manifest
+    /// Follow-up: name mismatch (body says `blog`, manifest
     /// says `notblog`) is a 400 from `phase_0_13_persist_manifest_bundle`.
     /// Exercises the validation pass through the PUT path end-to-end.
     #[tokio::test]

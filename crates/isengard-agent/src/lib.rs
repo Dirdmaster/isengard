@@ -1,5 +1,5 @@
 //! Agent-mode runtime: load plugins, run their lifecycle hooks, wait for
-//! shutdown. Phase 1 minimum — no gRPC client, no docker integration.
+//! shutdown. Minimum — no gRPC client, no docker integration.
 
 pub mod agent_labels;
 pub mod agent_state;
@@ -44,14 +44,13 @@ use crate::deployment::{DeploymentSupervisor, SupervisorDispatcher};
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
     /// URL of the controller, e.g. `https://controller.example.com:9417`.
-    /// Required — Phase 2d removes the `Option` wrapper from Phase 1. Must be
-    /// `https://` post-Phase-14 since the gRPC server is mTLS-only.
+    /// Required. Must be `https://` since the gRPC server is mTLS-only.
     pub controller_url: String,
     /// Directory where the agent persists its state (`agent.json` +
     /// `certs/{ca,agent.crt,agent.key}` etc). Created if missing.
     pub state_dir: std::path::PathBuf,
     pub config: serde_json::Value,
-    /// Reverse-proxy ports (Phase 8b). If both are `None`, the proxy
+    /// Reverse-proxy ports. If both are `None`, the proxy
     /// supervisor is not spawned — useful for integration tests that don't
     /// want to fight over port 8080/8443. Production passes `Some(8080)` /
     /// `Some(8443)`. Plan B will read these from settings.
@@ -61,12 +60,12 @@ pub struct AgentOptions {
     /// listener + ACME are all disabled — useful for integration tests.
     /// Production passes `Some(TlsOptions { ... })`.
     pub tls: Option<TlsOptions>,
-    /// One-time enrollment token (Phase 14). Used only on first boot when
+    /// One-time enrollment token. Used only on first boot when
     /// `agent.json` does not yet exist. The runtime also falls back to the
     /// `ISENGARD_ENROLL_TOKEN` env var. Once an agent has a persisted cert
     /// bundle, this is ignored.
     pub enroll_token: Option<String>,
-    /// Optional trust pin for the bootstrap Enroll RPC (Phase 14 task 15).
+    /// Optional trust pin for the bootstrap Enroll RPC.
     /// Required when the controller serves a self-signed (internal-CA) cert,
     /// which is the default. Resolution order in [`enroll::enroll`]:
     /// `ISENGARD_CONTROLLER_CA_PEM_PATH` env > `ISENGARD_CONTROLLER_CA_PEM`
@@ -124,7 +123,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("creating state dir {:?}: {e}", opts.state_dir))?;
 
     // -- determine agent_id + cert bundle --------------------------------
-    //    Phase 14: first boot reads ISENGARD_ENROLL_TOKEN (or
+    //    First boot reads ISENGARD_ENROLL_TOKEN (or
     //    AgentOptions::enroll_token), exchanges it for a signed cert bundle
     //    via Enroll, and persists both the bundle and agent.json. Subsequent
     //    boots refuse to start if agent.json exists without certs.
@@ -251,9 +250,9 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let proxy_event_tx = emitter.sender();
     let emitter: Arc<dyn EventEmitter> = Arc::new(emitter);
 
-    // -- agent-side inventory (Phase 10): always opened so the
+    // -- agent-side inventory: always opened so the
     //    DeploymentSupervisor can record + reconcile blue-green rows.
-    //    Pre-Phase 10, only the TLS subsystem opened it (and only when TLS
+    //    Previously, only the TLS subsystem opened it (and only when TLS
     //    was enabled). The handle is cheap to clone.
     let inventory = open_agent_inventory(&opts.state_dir).await?;
 
@@ -295,7 +294,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     // get rewritten.
     let docker = backend.as_ref().and_then(|b| b.as_bollard());
 
-    // -- DeploymentSupervisor (Phase 10 Task 7). Build it BEFORE plugins so
+    // -- DeploymentSupervisor. Build it BEFORE plugins so
     //    its dispatcher can be threaded through PluginContext into the
     //    updater plugin. Reconcile orphans from a previous run before any
     //    plugin starts cycling, so we don't race the updater on a row this
@@ -310,7 +309,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let storage_host_id = isengard_storage::host::HostId(host_ulid);
     let core_host_id: isengard_core::HostId = host_ulid;
 
-    // -- Phase 14 Task 12: cert renewal task. Polls the on-disk cert TTL and
+    // -- cert renewal task. Polls the on-disk cert TTL and
     //    swaps in a fresh bundle once past 50%. Imp-2: the task and the sync
     //    loop share an `Arc<RwLock<Endpoint>>`; on renewal the task rebuilds
     //    the Endpoint from the new bundle and replaces the inner. Sync's
@@ -338,7 +337,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
-    // Phase 9b: build a `PolicyLoader` backed by the agent inventory so the
+    // Build a `PolicyLoader` backed by the agent inventory so the
     // updater plugin can consult the policies table once per cycle. Phase
     // 9F: also passed into the supervisor so it can resolve `on_failure`
     // and seed `previous_digest` for Rollback-policy deployments.
@@ -384,7 +383,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 
     // -- plugin lifecycle ----------------------------------------------
     //
-    // Phase 9e: build an `ApprovalStore` backed by the same inventory so the
+    // Build an `ApprovalStore` backed by the same inventory so the
     // updater can persist + dedupe pending-approval rows when a candidate's
     // resolved policy gates on `Approval`.
     let approval_store: Arc<dyn isengard_core::ApprovalStore> = Arc::new(
@@ -466,8 +465,8 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         });
     }
 
-    // -- spawn the runtime label watcher (Phase 8b Task 16, trait-ified
-    //    in Phase 0.5).
+    // -- spawn the runtime label watcher (Task 16, trait-ified
+    // ).
     //    Pushes ContainerLabelsReport / ContainerLabelsRemoved up the sync
     //    stream as containers come and go. Messages queue in `agent_msg_rx`
     //    while the stream is down; the sync loop drains them on reconnect.
@@ -491,7 +490,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         // bind in docker/compose.yaml so the file persists across
         // container restarts.
         //
-        // Phase 0.5: still bollard-coupled (reverse-engineering compose.yaml
+        // Still bollard-coupled (reverse-engineering compose.yaml
         // from running containers reaches into bollard inspect details the
         // trait doesn't surface yet). Gated on the bollard escape hatch;
         // fresh wisp installs skip compose-import: the use case is
@@ -514,7 +513,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         // edits (vim, git pull, dashboard PUT). Each debounced change
         // drives a reconcile sweep against the running containers.
         //
-        // Phase 0.6: lifted out of the if-let-Some-docker gate so wisp
+        // Lifted out of the if-let-Some-docker gate so wisp
         // deploys also see the watcher. reconcile_stack_with_secrets
         // drives the RuntimeBackend trait directly; the watcher only
         // captures an Arc<dyn RuntimeBackend>, no bollard borrow.
@@ -567,7 +566,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                         // endpoint; the variant only contacts the
                         // controller when at least one service has
                         // `secrets:` set OR the stack.toml declares
-                        // `secrets = [...]` at fleet level (Phase 0.13
+                        // `secrets = [.]` at fleet level (
                         // follow-up).
                         //
                         // Stack-level secrets are read off the persisted
@@ -681,7 +680,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     // -- run sync loop in background; ctrl_c triggers shutdown ----------
     let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
 
-    // Phase 13B: optional log source for `StartLogStream` subscriptions.
+    // Optional log source for `StartLogStream` subscriptions.
     // Same `docker` handle as the labels watcher and the deployment driver;
     // tests / docker-less envs skip log streaming the same way they skip
     // those subsystems.
@@ -698,7 +697,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_log_source = log_source.clone();
     let sync_mdns = mdns_handle.clone();
     let sync_backend = backend.clone();
-    // Phase 0.14: load agent labels once at boot. SIGHUP re-read is
+    // Load agent labels once at boot. SIGHUP re-read is
     // future work; for now the loader runs at agent start and the same
     // map travels with every heartbeat. BTreeMap from the loader is
     // converted to HashMap because the prost-generated `Heartbeat.labels`
@@ -714,7 +713,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     let sync_agent_labels = agent_label_map;
     // v0.3d: surface the compose root + host id to the sync loop so it
     // can service `WriteCompose` ControllerMessages from the dashboard.
-    // Phase 0.13 wave 3.D: also surface the EventEmitter so the
+    // Also surface the EventEmitter so the
     // lifecycle-hook executor can publish `lifecycle_hook.*` audit
     // events back to the controller via the existing outbound channel.
     let sync_compose_ctx = Some(sync::ComposeContext {
@@ -790,7 +789,7 @@ async fn open_agent_inventory(state_dir: &std::path::Path) -> Result<isengard_st
 
 /// Fallback heartbeat interval when the persisted `agent.json` predates Phase
 /// 14 (no `heartbeat_interval_secs` field). Production agents enrolled on
-/// Phase 14+ get this value from the EnrollResponse.
+/// Get this value from the EnrollResponse.
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u32 = 10;
 
 /// Build the reusable mTLS [`tonic::transport::Endpoint`] every post-enroll

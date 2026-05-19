@@ -1,5 +1,4 @@
 //! Integration tests for `/api/v1/approvals` + Telegram webhook callback
-//! (Phase 9 Plan B, T4).
 //!
 //! Builds the approvals router against an in-memory `Inventory` and verifies:
 //! - GET list / single / round-trip after a storage-side insert

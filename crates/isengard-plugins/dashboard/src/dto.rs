@@ -19,7 +19,7 @@ pub struct HostDto {
     pub docker_version: String,
     pub enrolled_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
-    /// Phase 0.5 wisp: which runtime backend this host's agent is
+    /// Wisp: which runtime backend this host's agent is
     /// driving (`docker`, `wisp`, ...). `"docker"` for pre-0.5
     /// agents that never gossiped the field. Read from
     /// `metadata.runtime_backend` on the host row.
@@ -158,7 +158,7 @@ pub struct EventsQuery {
     pub limit: Option<i64>,
     pub kind: Option<String>,
     pub host_id: Option<String>,
-    /// Phase 10c (T4 refs #50): filter events whose `metadata.deployment.id`
+    /// Filter events whose `metadata.deployment.id`
     /// matches this id. Used by the History tab row-expand timeline.
     pub deployment_id: Option<String>,
 }
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(dto.source, "compose");
     }
 
-    /// Phase 0.5 wisp: host metadata's `runtime_backend` key
+    /// Wisp: host metadata's `runtime_backend` key
     /// surfaces on the DTO so the dashboard / isd ps can render the
     /// column. Hosts whose agents never gossiped a backend (pre-0.5)
     /// default to `"docker"`.
@@ -373,7 +373,7 @@ mod tests {
     }
 }
 
-/// Phase 0.18: container list / get response shape.
+/// Container list / get response shape.
 ///
 /// `host_offline` and `host_offline_secs` are derived at the API
 /// boundary by joining containers to hosts and comparing

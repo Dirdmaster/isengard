@@ -1,4 +1,4 @@
-//! Phase 11a: age passphrase encryption tests.
+//! Age passphrase encryption tests.
 
 use isengard_plugin_backup::encrypt::{
     EncryptError, decrypt_with_passphrase, encrypt_with_passphrase, passphrase_fingerprint,

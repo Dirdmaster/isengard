@@ -1,4 +1,4 @@
-//! Phase 11a: backup destination trait + implementations.
+//! Backup destination trait + implementations.
 //!
 //! Two backends ship in 11a:
 //!

@@ -1,6 +1,6 @@
 //! `isd stack ls` and `isd stack ps`: docker-parity stack subcommands.
 //!
-//! Phase 0.18 step 6. The pre-0.18 surface had no `isd stack` namespace:
+//! Step 6. The pre-0.18 surface had no `isd stack` namespace:
 //! stack enumeration was buried inside the joined `isd ps` view and the
 //! verbs (`deploy`, `diff`, `edit`, `manifest`) lived at the top level
 //! with no shared parent. This module gives stacks their own namespace.

@@ -1,4 +1,4 @@
-//! Phase 11a: S3Destination tests using a wiremock S3-compatible endpoint.
+//! S3Destination tests using a wiremock S3-compatible endpoint.
 //!
 //! We don't aim to validate the SigV4 signature in tests (mock servers don't
 //! verify it). Instead we verify request shape: PUT/GET/DELETE land on the

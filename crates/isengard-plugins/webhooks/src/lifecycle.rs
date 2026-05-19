@@ -1,4 +1,4 @@
-//! Phase 12b: lifecycle-hook event subscriber on the webhooks plugin (#54).
+//! Lifecycle-hook event subscriber on the webhooks plugin (#54).
 //!
 //! Distinct from the 12a webhook subscriber. Listens for the four
 //! deployment lifecycle events; for each, looks up the deployment's blue

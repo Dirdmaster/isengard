@@ -1,15 +1,15 @@
 //! The `isd` index cache: `~/.cache/isengard/last-ps.json`.
 //!
 //! Any list command that renders a `#` column writes its row set here.
-//! Phase 0.22 lifecycle commands read it back to resolve a bare integer
+//! Lifecycle commands read it back to resolve a bare integer
 //! argument (`isd stop 2`) to a container. This module owns the schema,
 //! the read/write, and the staleness check; it does not do resolution.
 //!
-//! Phase 0.21 only exercises `write`; `read`, `age_secs`, `is_stale`,
-//! and `STALE_AFTER_SECS` are the API surface Phase 0.22's resolver
+//! Currently only `write` is exercised; `read`, `age_secs`, `is_stale`,
+//! and `STALE_AFTER_SECS` are the API surface the resolver
 //! will call. They're covered by unit tests in this module but not yet
 //! by a consumer in `main.rs`, so `dead_code` is allowed module-wide
-//! until Phase 0.22 wires them in.
+//! until the resolver wires them in.
 //!
 //! Design: `3 Resources/Superpowers/specs/2026-05-15-isd-table-renderer-design.md`.
 

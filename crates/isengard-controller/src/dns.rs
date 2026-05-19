@@ -323,7 +323,7 @@ async fn build_record_for_rule(
     ip_cache: &mut HashMap<HostId, Option<Ipv4Addr>>,
 ) -> Option<ZoneRecord> {
     // mDNS coexistence: `.local` rules are advertised by the agent itself
-    // via the Phase 9d (v0.3a) mDNS responder. Skip them here so we don't
+    // via the (v0.3a) mDNS responder. Skip them here so we don't
     // shadow the multicast answer.
     if rule.public_hostname.ends_with(".local") {
         return None;

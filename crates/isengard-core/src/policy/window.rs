@@ -1,4 +1,4 @@
-//! Maintenance window evaluator (Phase 9d).
+//! Maintenance window evaluator.
 //!
 //! See spec §"Window evaluator" of
 //! `docs/superpowers/specs/2026-05-06-phase-9d-maintenance-windows-design.md`.

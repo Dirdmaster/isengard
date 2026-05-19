@@ -565,7 +565,7 @@ impl EventSubscriber for Notifier {
 
     async fn handle(&self, _event: &Event, _ctx: &PluginContext) -> Result<()> {
         // Unused — start() spawns its own dispatch task. EventSubscriber
-        // is implemented for shape-compliance with the Phase 1 trait, but
+        // is implemented for shape-compliance with the trait, but
         // the actual handling is the spawned task in start().
         Ok(())
     }

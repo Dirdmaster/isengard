@@ -2,7 +2,7 @@
 //! based on the `com.docker.compose.project` label (or `isengard.stack=` override),
 //! and converts to the wire-format `StackInfo`.
 //!
-//! Phase 0.6: drives off the [`crate::runtime::RuntimeBackend`] trait
+//! Drives off the [`crate::runtime::RuntimeBackend`] trait
 //! so heartbeats from a wisp host stop dialling docker.sock every
 //! interval. The legacy `list_container_snapshots()` function (no
 //! backend arg) is kept for back-compat but routes through a
@@ -21,7 +21,7 @@ use crate::runtime::{ContainerState, ListFilter, RuntimeBackend};
 /// Lightweight snapshot of one container: the bits we need to derive
 /// stacks, services, and (phase 0.18) container rows from a heartbeat.
 ///
-/// Phase 0.18: extended with `id`, `created_at`, and `exit_code` so the
+/// Extended with `id`, `created_at`, and `exit_code` so the
 /// agent can ship a `ContainerInfo` per container. The runtime id is
 /// the backend's native handle (bollard container id, wisp handle).
 /// Pre-0.18 callers that consume only `name`/`image`/`state`/`labels`
@@ -44,7 +44,7 @@ pub struct ContainerSnapshot {
     pub exit_code: Option<i32>,
 }
 
-/// Phase 0.6: query the [`RuntimeBackend`] for all containers
+/// Query the [`RuntimeBackend`] for all containers
 /// (running + stopped) and project to the heartbeat-oriented
 /// [`ContainerSnapshot`] shape. Returns an empty Vec on backend error
 /// (logged at warn level so the heartbeat still sends).
@@ -157,7 +157,7 @@ fn state_to_str(state: ContainerState) -> &'static str {
     }
 }
 
-/// Phase 0.6: heartbeat hook that prefers the live backend when one is
+/// Heartbeat hook that prefers the live backend when one is
 /// available; falls back to the legacy bollard probe otherwise.
 /// Callers pass the same `Option<Arc<dyn RuntimeBackend>>` they already
 /// hold for the rest of the agent.
@@ -228,7 +228,7 @@ pub fn derive_stacks(containers: &[ContainerSnapshot]) -> Vec<StackInfo> {
         .collect()
 }
 
-/// Phase 0.18: state vocabulary the agent emits in [`ContainerInfo`].
+/// State vocabulary the agent emits in [`ContainerInfo`].
 /// Distinct from [`state_to_str`] which targets the storage-side
 /// `ServiceState` enum. The container vocabulary is fixed: `running`,
 /// `restarting`, `paused`, `created`, `exited`, `dead`. `removing` is
@@ -240,7 +240,7 @@ fn container_state_to_str(state: &str) -> &str {
     // `running`, `exited`, `dead`, `paused`, `removing`, `restarting`,
     // `created`). The backend-driven path passes one of the legacy
     // service strings (`creating`, `stopped`, `failed`). Normalise both
-    // onto the Phase 0.18 vocabulary so the controller sees a single
+    // onto the vocabulary so the controller sees a single
     // dictionary.
     match state {
         "creating" => "created",
@@ -252,7 +252,7 @@ fn container_state_to_str(state: &str) -> &str {
     }
 }
 
-/// Phase 0.18: render the per-container `STATUS` column the way docker
+/// Render the per-container `STATUS` column the way docker
 /// ps does. Inputs are the container's state vocabulary (post
 /// [`container_state_to_str`]), the unix-ms creation time (0 when the
 /// runtime didn't record one), the optional exit code, and the
@@ -308,7 +308,7 @@ fn humanize_age_ms(now_ms: i64, then_ms: i64) -> String {
     }
 }
 
-/// Phase 0.18: project a slice of snapshots to the wire-format
+/// Project a slice of snapshots to the wire-format
 /// [`ContainerInfo`] vec carried on every heartbeat. Each row gets its
 /// `observed_at_ms` stamped from `now_ms` so the controller's
 /// `last_seen_at` derivation can clamp to the agent's clock.
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(homer.stack.as_deref(), Some("homer"));
     }
 
-    // Phase 0.18: derive_containers shape tests.
+    // Derive_containers shape tests.
 
     fn rich_snap(name: &str, id: &str, state: &str, created_at_ms: i64) -> ContainerSnapshot {
         let mut labels = HashMap::new();
@@ -514,7 +514,7 @@ mod tests {
         }
     }
 
-    /// Phase 0.18: every populated field on the source snapshot lands
+    /// Every populated field on the source snapshot lands
     /// on the wire-format `ContainerInfo`. Runtime id, image, names,
     /// stack, service, created_at_ms, observed_at_ms.
     #[test]
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(info.observed_at_ms, 1_700_000_300_000);
     }
 
-    /// Phase 0.18: status_message renders consistently per state with a
+    /// Status_message renders consistently per state with a
     /// deterministic clock. Up uses humanized age, Exited adds an exit
     /// code if present, terminal states (Paused / Restarting / Created /
     /// Dead / Removing) render verbatim.
@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(render_status_message("running", 0, None, now), "Up ?");
     }
 
-    /// Phase 0.18: `observed_at_ms` is stamped from the explicit `now_ms`
+    /// `observed_at_ms` is stamped from the explicit `now_ms`
     /// arg so callers can inject deterministic clocks. Two snapshots
     /// derived at different `now_ms` get distinct observed_at_ms values.
     #[test]
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(later[0].observed_at_ms, 1_700_000_900_000);
     }
 
-    /// Phase 0.18: stack + service derive from compose labels when
+    /// Stack + service derive from compose labels when
     /// present. Falls back to empty string (NOT the container name) so
     /// the controller can distinguish "no stack" from "stack named X".
     #[test]

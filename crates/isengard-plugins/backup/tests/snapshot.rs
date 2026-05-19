@@ -1,4 +1,4 @@
-//! Phase 11a: SQLite snapshot integrity tests for `create_snapshot`.
+//! SQLite snapshot integrity tests for `create_snapshot`.
 
 use std::str::FromStr;
 

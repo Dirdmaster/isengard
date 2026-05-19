@@ -1,4 +1,4 @@
-//! Phase 14: agent-side cert bundle storage. Lives in `state_dir/certs/`.
+//! Agent-side cert bundle storage. Lives in `state_dir/certs/`.
 //! Atomic writes via `.new` + rename; key file gets chmod 600.
 
 use std::path::{Path, PathBuf};

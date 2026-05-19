@@ -74,7 +74,7 @@ pub struct DeploymentSupervisor {
     /// B 10f's [`Self::handle_abort`] looks up the token and fires it,
     /// driving the in-flight driver into its abort path.
     abort_tokens: Arc<StdRwLock<HashMap<String, CancellationToken>>>,
-    /// Phase 9F: optional policy loader. When wired, the supervisor
+    /// Optional policy loader. When wired, the supervisor
     /// resolves a `ResolvedPolicy` per trigger and consults
     /// `on_failure` to decide whether to seed `previous_digest` and
     /// what failure-handling mode to pass to the driver. `None` keeps
@@ -99,7 +99,7 @@ impl DeploymentSupervisor {
         }
     }
 
-    /// Phase 9F: install a `PolicyLoader` so the supervisor can resolve
+    /// Install a `PolicyLoader` so the supervisor can resolve
     /// `on_failure` per trigger. Without one, every deployment defaults
     /// to Notify (existing behaviour). With one, deployments whose
     /// resolved policy says `Rollback` get `previous_digest` populated
@@ -144,7 +144,7 @@ impl DeploymentSupervisor {
         Ok(n)
     }
 
-    /// Phase 9F: resolve the failure-handling policy for this trigger.
+    /// Resolve the failure-handling policy for this trigger.
     /// Falls back to `FailureHandling::Notify` (the design's default) on
     /// any error so a slow or broken policy DAO never blocks a deploy.
     /// Returns the resolved enum AND a boolean indicating whether a
@@ -240,7 +240,7 @@ impl DeploymentSupervisor {
         match classify(&spec) {
             Decision::InPlace { .. } => Ok(SupervisorOutcome::InPlaceForUpdater),
             Decision::BlueGreen => {
-                // Phase 9F: resolve the failure-handling policy ONCE
+                // Resolve the failure-handling policy ONCE
                 // before insert + spawn so we can both seed
                 // `previous_digest` and tell the driver what mode to
                 // operate in.
@@ -601,7 +601,7 @@ mod supervisor_tests {
         );
     }
 
-    // ----- Phase 9F (T2): supervisor captures previous_digest -----
+    // ----- supervisor captures previous_digest -----
 
     /// Synthetic `PolicyLoader` returning a fixed list. Used by the T2
     /// tests to drive `resolve_failure_handling` deterministically

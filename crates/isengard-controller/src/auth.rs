@@ -1,5 +1,5 @@
-//! Phase 14: per-RPC client cert validation + revocation check.
-//! Replaces Phase 2c's `TokenAuthLayer` (bearer-token middleware).
+//! Per-RPC client cert validation + revocation check.
+//! Replaces `TokenAuthLayer` (bearer-token middleware).
 //!
 //! All RPCs except those listed in [`PUBLIC_METHODS`] require a valid client
 //! certificate signed by the controller's internal CA. The interceptor

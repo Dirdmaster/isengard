@@ -1,5 +1,4 @@
 //! Parse `isengard.hooks.*` Docker labels into a `ParsedHooks` struct.
-//! Phase 12b (#54).
 //!
 //! Pure module: `HashMap<String, String>` in, `ParsedHooks` out. The ingest
 //! caller (controller's `HookLabelIngest`) decides what to upsert.

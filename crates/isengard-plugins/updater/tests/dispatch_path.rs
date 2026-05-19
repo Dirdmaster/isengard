@@ -1,4 +1,4 @@
-//! Phase 10 Task 6: structural smoke tests for the updater ↔
+//! Structural smoke tests for the updater ↔
 //! `UpdateDispatcher` wiring.
 //!
 //! These tests do NOT exercise `do_cycle` end-to-end — that needs a Docker

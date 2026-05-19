@@ -1,4 +1,4 @@
-//! Phase 11a: SQLite snapshot helper.
+//! SQLite snapshot helper.
 //!
 //! Strategy: WAL checkpoint + IMMEDIATE-tx lock + file copy. This produces a
 //! byte-identical replica of the live DB file. Cheap and fast (sub-second for

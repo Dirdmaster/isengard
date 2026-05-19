@@ -1,4 +1,4 @@
-//! Reconcile loop body. Phase 0.14 step 6.
+//! Reconcile loop body. Step 6.
 //!
 //! The scheduler is the **planner**: it computes which host should run
 //! which replica of a service and persists that decision to the

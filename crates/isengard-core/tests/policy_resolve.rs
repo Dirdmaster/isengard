@@ -294,7 +294,7 @@ fn rows_for_other_scopes_are_filtered_out() {
     assert_eq!(resolved.provenance.strategy, PolicyOrigin::Default);
 }
 
-/// Phase 9d: window field merges per scope precedence. Stack overrides
+/// Window field merges per scope precedence. Stack overrides
 /// global; service overrides stack.
 #[test]
 fn window_merges_per_scope_precedence() {
@@ -325,7 +325,7 @@ fn window_merges_per_scope_precedence() {
     assert_eq!(resolved.provenance.window, PolicyOrigin::Stack);
 }
 
-/// Phase 9d: window unset on every applicable row resolves to None with
+/// Window unset on every applicable row resolves to None with
 /// Default origin.
 #[test]
 fn window_none_when_unset() {

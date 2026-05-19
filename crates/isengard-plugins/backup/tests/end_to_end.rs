@@ -1,4 +1,4 @@
-//! Phase 11a: end-to-end backup pipeline integration test.
+//! End-to-end backup pipeline integration test.
 //!
 //! Simulates a configured controller: writes a row, runs the runner, then
 //! verifies the encrypted blob round-trips: download from the destination,

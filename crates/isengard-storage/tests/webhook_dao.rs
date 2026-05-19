@@ -1,4 +1,4 @@
-//! Phase 12a T1 acceptance tests for the webhooks DAO.
+//! Acceptance tests for the webhooks DAO.
 //!
 //! See plan §"T1: Storage migration 0020 + DAO" of
 //! `docs/superpowers/plans/2026-05-06-phase-12a-outbound-webhooks.md`.
@@ -263,7 +263,7 @@ async fn list_deliveries_filters_by_status_and_limit() {
     assert_eq!(limited.len(), 2);
 }
 
-// Phase 12b/c additions: lifecycle + gate delivery sources.
+// Additions: lifecycle + gate delivery sources.
 
 use isengard_storage::webhook::{DeliverySource, InsertGateDelivery, InsertLifecycleDelivery};
 

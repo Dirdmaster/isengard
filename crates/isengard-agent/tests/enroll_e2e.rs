@@ -1,16 +1,16 @@
-//! End-to-end Phase 2d test: spawn a real controller, run the agent, verify
+//! End-to-end test: spawn a real controller, run the agent, verify
 //! enrollment lands on both sides (agent.json exists, controller inventory
 //! has a row).
 //!
-//! Phase 2e made `run_agent` long-lived (blocks on ctrl_c). These tests now
+//! Made `run_agent` long-lived (blocks on ctrl_c). These tests now
 //! `tokio::spawn(run_agent(...))` and assert via polling, then abort the
 //! handle when the assertions are satisfied.
 //!
 //! NOTE(phase-14, task-11): the underlying enrollment flow now requires mTLS
-//! plus a controller-minted token. The Phase 2 helpers (`seed_token` writing
+//! plus a controller-minted token. The helpers (`seed_token` writing
 //! to `enrollment.token.<X>` settings, `http://` URLs, bearer auth) no longer
 //! match the wire surface. These tests stay in the tree as documentation of
-//! the old invariants; they're `#[ignore]`d and superseded by the Phase 14
+//! the old invariants; they're `#[ignore]`d and superseded by the
 //! Task 15 e2e (`auth_e2e.rs`).
 
 #![allow(clippy::result_large_err)]
@@ -58,7 +58,7 @@ async fn spawn_controller(state_dir: PathBuf) -> SocketAddr {
 }
 
 /// Pre-seed the bearer token's enrollment payload so the controller can
-/// resolve the agent's fleet on enroll. After Phase 6b/wizard work, every
+/// resolve the agent's fleet on enroll./wizard work, every
 /// enroll requires a token whose payload was issued via POST /api/v1/hosts;
 /// in tests we write the payload directly.
 async fn seed_token(state_dir: &std::path::Path, token: &str, fleet: &str) {

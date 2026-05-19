@@ -1,4 +1,4 @@
-//! Spread / global / on / singleton assignment math. Phase 0.14 step 5.
+//! Spread / global / on / singleton assignment math. Step 5.
 //!
 //! Each verb maps to a function returning `Vec<(HostId, replica_index)>`
 //! pairs. The reconcile loop (step 6) diffs this against the current

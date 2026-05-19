@@ -1,6 +1,6 @@
 //! Recreate a running container against a new image, preserving its config.
 //!
-//! Phase 3c does NOT handle self-update — see `self_id.rs`. Phase 3d adds
+//! Does NOT handle self-update — see `self_id.rs`. Adds
 //! rename-first ordering for the agent's own container.
 
 use std::collections::HashMap;
@@ -73,7 +73,7 @@ pub fn capture_config(inspect: &ContainerInspectResponse, new_image: &str) -> Re
 
     // Suppress unused-warning for the cloned-out mounts; bollard's Config
     // already carries them via host_config but some downstream code may want
-    // them separately. Phase 3d revisits.
+    // them separately. Revisits.
     let _ = mounts_for_options;
 
     RecreateSpec {

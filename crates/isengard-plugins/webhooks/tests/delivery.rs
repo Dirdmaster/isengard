@@ -1,4 +1,4 @@
-//! Phase 12a T4 integration tests: delivery worker against a wiremock server.
+//! Integration tests: delivery worker against a wiremock server.
 //!
 //! Covers: 200 -> success, 5xx -> retry, 4xx -> failed (no retry), and
 //! signature header presence + correctness.

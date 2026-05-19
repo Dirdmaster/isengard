@@ -154,7 +154,7 @@ impl Inventory {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Phase 0.5 (wisp): stash the agent's active runtime backend
+    /// Stash the agent's active runtime backend
     /// name (`docker`, `wisp`, ...) under `metadata.runtime_backend`.
     /// Read via [`Self::host_runtime_backend`] for the dashboard's
     /// HostDto + `isd ps`. Like `set_host_lan_ip`, lives in metadata
@@ -201,7 +201,7 @@ impl Inventory {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Phase 0.5 (wisp): read the persisted runtime backend name for
+    /// Read the persisted runtime backend name for
     /// a host. Returns `None` when the host doesn't exist or its
     /// metadata has no `runtime_backend` key (pre-0.5 agents that
     /// never gossiped a backend). Callers (HostDto, isd ps) treat
@@ -270,7 +270,7 @@ impl Inventory {
         rows.into_iter().map(decode_host).collect()
     }
 
-    /// Borrow the underlying pool. Phase 0.18 widened this from
+    /// Borrow the underlying pool. Widened this from
     /// `pub(crate)` to `pub` so the controller's container-ingest path
     /// can call into the standalone DAO functions
     /// (`upsert_container`, `mark_containers_removed`, ...) without a
@@ -389,7 +389,7 @@ impl Inventory {
         }
     }
 
-    /// Phase 0.13: write the manifest body + metadata + deploy strategy
+    /// Write the manifest body + metadata + deploy strategy
     /// for `stack_id`. Idempotent; called every time `isd deploy` ships
     /// a stack with a manifest. Pass `None` for `deploy_strategy` when
     /// the manifest doesn't pin one.
@@ -421,7 +421,7 @@ impl Inventory {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Phase 0.13: bind a set of secret names to `stack_id`. DELETE the
+    /// Bind a set of secret names to `stack_id`. DELETE the
     /// existing bindings, then INSERT the new list in one transaction.
     /// Returns `Error::UnknownSecrets` listing every name in `names`
     /// that does NOT have a matching row in the `secrets` table.
@@ -459,7 +459,7 @@ impl Inventory {
         Ok(())
     }
 
-    /// Phase 0.13: replace the hook list for `stack_id`. Preserves
+    /// Replace the hook list for `stack_id`. Preserves
     /// manifest order via the `ordinal` column. `cmd` is stored as a
     /// JSON-encoded `Vec<String>`. Empty list clears all hooks.
     pub async fn set_stack_hooks(&self, stack_id: StackId, hooks: &[StackHook]) -> Result<()> {
@@ -492,7 +492,7 @@ impl Inventory {
         Ok(())
     }
 
-    /// Phase 0.13: read back the manifest bundle (manifest_toml, secrets,
+    /// Read back the manifest bundle (manifest_toml, secrets,
     /// hooks) for `stack_id`. Used by `GET /api/v1/stacks/<id>`. Returns
     /// a bundle with NULL / empty fields when the stack has no manifest.
     pub async fn get_stack_manifest_bundle(
@@ -791,7 +791,7 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
         reason: format!("unknown stack source: {source_str}"),
     })?;
     let discovered_at: chrono::DateTime<chrono::Utc> = row.try_get("discovered_at")?;
-    // Phase 0.13 manifest columns. Read defensively: pre-0.13 callers
+    // Manifest columns. Read defensively: pre-0.13 callers
     // that SELECT only the base columns get None rather than a decode
     // error.
     let manifest_toml: Option<String> = row.try_get("manifest_toml").ok().flatten();
@@ -1028,7 +1028,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.5 wisp: round-trip the runtime backend through
+    /// Wisp: round-trip the runtime backend through
     /// metadata. The setter is idempotent + skips writes when the
     /// value already matches; the getter returns `None` for hosts
     /// whose agent never gossiped a backend.
@@ -1263,7 +1263,7 @@ mod tests {
         .unwrap()
     }
 
-    // ------- Phase 0.13 manifest helpers -------
+    // ------- manifest helpers -------
 
     async fn setup_stack_for_manifest_tests(inv: &Inventory) -> StackId {
         let host_id = test_enroll_h(inv, "h1").await;

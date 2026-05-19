@@ -1,4 +1,4 @@
-//! Phase 13B: integration tests for the WebSocket logs endpoint
+//! Integration tests for the WebSocket logs endpoint
 //! `GET /api/v1/services/:stack_id/:service_name/logs/ws`.
 //!
 //! Strategy: spin up an axum::serve on an ephemeral TCP port, register a

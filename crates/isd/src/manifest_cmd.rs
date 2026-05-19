@@ -1,5 +1,5 @@
 //! `isd manifest cat | export | edit`: operator-side view + edit of a
-//! deployed stack's `stack.toml` (Phase 0.13 follow-up).
+//! deployed stack's `stack.toml`.
 //!
 //! Before this subcommand, the manifest was a write-only artifact from
 //! the operator's view: `isd deploy` shipped it to the controller, but

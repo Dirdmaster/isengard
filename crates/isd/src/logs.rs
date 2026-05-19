@@ -13,9 +13,9 @@
 //! `<container-name> | <line>` (docker-compose style). Single targets
 //! print raw lines.
 //!
-//! Track G note: cross-host log streaming (resolved target lives on a
+//! Note: cross-host log streaming (resolved target lives on a
 //! different host than the current context) currently errors with an
-//! ssh hint. The controller-side WebSocket forwarder that the Track D
+//! ssh hint. The controller-side WebSocket forwarder that the
 //! version used was removed in this rewrite; a future track wires it
 //! back in.
 
@@ -48,7 +48,7 @@ pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
         return Err(anyhow!("no targets resolved for {:?}", args.target));
     }
 
-    // Track G: cross-host log streaming is not wired through the
+    // Cross-host log streaming is not wired through the
     // controller WebSocket forwarder anymore. Detect any target whose
     // recorded context (the host stamped at `isd ps` time) does not
     // match the current resolved context, and error with an ssh hint.

@@ -1,6 +1,6 @@
 //! Discord channel.
 //!
-//! v1 had a single one-way path: post to an incoming webhook URL. v2 (Phase 9c)
+//! v1 had a single one-way path: post to an incoming webhook URL. V2
 //! adds an optional interactive path that uses the Discord Bot API to send
 //! messages with action-row buttons and edit them after a decision.
 //!
@@ -107,7 +107,7 @@ impl NotifyChannel for DiscordChannel {
 }
 
 // ---------------------------------------------------------------------------
-// Interactive (Phase 9c)
+// Interactive
 // ---------------------------------------------------------------------------
 
 /// Result of a successful interactive send. Carries the Discord-assigned

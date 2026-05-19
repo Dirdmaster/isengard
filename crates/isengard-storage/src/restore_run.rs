@@ -1,4 +1,4 @@
-//! Phase 11b: `restore_runs` DAO.
+//! `restore_runs` DAO.
 //!
 //! A row is inserted with status=`running` when a restore starts, then
 //! transitioned to `success` (with `previous_db_backup_path` + `bytes_restored`)

@@ -2,7 +2,7 @@
 //! into the cross-crate `UpdateTriggerInfo` shape. Each function is small,
 //! independently testable, and side-effect free.
 //!
-//! Phase 10 Task 6. The updater calls these once per `needs_update`
+//! The updater calls these once per `needs_update`
 //! container before consulting the [`isengard_core::UpdateDispatcher`].
 
 use bollard::models::{ContainerInspectResponse, ContainerSummary};

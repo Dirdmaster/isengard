@@ -1,4 +1,4 @@
-//! Phase 11a: backup configuration persisted via the existing settings table.
+//! Backup configuration persisted via the existing settings table.
 //!
 //! Keys live under `backup.config.*`. The runner and the dashboard's REST
 //! handlers both read and write through `BackupConfig::load` / `save`. The

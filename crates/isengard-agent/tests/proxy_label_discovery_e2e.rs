@@ -63,7 +63,7 @@ async fn label_on_real_container_creates_routing_rule() {
         .unwrap();
     let pusher = isengard_controller::routing::RoutingPusher::new(inv.clone());
 
-    // 3. Spawn the labels watcher; it forwards into our channel. Phase 0.5
+    // 3. Spawn the labels watcher; it forwards into our channel.
     //    moved the watcher onto `RuntimeBackend`; build a BollardBackend
     //    against a tempdir state_dir to drive it.
     let (tx, mut rx) = mpsc::channel::<AgentMessage>(16);

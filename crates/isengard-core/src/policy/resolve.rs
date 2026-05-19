@@ -69,7 +69,7 @@ pub struct ResolvedProvenance {
     pub on_failure: PolicyOrigin,
     pub approver_channel: PolicyOrigin,
     pub window: PolicyOrigin,
-    /// Phase 12c: where the resolved `external_gate` came from.
+    /// Where the resolved `external_gate` came from.
     pub external_gate: PolicyOrigin,
 }
 
@@ -97,9 +97,9 @@ pub struct ResolvedPolicy {
     pub paused_until: Option<DateTime<Utc>>,
     pub on_failure: FailureHandling,
     pub approver_channel: Option<String>,
-    /// Phase 9d: maintenance window. `None` means "no window constraint".
+    /// Maintenance window. `None` means "no window constraint".
     pub window: Option<MaintenanceWindow>,
-    /// Phase 12c: external-action gate. `None` means "no gate"; the
+    /// External-action gate. `None` means "no gate"; the
     /// updater proceeds to the existing decision logic.
     pub external_gate: Option<ExternalGate>,
     pub provenance: ResolvedProvenance,

@@ -1,6 +1,6 @@
 //! Isengard `webhooks` plugin (controller-side).
 //!
-//! Phase 12a: subscribes to the controller EventBus, persists a delivery row
+//! Subscribes to the controller EventBus, persists a delivery row
 //! per matching webhook, and runs a worker that POSTs queued deliveries with
 //! an HMAC-SHA256 signature. Retries with exponential backoff
 //! (30s, 1m, 5m, 30m, 2h) up to 5 attempts.
@@ -48,7 +48,7 @@ pub struct WebhooksConfig {
 pub struct Webhooks {
     config: WebhooksConfig,
     subscriber_task: Option<JoinHandle<()>>,
-    /// Phase 12b: lifecycle-event subscriber for `deployment.*` events.
+    /// Lifecycle-event subscriber for `deployment.*` events.
     lifecycle_task: Option<JoinHandle<()>>,
     worker_task: Option<JoinHandle<()>>,
 }
@@ -116,7 +116,7 @@ impl Plugin for Webhooks {
         // Subscriber: persist a delivery row per matching webhook on each event.
         self.subscriber_task = Some(tokio::spawn(subscriber::run(inventory.clone(), bus_rx)));
 
-        // Phase 12b: lifecycle subscriber. Distinct broadcast subscription
+        // Lifecycle subscriber. Distinct broadcast subscription
         // so a lag on one tap doesn't drop the other's events.
         let lifecycle_rx = handles.bus.subscribe();
         self.lifecycle_task = Some(tokio::spawn(lifecycle::run(

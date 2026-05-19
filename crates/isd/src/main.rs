@@ -1,7 +1,7 @@
 //! `isd`: the Isengard operator CLI. Talks to a controller over the same
 //! REST + WebSocket surface the dashboard uses.
 //!
-//! Track H: `isd` reads docker's context store at `~/.docker/contexts/`
+//! `isd` reads docker's context store at `~/.docker/contexts/`
 //! directly. No parallel credentials.toml. Operator creates contexts with
 //! `docker context create <name> --docker host=ssh://...`; `isd context
 //! use <name>` writes the same `currentContext` field `docker context use`
@@ -154,7 +154,7 @@ async fn main() {
     let cli = Cli::parse();
     init_tracing(cli.log.as_deref());
 
-    // Phase 0.18: bare `isd` (no subcommand) defaults to `isd ps`
+    // Bare `isd` (no subcommand) defaults to `isd ps`
     // with the clap-resolved arg defaults. This matches docker's
     // `docker ps` convenience and replaces the pre-0.18 behaviour of
     // erroring with the help text.
@@ -220,7 +220,7 @@ async fn main() {
     }
 }
 
-/// Phase 0.18: when the operator runs bare `isd` with no subcommand,
+/// When the operator runs bare `isd` with no subcommand,
 /// route through `Ps` with the same defaults clap would pick for an
 /// explicit `isd ps`. Spec entry: bare-isd default-and-document.
 fn default_command() -> Command {

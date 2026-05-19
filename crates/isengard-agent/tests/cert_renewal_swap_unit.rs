@@ -117,9 +117,9 @@ async fn renewal_swaps_endpoint_in_holder() {
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
-    // Track G: redeem requires a packed token; pack the bare bytes the
+    // Redeem requires a packed token; pack the bare bytes the
     // mint returned and seed verified_ca_pem with the harness's CA so
-    // the agent skips fetch_and_verify_ca but stays on the Track F flow.
+    // the agent skips fetch_and_verify_ca but stays on the flow.
     let bytes_vec = data_encoding::BASE32_NOPAD
         .decode(bare.as_bytes())
         .expect("mint returns base32");

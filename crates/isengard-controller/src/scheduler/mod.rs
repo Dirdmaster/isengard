@@ -1,4 +1,4 @@
-//! Phase 0.14 placement scheduler.
+//! Placement scheduler.
 //!
 //! The scheduler resolves each service's `Placement` (parsed from the
 //! compose source) into a concrete set of `(host_id, replica_index)`
@@ -125,7 +125,7 @@ pub struct SchedulerState {
     pub label_hash: HashMap<HostId, u64>,
 }
 
-/// Phase 0.14 placement scheduler.
+/// Placement scheduler.
 ///
 /// Step 3 skeleton: fields land here so the public API stays stable as
 /// step 4-6 fill in eligibility, assignment, and reconcile. Each field

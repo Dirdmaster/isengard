@@ -1,7 +1,7 @@
-//! Phase 2e e2e: agent runs, sends heartbeats, controller's last_seen_at
+//! E2e: agent runs, sends heartbeats, controller's last_seen_at
 //! advances visibly.
 //!
-//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). The Phase 2
+//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). The
 //! bootstrap (`http://`, bearer token, `seed_token` writing settings rows)
 //! does not match the mTLS surface; test left in tree as documentation and
 //! marked `#[ignore]`.
@@ -119,7 +119,7 @@ async fn agent_heartbeats_advance_last_seen_at() {
     let initial_last_seen = hosts[0].last_seen_at;
 
     // Wait up to 15 seconds for last_seen_at to advance from its initial value.
-    // Phase 2e hardcodes a 10s heartbeat interval, so the first Heartbeat lands
+    // Hardcodes a 10s heartbeat interval, so the first Heartbeat lands
     // ~10s after Hello. We poll every 250ms.
     let mut advanced = false;
     for _ in 0..60 {

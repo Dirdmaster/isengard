@@ -1,4 +1,4 @@
-//! Phase 13B: agent-side log tailer.
+//! Agent-side log tailer.
 //!
 //! On a `ControllerMessage::StartLogStream`, the agent opens a bollard
 //! `containers.logs(LogsOptions { follow:true, stdout:true, stderr:true,

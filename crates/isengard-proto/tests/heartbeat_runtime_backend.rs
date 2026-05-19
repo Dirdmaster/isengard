@@ -1,4 +1,4 @@
-//! Phase 0.5 wisp: round-trip the new `runtime_backend` field on
+//! Wisp: round-trip the new `runtime_backend` field on
 //! `Heartbeat`. Wire shape stays additive: an older proto blob (no
 //! field 4) decodes with the field as the empty string, which the
 //! controller treats as "docker" for back-compat.
@@ -24,7 +24,7 @@ fn agent_reports_backend_in_heartbeat() {
 
 #[test]
 fn heartbeat_runtime_backend_default_empty_for_legacy_blob() {
-    // Phase 0.4 (and earlier) agents emit a Heartbeat without
+    // Agents emit a Heartbeat without
     // field 4. Decoding a blob shaped like the older message must
     // succeed with `runtime_backend = ""`, which the controller
     // treats as "docker" so legacy hosts keep their backend column
@@ -44,7 +44,7 @@ fn heartbeat_runtime_backend_default_empty_for_legacy_blob() {
 
 #[test]
 fn heartbeat_labels_round_trip() {
-    // Phase 0.14: gossiped labels travel as a map<string, string> on
+    // Gossiped labels travel as a map<string, string> on
     // field 6. Round-trip a non-empty map; older blobs without field 6
     // decode to an empty map (covered by the legacy-backend test above
     // which round-trips Default::default()).

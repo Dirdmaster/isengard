@@ -1,4 +1,4 @@
-//! Phase 3a integration: construct Updater, init against the host's Docker
+//! Integration: construct Updater, init against the host's Docker
 //! daemon, start, wait briefly, stop cleanly.
 //!
 //! Skips if Docker is not available on the host (e.g. CI without Docker-in-Docker).

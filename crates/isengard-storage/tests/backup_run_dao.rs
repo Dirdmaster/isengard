@@ -1,4 +1,4 @@
-//! Phase 11a: backup_runs DAO unit tests.
+//! Backup_runs DAO unit tests.
 
 use chrono::{Duration, Utc};
 use isengard_storage::{BackupRunStatus, Inventory};

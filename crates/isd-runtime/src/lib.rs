@@ -10,8 +10,8 @@
 //!   - [`DockerBackend`] wraps `bollard::Docker` against either the
 //!     local default socket or a tunneled remote.
 //!
-//! Phase 0.20 ships the transport plumbing. Phase 0.21 swaps `isd ps`
-//! over to use this in place of the controller round-trip.
+//! Ships the transport plumbing and swaps `isd ps`
+//! over to use it in place of the controller round-trip.
 
 pub mod controller_discovery;
 pub mod discovery_labels;

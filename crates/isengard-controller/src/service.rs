@@ -1,5 +1,5 @@
-//! `Controller` gRPC service. `enroll` (Phase 2c, refactored Phase 14 Task 6)
-//! and `sync` (Phase 2e) are real.
+//! `Controller` gRPC service. `enroll` (refactored Task 6)
+//! and `sync` are real.
 
 #![allow(clippy::result_large_err)]
 
@@ -31,19 +31,19 @@ pub struct ControllerService {
     pub journal: Arc<Journal>,
     pub bus: Arc<EventBus>,
     pub routing: Arc<RoutingPusher>,
-    /// Phase 9b.1: container-scope policy ingest from `isengard.policy.*`
+    /// Container-scope policy ingest from `isengard.policy.*`
     /// labels.
     pub policy_ingest: Arc<PolicyLabelIngest>,
-    /// Phase 12b: container-scope lifecycle-hook ingest from
+    /// Container-scope lifecycle-hook ingest from
     /// `isengard.hooks.*` labels.
     pub hook_ingest: Arc<HookLabelIngest>,
     pub ca: Arc<Authority>,
     pub enrollment: Arc<EnrollmentService>,
-    /// Phase 14: in-memory revocation set the auth interceptor reads on every
+    /// In-memory revocation set the auth interceptor reads on every
     /// RPC. Carried on the service so future handlers (e.g. an admin RPC for
     /// `revoke_agent`) can mutate it without re-fetching from inventory.
     pub revocation: RevocationSet,
-    /// Phase 13B: log subscription registry. Inbound `AgentMessage::LogChunk`
+    /// Log subscription registry. Inbound `AgentMessage::LogChunk`
     /// frames on the Sync stream are routed through this fanout to the
     /// dashboard's WebSocket tasks.
     pub log_fanout: Arc<LogFanout>,
@@ -54,7 +54,7 @@ pub struct ControllerService {
     /// through this; the auth interceptor already gated the connection
     /// behind a valid client cert.
     pub secrets: Arc<SecretsStore>,
-    /// Phase 0.14: placement scheduler. Optional so the `new_for_test`
+    /// Placement scheduler. Optional so the `new_for_test`
     /// constructor doesn't need to fabricate one. The Sync handler calls
     /// `on_heartbeat_labels` here; `enroll` calls `on_host_enroll`;
     /// `disconnect_monitor.rs` calls `on_host_disconnect_long`.
@@ -97,7 +97,7 @@ impl ControllerService {
 
     /// Test constructor: stubs the bus, journal, and routing pusher with
     /// fresh in-memory instances. Caller supplies the inventory + CA +
-    /// enrollment service it wants to exercise. Used by Phase 14 task tests
+    /// enrollment service it wants to exercise. Used by task tests
     /// that only care about the enrollment / cert flows.
     pub async fn new_for_test(
         inventory: Arc<Inventory>,
@@ -191,7 +191,7 @@ impl Controller for ControllerService {
         };
         crate::persist_and_broadcast(&self.journal, &self.bus, event).await;
 
-        // Phase 0.14: notify the scheduler the host enrolled. The
+        // Notify the scheduler the host enrolled. The
         // trigger marks the host Healthy and re-evaluates every
         // Pending placement (operator decision #3: auto-place onto
         // the new host when it satisfies a `where:` selector).
@@ -373,7 +373,7 @@ impl Controller for ControllerService {
         }
 
         // Build outbound channel. Controller uses this to send HeartbeatAcks,
-        // ProxyConfig pushes (Phase 8), and Phase 3+ commands.
+        // ProxyConfig pushes, and other commands.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ControllerMessage, Status>>(16);
         let outbound = ReceiverStream::new(rx);
 
@@ -417,7 +417,7 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "touch_host failed");
                         }
 
-                        // Phase 0.5 wisp: agent gossips its active
+                        // Wisp: agent gossips its active
                         // runtime backend on every heartbeat so the
                         // dashboard / isd ps can show a backend
                         // column. The setter is idempotent + skips
@@ -453,7 +453,7 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_services failed");
                         }
 
-                        // Phase 0.14: persist the heartbeat's agent
+                        // Persist the heartbeat's agent
                         // labels for the scheduler. Older agents send an
                         // empty map; `replace_agent_labels` then leaves
                         // the host's row set empty (or clears any stale
@@ -483,7 +483,7 @@ impl Controller for ControllerService {
                             sched.on_heartbeat_labels(host_id, label_map).await;
                         }
 
-                        // Phase 0.18: ingest the per-container snapshot
+                        // Ingest the per-container snapshot
                         // alongside services. Empty array (older agent)
                         // is handled by mark_containers_removed marking
                         // every prior row for this host as removed,
@@ -565,7 +565,7 @@ impl Controller for ControllerService {
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsReport(
                         report,
                     )) => {
-                        // Phase 9b.1: container-scope policy ingest runs in
+                        // Container-scope policy ingest runs in
                         // parallel with the routing-rule ingest. Both consume
                         // the same payload; routing takes ownership last.
                         if let Err(e) = policy_ingest.ingest(host_id, &report).await {
@@ -575,7 +575,7 @@ impl Controller for ControllerService {
                                 "policy labels: ingest failed",
                             );
                         }
-                        // Phase 12b: lifecycle-hook label ingest. Same shape;
+                        // Lifecycle-hook label ingest. Same shape;
                         // upserts container_hooks for any container carrying
                         // `isengard.hooks.*` labels.
                         if let Err(e) = hook_ingest.ingest(host_id, &report).await {
@@ -601,7 +601,7 @@ impl Controller for ControllerService {
                         }
                     }
                     Some(isengard_proto::pb::agent_message::Payload::LogChunk(chunk)) => {
-                        // Phase 13B: route the chunk to the matching
+                        // Route the chunk to the matching
                         // dashboard subscription. Dropped chunks are
                         // surfaced as `dropped` frames on the WebSocket;
                         // unknown subscriptions are simply dropped (the
@@ -658,7 +658,7 @@ impl Controller for ControllerService {
                     Some(isengard_proto::pb::agent_message::Payload::ContainerLabelsRemoved(
                         ev,
                     )) => {
-                        // Phase 9b.1: drop the container-scope policy row.
+                        // Drop the container-scope policy row.
                         if let Err(e) = policy_ingest.ingest_removed(host_id, &ev).await {
                             tracing::warn!(
                                 error = %e,
@@ -666,7 +666,7 @@ impl Controller for ControllerService {
                                 "policy labels: ingest_removed failed",
                             );
                         }
-                        // Phase 12b: drop the container_hooks row.
+                        // Drop the container_hooks row.
                         if let Err(e) = hook_ingest.ingest_removed(host_id, &ev).await {
                             tracing::warn!(
                                 error = %e,

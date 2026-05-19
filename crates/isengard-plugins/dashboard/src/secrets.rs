@@ -10,7 +10,7 @@
 //! | DELETE | `/secrets/{name}`     | Remove a secret. 204 on success, 404 if missing.          |
 //!
 //! Auth: these run on the dashboard plugin's HTTP port, which is currently
-//! unauthenticated per Phase 14. The operator binds the dashboard behind
+//! unauthenticated per. The operator binds the dashboard behind
 //! their own access control (Cloudflare Access, mTLS, VPN). v1.x will add
 //! a first-party gate; until then we rely on the existing stance.
 //!

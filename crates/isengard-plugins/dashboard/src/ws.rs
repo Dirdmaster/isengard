@@ -1,4 +1,4 @@
-//! WebSocket handler for live event streaming + Phase 13B logs streaming.
+//! WebSocket handler for live event streaming + logs streaming.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,7 +111,7 @@ async fn send_frame(socket: &mut WebSocket, frame: &WsFrame) -> anyhow::Result<(
     Ok(())
 }
 
-/// Phase 13B: WebSocket entry point for service logs.
+/// WebSocket entry point for service logs.
 ///
 /// Path: `GET /api/v1/services/:stack_id/:service_name/logs/ws`.
 ///

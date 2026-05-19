@@ -135,7 +135,7 @@ impl RoutingPusher {
         s.by_host.remove(&host);
     }
 
-    /// Phase 13B: send an arbitrary `ControllerMessage` (e.g. `StartLogStream`,
+    /// Send an arbitrary `ControllerMessage` (e.g. `StartLogStream`,
     /// `StopLogStream`) to the host's current Sync sender. Returns `true` on a
     /// successful enqueue, `false` if the host has no registered sender or the
     /// sender's queue is full / closed.

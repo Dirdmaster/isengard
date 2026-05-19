@@ -1,4 +1,4 @@
-//! Phase 14 Task 8: end-to-end mTLS test of the controller's gRPC server.
+//! End-to-end mTLS test of the controller's gRPC server.
 //!
 //! Spins up a real tonic Server with mTLS (`client_auth_optional(true)` so
 //! Enroll succeeds without a client cert), then exercises:
@@ -119,7 +119,7 @@ fn mtls(ca_root_pem: &str, cert_pem: &str, key_pem: &str) -> ClientTlsConfig {
         .domain_name(CONTROLLER_DNS)
 }
 
-/// Track G: redeem requires the packed `TK<bytes>.<fingerprint>` shape;
+/// Redeem requires the packed `TK<bytes>.<fingerprint>` shape;
 /// wrap a bare-base32 token (the mint output) with the harness's CA.
 fn pack(bare: &str, ca_pem: &str) -> String {
     let bytes_vec = data_encoding::BASE32_NOPAD
@@ -139,7 +139,7 @@ async fn enroll_then_mtls_heartbeat_succeeds() {
         .unwrap();
     let token = pack(&bare, boot.ca.root_cert_pem());
 
-    // Phase 1: bootstrap channel (no client cert) → enroll. The interceptor
+    // Bootstrap channel (no client cert) → enroll. The interceptor
     // bypasses the cert check for the Enroll method, so this succeeds.
     let channel = Channel::from_shared(boot.url.clone())
         .unwrap()
@@ -160,7 +160,7 @@ async fn enroll_then_mtls_heartbeat_succeeds() {
         .unwrap()
         .into_inner();
 
-    // Phase 2: mTLS channel using the issued cert → RenewCert. This RPC is
+    // mTLS channel using the issued cert → RenewCert. This RPC is
     // NOT in PUBLIC_METHODS, so the interceptor enforces cert presence + the
     // revocation check before dispatching.
     let channel = Channel::from_shared(boot.url.clone())

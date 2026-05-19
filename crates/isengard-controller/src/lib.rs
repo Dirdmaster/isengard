@@ -54,18 +54,18 @@ pub struct ControllerHandles {
     pub journal: Arc<Journal>,
     pub bus: Arc<EventBus>,
     pub routing: Arc<routing::RoutingPusher>,
-    /// Phase 14: enrollment-token mint/redeem service. Surfaced so the
+    /// Enrollment-token mint/redeem service. Surfaced so the
     /// dashboard plugin can expose REST endpoints for token management.
     pub enrollment: Arc<EnrollmentService>,
-    /// Phase 14: in-memory revocation set the auth interceptor reads on every
+    /// In-memory revocation set the auth interceptor reads on every
     /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
     /// `revoke_agent` (which both writes the DB row and updates this set).
     pub revocation: RevocationSet,
-    /// Phase 11a: on-disk path to the controller's SQLite file. Surfaced so
+    /// On-disk path to the controller's SQLite file. Surfaced so
     /// the backup plugin can open its own pool for WAL checkpoint + file
     /// copy without needing a public `Inventory::pool()` getter.
     pub db_path: std::path::PathBuf,
-    /// Phase 13B: subscription registry for log streaming. Dashboard's
+    /// Subscription registry for log streaming. Dashboard's
     /// WebSocket handler `register`s a fresh subscription, then sends
     /// `StartLogStream` ControllerMessages via `routing.register_sender` to
     /// each involved host. Inbound `AgentMessage::LogChunk` frames are
@@ -83,7 +83,7 @@ pub struct ControllerHandles {
     /// `/run/secrets/master.key`) is readable and 32 bytes long;
     /// otherwise the controller refuses to start.
     pub secrets: Arc<secrets::SecretsStore>,
-    /// Track F: controller's internal CA. Surfaced so the dashboard
+    /// Controller's internal CA. Surfaced so the dashboard
     /// plugin can expose the unauthenticated `GET /api/v1/ca/pem`
     /// endpoint agents call during pre-enroll fingerprint verification.
     /// Same `Authority` instance already passed to `EnrollmentService`.
@@ -245,10 +245,10 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         routing::RoutingPusher::new(inventory.clone()).with_wildcard_certs(wildcard_store.clone()),
     );
     let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
-    // Phase 12b: lifecycle-hook label ingest runs in parallel with policy_ingest.
+    // Lifecycle-hook label ingest runs in parallel with policy_ingest.
     let hook_ingest = Arc::new(hook_ingest::HookLabelIngest::new(inventory.clone()));
 
-    // Phase 14: internal CA + enrollment service. CA is loaded-or-initialized
+    // Internal CA + enrollment service. CA is loaded-or-initialized
     // from the `ca` row (single-row table); the EnrollmentService owns the
     // mint/redeem flow and signs leaf certs via the CA.
     let ca = Arc::new(
@@ -258,7 +258,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     );
     let enrollment = Arc::new(EnrollmentService::new(inventory.clone(), ca.clone()));
 
-    // Phase 14: hydrate the in-memory revocation set from the `agent_certs`
+    // Hydrate the in-memory revocation set from the `agent_certs`
     // table so the very first RPC after boot already sees revoked certs.
     let revocation = RevocationSet::load_from_inventory(&inventory)
         .await
@@ -289,7 +289,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         "controller plugins started"
     );
 
-    // Phase 0.14: placement scheduler. Constructed BEFORE the
+    // Placement scheduler. Constructed BEFORE the
     // disconnect monitor so the monitor can be wired to call
     // on_host_disconnect_long whenever it fires. The scheduler
     // itself rebuilds in-memory state from the placements +
@@ -405,7 +405,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         );
     }
 
-    // Phase 10c (10i, refs #50): stack-level deployment orchestrator. Owns the
+    // Stack-level deployment orchestrator. Owns the
     // multi-host wave plan when a stack-wide update fans out to 2+ hosts.
     // Single-host deploys bypass this entirely; existing per-host deployment
     // supervisors keep their behaviour.
@@ -477,8 +477,8 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         .build_v1()
         .context("building reflection service")?;
 
-    // Phase 14: per-RPC client cert validation + revocation check (replaces
-    // the Phase 2c bearer-token middleware).
+    // Per-RPC client cert validation + revocation check (replaces
+    // the bearer-token middleware).
     let auth_layer = CertAuthInterceptor::new(revocation.clone(), ca.clone());
 
     // Sign the controller's own server cert with our CA. The DNS name agents
@@ -487,7 +487,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     // workflows don't require extra env wiring.
     let controller_dns =
         std::env::var("ISENGARD_CONTROLLER_DNS").unwrap_or_else(|_| "controller.local".into());
-    // Phase 0.10: extra SANs threaded through `isengard init` so the
+    // Extra SANs threaded through `isengard init` so the
     // controller's server cert is valid for `localhost`, `127.0.0.1`,
     // the auto-detected host IP, and any operator-supplied hostnames.
     // Comma-separated; whitespace and blank entries are ignored.
@@ -537,7 +537,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         Some(placement_scheduler.clone()),
     ));
 
-    // Phase 9b.1: periodic reaper for orphaned container-scope policy rows.
+    // Periodic reaper for orphaned container-scope policy rows.
     // Runs every hour with a 24h max-age. Belt-and-braces against missed
     // `ContainerLabelsRemoved` events (e.g. agent crashed during destroy).
     let reaper_inv = inventory.clone();

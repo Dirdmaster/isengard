@@ -1,11 +1,11 @@
-//! Phase 9b T3 integration tests for the updater's policy-skip path.
+//! Integration tests for the updater's policy-skip path.
 //!
 //! See plan §"T3: Updater integration" of
 //! `docs/superpowers/plans/2026-05-06-phase-9a-9d-policy-foundation.md`.
 //!
 //! These tests do not run a real Docker daemon. The full `do_cycle` path
 //! requires bollard + a registry + actual containers; the existing
-//! `cycle_e2e.rs` test owns that coverage. Phase 9b only touches the
+//! `cycle_e2e.rs` test owns that coverage. Only touches the
 //! decision step that runs before `recreate::update_container` is even
 //! considered, so the tests exercise that decision step in isolation:
 //!

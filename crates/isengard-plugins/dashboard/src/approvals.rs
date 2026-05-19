@@ -1,4 +1,4 @@
-//! REST endpoints for the pending-approval queue (Phase 9 Plan B, T4).
+//! REST endpoints for the pending-approval queue.
 //!
 //! See spec §"REST: dashboard plugin" of
 //! `docs/superpowers/specs/2026-05-06-phase-9e-9f-approval-flow-design.md`.
@@ -11,7 +11,7 @@
 //! | GET    | `/approvals/:id`                | Single row by ULID action_id             |
 //! | POST   | `/approvals/:id`                | Decide (approve/reject/snooze)           |
 //! | POST   | `/notifier/callback/telegram`   | Telegram webhook callback for inline btn |
-//! | POST   | `/notifier/callback/discord`    | Discord interactions endpoint (Phase 9c) |
+//! | POST | `/notifier/callback/discord` | Discord interactions endpoint |
 //!
 //! Decision flow:
 //! 1. `decide_pending_approval` atomically transitions `pending_open` to one
@@ -34,7 +34,7 @@
 //! 5. Return Telegram's expected `answerCallbackQuery` shape so the user's
 //!    button stops spinning.
 //!
-//! Discord callback flow (Phase 9c):
+//! Discord callback flow:
 //! 1. Verify the ed25519 signature over `timestamp || raw_body` using
 //!    `ISENGARD_DISCORD_PUBLIC_KEY`. 401 on any failure.
 //! 2. Parse the interaction body. PING (type=1) returns PONG; MESSAGE_COMPONENT

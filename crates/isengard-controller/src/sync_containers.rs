@@ -1,4 +1,4 @@
-//! Persist container info from agent heartbeats. Phase 0.18.
+//! Persist container info from agent heartbeats.
 //!
 //! For each `ContainerInfo` in the heartbeat we derive the operator-
 //! visible id (see [`crate::container_id::derive_container_id`]) and
@@ -136,7 +136,7 @@ mod tests {
         }
     }
 
-    /// Phase 0.18: first heartbeat upserts N containers; second
+    /// First heartbeat upserts N containers; second
     /// heartbeat with M < N marks the missing (N - M) as removed.
     /// Survivors keep their first_seen_at across the two ingest calls.
     #[tokio::test]
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(row_b.removed_at, Some(1_700_000_600));
     }
 
-    /// Phase 0.18: last_seen_at is min(server_now, observed_at_ms/1000).
+    /// Last_seen_at is min(server_now, observed_at_ms/1000).
     /// A future-shifted agent clock can't push the row's last-seen past
     /// the controller's clock.
     #[tokio::test]

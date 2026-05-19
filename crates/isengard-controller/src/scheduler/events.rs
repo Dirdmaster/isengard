@@ -1,7 +1,7 @@
 //! `placement.*` event helpers (created, removed, degraded, etc.).
 //! Filled in at step 6.
 
-/// Phase 0.14 placement event kinds. These are the strings the bus
+/// Placement event kinds. These are the strings the bus
 /// carries on `Event.kind`; subscribers (journal, dashboard banner,
 /// future notifiers) match on them.
 pub mod kind {

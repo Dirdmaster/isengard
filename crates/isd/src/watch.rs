@@ -1211,8 +1211,8 @@ mod tests {
         assert!(d2.as_secs() >= 9, "got {:?}", d2);
     }
 
-    // Track G: deleted `integration_full_cycle_against_wiremock`. The
-    // test relied on `Backend::Http`, which is gone post-Track-G. The
+    // Deleted `integration_full_cycle_against_wiremock`. The
+    // test relied on `Backend::Http`, which has since been removed. The
     // poller + state machine are exercised at the unit level here; the
     // controller wire path is covered by the controller crate's e2e
     // tests.

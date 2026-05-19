@@ -1,4 +1,4 @@
-//! Phase 0.4 dispatch A3: BollardBackend, the dockerd-backed
+//! Dispatch A3: BollardBackend, the dockerd-backed
 //! [`super::RuntimeBackend`].
 //!
 //! The agent's existing compose / logs / deploy paths build bollard
@@ -57,7 +57,7 @@ impl BollardBackend {
         })
     }
 
-    /// Borrow the underlying bollard handle. Phase 0.4 dispatch A4 keeps
+    /// Borrow the underlying bollard handle. Dispatch A4 keeps
     /// internal call sites in compose_apply / deployment/driver using the
     /// raw handle; dispatch B replaces those paths against the trait.
     pub fn docker(&self) -> std::sync::Arc<bollard::Docker> {

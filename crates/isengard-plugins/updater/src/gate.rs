@@ -1,4 +1,4 @@
-//! Phase 12c: external-action gate evaluator (#55).
+//! External-action gate evaluator (#55).
 //!
 //! Pure function over `(http client, gate config, payload)` -> decision.
 //! No storage / event-bus side effects: the caller persists the
@@ -36,7 +36,7 @@ use tracing::{debug, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Outgoing signature header name. Matches Phase 12a webhook deliveries.
+/// Outgoing signature header name. Matches webhook deliveries.
 pub const SIGNATURE_HEADER: &str = "X-Isengard-Signature";
 
 /// Compute `sha256=<hex>` over the body bytes with the given secret.

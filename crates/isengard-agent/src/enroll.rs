@@ -21,13 +21,13 @@ use tonic::transport::{Certificate, ClientTlsConfig};
 
 use crate::cert_store::CertBundle;
 
-/// Trust anchor for the bootstrap channel. After Track G the only path
-/// is the Track F fingerprint flow: [`fetch_and_verify_ca`] populates
+/// Trust anchor for the bootstrap channel. The only path
+/// is the fingerprint flow: [`fetch_and_verify_ca`] populates
 /// `verified_ca_pem` after confirming the CA fetched over skip-verify
 /// TLS matches the SHA-256 embedded in the packed join token.
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapTrust {
-    /// Track F: CA PEM that has already been fingerprint-verified against
+    /// CA PEM that has already been fingerprint-verified against
     /// the join token's embedded SHA-256.
     pub verified_ca_pem: Option<Vec<u8>>,
 }

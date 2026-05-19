@@ -1,4 +1,4 @@
-//! Host eligibility under a `LabelSelector`. Phase 0.14 step 4.
+//! Host eligibility under a `LabelSelector`. Step 4.
 //!
 //! Two surfaces:
 //! - [`match_selector`] is a thin wrapper around

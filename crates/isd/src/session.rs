@@ -1,7 +1,7 @@
 //! Per-command session: resolves a docker-context URI into a usable
 //! `reqwest::Client` + base URL.
 //!
-//! Track H: contexts come from docker's own store at `~/.docker/contexts/`.
+//! Contexts come from docker's own store at `~/.docker/contexts/`.
 //! The session connects to docker at the configured URL, discovers the
 //! controller container by `io.isengard.role=controller` label, and (for
 //! SSH-backed docker URLs) opens a LocalForward via the existing
@@ -22,7 +22,7 @@ use crate::docker_context;
 use crate::ssh_tunnel::Tunnel;
 
 /// A resolved docker context plus the URI we'll talk to. Replaces the
-/// pre-Track-H `ContextEntry`; carries just enough to drive a session.
+/// earlier `ContextEntry`; carries just enough to drive a session.
 #[derive(Debug, Clone)]
 pub struct ResolvedContext {
     pub name: String,

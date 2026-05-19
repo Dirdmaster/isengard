@@ -79,7 +79,7 @@ impl ImageRef {
     }
 
     /// Tags-list URL for a GET request: `https://<registry>/v2/<repo>/tags/list`.
-    /// `docker.io` is rewritten to `registry-1.docker.io`. Used by Phase 9e
+    /// `docker.io` is rewritten to `registry-1.docker.io`. Used
     /// (`Minor` strategy) to enumerate semver candidates on the registry.
     pub fn tags_list_url(&self) -> String {
         let host = if self.registry == "docker.io" {
@@ -91,7 +91,7 @@ impl ImageRef {
     }
 
     /// Returns a copy of this ref with the tag swapped to `new_tag`.
-    /// Convenience for the Phase 9e bumped-tag path.
+    /// Convenience for the bumped-tag path.
     pub fn with_tag(&self, new_tag: impl Into<String>) -> Self {
         Self {
             registry: self.registry.clone(),

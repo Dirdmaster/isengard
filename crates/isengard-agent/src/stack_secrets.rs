@@ -1,4 +1,4 @@
-//! Phase 0.13 follow-up: read the stack-level `secrets = [...]` list out
+//! Follow-up: read the stack-level `secrets = [.]` list out
 //! of an on-disk `stack.toml`.
 //!
 //! Background: the controller persists every `stack.toml` verbatim to

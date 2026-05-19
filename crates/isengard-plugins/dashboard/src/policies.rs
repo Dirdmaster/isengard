@@ -1,4 +1,4 @@
-//! REST endpoints for update policies (Phase 9 Plan A, T4).
+//! REST endpoints for update policies.
 //!
 //! See spec §"REST API (9c)" of
 //! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
@@ -127,7 +127,7 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 ///
 /// 1. `global` requires an empty `scope_key`; every other scope requires a
 ///    non-empty `scope_key`.
-/// 2. Phase 9d: when `body.window` is set, the cron expression must parse.
+/// 2. When `body.window` is set, the cron expression must parse.
 ///    Timezone parsing is intentionally lenient (warn-only on read; we
 ///    don't reject custom values here) so operators can paste niche IANA
 ///    names without an API roundtrip.
@@ -162,7 +162,7 @@ fn validate_policy(
         }
     }
 
-    // Phase 12c: external_gate URL must be non-empty when configured.
+    // External_gate URL must be non-empty when configured.
     if let Some(g) = &body.external_gate {
         if g.url.trim().is_empty() {
             return Err(err(

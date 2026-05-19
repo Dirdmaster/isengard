@@ -1,4 +1,4 @@
-//! `placements` + `agent_labels` DAO. Phase 0.14.
+//! `placements` + `agent_labels` DAO.
 //!
 //! Two tables, two surfaces:
 //!

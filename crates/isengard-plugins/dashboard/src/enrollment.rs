@@ -1,5 +1,4 @@
 //! REST endpoints for enrollment-token management + per-host cert revocation
-//! (Phase 14 Task 13).
 //!
 //! Endpoints (mounted under `/api/v1`):
 //!

@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 /// Wildcard token in `event_kinds` that matches every event.
 pub const KIND_WILDCARD: &str = "*";
 
-/// Where a `webhook_deliveries` row originated. Phase 12b/c (#54 #55).
+/// Where a `webhook_deliveries` row originated. (#54 #55).
 ///
 /// `Webhook` rows reference a `webhooks(id)` row (the 12a shape). `Lifecycle`
 /// and `Gate` rows carry their URL+secret inline because there is no parent
@@ -156,7 +156,7 @@ pub struct WebhookDelivery {
     pub created_at: DateTime<Utc>,
 }
 
-/// Insert payload for a `source=webhook` delivery row (Phase 12a path).
+/// Insert payload for a `source=webhook` delivery row (path).
 #[derive(Debug, Clone)]
 pub struct InsertDelivery {
     pub webhook_id: i64,
@@ -164,7 +164,7 @@ pub struct InsertDelivery {
     pub payload_json: String,
 }
 
-/// Insert payload for a `source=lifecycle` delivery row (Phase 12b).
+/// Insert payload for a `source=lifecycle` delivery row.
 #[derive(Debug, Clone)]
 pub struct InsertLifecycleDelivery {
     pub url: String,
@@ -173,7 +173,7 @@ pub struct InsertLifecycleDelivery {
     pub payload_json: String,
 }
 
-/// Insert payload for a `source=gate` delivery row (Phase 12c).
+/// Insert payload for a `source=gate` delivery row.
 #[derive(Debug, Clone)]
 pub struct InsertGateDelivery {
     pub url: String,
@@ -298,7 +298,7 @@ impl crate::inventory::Inventory {
         })
     }
 
-    /// Phase 12b: insert a delivery row for a container lifecycle hook.
+    /// Insert a delivery row for a container lifecycle hook.
     /// `webhook_id` is left NULL; `url` + `secret` carry the destination
     /// directly so the worker can dispatch without a parent row.
     pub async fn insert_lifecycle_delivery(
@@ -325,7 +325,7 @@ impl crate::inventory::Inventory {
         })
     }
 
-    /// Phase 12c: insert a delivery row representing one external-gate
+    /// Insert a delivery row representing one external-gate
     /// evaluation. The row is the audit trail; the synchronous evaluator
     /// stamps the outcome via `mark_delivery_*` paths just like webhook rows.
     pub async fn insert_gate_delivery(&self, ins: InsertGateDelivery) -> Result<WebhookDelivery> {
@@ -408,7 +408,7 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_delivery).collect()
     }
 
-    /// Phase 12b/c: list deliveries filtered by source. Used by the
+    /// List deliveries filtered by source. Used by the
     /// dashboard "Lifecycle hooks" / "Gates" tabs to show traffic that has
     /// no parent webhook row.
     pub async fn list_deliveries_by_source(

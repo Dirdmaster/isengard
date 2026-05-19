@@ -1,4 +1,4 @@
-//! Phase 11a: backup runner. Orchestrates snapshot -> encrypt -> upload ->
+//! Backup runner. Orchestrates snapshot -> encrypt -> upload ->
 //! retention prune, recording each step in `backup_runs`.
 //!
 //! The runner is exposed both to the scheduler (interval timer) and to the

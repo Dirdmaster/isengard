@@ -153,7 +153,7 @@ async fn wait_for_port_ready(port: u16) -> Result<()> {
 /// `host:port`; the tokens expand inconsistently across those forms.
 ///
 /// Exposed pub(crate)-style via the [`control_path_for`] helper module
-/// re-export: Phase 4 (`isd::ssh_tunnel::Tunnel::open_local_forward`)
+/// re-export so `isd::ssh_tunnel::Tunnel::open_local_forward`
 /// reuses the exact same hash so the controller-REST LocalForward
 /// piggybacks on the docker-socket forward's ControlMaster instead of
 /// opening a second TCP handshake to the same host.

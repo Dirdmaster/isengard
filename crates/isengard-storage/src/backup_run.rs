@@ -1,4 +1,4 @@
-//! Phase 11a: `backup_runs` DAO.
+//! `backup_runs` DAO.
 //!
 //! Lifecycle: a row is inserted with status=`running` when a snapshot starts,
 //! then transitioned to `success` (with object_name + size_bytes) or `failed`

@@ -1,13 +1,13 @@
 //! Long-lived Sync stream from agent to controller.
 //!
-//! Phase 2e ships the happy path:
+//! Ships the happy path:
 //!  - open one bidi stream
 //!  - first frame: SyncHello { agent_id }
 //!  - then: Heartbeat every `interval_secs` until the stream errors or the
 //!    caller's cancellation Notify fires
 //!  - read every ControllerMessage from the server side, log at debug
 //!
-//! Reconnection on drop is Phase 2f.
+//! Reconnection on drop is layered on top.
 
 #![allow(clippy::result_large_err)]
 
@@ -43,7 +43,7 @@ pub type MdnsHandle = Arc<tokio::sync::Mutex<MdnsResponder>>;
 /// with a `WriteComposeAck`. `None` makes the agent ignore WriteCompose
 /// messages with a warn (used in tests / docker-less envs).
 ///
-/// Phase 0.13 (wave 3.D): also carries an [`EventEmitter`] handle so
+/// Also carries an [`EventEmitter`] handle so
 /// lifecycle-hook execution can surface `lifecycle_hook.*` audit
 /// events back to the controller via the existing outbound event
 /// channel.
@@ -58,7 +58,7 @@ pub struct ComposeContext {
     pub event_emitter: Option<Arc<dyn EventEmitter>>,
 }
 
-/// Phase 0.13 wave 3.D: split the proto's [`isengard_proto::pb::LifecycleHook`]
+/// Split the proto's [`isengard_proto::pb::LifecycleHook`]
 /// list (which carries every phase mixed together) into per-phase
 /// [`HookSpec`] vectors. Unknown `on` values are silently dropped: the
 /// dashboard validates the manifest on submit, so an unknown phase on
@@ -84,7 +84,7 @@ fn split_hooks_by_phase(
     (pre, post, failure)
 }
 
-/// Phase 13B: in-process registry of active log subscriptions on this agent.
+/// In-process registry of active log subscriptions on this agent.
 /// Each entry holds a `watch::Sender<bool>` whose receiver the corresponding
 /// `run_tail` task selects on; flipping it to `true` cancels the tail.
 type LogSubs =
@@ -125,14 +125,14 @@ pub async fn run_sync_loop<S: LogSource>(
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
     backend: Option<Arc<dyn RuntimeBackend>>,
-    // Phase 0.14: agent labels for placement selectors. Loaded once at
+    // Agent labels for placement selectors. Loaded once at
     // agent start; same value attached to every heartbeat. Empty map
     // means "no labels," which the controller treats as no `where:`
     // selectors will match (singletons / spreads with no selector still
     // place onto this host).
     agent_labels: std::collections::HashMap<String, String>,
 ) -> Result<()> {
-    // Phase 14: mTLS replaces the bearer-token interceptor. The endpoint
+    // MTLS replaces the bearer-token interceptor. The endpoint
     // already carries the client identity + CA root.
     let channel = endpoint
         .connect()
@@ -173,7 +173,7 @@ pub async fn run_sync_loop<S: LogSource>(
     let hb_tx = tx.clone();
     let interval = Duration::from_secs(u64::from(interval_secs.max(1)));
     let cancel_hb = cancel.clone();
-    // Phase 0.5: gossip the active runtime backend so `isd ps` can show
+    // Gossip the active runtime backend so `isd ps` can show
     // a per-host backend column. Empty string when the agent doesn't
     // know yet (no backend selected): the controller treats empty as
     // `docker` for back-compat with pre-0.5 agents.
@@ -181,12 +181,12 @@ pub async fn run_sync_loop<S: LogSource>(
         .as_ref()
         .map(|b| b.name().to_string())
         .unwrap_or_default();
-    // Phase 0.6: heartbeat reads the container snapshot via the live
+    // Heartbeat reads the container snapshot via the live
     // backend when one was selected (so wisp hosts stop dialling
     // docker.sock once per heartbeat). Falls back to the legacy
     // bollard probe when backend selection failed at boot.
     let heartbeat_backend = backend.clone();
-    // Phase 0.14: snapshot agent labels for this stream lifetime. The
+    // Snapshot agent labels for this stream lifetime. The
     // controller's scheduler reads these on every heartbeat to keep its
     // `agent_labels` table fresh. A fresh sync stream (post-reconnect)
     // re-uses the same in-memory snapshot the parent passed in.
@@ -213,7 +213,7 @@ pub async fn run_sync_loop<S: LogSource>(
                     .await;
                     let stacks = crate::container_snapshot::derive_stacks(&snapshots);
                     let services = crate::container_snapshot::derive_services(&snapshots);
-                    // Phase 0.18: ship one ContainerInfo per runtime
+                    // Ship one ContainerInfo per runtime
                     // container alongside the legacy services array.
                     // observed_at_ms uses the same agent-side `ts_ms`
                     // so the controller's last_seen clamp sees a
@@ -393,7 +393,7 @@ pub async fn run_sync_loop<S: LogSource>(
                     };
                     let stack_dir = ctx.root.join(&req.stack_name);
 
-                    // Phase 0.13 wave 3.D: split hooks by phase, build
+                    // Split hooks by phase, build
                     // the per-deploy [`HookContext`], and run pre-deploy
                     // hooks BEFORE the compose write. Pre-deploy hook
                     // failure aborts the deploy: WriteComposeAck =
@@ -457,7 +457,7 @@ pub async fn run_sync_loop<S: LogSource>(
                         &req.expected_sha256,
                         &ctx.host_id,
                         req.force,
-                        // Phase 0.13: persist verbatim stack.toml beside
+                        // Persist verbatim stack.toml beside
                         // compose.yml. The agent does NOT parse it; the
                         // hook + secrets behavior is driven by the
                         // explicit proto fields.
@@ -691,7 +691,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
     mdns: Option<MdnsHandle>,
     compose_ctx: Option<ComposeContext>,
     backend: Option<Arc<dyn RuntimeBackend>>,
-    // Phase 0.14: see run_sync_loop. Same value is reused across reconnect
+    // See run_sync_loop. Same value is reused across reconnect
     // attempts.
     agent_labels: std::collections::HashMap<String, String>,
 ) -> Result<()> {

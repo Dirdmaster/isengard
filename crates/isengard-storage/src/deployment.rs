@@ -47,9 +47,9 @@ pub enum DeploymentState {
     DestroyingBlue,
     /// Post-switch collapse recovery: green went unhealthy after the swap,
     /// driver is rolling back to the snapshotted blue upstream. Non-terminal
-    /// (transitions to `Failed` once the swap-back completes). Phase 10f.
+    /// (transitions to `Failed` once the swap-back completes).
     Recovering,
-    /// Phase 9F: the supervisor's `Rollback` failure-handler branch. The
+    /// The supervisor's `Rollback` failure-handler branch. The
     /// driver is re-pulling `previous_digest` and recreating the container
     /// at that image. Non-terminal: transitions to `RolledBack` on
     /// success or `RollbackFailed` on error.
@@ -57,10 +57,10 @@ pub enum DeploymentState {
     Done,
     Aborted,
     Failed,
-    /// Phase 9F: terminal success of the rollback handler. The previous
+    /// Terminal success of the rollback handler. The previous
     /// digest is now serving traffic.
     RolledBack,
-    /// Phase 9F: terminal failure of the rollback handler. The original
+    /// Terminal failure of the rollback handler. The original
     /// failure was real and the rollback itself broke (image gone from
     /// registry, resource exhaustion at recreate, etc).
     RollbackFailed,
@@ -85,7 +85,7 @@ impl DeploymentState {
     }
 
     /// Terminal states: a deployment in one of these doesn't transition
-    /// further on its own. Phase 9F adds `RolledBack` and `RollbackFailed`.
+    /// further on its own. Adds `RolledBack` and `RollbackFailed`.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -143,17 +143,17 @@ pub struct Deployment {
     pub metadata_json: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// Phase 10c (refs #50): set when this deployment is part of a multi-host
+    /// Set when this deployment is part of a multi-host
     /// rolling group. `None` for single-host deploys (orchestrator-bypass).
     #[serde(default)]
     pub group_id: Option<String>,
-    /// Phase 9F: snapshot of the blue digest taken at deployment start.
+    /// Snapshot of the blue digest taken at deployment start.
     /// Populated only when the resolved policy's `on_failure == Rollback`,
     /// so the supervisor can re-pull this exact image if the deployment
     /// fails healthcheck. NULL means "rollback not eligible".
     #[serde(default)]
     pub previous_digest: Option<String>,
-    /// Phase 9F: timestamp the supervisor entered the rollback branch.
+    /// Timestamp the supervisor entered the rollback branch.
     /// Set regardless of rollback success so the dashboard can render
     /// "Rolled back at HH:MM" without parsing the error string.
     #[serde(default)]
@@ -176,7 +176,7 @@ pub struct InsertDeployment {
     pub health_path: Option<String>,
     pub container_port: Option<i64>,
     pub metadata_json: Option<String>,
-    /// Phase 9F: when the resolved policy's `on_failure == Rollback`, the
+    /// When the resolved policy's `on_failure == Rollback`, the
     /// supervisor seeds this with `blue_digest` so the driver can re-pull
     /// it if green fails. `None` keeps the row rollback-ineligible (the
     /// existing default behaviour).
@@ -400,7 +400,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Phase 9F: stamp the moment the supervisor entered the rollback
+    /// Stamp the moment the supervisor entered the rollback
     /// branch. Set regardless of whether the rollback eventually
     /// succeeded: the dashboard reads this to render "Rolled back at
     /// HH:MM" without parsing the error string.
@@ -419,7 +419,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Phase 9F: patch `previous_digest` after the row has been inserted.
+    /// Patch `previous_digest` after the row has been inserted.
     /// Primary write happens at INSERT time when the resolved policy is
     /// `on_failure == Rollback`; this setter exists for tests and for
     /// any future "enable rollback mid-flight" flow.
@@ -485,7 +485,7 @@ impl crate::inventory::Inventory {
 
     /// Link an existing deployment row to a group. Used by the controller
     /// orchestrator after it has dispatched a wave of deployments and wants to
-    /// associate them with their parent group. Phase 10c.
+    /// associate them with their parent group.
     pub async fn set_deployment_group(&self, deployment_id: &str, group_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET group_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -499,7 +499,7 @@ impl crate::inventory::Inventory {
 
     /// List every deployment that belongs to `group_id`, oldest first. Used by
     /// the dashboard's group panel and by the orchestrator's wave-completion
-    /// check. Phase 10c.
+    /// check.
     pub async fn list_deployments_by_group(&self, group_id: &str) -> Result<Vec<Deployment>> {
         let rows = sqlx::query(
             r#"
@@ -811,7 +811,7 @@ mod tests {
         }
     }
 
-    // ----- Phase 9F: rollback handler storage coverage -----
+    // ----- rollback handler storage coverage -----
 
     /// Inserting a row with `previous_digest` set persists the value and
     /// it round-trips back through `get_deployment`. The default-None

@@ -123,7 +123,7 @@ pub async fn apply_config(
 /// discovery. The sync loop uses this entrypoint; tests stick with the
 /// no-backend [`apply_config`] form so they don't need a daemon.
 ///
-/// Phase 0.5: discovery is now trait-driven. Both bollard and wisp
+/// Discovery is now trait-driven. Both bollard and wisp
 /// backends resolve IPs via [`discovery::resolve_container_ip`] using
 /// `inspect_container` + `network_settings.ip_addresses` from
 /// `ContainerSnapshot`; the bollard-specific accessor is no longer used

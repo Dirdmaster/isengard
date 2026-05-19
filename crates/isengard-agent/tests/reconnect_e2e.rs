@@ -1,4 +1,4 @@
-//! Phase 2f e2e: agent survives controller restart.
+//! E2e: agent survives controller restart.
 //!
 //! Strategy: spawn controller A on a fixed port, let agent enroll + heartbeat
 //! for a bit, abort controller A, spawn controller B on the SAME port (with

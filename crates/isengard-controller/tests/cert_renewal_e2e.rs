@@ -1,4 +1,4 @@
-//! Phase 14 Task 7: end-to-end test of the gRPC `RenewCert` handler.
+//! End-to-end test of the gRPC `RenewCert` handler.
 //!
 //! After the Bl-1 fix the request body carries no `host_id`; the controller
 //! reads it authoritatively from the caller's client cert CN. This test
@@ -29,7 +29,7 @@ async fn renew_cert_rejects_when_no_peer_cert_extension() {
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
-    // Track G: redeem requires the packed `TK<bytes>.<fingerprint>` shape.
+    // Redeem requires the packed `TK<bytes>.<fingerprint>` shape.
     let bytes_vec = data_encoding::BASE32_NOPAD
         .decode(bare.as_bytes())
         .expect("mint returns base32");

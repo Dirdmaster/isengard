@@ -1,4 +1,4 @@
-//! Phase 0.13: round-trip the new optional fields on `WriteCompose`
+//! Round-trip the new optional fields on `WriteCompose`
 //! (`manifest_toml`, `secrets`, `hooks`, `deployment_id`) plus the new
 //! `LifecycleHook` message. Older agents that don't know about field
 //! numbers 6..=9 decode them as zero values / empty repeated lists,

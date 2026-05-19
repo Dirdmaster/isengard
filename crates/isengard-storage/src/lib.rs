@@ -1,6 +1,6 @@
 //! SQLite-backed inventory storage for the Isengard controller.
 //!
-//! Phase 2b surface: hosts table only. Containers and journal land in
+//! Surface: hosts table only. Containers and journal land in
 //! later phases as new migrations.
 
 pub mod acme_account;

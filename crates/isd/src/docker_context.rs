@@ -1,4 +1,4 @@
-//! Track H: isd reads docker's context store directly. No parallel
+//! `isd` reads docker's context store directly. No parallel
 //! credentials.toml. The single source of truth is `~/.docker/contexts/`,
 //! same files docker itself reads.
 //!
@@ -45,7 +45,7 @@ pub struct DockerEndpoint {
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerContextSummary {
     pub name: String,
-    pub kind: &'static str, // always "docker" in Track H
+    pub kind: &'static str, // always "docker"
     pub target: String,     // the Host URI
     pub current: bool,      // true for the active context
 }

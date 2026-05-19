@@ -1,4 +1,4 @@
-//! Phase 10 Plan B Task 9 — `DeploymentSupervisor::handle_abort`.
+//! Task 9 — `DeploymentSupervisor::handle_abort`.
 //!
 //! These tests don't spin up a real Driver: they pre-register a
 //! `CancellationToken` against a synthetic deployment id via the

@@ -1,4 +1,4 @@
-//! Phase 14 Task 12: agent-side cert renewal task.
+//! Agent-side cert renewal task.
 //!
 //! Periodically inspects the on-disk cert bundle's TTL. When the cert is past
 //! 50% of its validity window, calls `RenewCert` against the controller and

@@ -6,7 +6,7 @@
 //! method. `rm` and `kill` additionally prompt for confirmation when
 //! any arg was resolved through an index (see [`crate::confirm`]).
 //!
-//! Track G adds a pre-execute protection guard: any resolved target
+//! Adds a pre-execute protection guard: any resolved target
 //! whose `io.isengard.role` label is in
 //! [`isd_runtime::discovery_labels::ROLE_VALUES_PROTECTED`] is refused
 //! unless `--force-system` is passed. The guard inspects each target's
@@ -162,7 +162,7 @@ pub struct RmArgs {
     /// Override the system-container protection (refuses on
     /// io.isengard.role=controller|agent without this flag). Different
     /// from `-f` / `--force` which only force-removes a running
-    /// container; this flag bypasses the Track G role-label guard.
+    /// container; this flag bypasses the role-label guard.
     #[arg(long)]
     pub force_system: bool,
 }
@@ -199,7 +199,7 @@ pub struct KillArgs {
     /// Override the system-container protection (refuses on
     /// io.isengard.role=controller|agent without this flag). Different
     /// from `-f` / `--force` which only skips the confirm prompt; this
-    /// flag bypasses the Track G role-label guard.
+    /// flag bypasses the role-label guard.
     #[arg(long)]
     pub force_system: bool,
 }
@@ -226,7 +226,7 @@ pub async fn run_kill(args: KillArgs, context: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Track G: `isd rm <protected>` without `--force-system` refuses
+    /// `isd rm <protected>` without `--force-system` refuses
     /// with an actionable error naming both override paths.
     #[test]
     fn rm_refuses_protected_container_without_force_system() {
@@ -243,7 +243,7 @@ mod tests {
         );
     }
 
-    /// Track G: `--force-system` bypasses the guard so deliberate
+    /// `--force-system` bypasses the guard so deliberate
     /// teardown (`isd uninit` internals) can target system containers.
     #[test]
     fn rm_allows_protected_with_force_system() {
@@ -251,7 +251,7 @@ mod tests {
             .expect("force_system bypasses the guard");
     }
 
-    /// Track G: the same guard is wired into `stop`. Error mentions the
+    /// The same guard is wired into `stop`. Error mentions the
     /// `stop` verb so the override hint copy-pastes cleanly.
     #[test]
     fn stop_refuses_protected_container_without_force_system() {
@@ -266,7 +266,7 @@ mod tests {
         );
     }
 
-    /// Track G: same guard for `restart`. Verb threads through.
+    /// Same guard for `restart`. Verb threads through.
     #[test]
     fn restart_refuses_protected_container_without_force_system() {
         let err =
@@ -279,7 +279,7 @@ mod tests {
         );
     }
 
-    /// Track G: same guard for `kill`. Verb threads through.
+    /// Same guard for `kill`. Verb threads through.
     #[test]
     fn kill_refuses_protected_container_without_force_system() {
         let err =
@@ -291,14 +291,14 @@ mod tests {
         );
     }
 
-    /// Track G: containers without `io.isengard.role` are unaffected.
+    /// Containers without `io.isengard.role` are unaffected.
     #[test]
     fn unlabelled_container_is_not_protected() {
         check_one_target_protection("bazarr", None, false, "rm")
             .expect("unlabelled containers pass through");
     }
 
-    /// Track G: a role outside the protected set (e.g. a hypothetical
+    /// A role outside the protected set (e.g. a hypothetical
     /// `registry` role) is not protected. Mirrors
     /// `discovery_labels::tests::other_roles_are_not_protected`.
     #[test]

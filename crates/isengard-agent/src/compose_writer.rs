@@ -249,7 +249,7 @@ pub enum ApplyWriteOutcome {
 /// concurrency check (`expected_sha256` matches what's on disk) unless
 /// `force = true`, then atomically writes the new YAML + meta.toml.
 ///
-/// Phase 0.13: when `manifest_toml` is non-empty, also persists it at
+/// When `manifest_toml` is non-empty, also persists it at
 /// `dir/stack.toml` (atomic write). The agent does NOT parse it; it's
 /// kept for operator inspection + `isd manifest cat` (future). Hook
 /// execution + secret threading live elsewhere; this function only
@@ -282,7 +282,7 @@ pub fn apply_controller_write(
         return ApplyWriteOutcome::Error(format!("{e:#}"));
     }
 
-    // Phase 0.13 manifest persistence. Non-fatal: a manifest write
+    // Manifest persistence. Non-fatal: a manifest write
     // failure logs but does NOT roll back the compose write (the deploy
     // already happened; the operator can re-deploy to retry the manifest).
     if !manifest_toml.is_empty() {
@@ -300,7 +300,7 @@ pub fn apply_controller_write(
     }
 }
 
-/// Atomic write of `dir/stack.toml`. Phase 0.13.
+/// Atomic write of `dir/stack.toml`.
 fn write_manifest_atomic(dir: &Path, manifest_toml: &str) -> Result<(), anyhow::Error> {
     std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("mkdir {}: {e}", dir.display()))?;
     let path = dir.join("stack.toml");
