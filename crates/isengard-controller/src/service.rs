@@ -8,7 +8,7 @@ use std::sync::Arc;
 use isengard_proto::pb::controller_server::Controller;
 use isengard_proto::pb::{
     AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, FetchSecretRequest,
-    FetchSecretResponse, RenewCertRequest, RenewCertResponse,
+    FetchSecretResponse, GetCaPemRequest, GetCaPemResponse, RenewCertRequest, RenewCertResponse,
 };
 use isengard_storage::{Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
@@ -143,6 +143,18 @@ impl ControllerService {
 #[tonic::async_trait]
 impl Controller for ControllerService {
     type SyncStream = ReceiverStream<Result<ControllerMessage, Status>>;
+
+    async fn get_ca_pem(
+        &self,
+        _request: Request<GetCaPemRequest>,
+    ) -> Result<Response<GetCaPemResponse>, Status> {
+        // Unauthenticated: the response is the controller's public CA
+        // certificate. The agent has no client cert to present here.
+        // Listed in `auth::PUBLIC_METHODS` so the interceptor lets the
+        // call through without an mTLS handshake.
+        let pem = self.ca.root_cert_pem().as_bytes().to_vec();
+        Ok(Response::new(GetCaPemResponse { pem }))
+    }
 
     async fn enroll(
         &self,

@@ -7,6 +7,18 @@ package isengard.v1;
 // v1 wire surface, scoped for Phase 2 (Enroll + Sync only). Phase 3+ message
 // variants are scaffolded as oneof fields so the schema stays stable.
 service Controller {
+  // Unauthenticated. Returns the controller's root CA PEM so a freshly
+  // installed agent can verify it against the SHA-256 fingerprint
+  // embedded in its packed join token, then pin the verified PEM as
+  // the trust root for the actual `Enroll` RPC.
+  //
+  // Called over a skip-verify TLS channel: the agent has no CA yet, so
+  // tonic cannot validate the controller's server cert here. The
+  // fingerprint comparison the agent does next is what prevents MITM.
+  // Trust-the-transport from the operator's side: this endpoint
+  // returns public data (the CA cert itself).
+  rpc GetCaPem(GetCaPemRequest) returns (GetCaPemResponse);
+
   // One-shot at agent startup. Agent presents host metadata, receives a
   // controller-assigned ULID + the heartbeat interval the controller wants.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
@@ -28,6 +40,19 @@ service Controller {
   // Plaintext is never persisted on the agent: it lands in a tmpfs
   // mount inside the operator's workload container.
   rpc FetchSecret(FetchSecretRequest) returns (FetchSecretResponse);
+}
+
+// ============ GET CA PEM ============
+
+message GetCaPemRequest {
+  // Reserved for future shape stability. The fingerprint flow doesn't
+  // need any request fields today: the controller serves one CA.
+}
+
+message GetCaPemResponse {
+  // PEM-encoded X.509 root certificate. Agent compares its SHA-256
+  // against the fingerprint embedded in the join token.
+  bytes pem = 1;
 }
 
 // ============ ENROLL ============

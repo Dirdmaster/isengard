@@ -14,10 +14,10 @@
 
 use anyhow::{Context, Result, anyhow};
 
-use isengard_proto::pb::EnrollRequest;
 use isengard_proto::pb::controller_client::ControllerClient;
+use isengard_proto::pb::{EnrollRequest, GetCaPemRequest};
 use isengard_storage::host::HostId;
-use tonic::transport::{Certificate, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 
 use crate::cert_store::CertBundle;
 
@@ -132,15 +132,15 @@ fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
 
 /// Pre-enroll fingerprint verify.
 ///
-/// Fetches the controller's CA PEM over skip-verify TLS, compares its
-/// SHA-256 against the fingerprint embedded in the packed token, and
-/// returns the verified PEM bytes on match. Caller uses the returned
-/// PEM to build a properly-validating reqwest::Client (or tonic channel)
-/// for the actual Enroll RPC.
+/// Calls the unauthenticated `GetCaPem` RPC over a skip-verify TLS
+/// channel, compares the served CA's SHA-256 against the fingerprint
+/// embedded in the packed token, and returns the verified PEM bytes
+/// on match. Caller uses the returned PEM to build a properly-
+/// validating bootstrap channel for the real `Enroll` RPC.
 ///
-/// Threat model: the MITM window is one HTTP request long. Successfully
-/// spoofing the CA requires preimage resistance on SHA-256, which is
-/// computationally infeasible. Same mechanic as `docker swarm join`.
+/// Threat model: the MITM window is one RPC long. A successful spoof
+/// requires preimage resistance on SHA-256, which is computationally
+/// infeasible. Same mechanic as `docker swarm join`.
 pub async fn fetch_and_verify_ca(
     controller_url: &str,
     packed_token: &str,
@@ -148,27 +148,17 @@ pub async fn fetch_and_verify_ca(
     let parsed = isengard_core::join_token::parse(packed_token)
         .map_err(|e| anyhow!("invalid token: {e}"))?;
 
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| anyhow!("building skip-verify client: {e}"))?;
+    let channel = skip_verify_channel(controller_url)
+        .await
+        .with_context(|| format!("connect skip-verify channel to {controller_url}"))?;
 
-    let url = format!("{}/api/v1/ca/pem", controller_url.trim_end_matches('/'));
-    let resp = client
-        .get(&url)
-        .send()
+    let mut client = ControllerClient::new(channel);
+    let pem = client
+        .get_ca_pem(GetCaPemRequest {})
         .await
-        .map_err(|e| anyhow!("fetching CA from controller: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(anyhow!("controller returned {status} for GET {url}"));
-    }
-    let pem = resp
-        .bytes()
-        .await
-        .map_err(|e| anyhow!("reading CA response body: {e}"))?
-        .to_vec();
+        .context("GetCaPem RPC failed")?
+        .into_inner()
+        .pem;
 
     let actual = isengard_core::join_token::fingerprint(&pem);
     if actual != parsed.fingerprint {
@@ -181,6 +171,161 @@ pub async fn fetch_and_verify_ca(
     }
 
     Ok(pem)
+}
+
+/// Build a tonic [`Channel`] that skips server-cert verification.
+///
+/// Only used for the one-shot pre-enroll `GetCaPem` RPC: the agent has
+/// no CA yet, so tonic cannot validate the controller's server cert.
+/// The fingerprint check the caller does after this is what restores
+/// trust. Never reuse the returned channel for any other RPC.
+///
+/// Built as a custom `tower::Service<Uri>` connector that does TCP →
+/// TLS handshake against the *original* `https://` URL, then hands the
+/// already-TLS-wrapped stream to tonic via an `http://` URL so
+/// tonic's connector doesn't try to TLS-wrap on top of it.
+async fn skip_verify_channel(controller_url: &str) -> anyhow::Result<Channel> {
+    let original: tonic::transport::Uri = controller_url
+        .parse()
+        .with_context(|| format!("invalid controller url {controller_url:?}"))?;
+    let host = original
+        .host()
+        .ok_or_else(|| anyhow!("controller url {controller_url:?} missing host"))?
+        .to_string();
+    let port = original.port_u16().unwrap_or(9417);
+    let connector = skip_verify::Connector::new(host, port)?;
+
+    // Dial with an `http://` placeholder so tonic doesn't try to TLS
+    // on top of the already-TLS-wrapped stream the connector returns.
+    // The connector ignores the URI passed in `call`; it always
+    // connects to the host:port it was constructed with.
+    let placeholder = format!("http://{}:{}", original.host().unwrap(), port);
+    let endpoint = Channel::from_shared(placeholder.clone())
+        .with_context(|| format!("invalid placeholder uri {placeholder:?}"))?
+        .timeout(std::time::Duration::from_secs(10));
+    let channel = endpoint
+        .connect_with_connector(connector)
+        .await
+        .with_context(|| format!("dial {controller_url}"))?;
+    Ok(channel)
+}
+
+/// Skip-verify TLS connector for the one-shot pre-enroll `GetCaPem`
+/// call. Wraps the TCP+TLS dance behind a `tower::Service<Uri>` so
+/// tonic's `connect_with_connector` can drive it.
+mod skip_verify {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use anyhow::{Context as _, Result};
+    use hyper_util::rt::TokioIo;
+    use rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use rustls::crypto::ring;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, SignatureScheme};
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+    use tonic::transport::Uri;
+
+    #[derive(Debug)]
+    struct NoVerify;
+
+    impl ServerCertVerifier for NoVerify {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    #[derive(Clone)]
+    pub(super) struct Connector {
+        host: String,
+        port: u16,
+        tls: TlsConnector,
+        server_name: ServerName<'static>,
+    }
+
+    impl Connector {
+        pub(super) fn new(host: String, port: u16) -> Result<Self> {
+            let mut tls = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerify))
+                .with_no_client_auth();
+            // gRPC is HTTP/2 only; advertise h2 via ALPN so the server
+            // accepts the handshake.
+            tls.alpn_protocols = vec![b"h2".to_vec()];
+            let server_name = ServerName::try_from(host.clone())
+                .with_context(|| format!("invalid TLS server name {host:?}"))?;
+            Ok(Self {
+                host,
+                port,
+                tls: TlsConnector::from(Arc::new(tls)),
+                server_name,
+            })
+        }
+    }
+
+    impl tower::Service<Uri> for Connector {
+        type Response = TokioIo<tokio_rustls::client::TlsStream<TcpStream>>;
+        type Error = anyhow::Error;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _uri: Uri) -> Self::Future {
+            let host = self.host.clone();
+            let port = self.port;
+            let tls = self.tls.clone();
+            let name = self.server_name.clone();
+            Box::pin(async move {
+                let tcp = TcpStream::connect((host.as_str(), port))
+                    .await
+                    .with_context(|| format!("tcp connect {host}:{port}"))?;
+                let stream = tls
+                    .connect(name, tcp)
+                    .await
+                    .context("tls handshake")?;
+                Ok(TokioIo::new(stream))
+            })
+        }
+    }
 }
 
 fn hex_full(bytes: &[u8]) -> String {

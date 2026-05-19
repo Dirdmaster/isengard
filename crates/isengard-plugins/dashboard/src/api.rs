@@ -69,26 +69,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
             "/placements/by-stack/{stack_id}",
             get(list_placements_by_stack),
         )
-        // Serve the controller's CA PEM unauthenticated. The
-        // endpoint is only reachable on the loopback-bound listener
-        // (compose maps 127.0.0.1:9418); trust-the-transport already
-        // covers access control. Agents fetch this during pre-enroll
-        // fingerprint verification.
-        .route("/ca/pem", get(get_ca_pem))
         .with_state(handles)
-}
-
-/// Return the controller's root CA in PEM form so an
-/// enrolling agent can verify its operator-printed fingerprint before
-/// trusting the cert for the actual enroll RPC. No auth check here;
-/// see the route comment above for why (loopback-bound listener,
-/// trust-the-transport per).
-async fn get_ca_pem(State(handles): State<Arc<ControllerHandles>>) -> impl IntoResponse {
-    let pem = handles.ca.root_cert_pem().to_string();
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/x-pem-file")],
-        pem,
-    )
 }
 
 fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -1941,34 +1922,6 @@ mod tests {
             )),
             ca,
         })
-    }
-
-    #[tokio::test]
-    async fn get_ca_pem_returns_pem_with_correct_content_type() {
-        let handles = test_handles().await;
-        let expected_pem = handles.ca.root_cert_pem().to_string();
-        let app = router(handles);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ca/pem")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "application/x-pem-file"
-        );
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let text = std::str::from_utf8(&body).unwrap();
-        assert_eq!(text, expected_pem);
     }
 
     fn test_enroll() -> EnrollHost {
