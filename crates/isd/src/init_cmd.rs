@@ -281,6 +281,7 @@ async fn step_wait_for_controller_ready(docker_uri: &str) -> Result<()> {
 // === Step 6: mint the first agent join-token via docker exec ===
 
 async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
+    use bollard::container::LogOutput;
     use bollard::exec::{CreateExecOptions, StartExecResults};
     use futures_util::StreamExt;
 
@@ -308,23 +309,54 @@ async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
         .await
         .context("creating exec for token mint")?;
 
-    let mut output = String::new();
+    // Read stdout-only from the exec stream: the controller binary
+    // writes its tracing banner to stderr. We additionally scan for a
+    // token-shaped line as defense in depth so future logging changes
+    // can't silently corrupt the agent's enrollment token.
+    let mut stdout = String::new();
+    let mut stderr = String::new();
     if let StartExecResults::Attached {
         output: mut stream, ..
     } = docker.client().start_exec(&exec.id, None).await?
     {
         while let Some(item) = stream.next().await {
-            let chunk = item.context("reading token mint stdout")?;
-            output.push_str(&chunk.to_string());
+            match item.context("reading token mint output")? {
+                LogOutput::StdOut { message } => {
+                    stdout.push_str(&String::from_utf8_lossy(&message));
+                }
+                LogOutput::StdErr { message } => {
+                    stderr.push_str(&String::from_utf8_lossy(&message));
+                }
+                LogOutput::Console { message } | LogOutput::StdIn { message } => {
+                    stdout.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
         }
     }
-    let token = output.trim().to_string();
-    if token.is_empty() {
-        return Err(anyhow!(
-            "token mint returned empty output; check `docker logs iso-controller`"
-        ));
-    }
+
+    let token = extract_join_token(&stdout).ok_or_else(|| {
+        anyhow!(
+            "token mint did not emit a parseable join token.\n  stdout: {:?}\n  stderr: {:?}",
+            stdout.trim(),
+            stderr.trim()
+        )
+    })?;
     Ok(token)
+}
+
+/// Pull a `TK<base32>.<base32>` join token out of the controller's stdout.
+///
+/// Scans line-by-line and returns the last line that parses as a packed
+/// token. Tolerates accidental log noise mixed into stdout (e.g. an
+/// always-on banner from a future binary) without silently feeding it to
+/// the agent as `ISENGARD_ENROLL_TOKEN`.
+fn extract_join_token(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rfind(|line| isengard_core::join_token::parse(line).is_ok())
+        .map(str::to_string)
 }
 
 // === Step 7: docker compose up -d agent with the join token via env ===
@@ -417,6 +449,45 @@ mod tests {
     fn embedded_compose_carries_discovery_labels() {
         assert!(EMBEDDED_COMPOSE.contains("io.isengard.role: controller"));
         assert!(EMBEDDED_COMPOSE.contains("io.isengard.api.version: \"1\""));
+    }
+
+    /// Minted by `isengard controller token mint --format token` against a
+    /// real CA. Used as a token-shape fixture in the tests below.
+    const FIXTURE_TOKEN: &str = "TKY2ZPGCLMIWR6UZFIVZOVXTNAY626OE2G2FVELW35YIT3H7RBCQPQ.\
+                                 ZUGFQZXZQECT3BCZDBFMX7UL2V7KSYG5RZHZQKTWO3YOFOAEAGGQ";
+
+    #[test]
+    fn extract_join_token_strips_banner_noise() {
+        // What lausanne 0.6.0-pre actually emitted: ANSI-colored banner
+        // line ahead of the token. extract_join_token should ignore the
+        // banner and return the packed token.
+        let stdout = format!(
+            "\x1b[1;32misengard\x1b[0m \x1b[2mnext\x1b[0m \
+             \x1b[1;36mcontroller\x1b[0m \x1b[2mready\x1b[0m\n{FIXTURE_TOKEN}\n"
+        );
+        assert_eq!(extract_join_token(&stdout).as_deref(), Some(FIXTURE_TOKEN));
+    }
+
+    #[test]
+    fn extract_join_token_returns_last_match() {
+        // Defense in depth: if two tokens somehow end up on stdout,
+        // prefer the last one (the most recent mint).
+        let stale = "TKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\
+                     AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let stdout = format!("{stale}\n{FIXTURE_TOKEN}\n");
+        assert_eq!(extract_join_token(&stdout).as_deref(), Some(FIXTURE_TOKEN));
+    }
+
+    #[test]
+    fn extract_join_token_returns_none_on_banner_only() {
+        let stdout = "\x1b[1;32misengard\x1b[0m next controller ready\n";
+        assert!(extract_join_token(stdout).is_none());
+    }
+
+    #[test]
+    fn extract_join_token_returns_none_on_empty() {
+        assert!(extract_join_token("").is_none());
+        assert!(extract_join_token("   \n  \n").is_none());
     }
 
     // Integration-style; runs only against a real local docker.

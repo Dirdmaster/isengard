@@ -1,16 +1,14 @@
-//! Phase 14: agent → controller enrollment.
+//! Agent → controller enrollment.
 //!
-//! On first boot the agent has no CA cert to validate against. Track F
-//! mandates that the join token carry the SHA-256 of the controller's CA:
+//! On first boot the agent has no CA cert to validate against. The join
+//! token carries the SHA-256 of the controller's CA:
 //! [`fetch_and_verify_ca`] fetches the controller's CA over skip-verify
 //! TLS and confirms its digest matches the fingerprint embedded in the
 //! packed token before the real Enroll RPC runs over an mTLS channel
 //! rooted at the verified CA.
 //!
-//! Track G removed the legacy env-var fallbacks
-//! (`ISENGARD_CONTROLLER_CA_PEM_PATH`, `_BASE64`, `_PEM`, and the
-//! `BootstrapTrust::ca_pem_path` / `ca_pem` fields). The fingerprint-
-//! verified PEM is now the only trust anchor.
+//! The fingerprint-verified PEM is the only trust anchor: there is no
+//! env-var or path fallback.
 
 #![allow(clippy::result_large_err)]
 
@@ -114,10 +112,10 @@ pub async fn enroll(
     })
 }
 
-/// Build the bootstrap channel TLS config. Track G: only the
-/// fingerprint-verified PEM is accepted. A `None` trust value means the
-/// caller did not run the Track F pre-enroll verify; that is now a hard
-/// error pointing the operator at minting a fresh packed token.
+/// Build the bootstrap channel TLS config. Only the fingerprint-verified
+/// PEM is accepted; a `None` trust value means the caller did not run the
+/// pre-enroll verify, which is a hard error pointing the operator at
+/// minting a fresh packed token.
 fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
     let pem = trust
         .verified_ca_pem
@@ -125,14 +123,14 @@ fn build_bootstrap_tls(trust: &BootstrapTrust) -> Result<ClientTlsConfig> {
         .filter(|p| !p.is_empty())
         .ok_or_else(|| {
             anyhow!(
-                "Track F fingerprint flow required; got a legacy token without a CA fingerprint. \
-                 Mint a new token with `isd join-token` and re-run `isd join`."
+                "token is missing the controller CA fingerprint. \
+                 Mint a fresh token with `isd join-token` and re-run `isd join`."
             )
         })?;
     Ok(ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)))
 }
 
-/// Track F pre-enroll fingerprint verify.
+/// Pre-enroll fingerprint verify.
 ///
 /// Fetches the controller's CA PEM over skip-verify TLS, compares its
 /// SHA-256 against the fingerprint embedded in the packed token, and
@@ -191,9 +189,9 @@ fn hex_full(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod bootstrap_tls_tests {
-    //! Track G: `build_bootstrap_tls` only accepts the fingerprint-
-    //! verified PEM. Missing / empty PEM hard-fails with a Track F-
-    //! pointer error.
+    //! `build_bootstrap_tls` only accepts the fingerprint-verified PEM.
+    //! Missing / empty PEM hard-fails with an operator-actionable error
+    //! pointing at `isd join-token`.
 
     use super::{BootstrapTrust, build_bootstrap_tls};
 
@@ -209,22 +207,25 @@ mod bootstrap_tls_tests {
     }
 
     #[test]
-    fn missing_verified_pem_surfaces_track_f_pointer() {
+    fn missing_verified_pem_surfaces_operator_pointer() {
         let trust = BootstrapTrust {
             verified_ca_pem: None,
         };
         let err = build_bootstrap_tls(&trust).unwrap_err();
         let rendered = format!("{err:#}");
-        assert!(rendered.contains("Track F fingerprint flow"), "{rendered}");
+        assert!(
+            rendered.contains("missing the controller CA fingerprint"),
+            "{rendered}"
+        );
         assert!(rendered.contains("isd join-token"), "{rendered}");
     }
 
     #[test]
-    fn empty_verified_pem_surfaces_track_f_pointer() {
+    fn empty_verified_pem_surfaces_operator_pointer() {
         let trust = BootstrapTrust {
             verified_ca_pem: Some(Vec::new()),
         };
         let err = build_bootstrap_tls(&trust).unwrap_err();
-        assert!(format!("{err:#}").contains("Track F fingerprint flow"));
+        assert!(format!("{err:#}").contains("missing the controller CA fingerprint"));
     }
 }

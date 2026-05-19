@@ -73,21 +73,17 @@ impl FormatTime for ShortTime {
 }
 
 /// Initialize the global subscriber. Idempotent-ish: calling twice will
-/// panic (matches `tracing_subscriber::fmt::init`'s contract). `mode` is
-/// the runtime role string emitted in the ready banner ("controller" or
-/// "agent").
-pub fn init(mode: &str, cli_filter: Option<&str>) {
-    // `init` and `join` drive an interactive cliclack transcript on
-    // stderr (intro, prompts, spinners, outro). An `info` line from
-    // the in-process controller code (e.g. `SecretsStore::put`) would
-    // splice itself into the connector bar and break the layout, so
-    // we silence the default subscriber unless the operator explicitly
-    // overrode it via --log / RUST_LOG.
-    let default_filter = if matches!(mode, "init" | "join") {
-        "warn"
-    } else {
-        "info"
-    };
+/// panic (matches `tracing_subscriber::fmt::init`'s contract).
+///
+/// - `mode`: the runtime role string emitted in the ready banner
+///   ("controller" or "agent").
+/// - `is_daemon`: true for long-running modes that should print a ready
+///   banner and default to `info` logging; false for one-shot CLI flows
+///   (token mint, ca export, secret bootstrap, join-token printer)
+///   whose stdout other tools parse. One-shot flows silence the banner
+///   and default to `warn` so info lines don't splice into output.
+pub fn init(mode: &str, cli_filter: Option<&str>, is_daemon: bool) {
+    let default_filter = if is_daemon { "info" } else { "warn" };
     let filter = cli_filter.map(EnvFilter::new).unwrap_or_else(|| {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter))
     });
@@ -118,29 +114,20 @@ pub fn init(mode: &str, cli_filter: Option<&str>) {
         }
     }
 
-    ready_banner(mode, format, ansi);
+    if is_daemon {
+        ready_banner(mode, format, ansi);
+    }
 }
 
 /// Emit the post-init banner. JSON mode emits a structured ready event;
 /// pretty mode emits a colored single-line banner that's easy to spot in
-/// `docker logs` when something restarts.
-///
-/// Suppressed for one-shot CLI flows (`init`, `join`) where the banner
-/// would clash with the install transcript's hand-rolled ASCII banner.
-/// Long-running daemon modes (`controller`, `agent`) keep the banner so
-/// it shows up in journalctl right next to the boot sequence.
+/// `docker logs` when something restarts. Only called for daemon modes
+/// (controller / agent); one-shot CLI subcommands skip it entirely so
+/// their stdout stays parseable by `isd init` and friends.
 fn ready_banner(mode: &str, format: LogFormat, ansi: bool) {
     let version = env!("ISENGARD_BUILD_VERSION");
     if matches!(format, LogFormat::Json) {
         tracing::info!(version, mode, "isengard ready");
-        return;
-    }
-
-    if matches!(mode, "init" | "join") {
-        // The init/join flow renders its own polished banner; the
-        // tracing-init line would land above it and clash with the
-        // ASCII art. Stay quiet here; long-running daemons still print
-        // it for journalctl.
         return;
     }
 
