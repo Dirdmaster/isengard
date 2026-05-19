@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
-use crate::credentials::{self, ContextEntry};
-use crate::session::Session;
+use crate::docker_context::{self, DockerContextSummary};
+use crate::session::{ResolvedContext, Session};
 
 /// Where a `put` / `rm` / `ls` applies.
 ///
@@ -145,7 +145,7 @@ async fn run_put_global(name: &str, value: String) -> Result<()> {
     let contexts = load_all_contexts()?;
     if contexts.is_empty() {
         return Err(anyhow!(
-            "no saved contexts; run `isd context create <name> --ssh <target>` first"
+            "no docker contexts found; create one with `docker context create <name> --docker host=ssh://...` first"
         ));
     }
     let mut report = ScopeReport::new();
@@ -168,8 +168,12 @@ async fn run_put_global(name: &str, value: String) -> Result<()> {
     Ok(())
 }
 
-async fn put_to_context(ctx: &ContextEntry, name: &str, value: String) -> Result<()> {
-    let session = Session::from_context(ctx.clone()).await?;
+async fn put_to_context(ctx: &DockerContextSummary, name: &str, value: String) -> Result<()> {
+    let session = Session::from_context(ResolvedContext {
+        name: ctx.name.clone(),
+        docker_uri: ctx.target.clone(),
+    })
+    .await?;
     put_secret(&session, name, value).await
 }
 
@@ -214,7 +218,7 @@ async fn run_list_global() -> Result<()> {
     let contexts = load_all_contexts()?;
     if contexts.is_empty() {
         return Err(anyhow!(
-            "no saved contexts; run `isd context create <name> --ssh <target>` first"
+            "no docker contexts found; create one with `docker context create <name> --docker host=ssh://...` first"
         ));
     }
     let snapshot = collect_global_snapshot(&contexts).await;
@@ -249,7 +253,7 @@ impl GlobalSnapshot {
     }
 }
 
-async fn collect_global_snapshot(contexts: &[ContextEntry]) -> GlobalSnapshot {
+async fn collect_global_snapshot(contexts: &[DockerContextSummary]) -> GlobalSnapshot {
     use std::collections::BTreeMap;
     let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut unreachable: Vec<(String, anyhow::Error)> = Vec::new();
@@ -273,8 +277,12 @@ async fn collect_global_snapshot(contexts: &[ContextEntry]) -> GlobalSnapshot {
     }
 }
 
-async fn list_from_context(ctx: &ContextEntry) -> Result<Vec<SecretEntry>> {
-    let session = Session::from_context(ctx.clone()).await?;
+async fn list_from_context(ctx: &DockerContextSummary) -> Result<Vec<SecretEntry>> {
+    let session = Session::from_context(ResolvedContext {
+        name: ctx.name.clone(),
+        docker_uri: ctx.target.clone(),
+    })
+    .await?;
     list_secrets(&session).await
 }
 
@@ -353,7 +361,7 @@ async fn run_rm_global(name: &str) -> Result<()> {
     let contexts = load_all_contexts()?;
     if contexts.is_empty() {
         return Err(anyhow!(
-            "no saved contexts; run `isd context create <name> --ssh <target>` first"
+            "no docker contexts found; create one with `docker context create <name> --docker host=ssh://...` first"
         ));
     }
     let mut report = ScopeReport::new();
@@ -384,8 +392,12 @@ enum RmOutcome {
     AlreadyGone,
 }
 
-async fn rm_from_context(ctx: &ContextEntry, name: &str) -> Result<RmOutcome> {
-    let session = Session::from_context(ctx.clone()).await?;
+async fn rm_from_context(ctx: &DockerContextSummary, name: &str) -> Result<RmOutcome> {
+    let session = Session::from_context(ResolvedContext {
+        name: ctx.name.clone(),
+        docker_uri: ctx.target.clone(),
+    })
+    .await?;
     let controller_url = session.require_controller()?;
     // delete_secret returns an error on 404. For global scope that's a
     // success-ish state (already gone). Re-classify by re-checking the
@@ -482,14 +494,12 @@ async fn delete_secret(session: &Session, name: &str) -> Result<()> {
     Err(anyhow!("DELETE {url} -> {status}: {body}"))
 }
 
-/// Load every saved context. Used by `--scope global` to fan-out a
-/// put / rm / ls across the operator.s saved contexts. Returns an empty Vec when
-/// the credentials file is missing (the caller surfaces a friendlier
-/// message).
-pub(crate) fn load_all_contexts() -> Result<Vec<ContextEntry>> {
-    let path = credentials::default_credentials_path()?;
-    let file = credentials::load(&path)?;
-    Ok(file.contexts)
+/// Load every docker context. Used by `--scope global` to fan-out a
+/// put / rm / ls across the operator's docker contexts. Returns at
+/// minimum the synthetic "default" context (see
+/// `docker_context::list_contexts`).
+pub(crate) fn load_all_contexts() -> Result<Vec<DockerContextSummary>> {
+    docker_context::list_contexts()
 }
 
 /// Per-context status accumulator for `--scope global` operations.
@@ -793,102 +803,5 @@ mod tests {
         std::fs::write(&f, "hello\n").unwrap();
         let v = read_value(Some(&f)).unwrap();
         assert_eq!(v, "hello");
-    }
-
-    // ===================================================================
-    // Phase 0.15 integration test: spin up two stub controllers (one
-    // wiremock instance per "context"), point a temp credentials file at
-    // them, run `secret put --scope global` through the dispatch path,
-    // and verify both controllers received the PUT.
-    //
-    // Ignored by default because:
-    //   - wiremock binds an OS-chosen TCP port; environments with no
-    //     loopback access (some sandboxes) will fail.
-    //   - The test sets ISD_CREDENTIALS_FILE which is process-global; if
-    //     test runners share env between tests this can collide. Running
-    //     it under `--ignored` keeps it opt-in for local + CI smoke.
-    //
-    // Run with: `cargo test -p isd -- --ignored --include-ignored
-    //           secret::tests::global_put_fans_out_to_every_context`
-    // ===================================================================
-    #[tokio::test]
-    #[ignore]
-    async fn global_put_fans_out_to_every_context() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server_a = MockServer::start().await;
-        let server_b = MockServer::start().await;
-
-        Mock::given(method("PUT"))
-            .and(path("/api/v1/secrets/cf_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json_name("cf_token")))
-            .expect(1)
-            .mount(&server_a)
-            .await;
-        Mock::given(method("PUT"))
-            .and(path("/api/v1/secrets/cf_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json_name("cf_token")))
-            .expect(1)
-            .mount(&server_b)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds_path = dir.path().join("credentials.toml");
-        std::fs::write(
-            &creds_path,
-            format!(
-                r#"default_context = "alice"
-
-[[contexts]]
-name = "alice"
-kind = "http"
-url = "{}"
-
-[[contexts]]
-name = "bob"
-kind = "http"
-url = "{}"
-"#,
-                server_a.uri(),
-                server_b.uri()
-            ),
-        )
-        .unwrap();
-
-        // SAFETY: the surrounding test is `#[ignore]`d and runs in
-        // isolation when invoked explicitly. Other tests in this module
-        // do not touch ISD_CREDENTIALS_FILE so concurrent reads are
-        // safe in practice. set_var is unsafe in 2024 edition because
-        // it can race with getenv from other threads; the cost is
-        // acceptable for an ignored integration test.
-        unsafe {
-            std::env::set_var("ISD_CREDENTIALS_FILE", &creds_path);
-        }
-
-        let val_path = dir.path().join("value");
-        std::fs::write(&val_path, "supersecret\n").unwrap();
-        let result = run_put(
-            PutArgs {
-                name: "cf_token".to_string(),
-                from_file: Some(val_path),
-                scope: Scope::Global,
-            },
-            None,
-        )
-        .await;
-
-        unsafe {
-            std::env::remove_var("ISD_CREDENTIALS_FILE");
-        }
-
-        result.expect("put --scope global should succeed when every stub returns 200");
-        // wiremock's `.expect(1)` above panics on drop if the count was
-        // wrong, so reaching this line means both controllers got the
-        // PUT exactly once.
-    }
-
-    fn json_name(name: &str) -> serde_json::Value {
-        serde_json::json!({ "name": name })
     }
 }

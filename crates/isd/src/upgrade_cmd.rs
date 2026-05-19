@@ -44,11 +44,7 @@ pub struct UpgradeArgs {
 }
 
 pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
-    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!(
-            "context has no docker endpoint; add one with `isd context create ... --docker ...`"
-        )
-    })?;
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
     let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;
 
     // 1. Detect current tag.

@@ -32,9 +32,7 @@ pub async fn run(args: JoinArgs, context: Option<&str>) -> Result<()> {
         anyhow!("invalid token: {e}\nExpected TK<bytes>.<fingerprint> format from `isd join-token`")
     })?;
 
-    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!("context has no docker endpoint; create one with `isd context import <name>` first")
-    })?;
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
 
     eprintln!("isd join: bringing up agent on {docker_uri}");
 

@@ -18,9 +18,7 @@ pub struct JoinTokenArgs {
 }
 
 pub async fn run(args: JoinTokenArgs, context: Option<&str>) -> Result<()> {
-    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!("context has no docker endpoint; create one with `isd context import <name>` first")
-    })?;
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
     let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;
 
     let ttl_str = format!("{}", args.ttl);

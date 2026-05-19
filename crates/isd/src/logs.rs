@@ -52,7 +52,7 @@ pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
     // controller WebSocket forwarder anymore. Detect any target whose
     // recorded context (the host stamped at `isd ps` time) does not
     // match the current resolved context, and error with an ssh hint.
-    let current_context = ps::resolve_docker_context(context)?;
+    let current_context = crate::docker_context::resolve_context_name(context)?;
     for t in &targets {
         // Literal-only resolution stamps an empty context; skip that case
         // since we cannot prove cross-host without the index cache.

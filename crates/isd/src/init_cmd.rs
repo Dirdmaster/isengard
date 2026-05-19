@@ -47,10 +47,8 @@ pub(crate) const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose
 const BOOTSTRAP_IMAGE: &str = "alpine:3.21";
 
 pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
-    // Resolve docker URI from context; error early if missing.
-    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!("context has no docker endpoint; create one with `isd context import <name>` first")
-    })?;
+    // Resolve docker URI from the docker context (Track H).
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
 
     eprintln!("isd init: bootstrapping controller on {docker_uri}");
 

@@ -1,15 +1,14 @@
 //! `isd`: the Isengard operator CLI. Talks to a controller over the same
 //! REST + WebSocket surface the dashboard uses.
 //!
-//! Reach a controller via `isd context create <name> --ssh <target>` (the
-//! canonical homelab path: SSH tunnels the dashboard port per command,
-//! the operator's `~/.ssh/config` handles auth) or
-//! `--http <url>` (local dev, direct-reachable dashboards). `isd context
-//! use <name>` selects the default; `--context <name>` overrides per
-//! invocation.
+//! Track H: `isd` reads docker's context store at `~/.docker/contexts/`
+//! directly. No parallel credentials.toml. Operator creates contexts with
+//! `docker context create <name> --docker host=ssh://...`; `isd context
+//! use <name>` writes the same `currentContext` field `docker context use`
+//! does. `--context <name>` overrides per invocation.
 //!
 //! Subcommands:
-//!  - `isd context create | use | list | rm | show`
+//!  - `isd context list | use | show`
 //!  - `isd ps`: list stacks + services
 //!  - `isd open <stack>`: open the stack's primary host in a browser
 //!  - `isd logs <selector> -f`: tail container logs (#N, name, ID, range)
@@ -30,8 +29,7 @@ mod backup_storage;
 mod compose_cmd;
 mod confirm;
 mod context;
-mod context_import;
-mod credentials;
+mod docker_context;
 mod help_render;
 mod hosts_cmd;
 mod index_cache;
@@ -55,7 +53,6 @@ mod service_cmd;
 mod session;
 mod ssh_tunnel;
 mod stack_cmd;
-mod table;
 mod uninit_cmd;
 mod update_cmd;
 mod upgrade_cmd;
