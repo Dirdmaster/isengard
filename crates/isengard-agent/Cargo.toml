@@ -31,9 +31,18 @@ pingora-http = "0.8"
 pingora-proxy = { workspace = true }
 pingora-boringssl = "0.8"
 rcgen = "0.13"
-# Phase 0.8 self-update: download a new musl binary, verify sha256,
+# self-update: download a new musl binary, verify sha256,
 # atomic-rename, trigger systemctl restart. Plain GET, no JSON.
 reqwest = { workspace = true }
+# Pre-enroll skip-verify tonic channel for GetCaPem RPC. We have no CA
+# yet at that point: tonic's `ClientTlsConfig` cannot express
+# skip-verify, so we hand-roll a rustls config with a custom verifier
+# and feed it to tonic via `connect_with_connector`. The fingerprint
+# check the agent does next is what closes the trust loop.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http2", "tokio"] }
+tower = { version = "0.5" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -60,12 +69,8 @@ futures = "0.3"
 data-encoding.workspace = true
 tempfile = { workspace = true }
 isengard-controller = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-# Tests must install a process-level rustls CryptoProvider before any TLS
-# session is built. Required since instant-acme 0.8 transitively pulled in a
-# rustls-platform-verifier path that panics without an explicit provider.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
-# Track F Phase 3: `fingerprint_enroll` test spawns a wiremock server to
-# stand in for the controller's `GET /api/v1/ca/pem` endpoint so the
-# pre-enroll fingerprint-verify path can be exercised in isolation.
-wiremock = { workspace = true }
+# `fingerprint_enroll` test spawns an in-process tonic server with a
+# stub `GetCaPem` impl so the pre-enroll fingerprint-verify path can
+# be exercised in isolation. The test fixture needs to mint a self-
+# signed cert + serve it over TLS.
+rcgen = "0.13"

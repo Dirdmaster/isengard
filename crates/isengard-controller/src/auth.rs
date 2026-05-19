@@ -35,7 +35,17 @@ use crate::revocation::RevocationSet;
 
 /// RPCs that don't require a client cert (the bootstrap chicken-and-egg).
 /// Format matches the gRPC URI path tonic dispatches on.
-const PUBLIC_METHODS: &[&str] = &["/isengard.v1.Controller/Enroll"];
+///
+/// - `GetCaPem`: returns the controller's public CA cert. Agents fetch
+///   this over a skip-verify TLS channel during pre-enroll fingerprint
+///   verification; they have no cert to present yet, and the response
+///   itself is public data.
+/// - `Enroll`: redeems a one-time join token for a freshly minted mTLS
+///   cert. The token gates access; subsequent RPCs use the cert.
+const PUBLIC_METHODS: &[&str] = &[
+    "/isengard.v1.Controller/GetCaPem",
+    "/isengard.v1.Controller/Enroll",
+];
 
 /// Tower layer producing a [`CertAuth`] middleware around a service.
 ///

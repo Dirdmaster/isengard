@@ -83,10 +83,11 @@ pub struct ControllerHandles {
     /// `/run/secrets/master.key`) is readable and 32 bytes long;
     /// otherwise the controller refuses to start.
     pub secrets: Arc<secrets::SecretsStore>,
-    /// Controller's internal CA. Surfaced so the dashboard
-    /// plugin can expose the unauthenticated `GET /api/v1/ca/pem`
-    /// endpoint agents call during pre-enroll fingerprint verification.
-    /// Same `Authority` instance already passed to `EnrollmentService`.
+    /// Controller's internal CA. Same `Authority` instance held by
+    /// `EnrollmentService` (token minting) and `ControllerService` (the
+    /// unauthenticated `GetCaPem` RPC agents call during pre-enroll
+    /// fingerprint verification). Surfaced here so plugins can read
+    /// the root cert if they need to.
     pub ca: Arc<Authority>,
 }
 

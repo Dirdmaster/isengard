@@ -3299,6 +3299,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hostname",
+ "hyper-util",
  "if-addrs",
  "instant-acme",
  "isengard-controller",
@@ -3323,13 +3324,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "toml 0.8.23",
  "tonic",
+ "tower 0.5.3",
  "tracing",
  "ulid",
- "wiremock",
  "x509-parser 0.16.0",
 ]
 
