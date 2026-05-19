@@ -23,7 +23,7 @@ pub struct AgentState {
     #[serde(default)]
     pub controller_url: Option<String>,
     /// Heartbeat interval the controller asked us to use, in seconds. `None`
-    /// for state files written before Phase 14 task 11; the agent then falls
+    /// for older state files that omit it; the agent then falls
     /// back to its compiled-in default.
     #[serde(default)]
     pub heartbeat_interval_secs: Option<u32>,

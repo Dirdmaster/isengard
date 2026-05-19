@@ -1,4 +1,4 @@
-//! Integration tests for `/api/v1/webhooks` (Phase 12 Plan A, T5, #53).
+//! Integration tests for `/api/v1/webhooks` (T5, #53).
 
 use std::sync::Arc;
 
@@ -311,7 +311,7 @@ async fn update_returns_404_when_missing() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// Phase 12b/c: cross-source delivery list endpoint tests.
+// Cross-source delivery list endpoint tests.
 
 #[tokio::test]
 async fn deliveries_by_source_filters_to_lifecycle_only() {

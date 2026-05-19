@@ -141,7 +141,7 @@ pub async fn discover(docker: &Docker) -> Result<ControllerEndpoint, DiscoveryEr
 #[cfg(test)]
 mod tests {
     // The bollard Docker type can't be cheaply mocked; integration tests
-    // against a real docker live in the isd crate (Phase 4 covers them
+    // against a real docker live in the isd crate (covers them
     // via wiremock + a stub container around the Session::open flow).
     //
     // These tests cover the pure error mapping by exercising the

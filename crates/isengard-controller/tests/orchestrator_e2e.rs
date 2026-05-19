@@ -1,5 +1,4 @@
 //! End-to-end tests for the stack deployment orchestrator.
-//! Phase 10c (T2, refs #50).
 
 use std::sync::Arc;
 use std::time::Duration;

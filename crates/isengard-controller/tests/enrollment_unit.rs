@@ -1,4 +1,4 @@
-//! Unit tests for `EnrollmentService` (Task 3 of Phase 14).
+//! Unit tests for `EnrollmentService` (Task 3).
 //!
 //! Covers token mint format, full redeem happy path, and the two refusal
 //! cases (unknown token, double-redeem).
@@ -46,7 +46,7 @@ async fn mint_returns_base32_token_of_expected_length() {
     );
 }
 
-/// Track G: redeem requires the packed `TK<bytes>.<fingerprint>` shape;
+/// Redeem requires the packed `TK<bytes>.<fingerprint>` shape;
 /// bare-base32 tokens are rejected. Pack the freshly-minted token and
 /// confirm the signed-cert bundle comes back.
 #[tokio::test]
@@ -80,7 +80,7 @@ async fn redeem_unknown_token_errors() {
 
 #[tokio::test]
 async fn redeem_bare_legacy_token_rejected_with_clear_error() {
-    // Track G: legacy bare-base32 tokens (the pre-Track-F shape) are
+    // Legacy bare-base32 tokens (the earlier shape) are
     // rejected. The error message names "token" so callers can match on
     // it (existing `enroll_e2e` regression guard).
     let (_, svc) = fixture().await;
@@ -107,7 +107,7 @@ async fn redeem_twice_errors_second_time() {
     assert!(format!("{err}").to_lowercase().contains("token"));
 }
 
-/// Track F: a packed token (TK<base32(bytes)>.<base32(sha256(ca_pem))>)
+/// A packed token (TK<base32(bytes)>.<base32(sha256(ca_pem))>)
 /// must redeem successfully against the same storage row the legacy bare
 /// base32 token uses. The verify path is responsible for decomposing the
 /// packed shape back to the bare-bytes base32 form for the hash lookup.

@@ -1,6 +1,6 @@
 //! Controller-side ACME with DNS-01 challenge for wildcard cert issuance.
 //!
-//! Phase 8 (agent-side) shipped HTTP-01: each agent owns the cert for the
+//! Shipped HTTP-01: each agent owns the cert for the
 //! hostnames it routes. That works for per-host names but not for wildcards:
 //! `*.vallee.casa` cannot be validated via HTTP-01 because the wildcard
 //! covers names without a corresponding HTTP responder. Let's Encrypt

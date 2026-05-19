@@ -1,4 +1,4 @@
-//! Phase 13B: round-trip tests for the log-streaming wire types.
+//! Round-trip tests for the log-streaming wire types.
 
 use isengard_proto::pb::{LogChunk, StartLogStream, StopLogStream, log_chunk};
 use prost::Message;

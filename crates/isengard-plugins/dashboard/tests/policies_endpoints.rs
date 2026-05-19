@@ -1,4 +1,4 @@
-//! Integration tests for `/api/v1/policies` (Phase 9 Plan A, T4).
+//! Integration tests for `/api/v1/policies`.
 //!
 //! Builds the policies router against an in-memory `Inventory` and verifies
 //! the CRUD verbs plus `GET /policies/effective`. Mirrors the harness used
@@ -147,7 +147,7 @@ async fn post_duplicate_scope_returns_409() {
 
 #[tokio::test]
 async fn post_with_gate_approval_now_accepted() {
-    // Phase 9b lifted the 422 guard now that the updater enforces gate=approval.
+    // Lifted the 422 guard now that the updater enforces gate=approval.
     let (app, _h) = setup_app().await;
     let body = serde_json::json!({
         "scopeType": "global",
@@ -319,7 +319,7 @@ async fn effective_with_fleet_and_stack_rows_tracks_provenance() {
     assert_eq!(r.provenance.approver_channel, PolicyOrigin::Default);
 }
 
-/// Phase 9d: a policy with a malformed cron in window returns 400.
+/// A policy with a malformed cron in window returns 400.
 #[tokio::test]
 async fn post_with_malformed_window_cron_returns_400() {
     let (app, _h) = setup_app().await;
@@ -341,7 +341,7 @@ async fn post_with_malformed_window_cron_returns_400() {
     );
 }
 
-/// Phase 9d: a policy with a valid window round-trips through POST and
+/// A policy with a valid window round-trips through POST and
 /// GET. Body preserves cron + timezone fields.
 #[tokio::test]
 async fn post_with_valid_window_round_trips() {
@@ -374,7 +374,7 @@ async fn post_with_valid_window_round_trips() {
     assert_eq!(win.timezone.as_deref(), Some("Europe/Zurich"));
 }
 
-/// Phase 9d: PUT with a malformed cron returns 400, leaving any prior row
+/// PUT with a malformed cron returns 400, leaving any prior row
 /// unchanged.
 #[tokio::test]
 async fn put_with_malformed_window_cron_returns_400() {

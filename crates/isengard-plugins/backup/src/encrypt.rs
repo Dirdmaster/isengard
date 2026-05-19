@@ -1,4 +1,4 @@
-//! Phase 11a: age passphrase encryption.
+//! Age passphrase encryption.
 //!
 //! v1 ships passphrase-only (PBKDF2 via `age::scrypt`). X25519 recipients are
 //! deferred until SaaS escrow (later phase). The passphrase is provided to

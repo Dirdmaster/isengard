@@ -149,7 +149,7 @@ impl crate::inventory::Inventory {
             })
     }
 
-    /// Phase 9F: pause a service-scope policy for `duration`. Upserts a
+    /// Pause a service-scope policy for `duration`. Upserts a
     /// service-scope row at `service_key` with `paused_until = now +
     /// duration`. If a row already exists, preserves every other field
     /// and only updates `paused_until`. Used by the `Keep` failure

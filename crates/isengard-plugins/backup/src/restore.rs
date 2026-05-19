@@ -1,4 +1,4 @@
-//! Phase 11b: restore-from-destination flow.
+//! Restore-from-destination flow.
 //!
 //! Pipeline: download encrypted blob -> decrypt with passphrase -> validate
 //! the bytes are a real SQLite database -> rename current DB to a `.bak.<ts>`

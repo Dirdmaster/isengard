@@ -8,13 +8,13 @@
 //! A container is reported when it carries either:
 //!
 //! - any `isengard.expose*` label (proxy / routing rules), OR
-//! - any `isengard.policy.*` label (Phase 9b.1: container-scope policy
+//! - any `isengard.policy.*` label (: container-scope policy
 //!   discovery).
 //!
 //! Containers without either family of labels are filtered out: the
 //! controller has nothing to do with them.
 //!
-//! Phase 0.5: rewritten to drive off [`crate::runtime::RuntimeBackend`]
+//! Rewritten to drive off [`crate::runtime::RuntimeBackend`]
 //! instead of bollard directly. The dockerd code path is unchanged in
 //! shape (BollardBackend wraps `Docker::events` + `inspect_container`); the
 //! watcher feeds Pingora's label-derived routing through that.
@@ -131,7 +131,7 @@ async fn initial_scan(
 
 /// `true` if the controller wants to know about a container that carries
 /// this label key. Today: any `isengard.expose*` (routing) or
-/// `isengard.policy.*` (Phase 9b.1) key.
+/// `isengard.policy.*` key.
 ///
 /// Lives here (not in `isengard-core`) because it's a coupling between the
 /// agent's report filter and the two consumer subsystems on the controller.

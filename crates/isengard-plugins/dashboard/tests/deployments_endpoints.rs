@@ -1,4 +1,4 @@
-//! Integration tests for `GET /api/v1/deployments` (Phase 10 Plan B Task 5).
+//! Integration tests for `GET /api/v1/deployments`.
 //!
 //! Builds the deployments router against an in-memory `Inventory` and verifies
 //! that the `state=active` filter excludes terminal rows and `state=history`
@@ -243,7 +243,7 @@ async fn put_service_strategy_rejects_unknown_value() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// Phase 9F (#48): the deployments DTO surfaces previous_digest +
+/// The deployments DTO surfaces previous_digest +
 /// rollback_attempted_at when set. Insert a row with both fields
 /// populated, GET it, assert the JSON carries the values.
 #[tokio::test]

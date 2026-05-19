@@ -1,4 +1,4 @@
-//! Phase 11a: LocalDestination round-trip tests.
+//! LocalDestination round-trip tests.
 
 use isengard_plugin_backup::destination::{BackupDestination, LocalDestination};
 use tempfile::TempDir;

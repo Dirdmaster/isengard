@@ -1,5 +1,4 @@
 //! Integration tests for the enrollment-token + cert-revoke REST endpoints
-//! (Phase 14 Task 13).
 
 use std::sync::Arc;
 
@@ -224,7 +223,7 @@ async fn delete_host_cert_revokes_active_cert() {
     let (app, handles) = setup_app().await;
 
     // Enroll a host via the EnrollmentService so we have a real cert row to
-    // revoke (rather than just a host row with no cert). Track G: redeem
+    // revoke (rather than just a host row with no cert). Redeem
     // requires the packed `TK<bytes>.<fingerprint>` shape; pack the bare
     // base32 token mint returns before redeeming.
     let bare = handles

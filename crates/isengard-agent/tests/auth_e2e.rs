@@ -1,4 +1,4 @@
-//! Phase 14 Task 15: end-to-end auth lifecycle.
+//! End-to-end auth lifecycle.
 //!
 //! In-process variant of the planned real-Docker test (see
 //! `docs/superpowers/plans/2026-05-05-phase-14-auth-and-identity.md` Task 15
@@ -131,7 +131,7 @@ async fn full_auth_lifecycle_in_process() {
 
     let harness = boot_controller().await;
 
-    // --- 1. Mint enrollment token (operator side), pack for Track G ---
+    // --- 1. Mint enrollment token (operator side), pack as `TK<bytes>.<fp>` ---
     let bare = harness
         .enrollment
         .mint(TokenRole::Agent, Duration::minutes(5))
@@ -145,7 +145,7 @@ async fn full_auth_lifecycle_in_process() {
     let token = isengard_core::join_token::pack(&bytes, ca_pem.as_bytes());
 
     // --- 2. Agent enrolls via the production enroll::enroll ----------
-    //   Track G: bootstrap trust is the fingerprint-verified CA PEM. We
+    //   Bootstrap trust is the fingerprint-verified CA PEM. We
     //   skip the live fetch_and_verify_ca step (the harness's CA is the
     //   same one the controller serves) and seed verified_ca_pem
     //   directly.

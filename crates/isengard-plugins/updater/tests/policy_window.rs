@@ -1,4 +1,4 @@
-//! Phase 9d integration tests for the maintenance-window decision path.
+//! Integration tests for the maintenance-window decision path.
 //!
 //! See plan §"T3: do_cycle integration + event" of
 //! `docs/superpowers/plans/2026-05-06-phase-9d-maintenance-windows.md`.
@@ -60,7 +60,7 @@ async fn loader_with_policies(
     Arc::new(InventoryPolicyLoader::new(Arc::new(inv)))
 }
 
-/// Phase 9d test 1: in-window cycle proceeds. The window's previous firing
+/// Test 1: in-window cycle proceeds. The window's previous firing
 /// (Sunday 02:00 UTC) is 30 minutes ago; the resolver still considers
 /// `now` in window.
 #[tokio::test]
@@ -87,7 +87,7 @@ async fn in_window_cycle_proceeds() {
     assert_eq!(decision, PolicyDecision::Proceed);
 }
 
-/// Phase 9d test 2: outside-window cycle returns `Deferred` with the
+/// Test 2: outside-window cycle returns `Deferred` with the
 /// upcoming firing as `next_window`. Mirrors what the cycle would emit on
 /// `update.deferred`.
 #[tokio::test]
@@ -121,7 +121,7 @@ async fn outside_window_cycle_returns_deferred() {
     }
 }
 
-/// Phase 9d test 3: Pinned wins over outside-window. The cycle emits
+/// Test 3: Pinned wins over outside-window. The cycle emits
 /// `update.policy_skipped(reason=pinned)`, NOT `update.deferred`.
 #[tokio::test]
 async fn pinned_wins_over_outside_window() {
@@ -147,7 +147,7 @@ async fn pinned_wins_over_outside_window() {
     assert_eq!(decision, PolicyDecision::Skip(SkipReason::Pinned));
 }
 
-/// Phase 9d test 4: a malformed cron is fail-closed: the window check
+/// Test 4: a malformed cron is fail-closed: the window check
 /// returns `false` so the cycle defers (rather than letting an unparseable
 /// row open a back door to unconstrained updates). The `next_window` is
 /// `None` because `next_window_after` returns None on parse error.

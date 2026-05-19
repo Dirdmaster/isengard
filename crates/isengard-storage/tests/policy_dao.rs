@@ -1,4 +1,4 @@
-//! Phase 9a T1 acceptance tests for the policies DAO.
+//! Acceptance tests for the policies DAO.
 //!
 //! See plan §"T1: Storage migration 0016 + Policy DAO" of
 //! `docs/superpowers/plans/2026-05-06-phase-9a-9d-policy-foundation.md`.

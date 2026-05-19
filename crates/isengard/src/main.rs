@@ -467,7 +467,7 @@ async fn run_controller(
         .parse()
         .map_err(|e| anyhow!("invalid --dns-listen address {dns_listen:?}: {e}"))?;
 
-    // Phase 0.16 migration: pre-Phase-0.16 installs put the controller's
+    // Migration: earlier installs put the controller's
     // SQLite + CA under `<state_dir>/controller/`. The new layout writes
     // them at `<state_dir>` directly. If we see the legacy DB and the new
     // location is empty, fall back to the legacy path so an in-place
@@ -502,7 +502,7 @@ async fn run_controller(
 
 /// Open the inventory at the same path the controller boot path uses
 /// (`<state_dir>/isengard.db`). Subcommands need direct access for one-shot
-/// admin operations (mint / revoke / list). Auto-applies the Phase 0.16
+/// admin operations (mint / revoke / list). Auto-applies the
 /// state-dir migration so `isengard controller token mint` works on
 /// pre-0.16 hosts (data under `<state_dir>/controller/`) without
 /// requiring the operator to pass `--state-dir /var/lib/isengard/controller`.
@@ -516,10 +516,10 @@ async fn open_inventory(state_dir: &std::path::Path) -> Result<Inventory> {
         .with_context(|| format!("opening inventory at {db_path:?}"))
 }
 
-/// Phase 0.16 state-dir migration shim. Previously the systemd-native
-/// install rooted the controller at `<state_dir>/controller/`; Phase 0.16
-/// drops the suffix so the CLI's `--state-dir /var/lib/isengard` default
-/// matches the running unit.
+/// State-dir migration shim. Previously the systemd-native
+/// install rooted the controller at `<state_dir>/controller/`; the
+/// new layout drops the suffix so the CLI's `--state-dir /var/lib/isengard`
+/// default matches the running unit.
 ///
 /// Behaviour:
 ///   * If `<state_dir>/isengard.db` exists, use the new layout (return
@@ -586,7 +586,7 @@ async fn run_token_mint(
     let minted_at = chrono::Utc::now();
     let token = enr.mint(role_parsed, chrono_ttl).await?;
 
-    // Track F: decompose the legacy base32 bare token back into the raw
+    // Decompose the legacy base32 bare token back into the raw
     // 32 bytes so we can pack a (bytes, ca_fingerprint) tuple for the
     // operator-visible string. Storage still keys on the legacy string
     // (sha256(token_b32)) so the round-trip via base32 keeps verify
@@ -602,13 +602,13 @@ async fn run_token_mint(
             println!("{packed_token}");
         }
         MintFormat::Joincmd => {
-            // Track F default. One line, ready to paste on the Mac.
+            // Default. One line, ready to paste on the Mac.
             let host_port = resolve_public_addr(public_addr.as_deref());
             println!("isd join --controller https://{host_port} --token {packed_token}");
         }
         MintFormat::Text => {
             // Legacy `docker run` join block. The embedded token is now the
-            // packed Track F form, so newer agents verify the CA fingerprint
+            // packed form, so newer agents verify the CA fingerprint
             // even when the operator pasted the old-style block.
             let host_port = resolve_public_addr(public_addr.as_deref());
             let expires_at = minted_at + chrono_ttl;
@@ -627,7 +627,7 @@ async fn run_token_mint(
 
 /// Decode the legacy base32 (RFC 4648 unpadded, uppercase) bare-token
 /// string back to its raw 32 bytes. `EnrollmentService::mint` returns the
-/// base32 form and persists `sha256(b32_string)`; the Track F packed
+/// base32 form and persists `sha256(b32_string)`; the packed
 /// shape needs the raw bytes so we can wrap them with the CA fingerprint
 /// for the operator-visible string.
 fn decode_legacy_token_bytes(token_b32: &str) -> Result<[u8; 32]> {

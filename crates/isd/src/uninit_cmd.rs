@@ -7,7 +7,7 @@
 //! also delete the volumes: UNRECOVERABLE without a prior `isd backup`.
 //!
 //! This is the deliberate teardown path for the system containers
-//! protected by the Phase 1 lifecycle guard. The guard is not invoked
+//! protected by the lifecycle guard. The guard is not invoked
 //! here: `uninit` calls `docker remove_container` directly via bollard,
 //! the same override the `--force-system` flag exposes on `isd rm` /
 //! `isd stop` / etc.

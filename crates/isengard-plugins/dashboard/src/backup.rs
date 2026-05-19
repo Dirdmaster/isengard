@@ -1,4 +1,4 @@
-//! Phase 11a: backup REST endpoints.
+//! Backup REST endpoints.
 //!
 //! Routes:
 //! - GET  /api/v1/backup/config    -> current config (secrets masked)
@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(parsed[1]["status"], "success");
     }
 
-    // ---------------- Phase 11B endpoint tests ----------------
+    // ---------------- endpoint tests ----------------
 
     #[tokio::test]
     async fn restore_rejects_missing_object_name() {

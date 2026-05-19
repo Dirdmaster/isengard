@@ -66,16 +66,16 @@ pub trait DriverDeps: Send + Sync + 'static {
     /// Snapshot the upstream currently routing for this deployment's hostname.
     /// Returned `None` means there's nothing to recover to (no public_hostname,
     /// or the registry has no entry yet). Used by [`Driver::recover_to_blue`]
-    /// when a post-switch collapse forces a rollback. Phase 10f.
+    /// when a post-switch collapse forces a rollback.
     async fn snapshot_current_upstream(&self, deployment: &Deployment) -> Option<Upstream>;
 
     /// Instant swap back to a previously-snapshotted blue upstream. Called
     /// during post-switch collapse recovery (`Recovering` state) and during
     /// abort-during-drain. Uses a zero grace because the green upstream is
-    /// already failing: there's nothing in-flight to preserve. Phase 10f.
+    /// already failing: there's nothing in-flight to preserve.
     async fn swap_back_to_blue(&self, hostname: &str, blue: &Upstream) -> Result<()>;
 
-    /// Phase 9F: re-pull `previous_digest` and recreate the container at
+    /// Re-pull `previous_digest` and recreate the container at
     /// that exact digest. Used by the `Rollback` failure-handling
     /// branch when green failed and we need to restore the prior
     /// version. Symmetric with `start_green` but pinned: we never
@@ -110,7 +110,7 @@ const DEFAULT_SWAP_GRACE: Duration = Duration::from_secs(60);
 const DRAIN_BUFFER: Duration = Duration::from_secs(5);
 
 /// Outcome of the 3-way race during the drain window. See
-/// [`Driver::race_drain`]. Phase 10f.
+/// [`Driver::race_drain`].
 #[derive(Debug, PartialEq, Eq)]
 enum DrainOutcome {
     /// Grace + buffer elapsed cleanly: proceed to DestroyingBlue → Done.
@@ -137,18 +137,18 @@ pub struct Driver<D: DriverDeps> {
     /// Cooperative cancel signal: when fired, the driver short-circuits to
     /// `Aborted`, cleans up green if it was started, and rolls back any
     /// post-switch routing change. Defaults to a fresh, non-cancelled token
-    /// so existing call sites work unchanged. Phase 10f.
+    /// so existing call sites work unchanged.
     pub abort_token: CancellationToken,
     /// Optional subscription to the proxy event bus. When present, the
     /// driver listens for `UpstreamHealthChanged` during the drain window
     /// and triggers `recover_to_blue` if green flips unhealthy. `None`
-    /// keeps the drain a plain sleep (pre-Plan-B behaviour). Phase 10f.
+    /// keeps the drain a plain sleep (pre-Plan-B behaviour).
     pub proxy_events_rx: Option<broadcast::Receiver<ProxyEvent>>,
     /// Snapshotted blue upstream taken just before `swap_upstream_to_green`,
     /// used by `recover_to_blue` to roll back. `None` until the snapshot is
-    /// taken (i.e. before reaching `Switching`). Phase 10f.
+    /// taken (i.e. before reaching `Switching`).
     pub blue_upstream_snapshot: Option<Upstream>,
-    /// Phase 9F: which `on_failure` branch to take when the deployment
+    /// Which `on_failure` branch to take when the deployment
     /// breaks. Defaults to `Notify` (existing behaviour). When set to
     /// `Rollback`, failure paths consult `deployment.previous_digest`
     /// and call `pull_and_recreate_at_digest` instead of just
@@ -183,7 +183,7 @@ impl<D: DriverDeps> Driver<D> {
         }
     }
 
-    /// Phase 9F: install the resolved `on_failure` policy. Setting this
+    /// Install the resolved `on_failure` policy. Setting this
     /// to `Rollback` enables the supervisor's rollback branch on every
     /// failure path; `Keep` adds a 24h paused_until upsert to the
     /// existing abort path; `Notify` is the no-op default.
@@ -201,14 +201,14 @@ impl<D: DriverDeps> Driver<D> {
     }
 
     /// Install a cancellation token the driver checks at every state edge
-    /// and races against the spinup, healthcheck, and drain phases. Phase 10f.
+    /// and races against the spinup, healthcheck, and drain phases.
     pub fn with_abort_token(mut self, token: CancellationToken) -> Self {
         self.abort_token = token;
         self
     }
 
     /// Subscribe the driver to a proxy event bus so the drain race can
-    /// react to `UpstreamHealthChanged` for the green container. Phase 10f.
+    /// react to `UpstreamHealthChanged` for the green container.
     pub fn with_proxy_events(mut self, rx: broadcast::Receiver<ProxyEvent>) -> Self {
         self.proxy_events_rx = Some(rx);
         self
@@ -396,7 +396,7 @@ impl<D: DriverDeps> Driver<D> {
                 self.recover_to_blue("post_switch_collapse_recovered").await;
                 let _ = self.deps.stop_and_remove(&green_id).await;
 
-                // Phase 9F: if the resolved policy says Rollback and we
+                // If the resolved policy says Rollback and we
                 // captured a previous_digest, attempt a re-pull. This
                 // lands on RolledBack / RollbackFailed regardless of
                 // whether the in-flight blue snapshot helped (we're
@@ -428,7 +428,7 @@ impl<D: DriverDeps> Driver<D> {
     /// events (different hostname, different container, blue going
     /// unhealthy) are ignored — the loop continues. If the proxy event
     /// channel closes (sender dropped), the listener is dropped and the
-    /// race degrades to abort + sleep only. Phase 10f.
+    /// race degrades to abort + sleep only.
     async fn race_drain(&mut self, green_id: &str) -> DrainOutcome {
         let total_drain = self.swap_grace + self.drain_buffer;
         let abort_token = self.abort_token.clone();
@@ -477,7 +477,7 @@ impl<D: DriverDeps> Driver<D> {
     /// on the deployment row regardless of whether the swap-back succeeded.
     /// Idempotent and best-effort: if there's no snapshot or no public
     /// hostname, we still set the error string so the UI sees why we
-    /// couldn't recover. Phase 10f.
+    /// couldn't recover.
     async fn recover_to_blue(&mut self, reason: &str) {
         let Some(blue) = self.blue_upstream_snapshot.clone() else {
             let msg = format!("{reason} (no_blue_snapshot)");
@@ -535,14 +535,14 @@ impl<D: DriverDeps> Driver<D> {
     /// disposal), but it's logged at warn so persistent Docker issues are
     /// observable in production logs instead of silently leaking.
     ///
-    /// Phase 9F: when `self.failure_handling` is `Rollback` AND the
+    /// When `self.failure_handling` is `Rollback` AND the
     /// deployment row carries `previous_digest`, the abort branches into
     /// [`Self::attempt_rollback`] instead of transitioning to `Aborted`.
     /// When it's `Keep`, the Aborted transition still happens but a
     /// best-effort 24h `paused_until` upsert follows so the next scan
     /// skips the service.
     async fn abort(&mut self, error_msg: String, green_id: Option<String>) -> Result<()> {
-        // Phase 9F: branch FIRST on policy. Rollback re-pulls the prior
+        // Branch FIRST on policy. Rollback re-pulls the prior
         // digest instead of cleaning up green; Keep + Notify both clean
         // up green as before.
         if matches!(self.failure_handling, FailureHandling::Rollback)
@@ -588,7 +588,7 @@ impl<D: DriverDeps> Driver<D> {
             );
         }
         self.transition(DeploymentState::Aborted).await?;
-        // Phase 9F: Keep policy adds a 24h paused_until upsert AFTER the
+        // Keep policy adds a 24h paused_until upsert AFTER the
         // Aborted transition lands. Best-effort: a storage failure here
         // logs but does not change the user-visible outcome (the row is
         // already Aborted; the worst case is the next scan re-attempts).
@@ -599,7 +599,7 @@ impl<D: DriverDeps> Driver<D> {
         Ok(())
     }
 
-    /// Phase 9F: re-pull `previous_digest` and recreate the container at
+    /// Re-pull `previous_digest` and recreate the container at
     /// that exact digest. Stamps `rollback_attempted_at` regardless of
     /// success; transitions to `RolledBack` on success, `RollbackFailed`
     /// on error. The original failure that triggered the rollback is
@@ -689,7 +689,7 @@ impl<D: DriverDeps> Driver<D> {
         }
     }
 
-    /// Phase 9F: best-effort upsert of a 24h `paused_until` on a
+    /// Best-effort upsert of a 24h `paused_until` on a
     /// service-scope policy row, keyed by the deployment's
     /// `service_name`. Used by the `Keep` failure handler so the next
     /// updater scan skips the service for a day.
@@ -957,7 +957,7 @@ impl DriverDeps for RealDriverDeps {
         .await
     }
 
-    /// Phase 9F: re-pull `previous_digest` and recreate the container at
+    /// Re-pull `previous_digest` and recreate the container at
     /// that pinned image. Mirrors `start_green` but uses the digest as
     /// the image reference so the registry serves the exact prior
     /// version. Best-effort container destroy on the existing
@@ -1808,7 +1808,7 @@ mod tests {
         );
     }
 
-    // ---- Phase 9F (T3): rollback failure handler ----
+    // ---- rollback failure handler ----
 
     /// Variant of `setup_inventory_and_row` that seeds `previous_digest`
     /// so the driver can take the rollback branch.

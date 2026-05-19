@@ -27,11 +27,11 @@ use serde::Deserialize;
 use crate::auth::DockerConfig;
 use crate::image_ref::ImageRef;
 
-/// Phase 9e: hard cap on `tags/list` pagination so a misbehaving registry
+/// Hard cap on `tags/list` pagination so a misbehaving registry
 /// can't OOM the agent. After this many pages, the loop logs a warning and
 /// returns the tags collected so far.
 const MAX_TAGS_LIST_PAGES: usize = 5;
-/// Phase 9e: hard cap on the number of tags returned across all pages.
+/// Hard cap on the number of tags returned across all pages.
 const MAX_TAGS_LIST_ENTRIES: usize = 5000;
 
 const ACCEPT_MANIFESTS: &str = concat!(
@@ -143,7 +143,7 @@ impl RegistryClient {
         }
     }
 
-    /// Phase 9e: list every tag the registry advertises for `image`'s
+    /// List every tag the registry advertises for `image`'s
     /// repository. Used by the `Minor` update strategy to pick the highest
     /// semver tag whose major matches the running container.
     ///
@@ -286,7 +286,7 @@ impl RegistryClient {
     }
 
     /// Translate a `WWW-Authenticate` value into an `Authorization` header
-    /// (bearer token or basic). Used by the Phase 9e tags/list path; the
+    /// (bearer token or basic). Used by the tags/list path; the
     /// per-request retry in `head_digest` predates this helper and stays
     /// inlined to keep the diff focused.
     async fn resolve_auth_header(
@@ -352,7 +352,7 @@ impl RegistryClient {
     }
 }
 
-/// Phase 9e: registry response shape for `/v2/<repo>/tags/list`.
+/// Registry response shape for `/v2/<repo>/tags/list`.
 #[derive(Debug, Deserialize)]
 struct TagsListResponse {
     #[serde(default)]
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(abs, "https://other.example/path?x=1");
     }
 
-    // ---------------- Phase 9e: list_tags HTTP integration ----------------
+    // ---------------- list_tags HTTP integration ----------------
     //
     // Mocked-registry tests via `wiremock`. The fake server doesn't honor
     // the docker-content-digest header behaviors, but for tags/list we

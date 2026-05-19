@@ -15,7 +15,7 @@
 //!   9. print a one-line "Cluster ready" hint pointing at `isd join-token`
 //!      for operators who want to add more hosts
 //!
-//! Track F (2026-05-18): the agent verifies the controller's CA on first
+//! The agent verifies the controller's CA on first
 //! connect via the fingerprint embedded in the join token. The
 //! operator-side CA export step is gone; so is the docker-run join block
 //! that used to flood the terminal at the end of every `isd init`.
@@ -47,7 +47,7 @@ pub(crate) const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose
 const BOOTSTRAP_IMAGE: &str = "alpine:3.21";
 
 pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
-    // Resolve docker URI from the docker context (Track H).
+    // Resolve docker URI from the docker context.
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
 
     eprintln!("isd init: bootstrapping controller on {docker_uri}");
@@ -372,7 +372,7 @@ async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
 
     // The embedded recipe references ${ISENGARD_ENROLL_TOKEN} on the agent
     // service. docker compose interpolates from the parent process env.
-    // DOCKER_HOST routes the spawn to the operator's context. Track F: the
+    // DOCKER_HOST routes the spawn to the operator's context. The
     // CA pin used to ride alongside via ISENGARD_CONTROLLER_CA_PEM_BASE64;
     // the agent now fetches the CA from the controller on first connect and
     // verifies the embedded fingerprint, so we no longer thread it here.
@@ -434,7 +434,7 @@ async fn step_wait_for_agent_enrolled(docker_uri: &str) -> Result<()> {
 }
 // === Step 9: clean one-liner pointing operators at `isd join-token` ===
 
-/// Track F: cluster-ready output is a clean one-liner. The verbose
+/// Cluster-ready output is a clean one-liner. The verbose
 /// docker-run join block is gone; operators run `isd join-token` when
 /// they actually want to add a host.
 async fn step_render_join_block() -> Result<String> {

@@ -8,7 +8,7 @@
 //! reconciled per-service. Follow-up work tracked in the v0.3 status
 //! note.
 //!
-//! Phase 0.6 (wisp arc): rewritten to drive the [`crate::runtime::RuntimeBackend`]
+//! Rewritten to drive the [`crate::runtime::RuntimeBackend`]
 //! trait instead of bollard directly. Bollard remains the default
 //! backend; the byte-level Config the bollard backend hands to dockerd
 //! still flows through `BollardBackend::spec_to_config`, so the v0.3d
@@ -77,7 +77,7 @@ pub async fn reconcile_stack_with_secrets(
         .await
 }
 
-/// Phase 0.13 follow-up: same as [`reconcile_stack_with_secrets`] but
+/// Follow-up: same as [`reconcile_stack_with_secrets`] but
 /// also mounts the supplied stack-level secret names into every service
 /// of the stack. Stack-level secrets come from `secrets = [...]` in the
 /// operator's `stack.toml` and always mount at `/run/secrets/<name>`
@@ -170,7 +170,7 @@ const APPLY_PLAN_CONCURRENCY: usize = 8;
 /// in parallel. Failures don't short-circuit: the operator gets the
 /// full summary at the end.
 ///
-/// Phase 0.18: parallelism. Live on lausanne servarr reconciles took
+/// Parallelism. Live on lausanne servarr reconciles took
 /// ~30s wall-clock for 8 services because the previous `for op in
 /// &plan.ops` loop awaited each container's pull + extract + start
 /// before moving on. With `buffer_unordered` the wall-clock collapses
@@ -199,7 +199,7 @@ const APPLY_PLAN_CONCURRENCY: usize = 8;
 /// it on tmpfs, and bind-mount the directory into the container. When
 /// `None`, secrets are silently dropped (matches the v0.3d call site).
 ///
-/// `stack_level_secrets`: Phase 0.13 follow-up. Names declared via
+/// `stack_level_secrets`: follow-up. Names declared via
 /// `secrets = [...]` in the operator's `stack.toml`. Each name is
 /// fetched + mounted at `/run/secrets/<name>` in every service of the
 /// stack. Empty when the stack has no manifest or no stack-level
@@ -283,7 +283,7 @@ pub async fn apply_plan(
 
 /// Apply a single op. Extracted from [`apply_plan`] so the parallel
 /// `buffer_unordered` future can be a plain async block. Mirrors the
-/// pre-Phase-0.18 sequential body exactly.
+/// earlier sequential body exactly.
 async fn apply_one_op(
     backend: &dyn RuntimeBackend,
     stack_name: &str,
@@ -378,7 +378,7 @@ fn container_name_for(stack_name: &str, service: &str, svc: &DesiredService) -> 
         .unwrap_or_else(|| format!("{stack_name}-{service}"))
 }
 
-/// Phase 0.13 follow-up: build the ordered `(name, container_path)`
+/// Follow-up: build the ordered `(name, container_path)`
 /// list of secrets the agent should fetch + mount for one service.
 ///
 /// Order: per-service `secrets:` (in declaration order, with their
@@ -416,7 +416,7 @@ fn merge_secret_targets(
 /// backend-agnostic [`ContainerCreateSpec`] every [`crate::runtime::RuntimeBackend`]
 /// understands.
 ///
-/// Phase 0.6 wisp arc: this is the inverse of
+/// Wisp arc: this is the inverse of
 /// [`crate::runtime::bollard_backend::spec_to_config`]. The compose
 /// pipeline historically built `bollard::Config<String>` directly from a
 /// `DesiredService`; threading the trait through reconcile_stack means
@@ -581,7 +581,7 @@ async fn ensure_container_started(
     }
     let container_name = container_name_for(stack_name, &svc.name, svc);
 
-    // v0.3.6 + Phase 0.13 follow-up: union of per-service `secrets:`
+    // v0.3.6 + follow-up: union of per-service `secrets:`
     // and stack-level `secrets = [...]` (the latter mounts into every
     // service of the stack at the default `/run/secrets/<name>` path).
     // Per-service entries win on collision so `target:` overrides are
@@ -710,7 +710,7 @@ async fn stop_named(backend: &dyn RuntimeBackend, name: &str) -> anyhow::Result<
 
 async fn stop_and_remove(backend: &dyn RuntimeBackend, container_id: &str) -> anyhow::Result<()> {
     // Best-effort stop with the legacy 10s timeout: matches the
-    // pre-Phase-0.6 bollard invocation. remove with force=true matches
+    // earlier bollard invocation. remove with force=true matches
     // the legacy v=false / link=false / force=true shape.
     let _ = backend.stop_container(container_id, 10).await;
     match backend.remove_container(container_id, true).await {
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(container_name_for("hello", "web", &svc), "my-web");
     }
 
-    // ----- Phase 0.6: desired_service_to_create_spec golden tests -----
+    // ----- desired_service_to_create_spec golden tests -----
 
     #[test]
     fn desired_service_to_create_spec_minimal_image_only() {
@@ -997,7 +997,7 @@ mod tests {
         assert!(parse_bind_string("a:b:c:d").is_none());
     }
 
-    // ----- Phase 0.13 follow-up: merge_secret_targets -----
+    // ----- follow-up: merge_secret_targets -----
 
     /// Build a [`DesiredCompose`] with one service and an optional set
     /// of top-level external secrets + per-service refs.
@@ -1150,7 +1150,7 @@ mod tests {
         assert_eq!(names, vec!["alpha", "beta", "gamma", "delta"]);
     }
 
-    // ----- Phase 0.18: parallel apply_plan -----
+    // ----- parallel apply_plan -----
 
     use crate::runtime::{
         ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec, LogChunk, LogOptions,
@@ -1391,7 +1391,7 @@ mod tests {
 
     /// Wall-clock test: with N=4 ops each sleeping 1s, the parallel
     /// implementation should finish in well under 4s (single-pass
-    /// concurrency = 8 covers all 4). The pre-Phase-0.18 sequential
+    /// concurrency = 8 covers all 4). The earlier sequential
     /// loop would take ~4s. Marked `#[ignore]` so it doesn't slow the
     /// regular `cargo test` run; opt in via `cargo test ...
     /// apply_plan_parallel_wall_clock_under_budget -- --ignored`.

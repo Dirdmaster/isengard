@@ -1,6 +1,6 @@
 //! `PluginContext`: services the host exposes to plugins via their lifecycle hooks.
 //!
-//! Phase 1 minimum: host mode + plugin's slice of the merged config. Subsequent
+//! Minimum: host mode + plugin's slice of the merged config. Subsequent
 //! phases will add: logger handle, journal writer, gRPC clients, secret store.
 
 use std::any::Any;
@@ -37,7 +37,7 @@ pub struct PluginContext {
     /// a future migration of ControllerHandles to isengard-core.
     pub bus: Option<Arc<dyn Any + Send + Sync>>,
     /// Optional sink the updater plugin consults before recreating a
-    /// container. Wired by the agent host (Phase 10) so the
+    /// container. Wired by the agent host so the
     /// `DeploymentSupervisor` can intercept and run a blue-green driver
     /// instead of an in-place recreate. `None` outside the agent.
     pub update_dispatcher: Option<Arc<dyn UpdateDispatcher>>,

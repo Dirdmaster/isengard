@@ -1,6 +1,6 @@
 //! `ProxyHttp` implementation — the per-request routing logic.
 //!
-//! Phase 8b (Task 9): single-rule host-header routing. The router reads the
+//! Single-rule host-header routing. The router reads the
 //! incoming `Host` header, looks it up in `ProxyState.upstreams`, and returns
 //! an `HttpPeer` (or a `404`/`503` Pingora error). SNI-based lookup for the
 //! HTTPS listener lands in a later task.

@@ -1,4 +1,4 @@
-//! REST endpoints for routing rules + adapter config (Phase 8h Plan C).
+//! REST endpoints for routing rules + adapter config.
 //!
 //! See spec §3 in
 //! `docs/superpowers/specs/2026-05-04-phase-8h-8i-settings-ui-and-atomic-swap-design.md`.

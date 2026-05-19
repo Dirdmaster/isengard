@@ -1,4 +1,4 @@
-//! Track F join-token format: `TK<base32(32-bytes)>.<base32(sha256(ca_pem))>`
+//! Join-token format: `TK<base32(32-bytes)>.<base32(sha256(ca_pem))>`
 //!
 //! Used end-to-end:
 //!   - `isengard controller token mint` packs (bytes, ca_fingerprint) into
@@ -86,7 +86,7 @@ pub fn fingerprint(ca_pem: &[u8]) -> [u8; 32] {
 /// Re-encode a 32-byte token back to the bare base32 string used by the
 /// controller's storage hash. Only useful inside the controller's
 /// `EnrollmentService::redeem` to keep storage hash format unchanged
-/// across the Track F format bump. Not for general use; if you need a
+/// across the format bump. Not for general use; if you need a
 /// base32 encoder, use `data-encoding` directly.
 pub fn encode_bytes(token_bytes: &[u8; 32]) -> String {
     ALPHABET.encode(token_bytes)

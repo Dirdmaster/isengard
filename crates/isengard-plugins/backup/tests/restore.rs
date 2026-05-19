@@ -1,4 +1,4 @@
-//! Phase 11b: end-to-end restore integration tests.
+//! End-to-end restore integration tests.
 //!
 //! Each test sets up a controller-side state (Inventory + on-disk DB),
 //! runs a backup via the 11A pipeline (snapshot -> encrypt -> upload to a

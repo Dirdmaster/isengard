@@ -19,7 +19,7 @@
 //!   the same way.
 //!
 //! The wrapper shape was adopted in 2026-05-15 (one-file stack model
-//! design spec, Track A): with `name` / `secrets` / placement verbs
+//! design spec): with `name` / `secrets` / placement verbs
 //! sharing the top level, an explicit `services:` table keeps them
 //! unambiguous and matches the docker-compose surface operators
 //! already know.
@@ -63,7 +63,7 @@ pub struct DesiredService {
     /// by `compose_apply` to attach the container to each network at
     /// create time. Empty = docker default bridge.
     pub networks: Vec<String>,
-    /// Phase 0.17: per-service `cap_add:` list. Each entry is a Linux
+    /// Per-service `cap_add:` list. Each entry is a Linux
     /// capability name (with or without the `CAP_` prefix, e.g.
     /// `CHOWN`, `CAP_NET_BIND_SERVICE`). The compose path forwards the
     /// raw strings unchanged; `compose_apply` joins them into the
@@ -71,7 +71,7 @@ pub struct DesiredService {
     /// container-create time. Empty = docker's default capability set
     /// applies.
     pub cap_add: Vec<String>,
-    /// Phase 0.14: native placement directive parsed from the service's
+    /// Native placement directive parsed from the service's
     /// `spread:` / `global:` / `on:` / `where:` keys (or the Swarm-compat
     /// `deploy:` block). `None` means "no placement verb supplied"; the
     /// controller's scheduler treats that as `Singleton { selector: None }`.
@@ -79,7 +79,7 @@ pub struct DesiredService {
     /// Per-service deploy strategy from the stack file's `strategy:` key.
     /// `None` means the stack file did not set one; the controller's
     /// deployment supervisor applies its default. See the 2026-05-15
-    /// one-file stack model design spec (Track A).
+    /// one-file stack model design spec.
     pub strategy: Option<Strategy>,
 }
 
@@ -108,7 +108,7 @@ pub struct DesiredCompose {
     pub secrets: BTreeMap<String, TopLevelSecret>,
     /// Stack name from the file's top-level `name:` key. `None` for a
     /// bare compose file with no stack identity. See the 2026-05-15
-    /// one-file stack model design spec (Track A).
+    /// one-file stack model design spec.
     pub name: Option<String>,
 }
 
@@ -565,7 +565,7 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
             _ => {}
         }
     }
-    // Phase 0.17: per-service `cap_add:` list. Compose accepts the
+    // Per-service `cap_add:` list. Compose accepts the
     // list form (`cap_add: [CHOWN, SETUID]` or `cap_add: ["CAP_CHOWN"]`).
     // We forward each entry as-given; `bundle::parse_caps` downstream
     // accepts both `CHOWN` and `CAP_CHOWN` forms, so no normalisation
@@ -619,7 +619,7 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
         }
     }
 
-    // Phase 0.14: native placement verbs + swarm-compat `deploy:` block.
+    // Native placement verbs + swarm-compat `deploy:` block.
     // See `compose_placement_for_service` for the surface; the parser is
     // intentionally strict so a bad selector or conflicting verbs is a
     // hard error at `isd deploy` rather than a silent default.
@@ -953,7 +953,7 @@ pub struct RunningService {
 }
 
 impl RunningService {
-    /// Phase 0.6: build a [`RunningService`] from a backend-agnostic
+    /// Build a [`RunningService`] from a backend-agnostic
     /// [`ContainerSnapshot`]. The snapshot already filters managed env
     /// keys and projects ports / restart strings, so this is a flat
     /// field copy.
@@ -1431,7 +1431,7 @@ services:
 
     #[test]
     fn parse_compose_with_cap_add_bare_form() {
-        // Phase 0.17: compose `cap_add:` list using the bare form
+        // Compose `cap_add:` list using the bare form
         // (no `CAP_` prefix). nginx:alpine needs this exact set to
         // bootstrap the master + worker handover.
         let yaml = r#"services:
@@ -1568,7 +1568,7 @@ networks = ["frontend", "backend"]
 
     #[test]
     fn parse_toml_with_conflicting_placement_verbs_errors() {
-        // Phase 0.14: native placement verbs are first-class. Mixing
+        // Native placement verbs are first-class. Mixing
         // more than one of spread / global / on in a single service is
         // a hard parse error in the wrapper shape too.
         let toml_str = r#"
@@ -2328,7 +2328,7 @@ strategy = "blue-green"
         assert_eq!(plan.ops[1].service(), "zeta");
     }
 
-    // ----- Phase 0.6: RunningService::from_snapshot -----
+    // ----- RunningService::from_snapshot -----
 
     fn snap_with(
         id: &str,

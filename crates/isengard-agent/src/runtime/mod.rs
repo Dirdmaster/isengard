@@ -1,4 +1,4 @@
-//! Backend-agnostic runtime surface. Phase 0.4 introduced the trait so
+//! Backend-agnostic runtime surface. Introduced the trait so
 //! the agent's compose / logs / deploy paths speak one shape; today
 //! Bollard is the only implementor.
 
@@ -53,7 +53,7 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     /// container is asked to attach to it. Bollard / dockerd manages
     /// network lifetime itself, so the default is a no-op.
     ///
-    /// Phase 0.18: compose_apply's parallel container creates would race
+    /// Compose_apply's parallel container creates would race
     /// each other on the per-container `ensure_bridge` call (concurrent
     /// `iptables-restore` invocations on the same chain collide). Doing
     /// a sequential pre-pass over the distinct network names before the

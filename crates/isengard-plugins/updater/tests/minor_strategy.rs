@@ -1,4 +1,4 @@
-//! Phase 9e end-to-end: `Minor` strategy reaches into the registry's
+//! End-to-end: `Minor` strategy reaches into the registry's
 //! tags-list, picks the highest patch+minor on the same major, and the
 //! cycle's bump path produces the bumped image_ref + digest pair that the
 //! recreate path consumes.

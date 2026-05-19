@@ -13,8 +13,8 @@
 //! 2. [`resolve_container_ip`]: thin async wrapper that calls
 //!    [`crate::runtime::RuntimeBackend::inspect_container`] and feeds the
 //!    result into a sibling picker over the trait's
-//!    `ContainerSnapshot.network_settings.ip_addresses` map. Phase 0.5
-//!    moved this off the bollard-direct path so wisp can serve discovery
+//!    `ContainerSnapshot.network_settings.ip_addresses` map. Wisp
+//!    moved this off the bollard-direct path so it can serve discovery
 //!    too.
 //!
 //! Selection rules (in order):
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(pick_container_ip(&nets), None);
     }
 
-    // --- snapshot-driven picker tests (Phase 0.5) ---------------------------
+    // --- snapshot-driven picker tests ---------------------------
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()

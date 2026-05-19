@@ -1,4 +1,4 @@
-//! Stack-level deployment orchestrator. Phase 10c (10i, refs #50).
+//! Stack-level deployment orchestrator. (10i, refs #50).
 //!
 //! When the same stack runs on multiple hosts and an image change is detected
 //! (or a force-update is dispatched stack-wide), the orchestrator decides how

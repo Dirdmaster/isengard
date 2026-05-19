@@ -1,4 +1,4 @@
-//! External-action gate types. Phase 12c (#55).
+//! External-action gate types. (#55).
 //!
 //! Pure types only: the HTTP evaluator that turns these into actual
 //! decisions lives in `isengard-plugin-updater::gate` so this crate stays
@@ -10,7 +10,7 @@
 //! - `approve` -> proceed with the existing post-policy logic
 //! - `reject`  -> skip; emit `update.gated_reject`
 //! - `defer`   -> set the service's `paused_until` to the supplied time
-//! - `manual`  -> escalate to the existing approval queue (Phase 9e flow)
+//! - `manual` -> escalate to the existing approval queue (flow)
 //!
 //! Failure modes are mapped by the evaluator (5xx -> Manual, timeout ->
 //! Manual, connection refused -> [`GateDecision::Unreachable`] which the

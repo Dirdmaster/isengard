@@ -7,7 +7,7 @@
 //! too: the operator already typed the literal, no surprise possible.
 //!
 //! Default-and-document: this module is consumed by `lifecycle_cmd`'s
-//! rm/kill handlers in Task 7 of the Phase 0.22 plan; until those land
+//! rm/kill handlers in Task 7 of the plan; until those land
 //! in the same PR, `dead_code` is allowed module-wide so clippy stays
 //! green between commits.
 

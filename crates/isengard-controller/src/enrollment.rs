@@ -123,7 +123,7 @@ impl EnrollmentService {
     /// id at insert time. We work around the chicken-and-egg by pre-minting
     /// a `HostId` and passing it to both `sign_agent_leaf` and `enroll_host`.
     pub async fn redeem(&self, token: &str, host_info: HostInfo) -> Result<EnrollResponse> {
-        // Track G: incoming token MUST be packed (TK<bytes>.<fingerprint>).
+        // Incoming token MUST be packed (TK<bytes>.<fingerprint>).
         // Storage keys on `sha256(bare_b32_string)`, so the packed token
         // gets decomposed back to its bare-bytes base32 form for the
         // lookup; the fingerprint half stays opaque to the controller.

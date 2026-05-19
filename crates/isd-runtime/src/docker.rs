@@ -138,7 +138,7 @@ impl DockerBackend {
         Ok(())
     }
 
-    /// Fetch a container's labels by ID or name. Used by the Track G
+    /// Fetch a container's labels by ID or name. Used by the
     /// protection guard (`isd rm/stop/restart/kill`) to detect
     /// `io.isengard.role=controller|agent` on resolved targets without
     /// listing every container on the host. Returns an empty map when

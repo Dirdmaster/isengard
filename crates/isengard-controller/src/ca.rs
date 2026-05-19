@@ -150,7 +150,7 @@ impl Authority {
         self.sign_server_leaf_with_sans(host_id, hostname, &[], ttl)
     }
 
-    /// Phase 0.10: mint a server cert with extra Subject Alternative Names
+    /// Mint a server cert with extra Subject Alternative Names
     /// beyond the primary `hostname`. Each entry in `extra_sans` is parsed
     /// as either an IP address (v4 or v6) when it lexes as one, or a DNS
     /// name otherwise. Empty / blank entries are silently skipped so the

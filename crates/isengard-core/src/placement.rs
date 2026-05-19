@@ -1,4 +1,4 @@
-//! Phase 0.14 native placement verbs + label selectors.
+//! Native placement verbs + label selectors.
 //!
 //! The compose parser populates `DesiredService::placement` with one of
 //! the [`Placement`] variants when a service uses `spread:`, `global:`,
@@ -29,7 +29,7 @@ use std::fmt;
 /// behavior. `Auto` lets the controller pick per-service heuristically.
 ///
 /// Parsed from the stack file's per-service `strategy:` key. See the
-/// 2026-05-15 one-file stack model design spec (Track A) for the
+/// 2026-05-15 one-file stack model design spec for the
 /// rationale of pushing strategy choice into the stack file itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Strategy {

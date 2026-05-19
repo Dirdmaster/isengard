@@ -1,4 +1,4 @@
-//! Phase 9b T1 acceptance tests for the pending-approval DAO.
+//! Acceptance tests for the pending-approval DAO.
 //!
 //! See plan §"T1: Storage extensions for pending approvals" of
 //! `docs/superpowers/plans/2026-05-06-phase-9e-9f-approval-flow.md`.

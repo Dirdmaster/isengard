@@ -158,7 +158,7 @@ struct PutConflict {
 }
 
 pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
-    // Phase 0.13 dispatch. `--all` walks subdirs; otherwise we may
+    // Dispatch. `--all` walks subdirs; otherwise we may
     // have a manifest (`stack.toml` in cwd or the supplied dir) or a
     // bare compose file (legacy).
     let plan = resolve_deploy_plan(&args)?;
@@ -174,7 +174,7 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
-/// Phase 0.13: classify what `isd deploy` is being asked to do.
+/// Classify what `isd deploy` is being asked to do.
 #[derive(Debug)]
 pub enum DeployPlan {
     /// `--all`: walk immediate subdirs of `root`.
@@ -185,7 +185,7 @@ pub enum DeployPlan {
     Single { compose_path: PathBuf },
 }
 
-/// Phase 0.13: classify the args. Precedence:
+/// Classify the args. Precedence:
 ///   1. `--all` set: All { root: cwd or `--root` }
 ///   2. positional `-`: Single { compose_path: "-" } (stdin)
 ///   3. positional is an existing directory: probe for `stack.toml`,
@@ -309,7 +309,7 @@ fn looks_like_explicit_path(p: &std::path::Path) -> bool {
         || std::path::Path::new(s).is_absolute()
 }
 
-/// Phase 0.13: deploy from a `stack.toml`. Merges overlays, builds the
+/// Deploy from a `stack.toml`. Merges overlays, builds the
 /// JSON body with the manifest fields, and POSTs (or PUTs) via the
 /// existing dashboard endpoint.
 async fn run_manifest_deploy(
@@ -423,7 +423,7 @@ async fn run_manifest_deploy(
     Ok(())
 }
 
-/// Phase 0.13: `--all` walks immediate subdirs of `root` (lexical
+/// `--all` walks immediate subdirs of `root` (lexical
 /// order, sequential). Per-stack failures are collected; final report
 /// + exit status reflect the aggregate.
 async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) -> Result<()> {
@@ -798,7 +798,7 @@ async fn create_stack(
     Ok(ok)
 }
 
-/// Phase 0.13: hook shape on the create-stack POST body.
+/// Hook shape on the create-stack POST body.
 #[derive(Debug, Serialize, Clone)]
 pub struct JsonHook {
     pub on: String,
@@ -807,7 +807,7 @@ pub struct JsonHook {
     pub on_error: String,
 }
 
-/// Phase 0.13: extended POST /stacks body with manifest fields.
+/// Extended POST /stacks body with manifest fields.
 #[derive(Debug, Serialize)]
 pub struct CreateStackManifestBody {
     pub name: String,
@@ -822,7 +822,7 @@ pub struct CreateStackManifestBody {
     pub hooks: Option<Vec<JsonHook>>,
 }
 
-/// Phase 0.13: POST a stack with manifest body. Surfaces controller's
+/// POST a stack with manifest body. Surfaces controller's
 /// 422 (unknown secrets) verbatim so the operator sees the missing
 /// names without an extra round-trip.
 async fn create_stack_with_manifest(
@@ -850,7 +850,7 @@ async fn create_stack_with_manifest(
     Ok(ok)
 }
 
-/// Phase 0.13 (wave 2.A follow-up): body for the JSON content-type
+/// Body for the JSON content-type
 /// variant of `PUT /api/v1/stacks/:id/compose`. Mirrors the controller's
 /// `PutComposeJsonBody` shape. Used by `isd deploy` so a second deploy
 /// with manifest changes actually propagates, instead of silently
@@ -872,7 +872,7 @@ pub struct PutComposeJsonBody {
     pub manifest_sha256: Option<String>,
 }
 
-/// Phase 0.13 (wave 2.A follow-up): PUT a compose + manifest bundle via
+/// PUT a compose + manifest bundle via
 /// the JSON variant. Surfaces the controller's 409 / 422 / 400 bodies
 /// verbatim so the operator sees the underlying error (e.g. the missing
 /// secret name) without an extra round-trip.

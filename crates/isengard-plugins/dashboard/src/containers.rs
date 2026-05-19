@@ -1,4 +1,4 @@
-//! Dashboard REST surface for containers (Phase 0.18).
+//! Dashboard REST surface for containers.
 //!
 //! `GET  /api/v1/containers` lists rows from the `containers` table.
 //! Query params: `host`, `stack`, `service`, `state`, `all`, `limit`,

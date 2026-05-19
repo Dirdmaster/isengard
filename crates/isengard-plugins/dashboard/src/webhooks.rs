@@ -1,4 +1,4 @@
-//! REST endpoints for outbound webhooks (Phase 12 Plan A, #53).
+//! REST endpoints for outbound webhooks (#53).
 //!
 //! See spec §"REST endpoints" of
 //! `docs/superpowers/specs/2026-05-06-phase-12a-outbound-webhooks-design.md`.
@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/webhooks", get(list_webhooks).post(create_webhook))
-        // Phase 12b/c: cross-source delivery list, filtered by `?source=`.
+        // Cross-source delivery list, filtered by `?source=`.
         .route("/webhooks/deliveries", get(list_deliveries_by_source))
         .route(
             "/webhooks/{id}",
@@ -122,9 +122,9 @@ pub struct UpdateWebhookDto {
 pub struct WebhookDeliveryDto {
     pub id: i64,
     pub webhook_id: Option<i64>,
-    /// Phase 12b/c: which subsystem produced this row.
+    /// Which subsystem produced this row.
     pub source: DeliverySource,
-    /// Phase 12b/c: inline destination URL for `lifecycle` / `gate` rows.
+    /// Inline destination URL for `lifecycle` / `gate` rows.
     pub url: Option<String>,
     pub event_kind: String,
     pub status: DeliveryStatus,

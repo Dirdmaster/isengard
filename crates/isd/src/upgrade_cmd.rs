@@ -19,7 +19,7 @@
 //!      whose image reference changed. State volumes (iso-controller-state,
 //!      iso-agent-state, iso-stacks) survive because they are external
 //!      named volumes.
-//!   7. Poll Track F's discovery + `GET /api/v1/hosts` for 90s.
+//! 7. Poll discovery + `GET /api/v1/hosts` for 90s.
 //!   8. On success print the upgraded tag + backup path.
 
 use anyhow::{Context, Result, anyhow};
@@ -102,7 +102,7 @@ pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
     eprintln!("isd upgrade: recreating containers via docker compose up -d");
     compose_up(&docker_uri, &target_tag, backup_path.as_deref())?;
 
-    // 6. Health-check via Track F's discovery + GET /api/v1/hosts.
+    // 6. Health-check via discovery + GET /api/v1/hosts.
     wait_for_controller_ready(&docker, std::time::Duration::from_secs(90))
         .await
         .map_err(|e| {

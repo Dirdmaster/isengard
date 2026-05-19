@@ -1,7 +1,7 @@
 //! REST endpoints for blue-green deployments. See spec §10e-rest.
 //!
-//! Phase 10 Plan B Task 5: read-only `GET /api/v1/deployments?stack_id=&state=`.
-//! Phase 10 Plan B Task 10: `POST /api/v1/deployments/:id/abort`.
+//! Read-only `GET /api/v1/deployments?stack_id=&state=`.
+//! `POST /api/v1/deployments/:id/abort`.
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ pub struct ListQuery {
     /// `"active"` (default) or `"history"`.
     pub state: Option<String>,
     pub limit: Option<u32>,
-    /// Phase 10c (T3 refs #50): when set, returns deployments belonging to
+    /// When set, returns deployments belonging to
     /// the given group. Mutually exclusive with `stack_id` (group filter
     /// wins).
     pub group_id: Option<String>,
@@ -48,16 +48,16 @@ pub struct DeploymentDto {
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    /// Phase 10c (refs #50): set when this deployment is part of a multi-host
+    /// Set when this deployment is part of a multi-host
     /// rolling group. `None` for single-host (orchestrator-bypass) deploys.
     #[serde(default)]
     pub group_id: Option<String>,
-    /// Phase 9F (#48): blue digest snapshot taken at deployment start when
+    /// Blue digest snapshot taken at deployment start when
     /// the resolved policy's `on_failure == Rollback`. The supervisor
     /// uses this to re-pull the prior image if green fails.
     #[serde(default)]
     pub previous_digest: Option<String>,
-    /// Phase 9F (#48): timestamp the supervisor entered the rollback
+    /// Timestamp the supervisor entered the rollback
     /// branch. The dashboard uses it to render "Rolled back at HH:MM"
     /// without parsing the error string.
     #[serde(default)]
@@ -141,7 +141,7 @@ async fn list_deployments(
     let limit = q.limit.unwrap_or(50).min(200);
     let state_filter = q.state.as_deref().unwrap_or("active");
 
-    // Phase 10c: group_id filter takes precedence. When supplied, return every
+    // Group_id filter takes precedence. When supplied, return every
     // deployment belonging to the group regardless of state: callers (the
     // group panel UI) want the full picture.
     if let Some(gid) = q.group_id.as_deref() {

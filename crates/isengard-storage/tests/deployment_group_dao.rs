@@ -1,5 +1,4 @@
 //! DAO-level coverage for `deployment_groups` and stack parallelism.
-//! Phase 10c (T1).
 
 use isengard_storage::deployment::{DeployStrategy, DeploymentState, InsertDeployment};
 use isengard_storage::{

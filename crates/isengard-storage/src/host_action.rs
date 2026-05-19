@@ -1,6 +1,6 @@
 //! Queued action for a host. The agent pulls these on its next heartbeat.
 //!
-//! Phase 9b T1 extends this module with pending-approval rows. Approval rows
+//! Extends this module with pending-approval rows. Approval rows
 //! live in the same `host_actions` table but use a separate kind string
 //! (`update_pending_approval`) plus the new lifecycle columns added by
 //! migration 0017 (`action_id`, `state`, `expires_at`, `decided_at`,
@@ -55,7 +55,7 @@ pub struct HostAction {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 9b: pending approvals
+// Pending approvals
 // ---------------------------------------------------------------------------
 
 /// Wire-format `kind` column value for pending-approval rows.
@@ -501,7 +501,7 @@ impl crate::inventory::Inventory {
     }
 
     /// Stash Discord notifier metadata (channel_id + message_id) on an existing
-    /// approval row. Used by Phase 9c so the dashboard callback can edit the
+    /// approval row. Used so the dashboard callback can edit the
     /// originating Discord message after a decision. Idempotent and disjoint
     /// from `set_approval_message_metadata` so Telegram + Discord can coexist
     /// on the same row.

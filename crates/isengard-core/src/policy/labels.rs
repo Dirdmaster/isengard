@@ -5,7 +5,7 @@
 //!
 //! Pure module: `HashMap<String, String>` in, `Policy` out (or
 //! `ParseLabelError` on a malformed value). The ingest caller decides what
-//! to do with errors (Phase 9b.1 logs at warn and skips the upsert).
+//! to do with errors (logs at warn and skips the upsert).
 //!
 //! The five recognized labels match the `Policy` struct fields one-to-one:
 //!

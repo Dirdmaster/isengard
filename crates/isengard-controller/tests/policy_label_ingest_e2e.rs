@@ -1,4 +1,4 @@
-//! End-to-end (no gRPC) integration tests for Phase 9b.1 container-scope
+//! End-to-end (no gRPC) integration tests for container-scope
 //! policy ingest. Drive `PolicyLabelIngest::ingest` directly, then verify
 //! that the resolver picks the new container-scope row up.
 

@@ -38,7 +38,7 @@ pub enum CoreError {
 
     /// Catch-all for plugin-boundary errors that don't fit a more specific
     /// variant (e.g. networking adapters reporting "no adapter configured").
-    /// Added in Phase 8a so adapter implementations can return free-form
+    /// Added so adapter implementations can return free-form
     /// messages without each defining their own error type.
     #[error("{0}")]
     Other(String),

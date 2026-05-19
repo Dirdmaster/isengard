@@ -1,4 +1,4 @@
-//! Phase 14 Task 6: end-to-end test of the gRPC `Enroll` handler going
+//! End-to-end test of the gRPC `Enroll` handler going
 //! through `EnrollmentService::redeem`. We exercise the [`Controller`] trait
 //! impl directly (no transport) — that's enough to cover the wiring between
 //! proto request/response, `EnrollmentService`, and the CA.
@@ -25,7 +25,7 @@ async fn enroll_with_valid_token_returns_cert_bundle() {
         .mint(TokenRole::Agent, Duration::minutes(5))
         .await
         .unwrap();
-    // Track G: redeem requires the packed `TK<bytes>.<fingerprint>` shape.
+    // Redeem requires the packed `TK<bytes>.<fingerprint>` shape.
     let bytes_vec = data_encoding::BASE32_NOPAD
         .decode(bare.as_bytes())
         .expect("mint returns base32");

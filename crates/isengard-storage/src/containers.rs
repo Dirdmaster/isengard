@@ -1,6 +1,6 @@
 //! Containers entity: one runtime-level container observed on a host.
 //!
-//! Phase 0.18: containers become the leaf unit for `isd ps`. Each row is
+//! Containers become the leaf unit for `isd ps`. Each row is
 //! keyed by a 16-char hex digest of `sha256(host_id || "|" ||
 //! runtime_container_id)` so the operator-visible id is globally unique
 //! per fleet and stable across reconnects. The native runtime id (bollard

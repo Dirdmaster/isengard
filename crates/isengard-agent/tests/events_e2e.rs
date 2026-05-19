@@ -1,4 +1,4 @@
-//! Phase 4b e2e: an event sent on the agent→controller Sync stream lands in
+//! E2e: an event sent on the agent→controller Sync stream lands in
 //! the controller's `events` journal (and would have been broadcast on the
 //! bus, though this test only asserts the persistence side).
 //!
@@ -15,7 +15,7 @@
 //! handler → Journal → EventBus). The agent's internal emitter is unit-tested
 //! in `events::tests` separately.
 //!
-//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). The Phase 4
+//! NOTE(phase-14, task-11): superseded by auth_e2e.rs (Task 15). The
 //! bootstrap (`http://`, bearer token, `seed_token` writing settings rows)
 //! does not match the mTLS surface; left in tree as documentation and marked
 //! `#[ignore]`.

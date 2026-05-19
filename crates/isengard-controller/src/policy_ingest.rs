@@ -1,4 +1,4 @@
-//! Phase 9b.1: container-scope policy ingest from Docker labels.
+//! Container-scope policy ingest from Docker labels.
 //!
 //! See spec §"Discovery path" + §"Cleanup" of
 //! `docs/superpowers/specs/2026-05-06-phase-9b1-container-label-discovery-design.md`.

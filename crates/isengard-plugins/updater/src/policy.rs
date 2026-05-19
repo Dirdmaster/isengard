@@ -1,4 +1,4 @@
-//! Policy-aware skip helpers for the updater plugin (Phase 9b, T3).
+//! Policy-aware skip helpers for the updater plugin.
 //!
 //! See spec §"Updater integration (9b)" of
 //! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
@@ -14,7 +14,7 @@
 //! 2. `paused_until.is_some_and(|t| t > now())`: temporarily paused.
 //!
 //! Other resolved-policy fields (`gate`, `on_failure`, `approver_channel`)
-//! are surfaced by the resolver but NOT enforced here. Phase 9e+ adds them.
+//! are surfaced by the resolver but NOT enforced here. A later phase adds them.
 
 use chrono::{DateTime, Utc};
 use isengard_core::approval_store::PendingApprovalBody;
@@ -37,13 +37,13 @@ const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 /// Decision returned by [`policy_decision`]. Mirrors the cycle's branching:
 /// `Skip` short-circuits with a reason that is then translated into a
 /// `update.policy_skipped` event, `Proceed` falls through to the existing
-/// recreate path, `Deferred` (Phase 9d) emits `update.deferred` with the
-/// next firing time, and `PendingApproval` (Phase 9e) parks the candidate
+/// recreate path, `Deferred` emits `update.deferred` with the
+/// next firing time, and `PendingApproval` parks the candidate
 /// by persisting an approval row + emitting `update.pending_approval`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
     Skip(SkipReason),
-    /// Phase 9d: outside the resolved policy's maintenance window.
+    /// Outside the resolved policy's maintenance window.
     /// `next_window` is when the next firing is expected, in UTC. Used by
     /// the cycle to populate the `update.deferred` event payload.
     Deferred {
@@ -63,7 +63,7 @@ pub enum SkipReason {
     Paused {
         until: DateTime<Utc>,
     },
-    /// Phase 12c: the configured `external_gate` returned `reject`.
+    /// The configured `external_gate` returned `reject`.
     GateRejected {
         reason: Option<String>,
     },
@@ -168,8 +168,8 @@ pub struct ApprovalContext<'a> {
     pub proposed_digest: &'a str,
 }
 
-/// Apply the Phase 9b skip rules + Phase 9d window check + Phase 9e
-/// approval gate to a resolved policy.
+/// Apply the skip rules + window check + approval gate to a resolved
+/// policy.
 ///
 /// Order:
 ///
@@ -311,7 +311,7 @@ pub fn policy_decision(
     (resolved, decision)
 }
 
-/// Phase 12c: map a [`GateDecision`] to the matching [`PolicyDecision`].
+/// Map a [`GateDecision`] to the matching [`PolicyDecision`].
 ///
 /// Pure function (no I/O). Caller does the side effects: emits
 /// `update.gated_<x>` events, persists the gate-evaluation `webhook_deliveries`
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(dec, PolicyDecision::Proceed);
     }
 
-    /// Phase 9e: gate=Approval with `approval_ctx=Some` returns
+    /// Gate=Approval with `approval_ctx=Some` returns
     /// `PendingApproval` carrying a body built from ctx + approval_ctx.
     #[test]
     fn gate_approval_with_digests_returns_pending_approval() {
@@ -531,7 +531,7 @@ mod tests {
         }
     }
 
-    /// Phase 9e: gate=Approval with `approval_ctx=None` (pre-digest stage)
+    /// Gate=Approval with `approval_ctx=None` (pre-digest stage)
     /// falls through to `Proceed`. The cycle's early-skip phase only sees
     /// Skip vs Proceed; gate enforcement waits for the registry probe.
     #[test]
@@ -574,7 +574,7 @@ mod tests {
         assert!(ghcr_compare_url("ghcr.io/o/r", "md5:abc", "sha256:def").is_none());
     }
 
-    /// Phase 9d: a window matching `now` lets the cycle proceed.
+    /// A window matching `now` lets the cycle proceed.
     #[test]
     fn window_in_window_proceeds() {
         let policy = Policy {
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(dec, PolicyDecision::Proceed);
     }
 
-    /// Phase 9d: a window not matching `now` returns Deferred with the
+    /// A window not matching `now` returns Deferred with the
     /// upcoming firing time as `next_window`.
     #[test]
     fn window_outside_window_returns_deferred() {
@@ -625,7 +625,7 @@ mod tests {
         }
     }
 
-    /// Phase 9d edge case: Pinned wins over an outside-window check. The
+    /// Edge case: Pinned wins over an outside-window check. The
     /// more specific signal (`Skip(Pinned)`) is what the cycle emits.
     #[test]
     fn window_pinned_wins_over_outside_window() {
@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(dec, PolicyDecision::Skip(SkipReason::Pinned));
     }
 
-    /// Phase 9d edge case: paused_until in the future wins over the window
+    /// Edge case: paused_until in the future wins over the window
     /// check. Same precedence rule as Pinned.
     #[test]
     fn window_paused_wins_over_outside_window() {
@@ -680,7 +680,7 @@ mod tests {
         }
     }
 
-    /// Phase 12c: the four gate outcomes map to the four expected
+    /// The four gate outcomes map to the four expected
     /// `PolicyDecision` shapes.
     #[test]
     fn gate_approve_maps_to_proceed() {

@@ -1,7 +1,7 @@
 //! Isengard `updater` plugin.
 //!
 //! Watches running Docker containers and (in later sub-phases) keeps their
-//! images up to date. Phase 3b: filters containers by `isengard.enable=true`,
+//! images up to date. Filters containers by `isengard.enable=true`,
 //! compares each one's local digest against its remote registry digest, and
 //! classifies as `up_to_date | needs_update | unknown`.
 
@@ -45,7 +45,7 @@ const PLUGIN_NAME: &str = "updater";
 const DEFAULT_CYCLE_INTERVAL_SECS: u64 = 30;
 const MIN_CYCLE_INTERVAL_SECS: u64 = 5;
 /// How long an approval row stays `pending_open` before the controller's
-/// auto-expire task transitions it to `pending_expired`. Phase 9e default.
+/// auto-expire task transitions it to `pending_expired`. Default.
 const APPROVAL_DEFAULT_TTL_HOURS: i64 = 24;
 
 pub struct Updater {
@@ -53,7 +53,7 @@ pub struct Updater {
     /// by the inventory factory before init runs.
     docker: Option<Docker>,
     registry: Option<Arc<RegistryClient>>,
-    /// Phase 9e: per-image tag cache for the `Minor` strategy. Built at
+    /// Per-image tag cache for the `Minor` strategy. Built at
     /// plugin init with the default 1h TTL; shared across cycles so the
     /// per-cycle cost stays at one cache lookup per Minor candidate.
     tag_cache: Arc<TagCache>,
@@ -69,11 +69,11 @@ pub struct Updater {
     host_id: Option<HostId>,
     /// Set in `init` from `PluginContext::policy_loader`. When `Some`, the
     /// cycle pulls the full policy snapshot at the start and resolves
-    /// per-candidate (Phase 9b: respects Pinned + paused_until).
+    /// per-candidate (respects Pinned + paused_until).
     policy_loader: Option<Arc<dyn PolicyLoader>>,
     /// Set in `init` from `PluginContext::approval_store`. When `Some`, the
     /// cycle persists a pending-approval row whenever a candidate's resolved
-    /// policy gates on `Approval` (Phase 9e). `None` outside the agent or in
+    /// policy gates on `Approval`. `None` outside the agent or in
     /// test harnesses that don't exercise the approval path.
     approval_store: Option<Arc<dyn ApprovalStore>>,
     /// Cached fleet name for this host. Looked up once during `init` (when
@@ -112,7 +112,7 @@ impl Default for Updater {
 // --- error-wrapping helpers --------------------------------------------------
 // The Plugin trait returns `isengard_core::Result<()>` which is
 // `Result<(), CoreError>`. Bollard / anyhow errors don't auto-coerce, so we
-// wrap them per-lifecycle-stage. Phase 3b can refactor if a `From` impl lands
+// wrap them per-lifecycle-stage. Can refactor if a `From` impl lands
 // in isengard-core.
 
 fn init_err(e: impl std::fmt::Display) -> CoreError {
@@ -135,7 +135,7 @@ async fn emit(emitter: Option<&Arc<dyn EventEmitter>>, event: Event) {
     }
 }
 
-/// Phase 9e: when the resolved strategy is `Minor`, list the registry's
+/// When the resolved strategy is `Minor`, list the registry's
 /// tags via the cache, pick the highest patch+minor on the same major,
 /// and (if strictly greater than the current tag) HEAD the bumped tag
 /// to obtain its digest. Returns `(bumped_image_ref, bumped_digest)`
@@ -205,12 +205,12 @@ pub async fn maybe_minor_bump(
 /// existing `recreate::update_container` call. `host_id` is forwarded into
 /// every `UpdateTriggerInfo`.
 ///
-/// Phase 9b: when `policy_loader` is `Some`, the cycle pulls the policy
+/// When `policy_loader` is `Some`, the cycle pulls the policy
 /// snapshot once at the start, resolves a `ResolvedPolicy` per candidate
 /// (using the candidate's compose labels + cached fleet + host_id), and
 /// short-circuits with `update.policy_skipped` for `Pinned` services and
 /// services with active `paused_until`. All other resolved-policy fields
-/// are computed but NOT enforced; Phase 9e+ adds them.
+/// are computed but NOT enforced; a later phase adds them.
 #[allow(clippy::too_many_arguments)]
 async fn do_cycle(
     docker: &Docker,
@@ -237,7 +237,7 @@ async fn do_cycle(
         .filter(|c| isengard_enabled(c.labels.as_ref()))
         .collect();
 
-    // Phase 9b: load the policy snapshot once per cycle. On loader error
+    // Load the policy snapshot once per cycle. On loader error
     // we behave as if no policies exist (fail-safe: don't block updates).
     let policy_snapshot: Vec<LoadedPolicy> = match policy_loader {
         Some(loader) => match loader.list().await {
@@ -269,7 +269,7 @@ async fn do_cycle(
             .unwrap_or_else(|| "<unknown>".into());
         let original_image_str = c.image.as_deref().unwrap_or("").to_string();
         // `image_str` is a borrowed alias that will be reassigned below if
-        // the Phase 9e Minor strategy bumps the tag. The original string
+        // the Minor strategy bumps the tag. The original string
         // (for `inspect_image`) lives in `original_image_str`.
         let mut image_str: String = original_image_str.clone();
 
@@ -278,9 +278,9 @@ async fn do_cycle(
             continue;
         };
 
-        // Phase 9b policy gate: build the resolver context from the
+        // Policy gate: build the resolver context from the
         // candidate's compose labels + cached fleet + host_id, then
-        // short-circuit on Pinned / paused_until. Phase 9e: gate=Approval
+        // short-circuit on Pinned / paused_until. Gate=Approval
         // is enforced AFTER the registry probe (we need both digests to
         // build the approval body), so the early-skip pass passes
         // `approval_ctx=None`.
@@ -317,7 +317,7 @@ async fn do_cycle(
                             gate_reason = ?reason,
                             "policy skip"
                         );
-                        // Phase 12c: gate-rejected counts as a paused-style skip
+                        // Gate-rejected counts as a paused-style skip
                         // for cycle bookkeeping.
                         paused += 1;
                     }
@@ -325,7 +325,7 @@ async fn do_cycle(
                 emit(emitter, event).await;
                 continue;
             }
-            // Phase 9d: outside the maintenance window. Emit
+            // Outside the maintenance window. Emit
             // `update.deferred` and skip recreation. The cycle moves on;
             // no approval row is persisted.
             crate::policy::PolicyDecision::Deferred { next_window } => {
@@ -346,7 +346,7 @@ async fn do_cycle(
             | crate::policy::PolicyDecision::PendingApproval(_) => {}
         }
 
-        // Phase 9b: local digest probe uses the ORIGINAL image string
+        // Local digest probe uses the ORIGINAL image string
         // (the tag actually running on this host). Even when the Minor
         // strategy bumps to a newer tag below, the local digest must
         // reflect what's running, not the proposed tag.
@@ -372,7 +372,7 @@ async fn do_cycle(
             }
         };
 
-        // Phase 9e Minor strategy: when the resolved policy is `Minor`,
+        // Minor strategy: when the resolved policy is `Minor`,
         // additionally check the registry's tag list for a higher
         // patch+minor on the current major. If the picked tag is strictly
         // greater than the running tag AND has a different digest, we
@@ -410,7 +410,7 @@ async fn do_cycle(
                 );
                 needs_update += 1;
 
-                // Phase 9e: re-evaluate the resolved policy now that we
+                // Re-evaluate the resolved policy now that we
                 // have both digests. If gate=Approval, the cycle MUST NOT
                 // recreate; instead we persist a pending-approval row
                 // (idempotently) and emit `update.pending_approval`. The
@@ -635,7 +635,7 @@ enum ApprovalOutcome {
     PersistFailed,
 }
 
-/// Phase 9e: persist + emit a pending approval, idempotently.
+/// Persist + emit a pending approval, idempotently.
 ///
 /// Returns an [`ApprovalOutcome`] describing what the cycle should do
 /// next. The function never panics; storage errors translate to
@@ -741,7 +741,7 @@ async fn handle_pending_approval(
 }
 
 /// Construct the `update.policy_skipped` event payload defined by the
-/// Phase 9b spec:
+/// spec:
 ///
 /// ```json
 /// {
@@ -800,7 +800,7 @@ fn build_policy_skipped_event(
     }
 }
 
-/// Construct the `update.deferred` event payload (Phase 9d):
+/// Construct the `update.deferred` event payload:
 ///
 /// ```json
 /// {
@@ -919,7 +919,7 @@ impl Plugin for Updater {
         if self.emitter.is_some() {
             info!("updater wired to event emitter");
         }
-        // Optional blue-green hand-off (Phase 10). When present, the cycle
+        // Optional blue-green hand-off. When present, the cycle
         // consults the dispatcher before recreating any container.
         self.dispatcher = ctx.update_dispatcher.clone();
         if self.dispatcher.is_some() {
@@ -927,7 +927,7 @@ impl Plugin for Updater {
         }
         self.host_id = ctx.host_id;
 
-        // Phase 9e: pick up the approval store. When wired, the cycle
+        // Pick up the approval store. When wired, the cycle
         // persists a pending-approval row for any candidate whose resolved
         // policy gates on `Approval`. `None` keeps the legacy recreate
         // path active for older agents and test harnesses.
@@ -936,7 +936,7 @@ impl Plugin for Updater {
             info!("updater wired to approval store (gate=Approval enforced)");
         }
 
-        // Phase 9b: pick up the policy loader. When wired, the cycle
+        // Pick up the policy loader. When wired, the cycle
         // resolves a `ResolvedPolicy` per candidate and respects Pinned +
         // paused_until. Cache the host's fleet name once so per-cycle
         // resolution doesn't re-hit the DB for it.
@@ -1001,7 +1001,7 @@ impl Plugin for Updater {
                             &tag_cache,
                         ).await {
                             // Don't crash the task on a single bad cycle; just log
-                            // and try again next tick. Phase 3b adds retry policy.
+                            // and try again next tick. Adds retry policy.
                             warn!(error = %e, "updater cycle failed");
                         }
                     }
@@ -1032,8 +1032,8 @@ impl Plugin for Updater {
 #[async_trait]
 impl AgentPlugin for Updater {
     async fn run_cycle(&self, _ctx: &PluginContext) -> Result<()> {
-        // External-invocation entry point. Phase 3a: same as the internal task.
-        // Phase 3e+: controller-triggered "force update now" lands here.
+        // External-invocation entry point. Same as the internal task.
+        // +: controller-triggered "force update now" lands here.
         let docker = self
             .docker
             .as_ref()

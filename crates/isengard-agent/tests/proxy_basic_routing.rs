@@ -2,7 +2,7 @@
 //! tokio HTTP server, curl through Pingora, assert the response body returns
 //! verbatim and the proxy shuts down cleanly.
 //!
-//! The test asserts the full Phase 8b path: Pingora binds → routing logic
+//! The test asserts the full path: Pingora binds → routing logic
 //! looks up upstream by Host header → upstream connect succeeds → response
 //! flows back. Plus our `OneshotShutdown` impl of Pingora 0.8's
 //! `ShutdownSignalWatch` lets the test stop the server cleanly so cargo test

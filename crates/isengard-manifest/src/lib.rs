@@ -1,4 +1,4 @@
-//! `stack.toml` and `isengard.toml` manifest parser for Phase 0.13.
+//! `stack.toml` and `isengard.toml` manifest parser.
 //!
 //! `stack.toml` lives next to a stack's compose file(s) and carries the
 //! orchestration metadata that compose itself can't express: stack name,

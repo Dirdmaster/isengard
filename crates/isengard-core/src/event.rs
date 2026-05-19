@@ -23,7 +23,7 @@ pub mod kinds {
     /// A `needs_update` candidate failed to recreate.
     pub const UPDATE_FAILED: &str = "update.failed";
     /// A candidate was skipped because the resolved policy said so.
-    /// Phase 9b: emitted for `strategy=Pinned` and active `paused_until`.
+    /// Emitted for `strategy=Pinned` and active `paused_until`.
     pub const UPDATE_POLICY_SKIPPED: &str = "update.policy_skipped";
     /// A `needs_update` candidate resolved with `gate=Approval`. The updater
     /// has persisted a `pending_open` approval row and is waiting on a
@@ -44,7 +44,7 @@ pub mod kinds {
     /// expiry tick.
     pub const UPDATE_EXPIRED: &str = "update.expired";
     /// A `needs_update` candidate fell outside its resolved policy's
-    /// maintenance window. Phase 9d. Payload includes the `next_window`
+    /// maintenance window. Payload includes the `next_window`
     /// (RFC3339, UTC) so notifier consumers can quote the back-online time.
     pub const UPDATE_DEFERRED: &str = "update.deferred";
 }

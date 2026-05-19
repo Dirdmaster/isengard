@@ -6,10 +6,10 @@
 //! - [`AgentPlugin`] — runs on agents, runs work cycles
 //! - [`ControllerPlugin`] — marker; runs on the controller (no extra methods yet)
 //! - [`EventSubscriber`] — reacts to journal events on the controller
-//! - [`HttpHandler`] — mounts HTTP routes on the controller's axum router (Phase 5)
+//! - [`HttpHandler`] — mounts HTTP routes on the controller's axum router
 //!
 //! Inputs and outputs that cross the plugin boundary use serde-clean types so
-//! the same trait works when plugins are loaded out-of-process (Phase 2+) or
+//! the same trait works when plugins are loaded out-of-process (+) or
 //! sandboxed via WASM (later).
 
 use crate::context::PluginContext;
@@ -63,7 +63,7 @@ pub trait EventSubscriber: Plugin {
 }
 
 /// Capability: this plugin mounts HTTP routes onto the controller's axum
-/// router. Real signature lands in Phase 5 once axum is added; for Phase 1 it
+/// router. Real signature lands once axum is added; for it
 /// is a marker only.
 pub trait HttpHandler: Plugin {}
 

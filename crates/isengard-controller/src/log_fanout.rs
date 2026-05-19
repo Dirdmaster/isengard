@@ -1,4 +1,4 @@
-//! Phase 13B: in-memory fanout from agent-emitted `LogChunk` frames to the
+//! In-memory fanout from agent-emitted `LogChunk` frames to the
 //! per-WebSocket-client receiver each dashboard subscription owns.
 //!
 //! The dashboard plugin calls `register(sub_id)` to get an `mpsc::Receiver`

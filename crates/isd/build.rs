@@ -49,7 +49,7 @@ fn main() {
     let version = resolve_version();
     println!("cargo:rustc-env=ISENGARD_BUILD_VERSION={version}");
 
-    // Track E: assert the embedded compose recipe carries the discovery
+    // Assert the embedded compose recipe carries the discovery
     // labels `isd_runtime::discovery_labels` reads. `isd init` writes this
     // file to a tmp path and runs `docker compose up -f <tmp>`; if the
     // recipe drifts from the constants, discovery breaks silently.

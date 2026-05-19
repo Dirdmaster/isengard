@@ -1,5 +1,5 @@
 //! Backend-agnostic types describing what to run, what's running, and what
-//! the runtime tells us about it. Phase 0.4 introduced these so the agent's
+//! the runtime tells us about it. Introduced these so the agent's
 //! compose / logs / deploy paths speak one shape. Bollard is the only
 //! backend today; fields are filled in by mapping helpers in
 //! `bollard_backend.rs`.
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// `Config<String>` for dockerd, wisp `BundleBuilder` + `NetworkSpec` for
 /// wisp).
 ///
-/// Phase 0.4 dispatch B serialises this on disk (under
+/// Dispatch B serialises this on disk (under
 /// `<state_dir>/containers/<id>/spec.json`) so [`super::RuntimeBackend::inspect_container`]
 /// and the agent's restart-policy watcher can recover labels and
 /// healthcheck info without re-running compose. All sub-types thus carry
@@ -42,7 +42,7 @@ pub struct ContainerCreateSpec {
     pub secrets: Vec<SecretMount>,
 }
 
-/// Volume / bind / tmpfs mount entry. Phase 0.4 dispatch A uses bind + tmpfs
+/// Volume / bind / tmpfs mount entry. Dispatch A uses bind + tmpfs
 /// since they're what compose_apply already emits; volume drivers come later.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountSpec {
@@ -167,7 +167,7 @@ pub struct ListFilter {
 /// projection needs). This shape is the runtime view: lifecycle state,
 /// network attachments, exit details.
 ///
-/// Phase 0.6: extended with `env`, `port_bindings`, and `restart` so the
+/// Extended with `env`, `port_bindings`, and `restart` so the
 /// compose reconciler can detect drift through the trait without
 /// reaching for backend-native inspect responses. Bollard fills these
 /// from `inspect_container`; wisp from the persisted spec.

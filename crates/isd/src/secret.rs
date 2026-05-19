@@ -10,7 +10,7 @@
 //! pattern from `compose_cmd.rs`: load the credentials file, pin the CA
 //! fingerprint, send the request.
 //!
-//! Phase 0.15 adds a `--scope` flag (`context` | `global`). `context` (the
+//! Adds a `--scope` flag (`context` | `global`). `context` (the
 //! default) keeps the historical single-context behaviour; `global` walks
 //! every context saved in the credentials file and applies the operation
 //! to each. Semantics are best-effort: per-context failures don't abort

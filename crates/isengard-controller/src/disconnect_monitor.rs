@@ -23,7 +23,7 @@ pub struct DisconnectMonitor {
     bus: Arc<EventBus>,
     threshold: chrono::Duration,
     poll_interval: Duration,
-    /// Phase 0.14: optional placement scheduler. When set, the monitor
+    /// Optional placement scheduler. When set, the monitor
     /// calls `on_host_disconnect_long` whenever it emits
     /// `agent.disconnect_long` so the scheduler can re-route placements
     /// off the stale host.
@@ -50,7 +50,7 @@ impl DisconnectMonitor {
 
     /// Builder: attach a placement scheduler so this monitor's
     /// `agent.disconnect_long` events also fire the scheduler's
-    /// auto-reroute path (Phase 0.14).
+    /// auto-reroute path.
     pub fn with_scheduler(mut self, scheduler: Arc<crate::scheduler::Scheduler>) -> Self {
         self.scheduler = Some(scheduler);
         self

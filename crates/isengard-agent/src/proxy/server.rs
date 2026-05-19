@@ -26,7 +26,7 @@
 //!   - After the grace, the runtime shuts down with
 //!     `graceful_shutdown_timeout_seconds` (default 5s).
 //!
-//! Our tune: 10s grace, 30s runtime shutdown. The Phase 0.8 agent's only
+//! Our tune: 10s grace, 30s runtime shutdown. The agent's only
 //! long-lived connections are operator-proxied HTTP requests; 10s is
 //! more than enough for any reasonable request to finish. systemd's
 //! TimeoutStopSec=15s on the unit will SIGKILL the process if it
@@ -78,7 +78,7 @@ impl ShutdownSignalWatch for OneshotShutdown {
 ///
 /// The new windows:
 ///   - `grace_period_seconds = 10`. After the listener drops we give
-///     in-flight requests 10s to finish. The Phase 0.8 proxy only
+///     in-flight requests 10s to finish. The proxy only
 ///     handles HTTP requests for stack workloads; 10s is the upper
 ///     bound on any sensible request.
 ///   - `graceful_shutdown_timeout_seconds = 30`. Tokio runtime

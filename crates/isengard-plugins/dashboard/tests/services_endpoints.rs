@@ -1,5 +1,5 @@
 //! Integration tests for `/api/v1/services/:stack_id/:service_name`
-//! (Phase 13A). Mirrors the harness used by `policies_endpoints.rs`.
+//! Mirrors the harness used by `policies_endpoints.rs`.
 //!
 //! Builds the dashboard API router against an in-memory `Inventory` +
 //! `Journal`, seeds the relevant rows, and asserts the JSON envelope shape

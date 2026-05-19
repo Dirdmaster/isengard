@@ -1,4 +1,4 @@
-//! Unit tests for `revocation::RevocationSet` (Task 4 of Phase 14).
+//! Unit tests for `revocation::RevocationSet` (Task 4).
 //!
 //! Covers initial load from inventory, runtime revocation, and the
 //! persistent `revoke_agent` helper (active cert lookup + DB revoke +

@@ -8,7 +8,7 @@
 //! never blocks on staleness.
 //!
 //! Default-and-document: this module is consumed by the lifecycle
-//! commands (Tasks 4-7 of the Phase 0.22 plan); until those land in
+//! commands (Tasks 4-7 of the plan); until those land in
 //! the same PR, `dead_code` is allowed module-wide so clippy stays
 //! green between commits. Mirrors `index_cache.rs` and `selector.rs`.
 

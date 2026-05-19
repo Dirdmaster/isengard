@@ -12,7 +12,7 @@
 //! item (`1 - 3` parses the same as `1-3`).
 //!
 //! Default-and-document: this module is consumed by `index_resolve.rs`
-//! (Task 3 of the Phase 0.22 plan); until that lands in the same PR,
+//! (Task 3 of the plan); until that lands in the same PR,
 //! `dead_code` is allowed module-wide so clippy -D warnings stays green
 //! between commits. Mirrors the pattern in `index_cache.rs`.
 

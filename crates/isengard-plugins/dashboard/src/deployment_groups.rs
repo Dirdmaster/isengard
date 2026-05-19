@@ -1,5 +1,4 @@
 //! REST endpoints for multi-host deployment groups + per-stack parallelism.
-//! Phase 10c (T3, refs #50).
 //!
 //! Routes mounted under `/api/v1`:
 //!

@@ -1,4 +1,4 @@
-//! Phase 0.13 (wave 3.D): agent-side execution of stack lifecycle hooks.
+//! Agent-side execution of stack lifecycle hooks.
 //!
 //! Wave 2.A shipped the data path: the proto carries hook lists on
 //! [`isengard_proto::pb::WriteCompose`], the dashboard persists them, the
@@ -38,9 +38,9 @@
 //!
 //! ## Security
 //!
-//! Hooks run as the agent's own user. On the Phase 0.8+ systemd install
+//! Hooks run as the agent's own user. On the systemd install
 //! that's `root`. A dedicated `isengard-hooks` user + AppArmor profile
-//! is a Phase 0.16+ tightening (out of scope here). To reduce blast
+//! is a future tightening (out of scope here). To reduce blast
 //! radius today, the parent environment is whitelisted (see
 //! [`AGENT_ENV_WHITELIST`]); `ISENGARD_*` and other agent-private
 //! variables are NOT exposed to hooks by default.

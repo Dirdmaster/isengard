@@ -1,6 +1,6 @@
 //! Isengard `backup` plugin (controller-side).
 //!
-//! Phase 11a scope: SQLite WAL snapshot, age passphrase encryption, pluggable
+//! Scope: SQLite WAL snapshot, age passphrase encryption, pluggable
 //! S3-compatible + local destinations, interval scheduler, LRU retention.
 //!
 //! Restore lives in 11b. The plugin only reads from the controller's storage;

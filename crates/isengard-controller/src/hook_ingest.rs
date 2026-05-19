@@ -1,4 +1,4 @@
-//! Phase 12b: container-scope lifecycle-hook ingest from Docker labels (#54).
+//! Container-scope lifecycle-hook ingest from Docker labels (#54).
 //!
 //! Mirrors `policy_ingest.rs`: tail `ContainerLabelsReport` /
 //! `ContainerLabelsRemoved` agent messages, parse `isengard.hooks.*` labels,

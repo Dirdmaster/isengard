@@ -1,4 +1,4 @@
-//! `isd ps`: docker-context view of the operator's containers (Track H).
+//! `isd ps`: docker-context view of the operator's containers.
 //!
 //! Resolves the active docker context via `crate::docker_context`, opens a
 //! `DockerBackend` against the resolved URI, and renders the container
@@ -50,14 +50,14 @@ pub struct PsArgs {
 }
 
 pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
-    // Track H: every context is a docker context with a docker URI. The
+    // Every context is a docker context with a docker URI. The
     // controller-direct REST path is gone for `ps`: we always go through
     // the DockerBackend.
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
     run_docker_backend(args, docker_uri, context).await
 }
 
-/// Track G protection filter for the docker-direct path. Drops any
+/// Protection filter for the docker-direct path. Drops any
 /// `ContainerSummary` whose `io.isengard.role` label is in the protected
 /// set when `all_system` is false. With `all_system=true` returns the
 /// input unchanged so `--all-system` shows everything.
@@ -80,7 +80,7 @@ pub(crate) fn filter_system(
 
 /// Open a DockerBackend for the resolved context. Used by the
 /// lifecycle commands so they share `ps`'s context-resolution + docker
-/// connection path. Track H: resolution goes through
+/// connection path. Resolution goes through
 /// `crate::docker_context::resolve_docker_uri`, which reads
 /// `~/.docker/contexts/` directly.
 pub(crate) async fn open_docker_backend(
@@ -162,7 +162,7 @@ async fn run_docker_backend(args: PsArgs, docker_uri: String, context: Option<&s
         .await
         .context("listing containers")?;
 
-    // Track G: hide system containers (io.isengard.role=controller|agent)
+    // Hide system containers (io.isengard.role=controller|agent)
     // unless `--all-system`. Applied BEFORE index-cache write + render so
     // the `#` column is dense (0..N) over the visible rows and a
     // downstream `isd stop <#>` never targets a system container by
@@ -245,7 +245,7 @@ mod tests {
         ]
     }
 
-    /// Helper for Track G filter tests: build a `ContainerSummary` with
+    /// Helper for filter tests: build a `ContainerSummary` with
     /// a given name and an optional `io.isengard.role` label value.
     fn make_row(name: &str, role: Option<&str>) -> isd_runtime::ContainerSummary {
         let mut labels = HashMap::new();
@@ -262,7 +262,7 @@ mod tests {
         }
     }
 
-    /// Track G: `isd ps` filters out containers labelled
+    /// `isd ps` filters out containers labelled
     /// `io.isengard.role=controller|agent` unless `--all-system` is set.
     /// The index column re-numbers over the visible rows so
     /// `isd stop <#>` never targets a system container by index.
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(index_rows[1].index, 1);
     }
 
-    /// Track G: `--all-system` returns everything unfiltered so the
+    /// `--all-system` returns everything unfiltered so the
     /// operator can still see the controller/agent rows when they ask.
     #[test]
     fn ps_all_system_shows_everything() {
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(cache_rows[1].name, "app-db");
     }
 
-    /// Phase 0.18: bare `isd` invokes `Ps` with the default arg shape.
+    /// Bare `isd` invokes `Ps` with the default arg shape.
     /// This guards against accidental regressions to the clap-default
     /// path that the main.rs match arm relies on.
     #[test]
@@ -343,7 +343,7 @@ mod tests {
         assert!(!args.no_trunc);
         assert!(args.filters.is_empty());
         assert_eq!(args.format, crate::output::Format::Table);
-        // Track G Phase 2: grouping defaults to on (auto-enabled when
+        // grouping defaults to on (auto-enabled when
         // >1 host present); --host filter unset by default.
         assert!(!args.no_group);
         assert!(args.host.is_none());

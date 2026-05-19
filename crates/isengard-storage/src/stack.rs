@@ -57,16 +57,16 @@ pub struct Stack {
     pub name: String,
     pub source: StackSource,
     pub discovered_at: DateTime<Utc>,
-    /// Phase 0.13: verbatim `stack.toml`. NULL for legacy compose-only stacks.
+    /// Verbatim `stack.toml`. NULL for legacy compose-only stacks.
     #[serde(default)]
     pub manifest_toml: Option<String>,
-    /// Phase 0.13: sha256 hex of `manifest_toml`. NULL when manifest absent.
+    /// Sha256 hex of `manifest_toml`. NULL when manifest absent.
     #[serde(default)]
     pub manifest_sha256: Option<String>,
-    /// Phase 0.13: RFC3339 timestamp when the manifest was last written.
+    /// RFC3339 timestamp when the manifest was last written.
     #[serde(default)]
     pub manifest_imported_at: Option<String>,
-    /// Phase 0.13: stack-level deploy strategy override. NULL means the
+    /// Stack-level deploy strategy override. NULL means the
     /// per-service phase 10g labels drive behavior.
     #[serde(default)]
     pub deploy_strategy: Option<String>,
@@ -90,7 +90,7 @@ pub struct StackComposeRow {
     pub imported_at: String,
 }
 
-/// Phase 0.13: a single hook row read back from `stack_hooks`. Ordered
+/// A single hook row read back from `stack_hooks`. Ordered
 /// by (on_event, ordinal). Used by the agent payload builder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackHook {
@@ -100,7 +100,7 @@ pub struct StackHook {
     pub on_error: String,
 }
 
-/// Phase 0.13: full manifest read-back for `GET /api/v1/stacks/<id>`.
+/// Full manifest read-back for `GET /api/v1/stacks/<id>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackManifestBundle {
     pub manifest_toml: Option<String>,

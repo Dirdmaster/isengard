@@ -1,4 +1,4 @@
-//! `container_hooks` DAO. Phase 12b (#54).
+//! `container_hooks` DAO. (#54).
 //!
 //! Stores per-container lifecycle hook configuration parsed from
 //! `isengard.hooks.*` Docker labels by the controller-side
