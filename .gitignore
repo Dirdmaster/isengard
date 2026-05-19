@@ -26,3 +26,4 @@ www/bun.lock
 # crates/wisp/examples/prepare-busybox.sh; it's arch-specific and not
 # worth committing.
 crates/wisp/examples/busybox/
+.cargo/

@@ -146,9 +146,9 @@ enum Command {
         #[arg(long, env = "ISENGARD_STATE_DIR", default_value = "/var/lib/isengard")]
         state_dir: std::path::PathBuf,
         /// One-time enrollment token. Required for first-time enrollment;
-        /// ignored once the agent has a persisted cert bundle. Track G:
-        /// the packed `TK<bytes>.<fingerprint>` shape is mandatory; the
-        /// agent verifies the controller CA fingerprint before enrol.
+        /// ignored once the agent has a persisted cert bundle. The packed
+        /// `TK<bytes>.<fingerprint>` shape is mandatory; the agent verifies
+        /// the controller CA fingerprint before enrolment.
         #[arg(long, env = "ISENGARD_ENROLL_TOKEN")]
         enroll_token: Option<String>,
         /// Network interface name the mDNS responder advertises on (v0.3a).
@@ -209,13 +209,13 @@ enum TokenOp {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MintFormat {
     /// Copy-pasteable `docker run` join block (legacy, kept for one
-    /// release while scripts migrate). Embeds the new Track F packed
-    /// token so newer agents still verify the CA fingerprint.
+    /// release while scripts migrate). Embeds the packed token so newer
+    /// agents still verify the CA fingerprint.
     Text,
     /// Single-line packed token: `TK<base32(bytes)>.<base32(sha256(ca))>`.
     Token,
     /// Single-line `isd join --controller ... --token ...` invocation
-    /// (recommended Track F format; what `isd join-token` prints).
+    /// (recommended; what `isd join-token` prints).
     Joincmd,
 }
 
@@ -282,13 +282,17 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let mode = match &cli.command {
-        Command::Controller { .. } => "controller",
-        Command::Agent { .. } => "agent",
-        Command::Secret { .. } => "secret",
-        Command::JoinToken { .. } => "join-token",
+    let (mode, is_daemon) = match &cli.command {
+        // Controller is a daemon only when no inner action is supplied; the
+        // subcommands (`token mint`, `agent list`, `ca export`) are one-shot
+        // CLI flows whose stdout is parsed by other tools.
+        Command::Controller { action: None, .. } => ("controller", true),
+        Command::Controller { .. } => ("controller", false),
+        Command::Agent { .. } => ("agent", true),
+        Command::Secret { .. } => ("secret", false),
+        Command::JoinToken { .. } => ("join-token", false),
     };
-    tracing_init::init(mode, cli.log.as_deref());
+    tracing_init::init(mode, cli.log.as_deref(), is_daemon);
 
     if let Err(err) = dispatch(cli.command).await {
         tracing_init::print_error_chain(&err);
@@ -535,7 +539,7 @@ fn resolve_controller_state_dir(state_dir: std::path::PathBuf) -> std::path::Pat
     if legacy_db.exists() {
         tracing::warn!(
             ?legacy,
-            "Phase 0.16: controller state still at legacy `<state_dir>/controller/`; \
+            "controller state still at legacy `<state_dir>/controller/`; \
              using it as-is. Move data up one level (`mv {legacy}/* {new}/`) when convenient.",
             legacy = legacy.display(),
             new = state_dir.display(),

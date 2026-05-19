@@ -167,18 +167,17 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                 })?;
             let host_info = enroll::HostInfo::detect();
 
-            // Track F + G: the join token MUST be in the packed format
+            // The join token MUST be in the packed format
             // (`TK<base32-bytes>.<base32-fingerprint>`). The agent
             // fetches the controller's CA via skip-verify TLS, checks
             // its SHA-256 against the fingerprint embedded in the
             // token, and pins the verified PEM as the bootstrap trust
             // root for the real Enroll RPC. A non-packed token is a
-            // hard error: legacy env-var CA fallbacks were removed in
-            // Track G.
+            // hard error: there are no env-var CA fallbacks.
             if isengard_core::join_token::parse(&enroll_token).is_err() {
                 return Err(anyhow::anyhow!(
-                    "Track F fingerprint flow required; got a legacy token. \
-                     Mint a new token with `isd join-token` and re-run `isd join`."
+                    "enrollment token is in a legacy format and cannot verify the controller CA. \
+                     Mint a fresh token with `isd join-token` and re-run `isd join`."
                 ));
             }
             let pem = enroll::fetch_and_verify_ca(&opts.controller_url, &enroll_token).await?;
