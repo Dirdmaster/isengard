@@ -221,9 +221,7 @@ mod skip_verify {
 
     use anyhow::{Context as _, Result};
     use hyper_util::rt::TokioIo;
-    use rustls::client::danger::{
-        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-    };
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::crypto::ring;
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{DigitallySignedStruct, SignatureScheme};
@@ -318,10 +316,7 @@ mod skip_verify {
                 let tcp = TcpStream::connect((host.as_str(), port))
                     .await
                     .with_context(|| format!("tcp connect {host}:{port}"))?;
-                let stream = tls
-                    .connect(name, tcp)
-                    .await
-                    .context("tls handshake")?;
+                let stream = tls.connect(name, tcp).await.context("tls handshake")?;
                 Ok(TokioIo::new(stream))
             })
         }

@@ -41,10 +41,7 @@ impl Controller for StubController {
         }))
     }
 
-    async fn enroll(
-        &self,
-        _: Request<EnrollRequest>,
-    ) -> Result<Response<EnrollResponse>, Status> {
+    async fn enroll(&self, _: Request<EnrollRequest>) -> Result<Response<EnrollResponse>, Status> {
         unimplemented!("not exercised in pre-enroll fingerprint tests")
     }
 
@@ -130,8 +127,7 @@ async fn fingerprint_match_proceeds_to_enroll() {
 
 #[tokio::test]
 async fn fingerprint_mismatch_hard_fails() {
-    let served =
-        b"-----BEGIN CERTIFICATE-----\nWRONG\n-----END CERTIFICATE-----\n".to_vec();
+    let served = b"-----BEGIN CERTIFICATE-----\nWRONG\n-----END CERTIFICATE-----\n".to_vec();
     let url = spawn_stub_controller(served).await;
 
     let bytes = [0x42u8; 32];
