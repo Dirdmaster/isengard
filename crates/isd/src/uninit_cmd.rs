@@ -12,7 +12,7 @@
 //! the same override the `--force-system` flag exposes on `isd rm` /
 //! `isd stop` / etc.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use bollard::container::RemoveContainerOptions;
 use clap::Args;
 
@@ -34,11 +34,7 @@ const VOLUMES: &[&str] = &["iso-controller-state", "iso-agent-state", "iso-stack
 const CONTAINERS: &[&str] = &["iso-controller", "iso-agent"];
 
 pub async fn run(args: UninitArgs, context: Option<&str>) -> Result<()> {
-    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!(
-            "context has no docker endpoint; add one with `isd context create ... --docker ...`"
-        )
-    })?;
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
 
     if args.backup_first {
         eprintln!("isd uninit: taking backup before teardown...");

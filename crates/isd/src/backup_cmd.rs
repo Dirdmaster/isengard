@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::Args;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 
@@ -45,12 +45,8 @@ impl BackupArgs {
 }
 
 pub async fn run(args: BackupArgs, context: Option<&str>) -> Result<()> {
-    let context_name = crate::ps::resolve_docker_context(context)?;
-    let docker_uri = crate::ps::resolve_docker_uri(context)?.ok_or_else(|| {
-        anyhow!(
-            "context has no docker endpoint; add one with `isd context create ... --docker ...`"
-        )
-    })?;
+    let context_name = crate::docker_context::resolve_context_name(context)?;
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
 
     let creds_path = backup_credentials::default_path()?;
     let creds_file = backup_credentials::load(&creds_path)?;
