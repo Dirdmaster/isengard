@@ -189,30 +189,104 @@ impl CredentialsFile {
     }
 }
 
-/// `~/.config/isengard/credentials.toml`. Honours `XDG_CONFIG_HOME` via the
-/// `dirs` crate. Returns an error only when the OS has no concept of a home
-/// dir (CI without `$HOME`); in that case the operator can pass a path via
-/// `ISD_CREDENTIALS_FILE`.
+/// `~/.config/isd/credentials.toml`. Matches `backup_credentials.rs`'s path
+/// scheme: dev-friendly + cross-platform. Operators on macOS get the file
+/// at the same location as on Linux (instead of `~/Library/Application
+/// Support/isengard/...`, which `dirs::config_dir()` would return).
+/// `ISD_CREDENTIALS_FILE` env overrides for tests and ad-hoc paths.
+///
+/// Migration: if the legacy `dirs::config_dir().join("isengard")/credentials.toml`
+/// path exists and the new path does not, move the file in place on first
+/// access. Operator never sees a regression after upgrading; legacy lookup
+/// table goes away after a release.
 pub fn default_credentials_path() -> Result<PathBuf> {
     if let Ok(env) = std::env::var("ISD_CREDENTIALS_FILE") {
         return Ok(PathBuf::from(env));
     }
-    let dir = dirs::config_dir()
-        .context("no config directory available (set XDG_CONFIG_HOME or ISD_CREDENTIALS_FILE)")?;
-    Ok(dir.join("isengard").join("credentials.toml"))
+    let home = dirs::home_dir()
+        .context("no home directory available (set HOME or ISD_CREDENTIALS_FILE)")?;
+    let new_path = home.join(".config").join("isd").join("credentials.toml");
+    migrate_legacy_credentials_path(&new_path);
+    Ok(new_path)
+}
+
+/// One-shot migration from the legacy `dirs::config_dir()/isengard/`
+/// location (macOS Application Support / Linux XDG) to `~/.config/isd/`.
+/// Silently no-ops when the new path already exists or the legacy path
+/// doesn't. Emits a stderr line on successful migration so the operator
+/// knows where the file is now.
+fn migrate_legacy_credentials_path(new_path: &Path) {
+    if new_path.exists() {
+        return;
+    }
+    let Some(legacy_dir) = dirs::config_dir() else {
+        return;
+    };
+    let legacy = legacy_dir.join("isengard").join("credentials.toml");
+    if !legacy.exists() {
+        return;
+    }
+    if let Some(parent) = new_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if std::fs::rename(&legacy, new_path).is_ok() {
+        eprintln!(
+            "isd: migrated credentials.toml from {} to {}",
+            legacy.display(),
+            new_path.display()
+        );
+    }
 }
 
 /// Load the credentials file, returning an empty [`CredentialsFile`] when the
 /// path doesn't exist yet (first-run case).
+///
+/// Per-entry resilience: parses `[[contexts]]` entries one at a time and
+/// skips any that fail to deserialize (legacy backends, unknown kinds,
+/// missing fields). Each skip emits a stderr warning so the operator can
+/// see which entries got dropped. Keeps the valid ones; one broken entry
+/// no longer blocks every isd command.
 pub fn load(path: &Path) -> Result<CredentialsFile> {
     if !path.exists() {
         return Ok(CredentialsFile::default());
     }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading credentials at {}", path.display()))?;
-    let parsed: CredentialsFile = toml::from_str(&text)
+    let raw: toml::Value = toml::from_str(&text)
         .with_context(|| format!("parsing credentials at {}", path.display()))?;
-    Ok(parsed)
+    let table = raw
+        .as_table()
+        .with_context(|| format!("credentials at {} is not a TOML table", path.display()))?;
+
+    let default_context = table
+        .get("default_context")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let mut contexts: Vec<ContextEntry> = Vec::new();
+    if let Some(arr) = table.get("contexts").and_then(|v| v.as_array()) {
+        for entry in arr {
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unnamed>");
+            match entry.clone().try_into::<ContextEntry>() {
+                Ok(ctx) => contexts.push(ctx),
+                Err(e) => {
+                    eprintln!(
+                        "isd: skipped context {name:?} in {} ({e}). Run `isd context import {name}` (or remove the [[contexts]] block by hand).",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(CredentialsFile {
+        default_context,
+        contexts,
+    })
 }
 
 /// Persist the credentials file at `path` with mode `0600`. Creates any
@@ -269,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_http_kind_rejected_with_actionable_error() {
+    fn legacy_http_kind_is_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let legacy = r#"
@@ -279,16 +353,23 @@ default_context = "default"
 name = "default"
 kind = "http"
 url = "http://127.0.0.1:9418"
+
+[[contexts]]
+name = "lausanne"
+kind = "docker"
+url = "ssh://user@host"
 "#;
         std::fs::write(&path, legacy).unwrap();
-        let err = load(&path).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("legacy http backend"), "msg: {msg}");
-        assert!(msg.contains("isd context import"), "msg: {msg}");
+        let loaded = load(&path).unwrap();
+        // The legacy entry is dropped; the docker one remains.
+        assert_eq!(loaded.contexts.len(), 1);
+        assert_eq!(loaded.contexts[0].name, "lausanne");
+        // default_context value stays as-stored (operator may need to reset it via `isd context use`).
+        assert_eq!(loaded.default_context.as_deref(), Some("default"));
     }
 
     #[test]
-    fn legacy_ssh_kind_rejected_with_actionable_error() {
+    fn legacy_ssh_kind_is_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let legacy = r#"
@@ -300,14 +381,12 @@ kind = "ssh"
 target = "dirdmaster@10.17.0.125"
 "#;
         std::fs::write(&path, legacy).unwrap();
-        let err = load(&path).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("legacy ssh backend"), "msg: {msg}");
-        assert!(msg.contains("isd context import"), "msg: {msg}");
+        let loaded = load(&path).unwrap();
+        assert!(loaded.contexts.is_empty());
     }
 
     #[test]
-    fn legacy_controller_url_rejected_with_actionable_error() {
+    fn legacy_controller_url_is_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.toml");
         let legacy = r#"
@@ -320,10 +399,8 @@ token = "abc"
 ca_fingerprint_sha256 = ""
 "#;
         std::fs::write(&path, legacy).unwrap();
-        let err = load(&path).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("predates Track D"), "msg: {msg}");
-        assert!(msg.contains("isd context import"), "msg: {msg}");
+        let loaded = load(&path).unwrap();
+        assert!(loaded.contexts.is_empty());
     }
 
     #[test]
