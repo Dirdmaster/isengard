@@ -1,8 +1,10 @@
-//! Track H: `isd context` reads docker's context store. `list`, `use`,
-//! `show` delegate to `docker_context`. `create` / `import` / `rm`
-//! are gone: operator runs `docker context create/rm` directly.
+//! `isd context`: list, use, show, create, rm. All operations delegate to
+//! docker's context store at `~/.docker/contexts/`: there is no parallel
+//! state. `create` and `rm` shell out to the `docker` CLI so operators
+//! never run docker commands directly. `list` / `use` / `show` read +
+//! write the store via `crate::docker_context`.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand};
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
@@ -22,6 +24,10 @@ pub enum ContextCommand {
     Use(UseArgs),
     /// Print one context's docker endpoint.
     Show(ShowArgs),
+    /// Create a new docker context. Thin wrapper over `docker context create`.
+    Create(CreateArgs),
+    /// Remove a docker context. Thin wrapper over `docker context rm`.
+    Rm(RmArgs),
 }
 
 #[derive(Debug, Args)]
@@ -34,11 +40,40 @@ pub struct ShowArgs {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Context name.
+    pub name: String,
+    /// Docker endpoint URL (e.g. `ssh://user@host`, `tcp://host:2375`,
+    /// `unix:///var/run/docker.sock`). Passed straight to
+    /// `docker context create --docker host=<url>`.
+    #[arg(long)]
+    pub docker: String,
+    /// Optional description recorded on the context.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Set as the current context after creation.
+    #[arg(long)]
+    pub r#use: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RmArgs {
+    /// Context name(s) to remove.
+    #[arg(required = true)]
+    pub names: Vec<String>,
+    /// Force removal even when the context is current.
+    #[arg(long, short = 'f')]
+    pub force: bool,
+}
+
 pub async fn run(args: ContextArgs) -> Result<()> {
     match args.command {
         ContextCommand::List => run_list().await,
         ContextCommand::Use(a) => run_use(a).await,
         ContextCommand::Show(a) => run_show(a).await,
+        ContextCommand::Create(a) => run_create(a).await,
+        ContextCommand::Rm(a) => run_rm(a).await,
     }
 }
 
@@ -82,6 +117,52 @@ async fn run_show(args: ShowArgs) -> Result<()> {
     Ok(())
 }
 
+async fn run_create(args: CreateArgs) -> Result<()> {
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.arg("context")
+        .arg("create")
+        .arg(&args.name)
+        .arg("--docker")
+        .arg(format!("host={}", args.docker));
+    if let Some(desc) = &args.description {
+        cmd.arg("--description").arg(desc);
+    }
+    let status = cmd
+        .status()
+        .await
+        .context("spawning `docker context create`")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "docker context create failed (exit {:?})",
+            status.code()
+        ));
+    }
+    if args.r#use {
+        docker_context::set_current_context(&args.name)?;
+        println!("Current docker context is now {:?}.", args.name);
+    }
+    Ok(())
+}
+
+async fn run_rm(args: RmArgs) -> Result<()> {
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.arg("context").arg("rm");
+    if args.force {
+        cmd.arg("--force");
+    }
+    for name in &args.names {
+        cmd.arg(name);
+    }
+    let status = cmd.status().await.context("spawning `docker context rm`")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "docker context rm failed (exit {:?})",
+            status.code()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,14 +198,46 @@ mod tests {
     }
 
     #[test]
-    fn create_import_rm_are_not_accepted_anymore() {
+    fn create_parses_with_required_args() {
         #[derive(Parser, Debug)]
         struct Wrap {
             #[command(subcommand)]
             c: ContextCommand,
         }
-        assert!(Wrap::try_parse_from(["x", "create", "lausanne", "--docker", "u"]).is_err());
-        assert!(Wrap::try_parse_from(["x", "import", "lausanne"]).is_err());
-        assert!(Wrap::try_parse_from(["x", "rm", "lausanne"]).is_err());
+        let w = Wrap::try_parse_from([
+            "x",
+            "create",
+            "lausanne",
+            "--docker",
+            "ssh://user@host",
+            "--use",
+        ])
+        .unwrap();
+        match w.c {
+            ContextCommand::Create(a) => {
+                assert_eq!(a.name, "lausanne");
+                assert_eq!(a.docker, "ssh://user@host");
+                assert!(a.r#use);
+                assert!(a.description.is_none());
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rm_parses_multiple_names() {
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: ContextCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "rm", "a", "b", "c", "--force"]).unwrap();
+        match w.c {
+            ContextCommand::Rm(a) => {
+                assert_eq!(a.names, vec!["a", "b", "c"]);
+                assert!(a.force);
+            }
+            other => panic!("expected Rm, got {other:?}"),
+        }
     }
 }
