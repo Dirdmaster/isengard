@@ -153,7 +153,7 @@ impl DockerBackend {
 /// A container row as the `isd` CLI consumes it: bollard's
 /// `ContainerSummary` flattened to display-ready strings. Built by
 /// [`DockerBackend::list_containers`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ContainerSummary {
     /// Full container ID. The CLI truncates for display.
     pub id: String,
@@ -165,6 +165,11 @@ pub struct ContainerSummary {
     /// Published + private ports, comma-joined, e.g.
     /// `0.0.0.0:8080->80/tcp, 5432/tcp`. Empty when none.
     pub ports: String,
+    /// Distinct private (container-internal) ports the container has
+    /// declared. Used by the interactive route-create wizard to
+    /// pre-fill the upstream port when there's exactly one obvious
+    /// candidate. Order matches docker daemon's port enumeration.
+    pub private_ports: Vec<u16>,
     /// First container name, leading `/` stripped.
     pub names: String,
     /// Container labels passed through from bollard. Used by the
@@ -225,14 +230,36 @@ fn map_summary(c: &bollard::models::ContainerSummary) -> ContainerSummary {
         .and_then(|n| n.first())
         .map(|n| n.trim_start_matches('/').to_string())
         .unwrap_or_default();
+    let private_ports = c
+        .ports
+        .as_deref()
+        .map(distinct_private_ports)
+        .unwrap_or_default();
     ContainerSummary {
         id: c.id.clone().unwrap_or_default(),
         image: c.image.clone().unwrap_or_default(),
         status: c.status.clone().unwrap_or_default(),
         ports: c.ports.as_deref().map(format_ports).unwrap_or_default(),
+        private_ports,
         names,
         labels: c.labels.clone().unwrap_or_default(),
     }
+}
+
+/// Distinct container-internal ports, in daemon-reported order. Used
+/// by `isd route create`'s wizard to detect an unambiguous upstream
+/// port. bollard reports each `Port` once per binding (often v4 + v6),
+/// so dedupe on `private_port`.
+fn distinct_private_ports(ports: &[bollard::models::Port]) -> Vec<u16> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for p in ports {
+        if seen.insert(p.private_port) {
+            out.push(p.private_port);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

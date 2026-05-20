@@ -33,20 +33,22 @@ pub enum RouteCommand {
 
 #[derive(Debug, Args)]
 pub struct CreateArgs {
-    /// Public hostname the rule matches.
-    pub public_hostname: String,
+    /// Public hostname the rule matches. Prompted when omitted.
+    pub public_hostname: Option<String>,
     /// Agent serving the upstream (ULID).
     #[arg(long, conflicts_with = "host")]
     pub host_id: Option<String>,
     /// Agent hostname (resolved to host_id).
     #[arg(long, conflicts_with = "host_id")]
     pub host: Option<String>,
-    /// Upstream container or service name.
+    /// Upstream container or service name. Prompted via a fuzzy
+    /// picker over the running containers when omitted.
     #[arg(long)]
-    pub service: String,
-    /// Upstream port.
+    pub service: Option<String>,
+    /// Upstream port. Prompted when omitted; default is the
+    /// container's sole private port when it has exactly one.
     #[arg(long)]
-    pub port: u16,
+    pub port: Option<u16>,
     /// Upstream protocol (http or https).
     #[arg(long, default_value = "http")]
     pub protocol: String,
@@ -143,13 +145,29 @@ async fn run_list(context: Option<&str>) -> Result<()> {
 }
 
 async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
+    let args = if args.service.is_none() || args.port.is_none() || args.public_hostname.is_none() {
+        run_wizard(args, context).await?
+    } else {
+        args
+    };
+
+    let public_hostname = args
+        .public_hostname
+        .as_deref()
+        .expect("public_hostname populated by wizard or CLI");
+    let service = args
+        .service
+        .as_deref()
+        .expect("service populated by wizard or CLI");
+    let port = args.port.expect("port populated by wizard or CLI");
+
     let session = Session::open(context).await?;
     let host_id = resolve_host_id(&session, args.host_id.as_deref(), args.host.as_deref()).await?;
     let body = CreateBody {
         host_id: &host_id,
-        service_name: &args.service,
-        container_port: args.port,
-        public_hostname: &args.public_hostname,
+        service_name: service,
+        container_port: port,
+        public_hostname,
         protocol: &args.protocol,
         adapter: &args.adapter,
         tls_mode: &args.tls_mode,
@@ -157,8 +175,148 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
         source: "ui",
     };
     let id = create_rule(&session, &body).await?;
-    println!("Created routing rule id={id} for {}.", args.public_hostname);
+    println!("Created routing rule id={id} for {public_hostname}.");
     Ok(())
+}
+
+/// Interactive wizard. Lists running containers on the resolved docker
+/// context, lets the operator pick one via a fuzzy-substring filter,
+/// then prompts for the missing port (auto-defaulting when the chosen
+/// container has exactly one private port) and the public hostname.
+/// Already-supplied fields pass through unchanged.
+async fn run_wizard(mut args: CreateArgs, context: Option<&str>) -> Result<CreateArgs> {
+    let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
+    let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;
+    let raw = docker.list_containers(false).await?;
+
+    // Hide controller/agent so operators don't accidentally route to
+    // the system plane.
+    let candidates: Vec<isd_runtime::ContainerSummary> = raw
+        .into_iter()
+        .filter(|c| {
+            !matches!(
+                c.labels.get("io.isengard.role").map(String::as_str),
+                Some("controller") | Some("agent")
+            )
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Err(anyhow!(
+            "no workload containers found on {docker_uri}; \
+             start one and try again, or pass --service / --port to skip the picker"
+        ));
+    }
+
+    let rows: Vec<ContainerRow> = candidates.into_iter().map(ContainerRow::from).collect();
+
+    if args.service.is_none() {
+        let picked = inquire::Select::new("Pick the upstream container", rows.clone())
+            .with_help_message("type to filter")
+            .with_page_size(15)
+            .prompt()
+            .map_err(|e| anyhow!("picker cancelled: {e}"))?;
+        args.service = Some(picked.service_name.clone());
+        if args.port.is_none() {
+            args.port = Some(prompt_port(&picked)?);
+        }
+    } else if args.port.is_none() {
+        // --service was supplied but --port wasn't. Try to match the
+        // service name against the docker view so we can still default
+        // the port; fall back to a plain prompt if nothing matches.
+        let svc = args.service.as_deref().unwrap();
+        let matched = rows.iter().find(|r| r.service_name == svc);
+        args.port = Some(match matched {
+            Some(row) => prompt_port(row)?,
+            None => inquire::CustomType::<u16>::new("Upstream port")
+                .with_error_message("ports are 1..=65535")
+                .prompt()
+                .map_err(|e| anyhow!("port prompt cancelled: {e}"))?,
+        });
+    }
+
+    if args.public_hostname.is_none() {
+        let hostname = inquire::Text::new("Public hostname")
+            .with_help_message("e.g. plex.vallee.casa")
+            .with_validator(|input: &str| {
+                if input.trim().is_empty() {
+                    Ok(inquire::validator::Validation::Invalid(
+                        "hostname can't be empty".into(),
+                    ))
+                } else {
+                    Ok(inquire::validator::Validation::Valid)
+                }
+            })
+            .prompt()
+            .map_err(|e| anyhow!("hostname prompt cancelled: {e}"))?;
+        args.public_hostname = Some(hostname.trim().to_string());
+    }
+
+    Ok(args)
+}
+
+/// Prompt for the upstream port. When the picked container has
+/// exactly one distinct private port, pre-fill it as the default so
+/// the operator can just hit Enter.
+fn prompt_port(row: &ContainerRow) -> Result<u16> {
+    let mut prompt =
+        inquire::CustomType::<u16>::new("Upstream port").with_error_message("ports are 1..=65535");
+    if let [only] = row.private_ports.as_slice() {
+        prompt = prompt
+            .with_default(*only)
+            .with_help_message("press Enter to accept the container's exposed port");
+    } else if !row.private_ports.is_empty() {
+        // Multiple candidates: surface them so the operator picks
+        // knowingly. Pre-filling would be a coin flip.
+        let listed = row
+            .private_ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        prompt = prompt.with_help_message(Box::leak(
+            format!("container exposes: {listed}").into_boxed_str(),
+        ));
+    }
+    prompt
+        .prompt()
+        .map_err(|e| anyhow!("port prompt cancelled: {e}"))
+}
+
+/// Display row for the inquire `Select`. Carries both the displayed
+/// label and the structured fields the wizard needs after the user
+/// picks a row.
+#[derive(Clone)]
+struct ContainerRow {
+    service_name: String,
+    image: String,
+    private_ports: Vec<u16>,
+}
+
+impl From<isd_runtime::ContainerSummary> for ContainerRow {
+    fn from(c: isd_runtime::ContainerSummary) -> Self {
+        // Prefer the compose-service label when present; falls back
+        // to the container name so non-compose containers still show
+        // up usefully.
+        let service_name = c
+            .labels
+            .get("com.docker.compose.service")
+            .cloned()
+            .unwrap_or_else(|| c.names.clone());
+        Self {
+            service_name,
+            image: c.image,
+            private_ports: c.private_ports,
+        }
+    }
+}
+
+impl std::fmt::Display for ContainerRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Two columns: service-name (left, fixed-ish) + image (right,
+        // dim). inquire renders this whole line in one selection row.
+        write!(f, "{:<22} {}", self.service_name, self.image)
+    }
 }
 
 /// Resolve the agent's host_id with this priority:
@@ -318,11 +476,11 @@ mod tests {
         .unwrap();
         match w.c {
             RouteCommand::Create(a) => {
-                assert_eq!(a.public_hostname, "iso.vallee.casa");
+                assert_eq!(a.public_hostname.as_deref(), Some("iso.vallee.casa"));
                 assert!(a.host_id.is_none());
                 assert!(a.host.is_none());
-                assert_eq!(a.service, "iso-controller");
-                assert_eq!(a.port, 9418);
+                assert_eq!(a.service.as_deref(), Some("iso-controller"));
+                assert_eq!(a.port, Some(9418));
                 assert_eq!(a.protocol, "http");
                 assert_eq!(a.adapter, "none");
                 assert_eq!(a.tls_mode, "acme");

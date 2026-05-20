@@ -213,6 +213,14 @@ rpassword = "7"
 # can't quietly change the look.
 cliclack = "0.5"
 
+# `inquire` powers the interactive picker in `isd route create` (fuzzy
+# substring filter over the list of running containers). cliclack's
+# `Select` is great for short fixed lists; inquire's `Select` adds the
+# type-to-filter behaviour operators expect when a host has 20+
+# containers. Default features disabled to keep the dep light; we only
+# need the built-in renderer.
+inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
+
 # v0.3b: embedded DNS server hosted by the controller for a configurable zone
 # (e.g. `*.iso`). Pinned to 0.25; 0.26+ requires Rust 1.88, the workspace
 # MSRV is 1.86. RUSTSEC-2026-0119 is acknowledged in deny.toml; not
