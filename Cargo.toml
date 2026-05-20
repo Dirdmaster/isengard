@@ -8,6 +8,7 @@ members = [
     "crates/isengard-controller",
     "crates/isengard-agent",
     "crates/isengard-lsp",
+    "crates/isengard-mcp",
     "crates/isengard-manifest",
     "crates/isengard-proto",
     "crates/isengard-storage",
@@ -76,6 +77,18 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "jso
 # language server) which validates stack.toml / isengard.toml / compose.yaml
 # against the isengard.* label vocabulary.
 tower-lsp = "0.20"
+
+# MCP framework. `rmcp` is the official Anthropic-maintained Rust SDK for the
+# Model Context Protocol (modelcontextprotocol/rust-sdk). Powers `isd mcp`
+# which serves the embedded docs + skills tree to AI hosts (Claude Code, any
+# MCP-capable LLM) over stdio. Pinned to 1.7 because the resource + prompt
+# surface stabilised at that revision; bumping to 1.8+ requires re-auditing
+# the ServerHandler trait shape.
+rmcp = { version = "1.7", default-features = false, features = ["server", "transport-io", "macros"] }
+
+# `include_dir` 0.7 bakes the operator docs tree, per-crate API docs, and
+# skills under the binary's data section so `isd mcp` ships self-contained.
+include_dir = "0.7"
 
 # gRPC + protobuf
 tonic = { version = "0.12.3", features = ["tls", "tls-native-roots"] }
@@ -179,6 +192,7 @@ isd-runtime = { path = "crates/isd-runtime", version = "0.1.0-alpha" }
 isengard-agent = { path = "crates/isengard-agent", version = "0.1.0-alpha" }
 isengard-manifest = { path = "crates/isengard-manifest", version = "0.1.0-alpha" }
 isengard-lsp = { path = "crates/isengard-lsp", version = "0.1.0-alpha" }
+isengard-mcp = { path = "crates/isengard-mcp", version = "0.1.0-alpha" }
 isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
 isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
 isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }
