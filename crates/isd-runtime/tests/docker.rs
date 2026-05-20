@@ -1,11 +1,15 @@
-//! DockerBackend integration tests. Local backend ping is gated
-//! `#[ignore]` because it requires a running docker daemon (Docker
-//! Desktop / dockerd / orbstack) which the CI shells do not always
-//! have. Run with `cargo test -p isd-runtime --test docker -- --ignored`
-//! when validating against a real engine.
+//! Integration tests for [`isd_runtime::DockerBackend`].
+//!
+//! The local-backend smoke tests are gated `#[ignore]` because they
+//! require a running docker daemon (Docker Desktop, dockerd, orbstack)
+//! which the CI shells do not always have. Run with
+//! `cargo test -p isd-runtime --test docker -- --ignored` when
+//! validating against a real engine.
 
 use isd_runtime::DockerBackend;
 
+/// `from_local` connects to the running daemon and returns a non-empty
+/// version string from `ping`.
 #[tokio::test]
 #[ignore]
 async fn from_local_connects_and_pings() {
@@ -14,6 +18,8 @@ async fn from_local_connects_and_pings() {
     assert!(!info.is_empty(), "ping should return a non-empty response");
 }
 
+/// `from_uri` rejects any scheme outside `ssh://`, `unix://`, and the
+/// literal `local`. The error names the valid schemes.
 #[tokio::test]
 async fn from_uri_rejects_invalid_scheme() {
     let result = DockerBackend::from_uri("ftp://example.com").await;
@@ -25,13 +31,13 @@ async fn from_uri_rejects_invalid_scheme() {
     );
 }
 
+/// `list_containers` against the local daemon succeeds and yields
+/// well-formed rows. Does not assert on count: a clean dev machine may
+/// have zero running containers.
 #[tokio::test]
 #[ignore]
 async fn list_containers_against_local_daemon() {
     let backend = DockerBackend::from_local().expect("local backend");
-    // Does not assert on count: a clean dev machine may have zero
-    // running containers. Asserts the call succeeds and the DTO shape
-    // is well-formed.
     let containers = backend
         .list_containers(true)
         .await
