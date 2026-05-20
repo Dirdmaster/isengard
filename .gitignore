@@ -3,6 +3,10 @@ www/.nuxt/
 www/.output/
 www/dist/
 www/bun.lock
+website/.nuxt/
+website/.output/
+website/.data/
+website/dist/
 .cachebust
 
 # Rust
