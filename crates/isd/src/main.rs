@@ -134,6 +134,11 @@ enum Command {
     Restore(restore_cmd::RestoreArgs),
     /// Upgrade controller + agent to a new image tag (auto-backup first).
     Upgrade(upgrade_cmd::UpgradeArgs),
+    /// Run the Isengard language server over stdio. Editors invoke this
+    /// via `isd lsp`; filetype detection + auto-attach are configured
+    /// by the editor plugin (`isengard.nvim` for Neovim, VSCode extension
+    /// for VSCode).
+    Lsp,
 }
 
 #[tokio::main]
@@ -212,6 +217,7 @@ async fn main() {
         Command::Backup(args) => backup_cmd::run(args, cli.context.as_deref()).await,
         Command::Restore(args) => restore_cmd::run(args, cli.context.as_deref()).await,
         Command::Upgrade(args) => upgrade_cmd::run(args, cli.context.as_deref()).await,
+        Command::Lsp => isengard_lsp::run_stdio().await,
     };
 
     if let Err(e) = result {
