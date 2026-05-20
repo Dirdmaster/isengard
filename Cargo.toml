@@ -78,6 +78,13 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "jso
 # against the isengard.* label vocabulary.
 tower-lsp = "0.20"
 
+# YAML parser with provenance spans. `serde_yaml` flattens position info; the
+# LSP needs every label's exact line + column so diagnostics land on the right
+# squiggle. `marked-yaml` is purpose-built for that: every node carries a
+# `Marker` (line + column + index). Used by `isengard-lsp` to walk compose
+# manifests and locate each `labels:` entry.
+marked-yaml = "0.8"
+
 # MCP framework. `rmcp` is the official Anthropic-maintained Rust SDK for the
 # Model Context Protocol (modelcontextprotocol/rust-sdk). Powers `isd mcp`
 # which serves the embedded docs + skills tree to AI hosts (Claude Code, any
