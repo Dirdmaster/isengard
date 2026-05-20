@@ -5,16 +5,13 @@ use crate::{Error, Result, SshTunnel};
 use bollard::{API_DEFAULT_VERSION, Docker};
 use std::collections::HashMap;
 
-/// Backend handle the rest of `isd` uses to talk to a Docker daemon.
-/// Owns the optional [`SshTunnel`] so the connection's lifetime is
-/// bounded by the backend's lifetime.
-///
-/// `bollard::Docker` does not implement `Debug`; we manually derive a
-/// minimal one so the test harness can `expect_err` cleanly.
+#[doc = include_str!("../docs/docker-backend.md")]
 pub struct DockerBackend {
+    /// `bollard::Docker` client. Talks to the daemon over whichever
+    /// transport the constructor wired up.
     docker: Docker,
-    // Held to keep the ssh child alive while the backend is in use.
-    // None for local backends.
+    /// Held to keep the ssh child alive while the backend is in use.
+    /// `None` for local backends.
     _tunnel: Option<SshTunnel>,
 }
 
@@ -27,9 +24,16 @@ impl std::fmt::Debug for DockerBackend {
 }
 
 impl DockerBackend {
-    /// Construct a backend that talks to the local docker daemon via
-    /// `bollard::Docker::connect_with_local_defaults` (Unix socket on
-    /// Linux, named pipe on Windows, `DOCKER_HOST` env if set).
+    /// Opens a backend against the local docker daemon.
+    ///
+    /// Uses `bollard::Docker::connect_with_local_defaults`: Unix socket
+    /// on Linux, named pipe on Windows, `DOCKER_HOST` when the env var
+    /// is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when bollard cannot reach the local
+    /// socket (daemon not running, permissions, missing `DOCKER_HOST`).
     pub fn from_local() -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
         Ok(Self {
@@ -38,8 +42,16 @@ impl DockerBackend {
         })
     }
 
-    /// Construct a backend that talks to a remote docker daemon via
-    /// an already-opened SSH tunnel.
+    /// Opens a backend that routes through an already-open SSH tunnel.
+    ///
+    /// Takes ownership of the tunnel so the ssh child stays alive for
+    /// as long as the backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when bollard cannot connect to the
+    /// tunneled HTTP endpoint (typically a closed tunnel or a port
+    /// that the tunnel did not actually bind).
     pub fn from_tunnel(tunnel: SshTunnel) -> Result<Self> {
         let host = tunnel.docker_host();
         let docker = Docker::connect_with_http(&host, 4, API_DEFAULT_VERSION)?;
@@ -49,10 +61,20 @@ impl DockerBackend {
         })
     }
 
-    /// Open a backend from a docker endpoint URI:
-    ///   - `ssh://user@host` opens a tunnel and routes through it
-    ///   - `unix:///var/run/docker.sock` or `local` uses the local socket
-    ///   - anything else returns [`Error::InvalidEndpoint`]
+    /// Opens a backend from a docker endpoint URI.
+    ///
+    /// Supported schemes:
+    ///
+    /// - `ssh://user@host`: opens an [`SshTunnel`] and routes through it.
+    /// - `unix:///var/run/docker.sock` or the literal string `local`:
+    ///   uses the local socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidEndpoint`] for any other URI. Returns
+    /// [`Error::SshTunnel`] when the ssh child fails to start or the
+    /// forwarded port never becomes ready. Returns [`Error::Docker`]
+    /// when bollard cannot connect to the chosen transport.
     pub async fn from_uri(uri: &str) -> Result<Self> {
         if let Some(ssh_target) = uri.strip_prefix("ssh://") {
             let tunnel = SshTunnel::open(ssh_target).await?;
@@ -66,12 +88,24 @@ impl DockerBackend {
         }
     }
 
-    /// Borrow the underlying bollard client.
+    /// Borrows the underlying bollard client.
+    ///
+    /// Use this to reach a daemon API the backend does not expose
+    /// directly (image management, network ops, exec sessions). Most
+    /// callers should prefer the higher-level methods on this struct.
     pub fn client(&self) -> &Docker {
         &self.docker
     }
 
-    /// Liveness probe. Returns "version (api_version)".
+    /// Liveness probe against the daemon.
+    ///
+    /// Calls `GET /version` and formats the result as
+    /// `"<version> (<api_version>)"`. Doubles as a connectivity check
+    /// for `isd doctor`-style flows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when the daemon round-trip fails.
     pub async fn ping(&self) -> Result<String> {
         let v = self.docker.version().await?;
         Ok(format!(
@@ -81,8 +115,16 @@ impl DockerBackend {
         ))
     }
 
-    /// List containers on the target daemon. `all = false` matches
-    /// `docker ps` (running only); `all = true` matches `docker ps -a`.
+    /// Lists containers on the target daemon.
+    ///
+    /// `all = false` matches `docker ps` (running only); `all = true`
+    /// matches `docker ps -a` (every container, including stopped).
+    /// The returned rows are the CLI-facing [`ContainerSummary`] DTO,
+    /// not the raw bollard struct.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] on daemon round-trip failure.
     pub async fn list_containers(&self, all: bool) -> Result<Vec<ContainerSummary>> {
         use bollard::container::ListContainersOptions;
         let opts = ListContainersOptions::<String> {
@@ -93,24 +135,43 @@ impl DockerBackend {
         Ok(raw.iter().map(map_summary).collect())
     }
 
-    /// Stop a container by ID or name. `timeout_secs` is the grace period
-    /// before docker sends SIGKILL; bollard's default when None is 10s.
+    /// Stops a container by ID or name.
+    ///
+    /// `timeout_secs` is the grace period docker waits before sending
+    /// `SIGKILL`. Bollard's default when `None` is 10 seconds; this
+    /// method makes the value explicit at the boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when the daemon round-trip fails
+    /// (container not found, already stopped, permission, etc.).
     pub async fn stop_container(&self, id: &str, timeout_secs: i64) -> Result<()> {
         let opts = bollard::container::StopContainerOptions { t: timeout_secs };
         self.docker.stop_container(id, Some(opts)).await?;
         Ok(())
     }
 
-    /// Start a stopped container.
+    /// Starts a stopped container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when the daemon round-trip fails
+    /// (container not found, already running, missing image, etc.).
     pub async fn start_container(&self, id: &str) -> Result<()> {
         self.docker.start_container::<String>(id, None).await?;
         Ok(())
     }
 
-    /// Restart a container. `timeout_secs` is the grace period before
-    /// SIGKILL. Note: bollard 0.18 types this as `isize` on the
-    /// restart options (vs `i64` on stop); we keep the public API
-    /// consistent (`i64`) and cast at the boundary.
+    /// Restarts a container.
+    ///
+    /// `timeout_secs` is the grace period before `SIGKILL`. Bollard
+    /// 0.18 types this as `isize` on the restart options (versus `i64`
+    /// on stop); this method keeps the public API consistent (`i64`)
+    /// and casts at the boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] on daemon round-trip failure.
     pub async fn restart_container(&self, id: &str, timeout_secs: i64) -> Result<()> {
         let opts = bollard::container::RestartContainerOptions {
             t: timeout_secs as isize,
@@ -119,16 +180,28 @@ impl DockerBackend {
         Ok(())
     }
 
-    /// Send a signal to a running container. `signal` defaults to
-    /// SIGKILL when None.
+    /// Sends a signal to a running container.
+    ///
+    /// `signal` is a docker signal name (e.g. `"SIGHUP"`, `"SIGTERM"`).
+    /// `None` defaults to `SIGKILL` (bollard's default).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when the daemon round-trip fails.
     pub async fn kill_container(&self, id: &str, signal: Option<&str>) -> Result<()> {
         let opts = signal.map(|s| bollard::container::KillContainerOptions { signal: s });
         self.docker.kill_container(id, opts).await?;
         Ok(())
     }
 
-    /// Remove a container. `force = true` is the `docker rm -f` form
-    /// (kills if running).
+    /// Removes a container.
+    ///
+    /// `force = true` is the `docker rm -f` form: kills the container
+    /// first if it is still running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] when the daemon round-trip fails.
     pub async fn remove_container(&self, id: &str, force: bool) -> Result<()> {
         let opts = bollard::container::RemoveContainerOptions {
             force,
@@ -138,55 +211,74 @@ impl DockerBackend {
         Ok(())
     }
 
-    /// Fetch a container's labels by ID or name. Used by the
-    /// protection guard (`isd rm/stop/restart/kill`) to detect
-    /// `io.isengard.role=controller|agent` on resolved targets without
-    /// listing every container on the host. Returns an empty map when
-    /// the daemon omits labels (a label-less container is, by
-    /// definition, not protected).
+    /// Fetches a container's labels by ID or name.
+    ///
+    /// Used by the protection guard (`isd rm`, `isd stop`,
+    /// `isd restart`, `isd kill`) to detect
+    /// `io.isengard.role=controller|agent` on a resolved target
+    /// without listing every container on the host. Returns an empty
+    /// map when the daemon omits labels; a label-less container is,
+    /// by definition, not protected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Docker`] on daemon round-trip failure.
     pub async fn inspect_labels(&self, id: &str) -> Result<HashMap<String, String>> {
         let info = self.docker.inspect_container(id, None).await?;
         Ok(info.config.and_then(|c| c.labels).unwrap_or_default())
     }
 }
 
-/// A container row as the `isd` CLI consumes it: bollard's
-/// `ContainerSummary` flattened to display-ready strings. Built by
+/// A container row as the `isd` CLI consumes it.
+///
+/// `ContainerSummary` flattens bollard's raw container struct into
+/// display-ready strings plus a few structured fields the interactive
+/// commands (route wizard, protection guard) need. Built by
 /// [`DockerBackend::list_containers`].
 #[derive(Debug, Clone, Default)]
 pub struct ContainerSummary {
-    /// Full container ID. The CLI truncates for display.
+    /// Full container ID. The CLI truncates this for display.
     pub id: String,
-    /// Image ref, e.g. `nginx:1.27`.
+    /// Image reference, e.g. `nginx:1.27`.
     pub image: String,
-    /// Docker's human status string, e.g. `Up 2 hours`,
+    /// Docker's human status string, e.g. `Up 2 hours` or
     /// `Exited (0) 12 minutes ago`. Empty when the daemon omits it.
     pub status: String,
-    /// Published + private ports, comma-joined, e.g.
+    /// Published and private ports, comma-joined, e.g.
     /// `0.0.0.0:8080->80/tcp, 5432/tcp`. Empty when none.
+    /// Rendered with default IP and proto noise stripped (private
+    /// helper `format_ports`).
     pub ports: String,
-    /// Distinct private (container-internal) ports the container has
-    /// declared. Used by the interactive route-create wizard to
-    /// pre-fill the upstream port when there's exactly one obvious
-    /// candidate. Order matches docker daemon's port enumeration.
+    /// Distinct private (container-internal) ports the container
+    /// declares.
+    ///
+    /// Used by the interactive `isd route create` wizard to pre-fill
+    /// the upstream port when there is exactly one obvious candidate.
+    /// Order matches the daemon's enumeration; duplicates from
+    /// IPv4 + IPv6 bindings are collapsed.
     pub private_ports: Vec<u16>,
-    /// First container name, leading `/` stripped.
+    /// First container name with the leading `/` stripped.
     pub names: String,
-    /// Container labels passed through from bollard. Used by the
-    /// operator-side protection guard to detect `io.isengard.role`
-    /// values. Empty when the daemon omits labels.
+    /// Container labels, forwarded verbatim from bollard.
+    ///
+    /// Used by the operator-side protection guard to detect
+    /// `io.isengard.role` values. Empty when the daemon omits labels.
     pub labels: HashMap<String, String>,
 }
 
-/// Format a bollard `Port` list the way `docker ps` renders the PORTS
-/// column: `ip:public->private/proto` for published ports,
-/// `private/proto` for unpublished. Comma-joined.
+/// Formats a bollard `Port` list the way `docker ps` renders the
+/// `PORTS` column.
+///
+/// `ip:public->private/proto` for published ports,
+/// `private/proto` for unpublished, comma-joined. Strips the boring
+/// defaults (see [`format_one_port`]).
+///
+/// Dedupes IPv4 and IPv6 bindings that collapse to the same display
+/// string after default-IP suppression. bollard returns
+/// `0.0.0.0` (v4) and `[::]` (v6) as separate `Port` entries; without
+/// dedupe every published port would render twice.
 fn format_ports(ports: &[bollard::models::Port]) -> String {
     use std::collections::HashSet;
-    // bollard returns IPv4 (`0.0.0.0`) and IPv6 (`[::]`) bindings as
-    // separate Port entries. After default-IP suppression both collapse
-    // to the same string; dedupe so the column does not double-render
-    // every published port.
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for p in ports {
@@ -198,10 +290,12 @@ fn format_ports(ports: &[bollard::models::Port]) -> String {
     out.join(", ")
 }
 
-/// Render one `Port` entry. Drops noise that's true for ~every row:
-/// `0.0.0.0:` / `[::]:` (default "all interfaces" IPs) and `/tcp`
-/// (default protocol). Non-default IPs and protos still render
-/// explicitly.
+/// Renders one `Port` entry.
+///
+/// Drops noise that is true for almost every row: `0.0.0.0:` and
+/// `[::]:` (the "all interfaces" IPs) and `/tcp` (the default proto).
+/// Non-default IPs and protocols still render explicitly so the
+/// operator sees them.
 fn format_one_port(p: &bollard::models::Port) -> String {
     let proto_raw = p
         .typ
@@ -222,7 +316,12 @@ fn format_one_port(p: &bollard::models::Port) -> String {
     }
 }
 
-/// Flatten a bollard `ContainerSummary` into the CLI-facing DTO.
+/// Flattens a bollard `ContainerSummary` into the CLI-facing DTO.
+///
+/// Strips the leading `/` from the first container name, hands the
+/// raw label map through, and runs the ports list through
+/// [`format_ports`] for display and [`distinct_private_ports`] for
+/// the route wizard.
 fn map_summary(c: &bollard::models::ContainerSummary) -> ContainerSummary {
     let names = c
         .names
@@ -246,10 +345,11 @@ fn map_summary(c: &bollard::models::ContainerSummary) -> ContainerSummary {
     }
 }
 
-/// Distinct container-internal ports, in daemon-reported order. Used
-/// by `isd route create`'s wizard to detect an unambiguous upstream
-/// port. bollard reports each `Port` once per binding (often v4 + v6),
-/// so dedupe on `private_port`.
+/// Distinct container-internal ports, in daemon-reported order.
+///
+/// Used by `isd route create`'s wizard to detect an unambiguous
+/// upstream port. bollard reports each `Port` once per binding (often
+/// v4 plus v6), so the function dedupes on `private_port`.
 fn distinct_private_ports(ports: &[bollard::models::Port]) -> Vec<u16> {
     use std::collections::HashSet;
     let mut seen = HashSet::new();
@@ -264,13 +364,18 @@ fn distinct_private_ports(ports: &[bollard::models::Port]) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    //! Unit coverage for the port-formatter and the
+    //! bollard-to-[`ContainerSummary`] mapper. The backend methods are
+    //! thin bollard wraps, so we exercise the wiring directly and
+    //! defer real-daemon coverage to the `#[ignore]` smoke test below.
+
     use super::*;
     use bollard::models::{Port, PortTypeEnum};
 
+    /// `0.0.0.0` IP and `tcp` proto are the boring defaults; the
+    /// formatter suppresses both to keep the PORTS column readable.
     #[test]
     fn format_ports_drops_default_ip_and_proto() {
-        // 0.0.0.0 IP and tcp proto are the boring defaults; format
-        // suppresses both to keep the PORTS column readable.
         let ports = vec![
             Port {
                 ip: Some("0.0.0.0".into()),
@@ -288,6 +393,7 @@ mod tests {
         assert_eq!(format_ports(&ports), "8080->80, 5432");
     }
 
+    /// Non-default IPs and protocols render explicitly.
     #[test]
     fn format_ports_keeps_non_default_ip_and_proto() {
         let ports = vec![
@@ -307,10 +413,10 @@ mod tests {
         assert_eq!(format_ports(&ports), "192.168.1.1:8080->80, 53/udp");
     }
 
+    /// bollard ships IPv4 and IPv6 bindings as separate entries. After
+    /// default-IP suppression both render the same string; dedupe.
     #[test]
     fn format_ports_dedupes_ipv4_and_ipv6_bindings() {
-        // bollard ships IPv4 + IPv6 bindings as separate entries. After
-        // default-IP suppression both render the same string; dedupe.
         let ports = vec![
             Port {
                 ip: Some("0.0.0.0".into()),
@@ -328,21 +434,18 @@ mod tests {
         assert_eq!(format_ports(&ports), "6767->6767");
     }
 
+    /// An empty port list renders as an empty string, not a stray
+    /// comma or whitespace.
     #[test]
     fn format_ports_empty_is_blank() {
         assert_eq!(format_ports(&[]), "");
     }
 
-    // Pure unit tests: every backend method is a thin bollard wrap, so
-    // we test the wiring (method exists, takes the right shape) and let
-    // the ignored smoke test below cover the real daemon round-trip.
-
+    /// Round-trips stop and start against the local daemon. Ignored
+    /// because it needs a real engine; run with `--ignored`.
     #[tokio::test]
     #[ignore]
     async fn stop_then_start_round_trips() {
-        // Smoke against the local docker daemon. Spins up a sleeping
-        // container, stops it, starts it, removes it. Ignored because
-        // it needs a real daemon; run with --ignored.
         let backend = DockerBackend::from_local().expect("local backend");
         let body = bollard::container::Config {
             image: Some("alpine:latest".to_string()),
@@ -364,6 +467,8 @@ mod tests {
         backend.remove_container(&id, true).await.expect("rm -f");
     }
 
+    /// `map_summary` takes the first name, strips the leading `/`,
+    /// and forwards id/image/status verbatim.
     #[test]
     fn map_summary_strips_leading_slash_and_takes_first_name() {
         let raw = bollard::models::ContainerSummary {

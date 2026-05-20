@@ -1,15 +1,4 @@
-//! SSH tunnel lifecycle. Spawns `ssh -L <local-port>:<remote-socket>
-//! <target>` so a local TCP port forwards to the remote dockerd's Unix
-//! socket. The struct owns the child process; Drop kills it.
-//!
-//! Requires OpenSSH 7+ on PATH (modern dev machines). Forward syntax
-//! `-L <port>:/var/run/docker.sock` routes local TCP to a remote UNIX
-//! socket; supported since OpenSSH 6.7 (released 2014).
-//!
-//! Uses ssh ControlMaster multiplexing so back-to-back invocations
-//! (e.g. `isd ps; isd ps`) reuse one ssh connection instead of paying
-//! the handshake cost every call. First call: ~1-2s (handshake).
-//! Subsequent calls within ControlPersist window: ~100ms.
+#![doc = include_str!("../docs/ssh-tunnel.md")]
 
 use std::net::{SocketAddr, TcpListener};
 use std::process::Stdio;
@@ -21,49 +10,83 @@ use tokio::time::sleep;
 
 use crate::{Error, Result};
 
+/// Remote path the tunnel forwards to. Docker's well-known Unix socket
+/// on every platform that ships dockerd.
 const REMOTE_DOCKER_SOCK: &str = "/var/run/docker.sock";
 
-/// Upper bound on how long we poll the local port for tunnel readiness
-/// before giving up. The poll exits the moment a TCP connect succeeds,
-/// so on a fast LAN we return in tens of ms; this cap only matters for
-/// slow links or a misconfigured target.
+/// Upper bound on how long the readiness probe polls the local port
+/// before giving up.
+///
+/// The poll exits the moment a TCP connect succeeds, so on a fast LAN
+/// the function returns in tens of milliseconds; this cap only matters
+/// for slow links or a misconfigured target.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Interval between TCP-connect probes while waiting for the forwarded
+/// port to come up.
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// How long ssh keeps an idle multiplex master alive after the last
-/// client exits. Long enough that an operator running `isd ps` then
-/// `isd stop 0` reuses the connection; short enough that a forgotten
-/// session does not linger forever.
+/// client exits.
+///
+/// Long enough that an operator running `isd ps` then `isd stop 0`
+/// reuses the connection. Short enough that a forgotten session does
+/// not linger forever.
 const CONTROL_PERSIST: &str = "10m";
 
+/// SSH tunnel that forwards a local TCP port to a remote docker socket.
+///
+/// See the module docs for the trust model and multiplexing behaviour.
+/// Construct via [`SshTunnel::open`]; the returned value owns the ssh
+/// child and kills it on `Drop`.
 #[derive(Debug)]
 pub struct SshTunnel {
-    /// Owned child; Drop sends start_kill so the ssh process exits
-    /// when the tunnel value is dropped.
+    /// Owned ssh child. `Drop` calls `start_kill` so the process
+    /// exits when the tunnel value is dropped. `Option` so `Drop` can
+    /// take ownership without `unsafe`.
     child: Option<Child>,
+    /// Local TCP port bound by `ssh -L`. The bollard client targets
+    /// `tcp://127.0.0.1:<this>`.
     local_port: u16,
 }
 
 impl SshTunnel {
-    /// Acquire a free local TCP port by binding to 127.0.0.1:0,
-    /// reading back the assigned port, then dropping the listener.
-    /// The port may be reused between drop and `ssh -L` binding; that
-    /// race is acceptable for a dev-CLI tunnel (ssh fails loudly with
-    /// "Address already in use" and the caller retries).
+    /// Acquires a free local TCP port from the kernel.
+    ///
+    /// Binds to `127.0.0.1:0`, reads back the assigned port, then drops
+    /// the listener. The port may be reused between drop and the
+    /// subsequent `ssh -L` binding; that race is acceptable for a
+    /// dev-CLI tunnel because ssh fails loudly with
+    /// `Address already in use` and the caller retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] when the kernel cannot hand out a port
+    /// (e.g. ulimit on open sockets exhausted).
     pub fn acquire_local_port() -> Result<u16> {
         let addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         let listener = TcpListener::bind(addr)?;
         Ok(listener.local_addr()?.port())
     }
 
-    /// Open an ssh tunnel to `ssh_target`, forwarding a fresh local
-    /// TCP port to the remote docker socket. Returned struct owns the
-    /// ssh child; Drop kills it. `ssh_target` accepts any form OpenSSH
-    /// accepts: `user@host`, an entry from `~/.ssh/config`, `host:port`.
+    /// Opens an ssh tunnel to `ssh_target` and waits for the forwarded
+    /// port to become ready.
     ///
-    /// Uses ControlMaster multiplexing per `ssh_target`: subsequent
-    /// `open()` calls for the same target within the ControlPersist
-    /// window reuse one ssh connection.
+    /// `ssh_target` accepts any form OpenSSH accepts: `user@host`, an
+    /// entry from `~/.ssh/config`, `host:port`. The function spawns
+    /// `ssh -N -T -L <local>:/var/run/docker.sock <target>` with
+    /// `ControlMaster=auto`. The returned tunnel owns the ssh child.
+    ///
+    /// Subsequent calls for the same `ssh_target` within the
+    /// `ControlPersist` window reuse the existing master socket and
+    /// return as soon as the new forward becomes ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SshTunnel`] when the ssh child fails to spawn
+    /// or when the forwarded port does not become ready inside the
+    /// readiness timeout (5 seconds). Returns [`Error::Io`] when port
+    /// acquisition fails.
     pub async fn open(ssh_target: &str) -> Result<Self> {
         let local_port = Self::acquire_local_port()?;
         let forward = format!("{local_port}:{REMOTE_DOCKER_SOCK}");
@@ -84,8 +107,8 @@ impl SshTunnel {
             .arg("-L")
             .arg(&forward)
             .arg(ssh_target)
-            // Silence the remote MOTD / login banner / PAM session
-            // messages: ssh's stdout inherits ours by default, so any
+            // Silence the remote MOTD, login banner, PAM session
+            // messages. ssh's stdout inherits ours by default, so any
             // bytes it writes land in `isd ps`'s table output.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -102,11 +125,15 @@ impl SshTunnel {
         })
     }
 
+    /// Returns the kernel-assigned local port the tunnel is bound to.
     pub fn local_port(&self) -> u16 {
         self.local_port
     }
 
-    /// URL bollard accepts for connecting to the tunneled remote.
+    /// Returns the URL bollard accepts for the tunneled remote daemon.
+    ///
+    /// Format: `tcp://127.0.0.1:<local_port>`. Hand this to
+    /// `bollard::Docker::connect_with_http`.
     pub fn docker_host(&self) -> String {
         format!("tcp://127.0.0.1:{}", self.local_port)
     }
@@ -115,19 +142,26 @@ impl SshTunnel {
 impl Drop for SshTunnel {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            // start_kill is fire-and-forget; the tokio runtime may
-            // still be alive at Drop time so we cannot await the
+            // `start_kill` is fire-and-forget. The tokio runtime may
+            // still be alive at `Drop` time so we cannot await the
             // child here. The kernel reaps the process. The master
-            // ssh connection survives via ControlPersist so the next
-            // open() call against the same target can reuse it.
+            // ssh connection survives via `ControlPersist` so the next
+            // `open()` against the same target can reuse it.
             let _ = child.start_kill();
         }
     }
 }
 
-/// Poll the local port until a TCP connect succeeds or the timeout
-/// elapses. Returns immediately on the first success (typically tens
-/// of ms once the multiplexed master is warm).
+/// Polls the local port until a TCP connect succeeds or the timeout
+/// elapses.
+///
+/// Returns the moment the first connect succeeds (typically tens of
+/// milliseconds once the multiplexed master is warm).
+///
+/// # Errors
+///
+/// Returns [`Error::SshTunnel`] when the port has not become reachable
+/// after [`READINESS_TIMEOUT`].
 async fn wait_for_port_ready(port: u16) -> Result<()> {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("static");
     let start = Instant::now();
@@ -145,18 +179,19 @@ async fn wait_for_port_ready(port: u16) -> Result<()> {
     }
 }
 
-/// Per-target ControlPath under the user's temp dir. The path's
-/// uniqueness comes from a stable hash of the target string so a
-/// second `isd` invocation against the same target finds the existing
-/// master socket. We avoid `%r@%h:%p` ssh tokens because the operator
-/// may pass any of `user@host`, a bare alias from ~/.ssh/config, or
-/// `host:port`; the tokens expand inconsistently across those forms.
+/// Builds the per-target ControlPath under the user's temp dir.
 ///
-/// Exposed pub(crate)-style via the [`control_path_for`] helper module
-/// re-export so `isd::ssh_tunnel::Tunnel::open_local_forward`
-/// reuses the exact same hash so the controller-REST LocalForward
-/// piggybacks on the docker-socket forward's ControlMaster instead of
-/// opening a second TCP handshake to the same host.
+/// The path's uniqueness comes from a stable hash of the target string
+/// so a second `isd` invocation against the same target finds the
+/// existing master socket. The function avoids ssh's `%r@%h:%p` tokens
+/// because the operator may pass any of `user@host`, a bare alias
+/// from `~/.ssh/config`, or `host:port`; those tokens expand
+/// inconsistently across those forms.
+///
+/// The `isd` controller-REST tunnel reuses this exact hash so the
+/// REST `LocalForward` piggybacks on the docker-socket forward's
+/// `ControlMaster` instead of opening a second TCP handshake to the
+/// same host.
 pub fn control_path_for(ssh_target: &str) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut h = DefaultHasher::new();
