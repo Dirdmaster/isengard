@@ -21,13 +21,28 @@ use crate::dto::LiveEventDto;
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)] // Pong/Error reserved for future client-message handling (5b Task 7+)
+/// WsFrame.
 pub enum WsFrame {
-    Welcome { event_count_today: usize },
-    Event { event: LiveEventDto },
+    /// Sent once on connect.
+    Welcome {
+        /// Number of events recorded so far today.
+        event_count_today: usize,
+    },
+    /// Live event frame broadcast from the bus.
+    Event {
+        /// Decoded event payload.
+        event: LiveEventDto,
+    },
+    /// Pong frame reserved for future client-driven ping/pong.
     Pong,
-    Error { message: String },
+    /// Server-emitted error frame.
+    Error {
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
+/// WebSocket handler for handler.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(handles): State<Arc<ControllerHandles>>,
@@ -35,6 +50,7 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, handles))
 }
 
+/// Handler for socket.
 async fn handle_socket(mut socket: WebSocket, handles: Arc<ControllerHandles>) {
     // Send welcome frame.
     let count_today = handles
@@ -105,6 +121,7 @@ async fn handle_socket(mut socket: WebSocket, handles: Arc<ControllerHandles>) {
     }
 }
 
+/// `send_frame`.
 async fn send_frame(socket: &mut WebSocket, frame: &WsFrame) -> anyhow::Result<()> {
     let json = serde_json::to_string(frame)?;
     socket.send(Message::Text(json.into())).await?;
@@ -127,6 +144,7 @@ pub async fn handle_service_logs(
     ws.on_upgrade(move |socket| handle_service_logs_socket(socket, handles, stack_id, service_name))
 }
 
+/// Handler for service logs socket.
 async fn handle_service_logs_socket(
     mut socket: WebSocket,
     handles: Arc<ControllerHandles>,
@@ -293,11 +311,13 @@ async fn handle_service_logs_socket(
     handles.log_fanout.unregister(&subscription_id).await;
 }
 
+/// `short_host`.
 fn short_host(h: HostId) -> String {
     let s = ulid::Ulid::from(h).to_string();
     s[..8.min(s.len())].to_string()
 }
 
+/// `chunk_host_short`.
 fn chunk_host_short(chunk: &isengard_proto::pb::LogChunk, accepted: &[HostId]) -> String {
     // We don't carry host id back from the agent today (the agent's
     // subscription is keyed by id; the controller knows which host the
@@ -317,6 +337,7 @@ fn chunk_host_short(chunk: &isengard_proto::pb::LogChunk, accepted: &[HostId]) -
     }
 }
 
+/// `chunk_to_frame`.
 fn chunk_to_frame(chunk: &isengard_proto::pb::LogChunk, host_short: &str) -> serde_json::Value {
     match log_chunk::Kind::try_from(chunk.kind).unwrap_or(log_chunk::Kind::Unspecified) {
         log_chunk::Kind::Backfill => json!({
@@ -356,6 +377,7 @@ fn chunk_to_frame(chunk: &isengard_proto::pb::LogChunk, host_short: &str) -> ser
     }
 }
 
+/// `send_err_text`.
 async fn send_err_text(socket: &mut WebSocket, message: &str) -> Result<(), axum::Error> {
     let frame = json!({"type": "unavailable", "reason": message});
     socket.send(Message::Text(frame.to_string().into())).await

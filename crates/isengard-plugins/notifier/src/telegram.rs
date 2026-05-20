@@ -1,15 +1,21 @@
-//! Telegram bot channel. Outbound-only in v1: POST to /sendMessage.
+//! Telegram bot channel.
 //!
-//! Setup: user creates a bot via @BotFather, gets a token, adds the bot to
-//! a chat (1:1 or group), sends `/start` once, reads the chat_id from
-//! `https://api.telegram.org/bot<TOKEN>/getUpdates`. Configures via:
+//! v1 fan-out is one-way: POST to `/sendMessage`. The interactive
+//! path adds inline-keyboard sends and message edits for the
+//! approval flow.
+//!
+//! # Setup
+//!
+//! Operator creates a bot via `@BotFather`, gets a token, adds the bot
+//! to a chat, sends `/start`, reads the chat id from
+//! `https://api.telegram.org/bot<TOKEN>/getUpdates`, then configures:
 //!
 //! ```json
 //! { "telegram": { "chat_ids": ["123456"], "kinds": ["update.success", "update.failed"] } }
 //! ```
 //!
-//! Bot token is sourced from env `ISENGARD_TELEGRAM_BOT_TOKEN` (preferred)
-//! or config field `bot_token` (fallback).
+//! The bot token comes from the env var `ISENGARD_TELEGRAM_BOT_TOKEN`
+//! (preferred) or the config field `bot_token` (fallback). Env wins.
 
 use async_trait::async_trait;
 use isengard_core::Event;
@@ -19,96 +25,141 @@ use tracing::warn;
 
 use crate::channel::{InlineButton, NotifyChannel, format_event};
 
+/// Public Telegram Bot API base URL.
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 
+/// Parsed `[notifier.telegram]` config block.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TelegramConfig {
-    /// Bot token. Optional in config — env `ISENGARD_TELEGRAM_BOT_TOKEN` takes precedence.
+    /// Bot token. Optional: env `ISENGARD_TELEGRAM_BOT_TOKEN` wins.
     #[serde(default)]
     pub bot_token: Option<String>,
-    /// One or more chat IDs to post to.
+    /// One or more chat ids to post to. Required.
     #[serde(default)]
     pub chat_ids: Vec<String>,
-    /// Event kinds (exact string match) this channel cares about.
+    /// Exact-match event kinds this channel wants.
     #[serde(default)]
     pub kinds: Vec<String>,
-    /// Override base URL (used by tests; defaults to https://api.telegram.org).
+    /// Override base URL. Used by tests to point at `wiremock`.
     #[serde(default)]
     pub api_base: Option<String>,
+    /// Rate limit refill rate in tokens per minute.
     #[serde(default)]
     pub tokens_per_minute: Option<f64>,
 }
 
+/// Live Telegram channel.
+///
+/// Holds the resolved bot token, the configured chat ids, and a
+/// reqwest client tagged with the notifier user agent. Cheap to
+/// clone via `Arc`.
 pub struct TelegramChannel {
+    /// Resolved bot token.
     bot_token: String,
+    /// Destination chat ids.
     chat_ids: Vec<String>,
+    /// Event kinds this channel matches.
     kinds: Vec<String>,
+    /// Resolved API base URL.
     api_base: String,
+    /// HTTP client used for every Telegram call.
     http: Client,
 }
 
+/// Body for the fan-out `sendMessage` POST.
 #[derive(Debug, Serialize)]
 struct SendMessageBody<'a> {
+    /// Destination chat id.
     chat_id: &'a str,
+    /// Plain text message body.
     text: &'a str,
 }
 
-/// Result of a successful interactive send. Carries the Telegram-assigned
-/// `message_id` so callers can later edit the message (after a decision) or
-/// stash it alongside the originating record (e.g. a pending_approval row).
+/// Result of a successful interactive send.
+///
+/// Carries the Telegram-assigned `message_id` so callers can edit the
+/// message (after a decision) or persist it next to the originating
+/// row (e.g. a pending-approval action).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramSentMessage {
+    /// Destination chat id, echoed from the request.
     pub chat_id: String,
+    /// Telegram-assigned message id.
     pub message_id: i64,
 }
 
-/// Telegram inline keyboard wire format.
-/// `inline_keyboard` is a 2-D array of buttons (rows of buttons).
+/// Telegram inline-keyboard wire format.
+///
+/// `inline_keyboard` is a 2-D array: rows of buttons.
 #[derive(Debug, Serialize)]
 struct InlineKeyboardMarkup<'a> {
+    /// Rows of buttons.
     inline_keyboard: Vec<Vec<TgInlineButton<'a>>>,
 }
 
+/// One button on a Telegram inline keyboard.
 #[derive(Debug, Serialize)]
 struct TgInlineButton<'a> {
+    /// User-visible button label.
     text: &'a str,
+    /// Opaque payload echoed back in the callback query.
     callback_data: &'a str,
 }
 
+/// Body for the interactive `sendMessage` POST.
 #[derive(Debug, Serialize)]
 struct SendInteractiveBody<'a> {
+    /// Destination chat id.
     chat_id: &'a str,
+    /// Message body. HTML-escaped at the call site.
     text: &'a str,
+    /// Telegram parse mode. Always `HTML` in this crate.
     parse_mode: &'static str,
+    /// Inline keyboard attached to the message.
     reply_markup: InlineKeyboardMarkup<'a>,
 }
 
+/// Body for `editMessageText`.
 #[derive(Debug, Serialize)]
 struct EditMessageBody<'a> {
+    /// Chat the message lives in.
     chat_id: &'a str,
+    /// Message id to edit.
     message_id: i64,
+    /// New body text.
     text: &'a str,
+    /// Telegram parse mode. Always `HTML`.
     parse_mode: &'static str,
+    /// Optional new keyboard. `None` clears the keyboard.
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_markup: Option<InlineKeyboardMarkup<'a>>,
 }
 
-/// Shape of Telegram's `sendMessage` success body. We only care about
-/// `result.message_id`; Telegram returns more (chat, date, etc.).
+/// Shape of Telegram's `sendMessage` success body.
+///
+/// Telegram returns more than this (chat, date, etc.); the channel
+/// only cares about `result.message_id`.
 #[derive(Debug, Deserialize)]
 struct TelegramSendResponse {
+    /// Telegram's `ok` flag.
     #[serde(default)]
     ok: bool,
+    /// Human-readable error description when `ok` is false.
     #[serde(default)]
     description: Option<String>,
+    /// Decoded result payload when `ok` is true.
     result: Option<TelegramMessageResult>,
 }
 
+/// Trimmed view of the `result` object in a `sendMessage` response.
 #[derive(Debug, Deserialize)]
 struct TelegramMessageResult {
+    /// Telegram-assigned message id.
     message_id: i64,
 }
 
+/// Converts the channel-agnostic [`InlineButton`] grid into Telegram's
+/// wire shape.
 fn to_keyboard<'a>(buttons: &'a [Vec<InlineButton>]) -> InlineKeyboardMarkup<'a> {
     InlineKeyboardMarkup {
         inline_keyboard: buttons
@@ -126,8 +177,14 @@ fn to_keyboard<'a>(buttons: &'a [Vec<InlineButton>]) -> InlineKeyboardMarkup<'a>
 }
 
 impl TelegramChannel {
-    /// Build a channel from config. Env var beats config. Returns Err if no
-    /// token resolvable OR chat_ids is empty.
+    /// Builds a channel from config plus env.
+    ///
+    /// Env `ISENGARD_TELEGRAM_BOT_TOKEN` wins over the config field.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no token is resolvable, when `chat_ids`
+    /// is empty, or when the HTTP client builder fails.
     pub fn from_config(cfg: TelegramConfig) -> anyhow::Result<Self> {
         let bot_token = std::env::var("ISENGARD_TELEGRAM_BOT_TOKEN")
             .ok()
@@ -154,18 +211,26 @@ impl TelegramChannel {
         })
     }
 
-    /// Configured chat ids. Used by the interactive subscriber to pick a
-    /// destination for `update.pending_approval` events.
+    /// Configured chat ids.
+    ///
+    /// Used by the interactive subscriber to pick a destination for
+    /// `update.pending_approval` events.
     pub fn chat_ids(&self) -> &[String] {
         &self.chat_ids
     }
 
-    /// Send a message with an inline keyboard. Returns the Telegram-assigned
-    /// `message_id` so callers can later edit the message after a decision.
+    /// Sends a message with an inline keyboard and returns the
+    /// resulting `message_id`.
     ///
     /// `buttons` is a 2-D array (rows of buttons). Telegram caps each
-    /// `callback_data` at 64 bytes; this method does not enforce that, so
-    /// keep payloads short at the call site.
+    /// `callback_data` at 64 bytes; this method does not enforce that,
+    /// so keep payloads short at the call site.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transport fails, when Telegram
+    /// returns a non-2xx status, when `ok` is false in the response,
+    /// or when the `result.message_id` field is missing.
     pub async fn send_inline_keyboard(
         &self,
         chat_id: &str,
@@ -213,9 +278,16 @@ impl TelegramChannel {
         })
     }
 
-    /// Edit the text (and optionally the keyboard) of a previously-sent
-    /// interactive message. Pass `reply_markup = None` to drop the keyboard
-    /// (used after an approval is decided so the buttons disappear).
+    /// Edits a previously-sent message in place.
+    ///
+    /// Pass `reply_markup = None` to drop the keyboard. The dashboard
+    /// callback handler uses this after recording a decision so the
+    /// buttons disappear.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transport fails or when Telegram
+    /// returns a non-2xx status.
     pub async fn edit_message_text(
         &self,
         chat_id: &str,
@@ -250,13 +322,20 @@ impl TelegramChannel {
     }
 }
 
-/// Stateless helper: edit a previously-sent Telegram message text and drop
-/// the inline keyboard. Used by the dashboard's Telegram callback handler,
-/// which has only the bot token + chat_id + message_id (no full
-/// `TelegramChannel` instance).
+/// Stateless helper that edits a Telegram message and drops the
+/// inline keyboard.
 ///
-/// `api_base` defaults to `https://api.telegram.org` when `None`. Tests
-/// override it to point at a `wiremock::MockServer`.
+/// Used by the dashboard's Telegram callback handler, which has only
+/// `(bot_token, chat_id, message_id)` and no full
+/// [`TelegramChannel`] instance.
+///
+/// `api_base` defaults to [`DEFAULT_API_BASE`] when `None`. Tests
+/// override it to a `wiremock::MockServer`.
+///
+/// # Errors
+///
+/// Returns an error when the HTTP client builder fails, when the
+/// transport fails, or when Telegram returns a non-2xx status.
 pub async fn edit_telegram_message_text(
     api_base: Option<&str>,
     bot_token: &str,
@@ -400,10 +479,9 @@ mod tests {
 
     #[test]
     fn from_config_errors_without_token() {
-        // Save & clear env to ensure isolation.
         let prev = std::env::var("ISENGARD_TELEGRAM_BOT_TOKEN").ok();
-        // SAFETY: tests run with `--test-threads=1` is not guaranteed; race is possible.
-        // Document this. v1.x: figure(env) crate.
+        // SAFETY: tests are not guaranteed single-threaded; the env
+        // var is restored on the way out. Race-prone.
         unsafe {
             std::env::remove_var("ISENGARD_TELEGRAM_BOT_TOKEN");
         }

@@ -1,6 +1,9 @@
-//! Generic HTTP POST channel. Send events as JSON to any URL with optional
-//! custom headers. Default body shape: `{"text": "<formatted event>"}`.
-//! Custom `body_template` supports `{{text}}` and `{{kind}}` placeholders.
+//! Generic HTTP POST channel.
+//!
+//! Sends formatted events as JSON to any URL with optional custom
+//! headers. Default body shape is `{"text": "<formatted event>"}`.
+//! When `body_template` is set, `{{text}}` and `{{kind}}` substitute
+//! into the operator-provided template (JSON-escaped).
 
 use std::collections::HashMap;
 
@@ -13,30 +16,54 @@ use tracing::warn;
 
 use crate::channel::{NotifyChannel, format_event};
 
+/// Parsed `[notifier.http]` config block.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct HttpConfig {
+    /// Endpoint URL. Required.
     pub url: String,
+    /// Optional extra headers added to every POST.
     #[serde(default)]
     pub headers: HashMap<String, String>,
-    /// Body template with `{{text}}` and `{{kind}}` placeholders.
-    /// Default: `{"text": "<text>"}` JSON.
+    /// Optional body template.
+    ///
+    /// Supports `{{text}}` and `{{kind}}` placeholders that get
+    /// JSON-string-escaped before substitution. Default body is
+    /// `{"text": "<formatted event>"}`.
     #[serde(default)]
     pub body_template: Option<String>,
+    /// Exact-match event kinds this channel wants.
     #[serde(default)]
     pub kinds: Vec<String>,
+    /// Rate limit refill rate in tokens per minute.
     #[serde(default)]
     pub tokens_per_minute: Option<f64>,
 }
 
+/// Live HTTP channel.
 pub struct HttpChannel {
+    /// Endpoint URL.
     url: String,
+    /// Pre-built header map applied to every send.
     headers: HeaderMap,
+    /// Operator-supplied body template, if any.
     body_template: Option<String>,
+    /// Event kinds this channel matches.
     kinds: Vec<String>,
+    /// HTTP client tagged with the notifier user agent.
     http: Client,
 }
 
 impl HttpChannel {
+    /// Builds an HTTP channel from config.
+    ///
+    /// Validates header names and values up front so per-event sends
+    /// never fail on malformed config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `url` is empty, when any header name or
+    /// value rejects (`HeaderName::from_bytes` / `HeaderValue::from_str`
+    /// failure), or when the HTTP client builder fails.
     pub fn from_config(cfg: HttpConfig) -> anyhow::Result<Self> {
         if cfg.url.is_empty() {
             return Err(anyhow::anyhow!("http channel: url required"));
@@ -61,6 +88,11 @@ impl HttpChannel {
         })
     }
 
+    /// Renders the outgoing body for `event`.
+    ///
+    /// With no template, returns the default `{"text": "..."}` JSON.
+    /// With a template, substitutes `{{text}}` and `{{kind}}` with
+    /// JSON-escaped versions of the formatted event and kind.
     fn build_body(&self, event: &Event) -> String {
         let text = format_event(event);
         match &self.body_template {
@@ -73,7 +105,10 @@ impl HttpChannel {
     }
 }
 
-/// Minimal JSON string-content escaping (quote, backslash, newline).
+/// JSON string-content escape for `"`, `\`, `\n`, `\r`, `\t`.
+///
+/// Used by the template substitution path so operator templates that
+/// drop `{{text}}` inside a JSON string literal stay valid JSON.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -105,7 +140,6 @@ impl NotifyChannel for HttpChannel {
         for (k, v) in self.headers.iter() {
             req = req.header(k, v);
         }
-        // Default Content-Type to application/json if user didn't override
         if !self.headers.contains_key(reqwest::header::CONTENT_TYPE) {
             req = req.header(reqwest::header::CONTENT_TYPE, "application/json");
         }

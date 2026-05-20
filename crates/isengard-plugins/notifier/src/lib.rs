@@ -1,8 +1,6 @@
-//! Isengard `notifier` plugin (controller-side).
-//!
-//! Subscribes to the controller's EventBus, filters events by kind, and
-//! dispatches matches to configured channels (v1: Telegram only).
-
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
@@ -30,46 +28,79 @@ use crate::telegram::{TelegramChannel, TelegramConfig};
 
 /// Event kind the interactive subscriber listens for.
 ///
-/// TODO(phase 9b T2): replace with `isengard_core::event::kinds::UPDATE_PENDING_APPROVAL`
-/// once T2 lands the constant. Defined locally for now so T6 can land in
-/// parallel without blocking on the event-kinds add.
+/// Defined locally so this module can land independently of the
+/// `isengard_core::event::kinds` constant. Migrate when the upstream
+/// constant exists.
 const UPDATE_PENDING_APPROVAL_KIND: &str = "update.pending_approval";
 
+/// Env var carrying the shared secret Telegram returns in callback
+/// query update bodies. Without it, button clicks have no way to
+/// authenticate against the dashboard.
 const TELEGRAM_WEBHOOK_SECRET_ENV: &str = "ISENGARD_TELEGRAM_WEBHOOK_SECRET";
+
+/// Env var carrying the Discord bot account token used by the
+/// interactive client.
 const DISCORD_BOT_TOKEN_ENV: &str = "ISENGARD_DISCORD_BOT_TOKEN";
+
+/// Env var carrying the Discord application public key used to verify
+/// inbound interaction signatures.
 const DISCORD_PUBLIC_KEY_ENV: &str = "ISENGARD_DISCORD_PUBLIC_KEY";
 
+/// Stable plugin name surfaced to the controller and host registry.
 const PLUGIN_NAME: &str = "notifier";
 
+/// Parsed `[notifier]` config block.
+///
+/// Each channel sub-block is optional. Absent blocks leave the
+/// corresponding channel unconfigured.
 #[derive(Debug, Clone, Deserialize, Default)]
 struct NotifierConfig {
+    /// Optional Telegram channel config.
     #[serde(default)]
     telegram: Option<TelegramConfig>,
+    /// Optional Discord channel config.
     #[serde(default)]
     discord: Option<DiscordConfig>,
+    /// Optional generic HTTP channel config.
     #[serde(default)]
     http: Option<HttpConfig>,
 }
 
+/// Controller-side notifier plugin instance.
+///
+/// Holds the constructed channels, the spawned dispatch task handle,
+/// and direct handles to the interactive Telegram and Discord clients
+/// (when configured) so the `update.pending_approval` path can call
+/// their typed methods.
 pub struct Notifier {
+    /// Configured channels, each wrapped in [`RateLimited`].
     channels: Vec<Box<dyn NotifyChannel>>,
-    /// Union of all kinds across channels (for the EventSubscriber trait).
-    /// Stored as String here, leaked to &'static str in event_kinds() see note.
+    /// Union of every kind any channel cares about.
+    ///
+    /// The dispatch task always subscribes to every event on the bus
+    /// and per-channel `matches_kind` does the actual filtering; this
+    /// field is kept for diagnostic surfaces.
     kinds: Vec<String>,
-    /// Direct handle to the Telegram channel (if configured) for the
-    /// interactive `update.pending_approval` subscriber, which calls typed
-    /// methods (`send_inline_keyboard`, `edit_message_text`) that the generic
+    /// Direct handle to the Telegram channel (when configured).
+    ///
+    /// The interactive path calls
+    /// [`TelegramChannel::send_inline_keyboard`] and
+    /// [`TelegramChannel::edit_message_text`] which the generic
     /// `NotifyChannel` trait does not expose.
     telegram: Option<Arc<TelegramChannel>>,
-    /// Direct handle to the Discord interactive client (if both the Discord
-    /// channel is configured and `ISENGARD_DISCORD_BOT_TOKEN` is set). Used by
-    /// the same `update.pending_approval` subscriber to fan the approval out
-    /// to Discord alongside Telegram.
+    /// Direct handle to the Discord interactive client.
+    ///
+    /// Present when a Discord channel is configured AND
+    /// `ISENGARD_DISCORD_BOT_TOKEN` is set. The dispatch task fans the
+    /// approval event to this client alongside Telegram.
     discord_interactive: Option<Arc<DiscordInteractive>>,
+    /// Join handle for the dispatch task spawned from [`Plugin::start`].
     task: Option<JoinHandle<()>>,
 }
 
 impl Notifier {
+    /// Builds an empty notifier. Channels are wired up in
+    /// [`Plugin::init`].
     pub fn new() -> Self {
         Self {
             channels: Vec::new(),
@@ -87,6 +118,8 @@ impl Default for Notifier {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::InitFailed`] for the
+/// notifier plugin.
 fn init_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::InitFailed {
         name: PLUGIN_NAME.into(),
@@ -94,6 +127,8 @@ fn init_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::StartFailed`] for the
+/// notifier plugin.
 fn start_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::StartFailed {
         name: PLUGIN_NAME.into(),
@@ -111,6 +146,19 @@ impl Plugin for Notifier {
         env!("CARGO_PKG_VERSION")
     }
 
+    /// Decodes config and constructs each configured channel.
+    ///
+    /// Telegram and Discord paths warn explicitly when only part of
+    /// the interactive setup is wired: a missing webhook secret leaves
+    /// Telegram one-way, a missing bot token leaves Discord one-way,
+    /// a missing public key leaves Discord callbacks unauthenticated.
+    /// Operators see the warnings in `isd ps` logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InitFailed`] when the config JSON is
+    /// malformed or when any channel fails to construct (bad header
+    /// name, missing required field, etc.).
     async fn init(&mut self, ctx: &PluginContext) -> Result<()> {
         let cfg: NotifierConfig = serde_json::from_value(ctx.config.clone())
             .map_err(|e| init_err(format!("parsing notifier config: {e}")))?;
@@ -135,8 +183,6 @@ impl Plugin for Notifier {
 
         if let Some(dc_cfg) = cfg.discord {
             let tpm = dc_cfg.tokens_per_minute.unwrap_or(10.0);
-            // Snapshot fields needed for the interactive client BEFORE the
-            // outbound webhook channel takes ownership of the config struct.
             let interactive_channel_id = dc_cfg
                 .channel_id
                 .as_ref()
@@ -146,10 +192,6 @@ impl Plugin for Notifier {
                 .map_err(|e| init_err(format!("discord channel: {e}")))?;
             self.channels.push(Box::new(RateLimited::new(dc, tpm)));
 
-            // Interactive path: only opt in if a channel_id is configured AND
-            // a bot token is in env. Surface explicit warnings for partial
-            // configurations so operators aren't surprised when Discord stays
-            // one-way.
             match interactive_channel_id {
                 Some(channel_id) => {
                     match DiscordInteractive::from_env(channel_id, interactive_api_base) {
@@ -204,8 +246,16 @@ impl Plugin for Notifier {
         Ok(())
     }
 
+    /// Spawns the dispatch task that drains the controller event bus.
+    ///
+    /// The task owns the constructed channels (moved out of `self`)
+    /// so [`Plugin::stop`] only needs to abort the join handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::StartFailed`] when the plugin context lacks
+    /// a downcast-compatible [`ControllerHandles`].
     async fn start(&mut self, ctx: &PluginContext) -> Result<()> {
-        // Downcast the bus handle to the controller handles bundle.
         let handles = ctx
             .bus
             .clone()
@@ -217,8 +267,6 @@ impl Plugin for Notifier {
         let mut rx = handles.bus.subscribe();
         let inventory = handles.inventory.clone();
 
-        // Move channels out so the spawned task owns them (Plugin::stop
-        // doesn't need them anymore).
         let channels = std::mem::take(&mut self.channels);
         let channels: Arc<[Box<dyn NotifyChannel>]> = channels.into();
         let telegram = self.telegram.clone();
@@ -228,11 +276,6 @@ impl Plugin for Notifier {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        // Interactive path: pending_approval drives an inline
-                        // keyboard via Telegram and/or Discord and persists
-                        // message metadata so the callback handler can edit
-                        // on decide. Both channels run independently; either,
-                        // both, or neither may be configured.
                         if event.kind == UPDATE_PENDING_APPROVAL_KIND {
                             if let Some(tg) = telegram.as_ref() {
                                 handle_pending_approval(tg, inventory.as_ref(), &event).await;
@@ -242,10 +285,6 @@ impl Plugin for Notifier {
                                     .await;
                             }
                         }
-                        // One-way fan-out path: every channel that opted in
-                        // by `kind` gets the event (skips pending_approval
-                        // since no channel registers that kind in v1; the
-                        // interactive Telegram message is the notification).
                         dispatch(&channels, event).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -272,6 +311,11 @@ impl Plugin for Notifier {
     }
 }
 
+/// Fans one event out to every channel that matches it.
+///
+/// Per-channel `send` errors log at warn and don't propagate: the
+/// dispatch loop must keep draining the bus even if one channel
+/// flaps.
 async fn dispatch(channels: &[Box<dyn NotifyChannel>], event: Event) {
     for ch in channels.iter() {
         if !ch.matches_kind(&event.kind) {
@@ -283,35 +327,33 @@ async fn dispatch(channels: &[Box<dyn NotifyChannel>], event: Event) {
     }
 }
 
-/// Payload carried on `update.pending_approval` events. Pulled from
-/// `event.metadata`. Matches the shape T2 emits.
+/// Payload shape carried on `update.pending_approval` events in
+/// `event.metadata`. Mirrors the JSON the updater plugin emits.
 #[derive(Debug, Clone, Deserialize)]
 struct PendingApprovalPayload {
+    /// ULID identifying the pending approval row.
     action_id: String,
+    /// Host the proposed change targets.
     #[serde(default)]
     host_id: Option<String>,
+    /// Stack the proposed change targets.
     #[serde(default)]
     stack: Option<String>,
+    /// Service the proposed change targets.
     #[serde(default)]
     service: Option<String>,
+    /// Image reference (without digest).
     #[serde(default)]
     image: Option<String>,
+    /// Currently running image digest.
     #[serde(default)]
     current_digest: Option<String>,
+    /// Proposed image digest pulled from the registry.
     #[serde(default)]
     proposed_digest: Option<String>,
 }
 
-/// Render the inline-keyboard Telegram message for a pending approval and
-/// persist (chat_id, message_id) on the action's metadata so the callback
-/// handler in 9f can edit the same message after a decision.
-///
-/// v1 retry semantics: on send failure we log and bail. There is no
-/// in-process retry. The next updater cycle's idempotence check
-/// (`find_open_approval_for_proposed_digest`) prevents duplicate rows; if a
-/// message_id never gets persisted, the action stays open and the operator
-/// must decide via the dashboard. Documented gap; revisit in v1.x with a
-/// dedicated outbox if it bites.
+#[doc = include_str!("../docs/pending-approval.md")]
 async fn handle_pending_approval(tg: &Arc<TelegramChannel>, inventory: &Inventory, event: &Event) {
     let payload: PendingApprovalPayload = match serde_json::from_value(event.metadata.clone()) {
         Ok(p) => p,
@@ -334,9 +376,6 @@ async fn handle_pending_approval(tg: &Arc<TelegramChannel>, inventory: &Inventor
         )],
     ];
 
-    // Send to the first configured chat_id. v1 design: one Telegram chat per
-    // notifier instance for approvals. Fan-out across multiple chats with a
-    // single decidable message would require richer message tracking.
     let Some(chat_id) = tg.chat_ids().first() else {
         warn!("telegram channel has no chat_ids; cannot send approval");
         return;
@@ -354,15 +393,9 @@ async fn handle_pending_approval(tg: &Arc<TelegramChannel>, inventory: &Inventor
         }
     };
 
-    // Best-effort parse of chat_id to i64 for storage. Telegram chat ids are
-    // numeric (negative for groups), but the config carries them as strings.
     let chat_id_i64 = match sent.chat_id.parse::<i64>() {
         Ok(n) => n,
         Err(_) => {
-            // Channel-style ids like "@somechannel" don't fit i64; storage
-            // schema uses i64. Fall back to 0 with a warn so the action_id
-            // still has SOME message metadata; callbacks won't work but
-            // logs make the misconfiguration obvious.
             warn!(
                 chat_id = %sent.chat_id,
                 "non-numeric Telegram chat_id; storing 0; Telegram callbacks will not match"
@@ -390,11 +423,12 @@ async fn handle_pending_approval(tg: &Arc<TelegramChannel>, inventory: &Inventor
     }
 }
 
-/// Discord variant: send a plain-text message with an action row + buttons,
-/// then persist (channel_id, message_id) on the action's metadata so the
-/// dashboard callback can edit the same message after a decision.
+/// Discord variant of the pending-approval handler.
 ///
-/// Discord and Telegram coexist; each writes its own metadata key pair so a
+/// Sends a plain-text message with an action row of buttons, then
+/// records `(channel_id, message_id)` on the action row so the
+/// dashboard callback can edit the message after a decision. Discord
+/// and Telegram coexist; each writes its own metadata key pair so a
 /// single approval row can carry both.
 async fn handle_pending_approval_discord(
     dc: &Arc<DiscordInteractive>,
@@ -448,9 +482,10 @@ async fn handle_pending_approval_discord(
     }
 }
 
-/// Plain-text summary for a pending-approval Discord message. Discord renders
-/// a tiny subset of markdown but we keep this plain because the formatting
-/// budget is better spent on the action row buttons.
+/// Plain-text body for a pending-approval Discord message.
+///
+/// Discord renders a subset of markdown but the formatting budget is
+/// better spent on the action row buttons, so this stays plain.
 fn format_pending_approval_plain(p: &PendingApprovalPayload, event: &Event) -> String {
     let mut lines = vec!["[isengard] update awaiting approval".to_string()];
 
@@ -484,8 +519,11 @@ fn format_pending_approval_plain(p: &PendingApprovalPayload, event: &Event) -> S
     lines.join("\n")
 }
 
-/// HTML-formatted summary for a pending-approval Telegram message. Mirrors
-/// the prose in the spec (host . stack . service, image:current -> proposed).
+/// HTML body for a pending-approval Telegram message.
+///
+/// Mirrors the prose in the spec: a `host . stack . service` location
+/// line, a `image: current -> proposed` digest line, the event's own
+/// summary, and a closing prompt.
 fn format_pending_approval_html(p: &PendingApprovalPayload, event: &Event) -> String {
     let mut lines = vec!["<b>[isengard] update awaiting approval</b>".to_string()];
 
@@ -526,9 +564,11 @@ fn format_pending_approval_html(p: &PendingApprovalPayload, event: &Event) -> St
     lines.join("\n")
 }
 
-/// Truncate a sha256 digest to its first 12 hex chars after the prefix, so
-/// the message stays compact. Pass-through if the input doesn't look like a
-/// digest.
+/// Truncates a sha256 digest to the first 12 hex chars after the
+/// prefix.
+///
+/// Keeps approval messages compact. Pass-through (with a 20-char cap)
+/// when the input doesn't look like a digest.
 fn short_digest(s: &str) -> String {
     if let Some(rest) = s.strip_prefix("sha256:") {
         let take: String = rest.chars().take(12).collect();
@@ -538,7 +578,8 @@ fn short_digest(s: &str) -> String {
     }
 }
 
-/// Minimal HTML escape for the four chars Telegram cares about in `parse_mode=HTML`.
+/// Minimal HTML escape for the four chars Telegram cares about in
+/// `parse_mode=HTML`.
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -555,18 +596,17 @@ fn html_escape(s: &str) -> String {
 
 #[async_trait]
 impl EventSubscriber for Notifier {
+    /// Returns an empty slice. The dispatch task subscribes to every
+    /// event on the bus and per-channel filtering happens inside
+    /// [`dispatch`]; the `EventSubscriber` shape is implemented for
+    /// trait conformance only.
     fn event_kinds(&self) -> &[&'static str] {
-        // The trait wants &'static str slice; we can't return runtime kinds
-        // here without leaking. For v1, return an empty slice — the actual
-        // filter happens per-channel in dispatch(). The host's role is just
-        // to subscribe; we always-want-everything from the bus.
         &[]
     }
 
+    /// Always returns `Ok(())`. The plugin's actual handling lives in
+    /// the dispatch task spawned from [`Plugin::start`].
     async fn handle(&self, _event: &Event, _ctx: &PluginContext) -> Result<()> {
-        // Unused — start() spawns its own dispatch task. EventSubscriber
-        // is implemented for shape-compliance with the trait, but
-        // the actual handling is the spawned task in start().
         Ok(())
     }
 }

@@ -224,7 +224,7 @@ async fn delete_host_cert_revokes_active_cert() {
     let (app, handles) = setup_app().await;
 
     // Enroll a host via the EnrollmentService so we have a real cert row to
-    // revoke (rather than just a host row with no cert). Redeem
+    // revoke (rather than only a host row with no cert). Redeem
     // requires the packed `TK<bytes>.<fingerprint>` shape; pack the bare
     // base32 token mint returns before redeeming.
     let bare = handles

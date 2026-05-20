@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 /// population we expect (a handful at any one time).
 const HASH_PREFIX_LEN: usize = 8;
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/enrollment/tokens", post(mint_token).get(list_tokens))
@@ -41,6 +42,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 }
 
 #[derive(Debug, Deserialize)]
+/// MintTokenBody.
 pub struct MintTokenBody {
     /// Currently always `"agent"`; reserved for future controller-admin tokens.
     pub role: String,
@@ -50,6 +52,7 @@ pub struct MintTokenBody {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// MintTokenResponse.
 pub struct MintTokenResponse {
     /// Plaintext token. Shown to the operator once; only the SHA-256 hash is
     /// stored on the controller.
@@ -60,18 +63,25 @@ pub struct MintTokenResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// TokenListEntry.
 pub struct TokenListEntry {
     /// Hex-encoded first [`HASH_PREFIX_LEN`] bytes of `token_hash`. Used as the
     /// stable identifier in delete URLs.
     pub hash_prefix: String,
+    /// `role` field.
     pub role: String,
+    /// `expires_at` field.
     pub expires_at: String,
+    /// `created_at` field.
     pub created_at: String,
 }
 
+/// `TTL_MIN_SECS` constant.
 const TTL_MIN_SECS: u64 = 1;
+/// `TTL_MAX_SECS` constant.
 const TTL_MAX_SECS: u64 = 86_400;
 
+/// `mint_token`.
 async fn mint_token(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<MintTokenBody>,
@@ -113,6 +123,7 @@ async fn mint_token(
     ))
 }
 
+/// `GET` handler for tokens.
 async fn list_tokens(
     State(handles): State<Arc<ControllerHandles>>,
 ) -> Result<Json<Vec<TokenListEntry>>, (StatusCode, String)> {
@@ -237,12 +248,14 @@ async fn revoke_host_cert(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `token_role_str`.
 fn token_role_str(role: TokenRole) -> &'static str {
     match role {
         TokenRole::Agent => "agent",
     }
 }
 
+/// `hex_encode`.
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -253,6 +266,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// `hex_decode`.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
@@ -267,6 +281,7 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// `nibble`.
 fn nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),

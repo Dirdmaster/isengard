@@ -34,6 +34,7 @@ use reqwest::Client;
 use sha2::Sha256;
 use tracing::{debug, warn};
 
+/// HMAC-SHA256 type alias.
 type HmacSha256 = Hmac<Sha256>;
 
 /// Outgoing signature header name. Matches webhook deliveries.

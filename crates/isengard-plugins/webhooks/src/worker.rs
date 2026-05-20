@@ -1,5 +1,8 @@
-//! Delivery worker: ticks at a fixed interval, claims pending due
-//! deliveries, POSTs them with HMAC signing, updates row state.
+//! Delivery worker.
+//!
+//! Ticks at a fixed interval, claims a batch of pending due
+//! deliveries, POSTs each with HMAC signing, and writes the outcome
+//! back to the row.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,15 +16,22 @@ use tracing::{debug, warn};
 use crate::backoff::{MAX_ATTEMPTS, next_delay};
 use crate::sign::{SIGNATURE_HEADER, compute_signature};
 
-/// Resolved (url, secret) for one delivery row. For `source=webhook` rows
-/// we look these up via the parent `webhooks` table; for `source=lifecycle`
-/// or `source=gate` rows the row carries them directly.
+/// Resolved destination for one delivery row.
+///
+/// For `source = Webhook` rows we look these up via the parent
+/// `webhooks` table; for `source = Lifecycle` or `source = Gate`
+/// rows the row carries them directly.
 pub struct Endpoint {
+    /// Destination URL.
     pub url: String,
+    /// HMAC secret. Empty when no per-row secret is configured.
     pub secret: String,
 }
 
-/// Run the worker forever. The caller aborts the JoinHandle on shutdown.
+/// Runs the worker loop forever.
+///
+/// The caller aborts the join handle on shutdown. The ticker uses
+/// `MissedTickBehavior::Delay` so a slow tick doesn't burst-fire.
 pub async fn run(inventory: Arc<Inventory>, http: Client, tick: Duration, batch: i64) {
     let mut interval = tokio::time::interval(tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -33,7 +43,15 @@ pub async fn run(inventory: Arc<Inventory>, http: Client, tick: Duration, batch:
     }
 }
 
-/// Drive one batch: claim pending due deliveries, dispatch each one.
+/// Runs one worker tick.
+///
+/// Claims up to `batch` due rows, dispatches each via
+/// [`dispatch_one`]. Per-row failures log; the loop keeps going.
+///
+/// # Errors
+///
+/// Returns an error when the claim query itself fails. Per-row
+/// failures are logged and don't propagate.
 pub async fn tick_once(inventory: &Inventory, http: &Client, batch: i64) -> anyhow::Result<()> {
     let now = Utc::now();
     let due = inventory.claim_pending_deliveries(now, batch).await?;
@@ -76,10 +94,23 @@ pub async fn tick_once(inventory: &Inventory, http: &Client, batch: i64) -> anyh
     Ok(())
 }
 
-/// Resolve a delivery row's destination URL+secret. For `Webhook` source we
-/// look up the parent `webhooks` row (cheap re-SELECT each tick: keeps the
-/// URL/secret current if the operator edits mid-flight). For `Lifecycle` /
-/// `Gate` rows the values come from the row itself.
+/// Resolves a delivery row's destination URL and secret.
+///
+/// For `Webhook` source: re-SELECTs the parent `webhooks` row on
+/// every tick (cheap and keeps the URL/secret current if the
+/// operator edits mid-flight). For `Lifecycle` and `Gate` sources:
+/// uses the values stored on the row itself.
+///
+/// Lifecycle hooks without a per-container secret fall back to an
+/// empty key. The HMAC computation accepts empty keys; receivers
+/// that don't care about signing can ignore the header, and ones
+/// that do care can still verify because the empty-key signature is
+/// well-defined.
+///
+/// # Errors
+///
+/// Returns an error when the SELECT for a `Webhook`-source row
+/// fails.
 async fn resolve_endpoint(
     inventory: &Inventory,
     delivery: &WebhookDelivery,
@@ -102,17 +133,27 @@ async fn resolve_endpoint(
                 Some(u) if !u.is_empty() => u,
                 _ => return Ok(None),
             };
-            // Lifecycle hooks may run unsigned (no per-container secret
-            // configured): fall back to an empty key. Receivers that don't
-            // care about signing can ignore the header; receivers that do
-            // can still verify because the empty-key signature is well-defined.
             let secret = delivery.secret.clone().unwrap_or_default();
             Ok(Some(Endpoint { url, secret }))
         }
     }
 }
 
-/// Dispatch one delivery. Updates the row's status based on the outcome.
+/// Dispatches one delivery and writes the outcome to the row.
+///
+/// The signature header carries
+/// `HMAC-SHA256(secret, payload_json)`. Outcomes:
+///
+/// - 2xx: `mark_delivery_success`.
+/// - 4xx: `mark_delivery_failed`, no retry.
+/// - 5xx or other non-success: `schedule_retry`.
+/// - Transport error: `schedule_retry` (treated as transient).
+///
+/// # Errors
+///
+/// Returns an error when the state-write back to storage fails. The
+/// HTTP call itself never returns Err: all transport errors fold
+/// into `schedule_retry`.
 pub async fn dispatch_one(
     inventory: &Inventory,
     http: &Client,
@@ -140,7 +181,6 @@ pub async fn dispatch_one(
             Ok(())
         }
         Ok(r) if r.status().is_client_error() => {
-            // 4xx: receiver says the request is permanently bad. No retry.
             let status = r.status();
             inventory
                 .mark_delivery_failed(delivery.id, now, attempts, &format!("HTTP {status}"))
@@ -148,13 +188,11 @@ pub async fn dispatch_one(
             Ok(())
         }
         Ok(r) => {
-            // 5xx or other non-success: retry per backoff.
             let status = r.status();
             schedule_retry(inventory, delivery.id, attempts, &format!("HTTP {status}")).await?;
             Ok(())
         }
         Err(e) => {
-            // Network / timeout / DNS: treat as transient, retry per backoff.
             let msg = e.to_string();
             schedule_retry(inventory, delivery.id, attempts, &msg).await?;
             Ok(())
@@ -162,8 +200,16 @@ pub async fn dispatch_one(
     }
 }
 
-/// Mark a delivery for retry. If the attempt count has hit the cap, the
-/// row is marked `exhausted` instead.
+/// Marks a delivery for retry or, if the attempt count has hit
+/// [`MAX_ATTEMPTS`], marks it `exhausted`.
+///
+/// The next-attempt timestamp uses [`next_delay`] when available;
+/// the fallback 60s only triggers if the schedule ever returns
+/// `None` for a non-exhausted state (it currently never does).
+///
+/// # Errors
+///
+/// Returns an error when the storage write fails.
 async fn schedule_retry(
     inventory: &Inventory,
     delivery_id: i64,

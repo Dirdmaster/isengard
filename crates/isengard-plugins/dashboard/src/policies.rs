@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 /// rejects an empty trailing segment, so we accept `_` and translate.
 const GLOBAL_SCOPE_KEY_SENTINEL: &str = "_";
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/policies", get(list_policies).post(create_policy))
@@ -56,11 +57,17 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyDto {
+    /// `id` field.
     pub id: i64,
+    /// `scope_type` field.
     pub scope_type: PolicyScopeType,
+    /// `scope_key` field.
     pub scope_key: String,
+    /// `body` field.
     pub body: Policy,
+    /// `created_at` field.
     pub created_at: DateTime<Utc>,
+    /// `updated_at` field.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -81,8 +88,11 @@ impl From<PolicyRow> for PolicyDto {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InsertPolicyDto {
+    /// `scope_type` field.
     pub scope_type: PolicyScopeType,
+    /// `scope_key` field.
     pub scope_key: String,
+    /// `body` field.
     pub body: Policy,
 }
 
@@ -91,6 +101,7 @@ pub struct InsertPolicyDto {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PutPolicyBodyDto {
+    /// `body` field.
     pub body: Policy,
 }
 
@@ -102,20 +113,28 @@ pub struct EffectivePolicyDto(pub ResolvedPolicy);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// EffectiveQueryDto.
 pub struct EffectiveQueryDto {
+    /// `fleet` field.
     pub fleet: Option<String>,
+    /// `stack` field.
     pub stack: Option<String>,
+    /// `service` field.
     pub service: Option<String>,
+    /// `host_id` field.
     pub host_id: Option<String>,
+    /// `container` field.
     pub container: Option<String>,
 }
 
 /// Standard JSON error envelope used by the policies endpoints.
 #[derive(Debug, Serialize)]
 struct ErrorBody {
+    /// `error` field.
     error: String,
 }
 
+/// `err`.
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ErrorBody { error: msg.into() })).into_response()
 }
@@ -192,6 +211,7 @@ fn decode_scope_key(raw: &str) -> String {
     }
 }
 
+/// `GET` handler for policies.
 async fn list_policies(State(handles): State<Arc<ControllerHandles>>) -> Response {
     match handles.inventory.list_policies().await {
         Ok(rows) => {
@@ -205,6 +225,7 @@ async fn list_policies(State(handles): State<Arc<ControllerHandles>>) -> Respons
     }
 }
 
+/// `POST` handler for policy.
 async fn create_policy(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<InsertPolicyDto>,
@@ -257,6 +278,7 @@ async fn create_policy(
     }
 }
 
+/// `PUT` handler for policy.
 async fn put_policy(
     State(handles): State<Arc<ControllerHandles>>,
     Path((scope_type_s, scope_key_raw)): Path<(String, String)>,
@@ -283,6 +305,7 @@ async fn put_policy(
     }
 }
 
+/// `DELETE` handler for policy.
 async fn delete_policy(
     State(handles): State<Arc<ControllerHandles>>,
     Path((scope_type_s, scope_key_raw)): Path<(String, String)>,
@@ -309,6 +332,7 @@ async fn delete_policy(
     }
 }
 
+/// `GET` handler for effective policy.
 async fn get_effective_policy(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<EffectiveQueryDto>,

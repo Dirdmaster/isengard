@@ -17,6 +17,7 @@ use tracing::{debug, warn};
 use crate::deployments::DeploymentDto;
 use crate::dto::*;
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/hosts", get(list_hosts).post(enroll_host))
@@ -72,10 +73,12 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .with_state(handles)
 }
 
+/// `json_err`.
 fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
 }
 
+/// `GET` handler for hosts.
 async fn list_hosts(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<HostsQuery>,
@@ -102,6 +105,7 @@ async fn list_hosts(
     }
 }
 
+/// `GET` handler for host.
 async fn get_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
@@ -117,6 +121,7 @@ async fn get_host(
     }
 }
 
+/// `host_events`.
 async fn host_events(
     State(handles): State<Arc<ControllerHandles>>,
     Path(_id): Path<String>,
@@ -135,6 +140,7 @@ async fn host_events(
     }
 }
 
+/// `enroll_host`.
 async fn enroll_host(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<EnrollRequest>,
@@ -180,6 +186,7 @@ async fn enroll_host(
     .into_response()
 }
 
+/// `default_url`.
 fn default_url() -> String {
     "http://controller.local:9418".to_string()
 }
@@ -200,6 +207,7 @@ fn render_docker_run_command(controller_url: &str, token: &str) -> String {
     .join("\n")
 }
 
+/// `force_update_host`.
 async fn force_update_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
@@ -224,6 +232,7 @@ async fn force_update_host(
     }
 }
 
+/// `force_update_stack`.
 async fn force_update_stack(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
@@ -251,6 +260,7 @@ async fn force_update_stack(
     }
 }
 
+/// `PATCH` handler for host.
 async fn patch_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
@@ -272,6 +282,7 @@ async fn patch_host(
     }
 }
 
+/// `DELETE` handler for host.
 async fn delete_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
@@ -289,6 +300,7 @@ async fn delete_host(
     }
 }
 
+/// `GET` handler for events.
 async fn list_events(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<EventsQuery>,
@@ -332,6 +344,7 @@ async fn list_events(
     }
 }
 
+/// `GET` handler for event.
 async fn get_event(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id_str): Path<String>,
@@ -349,6 +362,7 @@ async fn get_event(
     }
 }
 
+/// `GET` handler for settings.
 async fn get_settings(State(handles): State<Arc<ControllerHandles>>) -> Response {
     let all = match handles.inventory.list_settings().await {
         Ok(v) => v,
@@ -369,6 +383,7 @@ async fn get_settings(State(handles): State<Arc<ControllerHandles>>) -> Response
     Json(SettingsDto { values }).into_response()
 }
 
+/// `PATCH` handler for settings.
 async fn patch_settings(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<PatchSettingsBody>,
@@ -391,10 +406,13 @@ async fn patch_settings(
 }
 
 #[derive(Debug, Deserialize)]
+/// ListStacksQuery.
 struct ListStacksQuery {
+    /// `host_id` field.
     host_id: Option<String>,
 }
 
+/// `GET` handler for stacks.
 async fn list_stacks(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<ListStacksQuery>,
@@ -421,6 +439,7 @@ async fn list_stacks(
     Json(dtos).into_response()
 }
 
+/// `GET` handler for stack.
 async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path<i64>) -> Response {
     let stack = match handles.inventory.get_stack(StackId(id)).await {
         Ok(Some(s)) => s,
@@ -784,15 +803,22 @@ struct PutComposeJsonBody {
 /// Internal shape carrying either the YAML-body or JSON-body PUT input
 /// through to the WriteCompose dispatch. Keeps the dispatch single-pass.
 struct PutComposeInput {
+    /// `compose_yaml` field.
     compose_yaml: String,
+    /// `expected_sha256` field.
     expected_sha256: String,
+    /// `force` field.
     force: bool,
+    /// `manifest_toml` field.
     manifest_toml: Option<String>,
+    /// `secrets` field.
     secrets: Option<Vec<String>>,
+    /// `hooks` field.
     hooks: Option<Vec<HookBody>>,
 }
 
 #[derive(Debug, Deserialize)]
+/// PutComposeQuery.
 struct PutComposeQuery {
     /// Skip the optimistic concurrency check. False / absent by default.
     force: Option<bool>,
@@ -804,9 +830,13 @@ struct PutComposeQuery {
 /// field; we expose `on` here to match the manifest TOML schema operators see.
 #[derive(Debug, Serialize)]
 struct ManifestHookDto {
+    /// `on` field.
     on: String,
+    /// `cmd` field.
     cmd: Vec<String>,
+    /// `timeout_ms` field.
     timeout_ms: i64,
+    /// `on_error` field.
     on_error: String,
 }
 
@@ -886,10 +916,13 @@ async fn get_stack_manifest(
 /// persisted set. When absent, the existing bindings stay untouched.
 #[derive(Debug, Deserialize)]
 struct PutManifestBody {
+    /// `manifest_toml` field.
     manifest_toml: String,
     #[serde(default)]
+    /// `secrets` field.
     secrets: Option<Vec<String>>,
     #[serde(default)]
+    /// `hooks` field.
     hooks: Option<Vec<HookBody>>,
 }
 
@@ -985,6 +1018,7 @@ async fn put_stack_manifest(
 }
 
 #[derive(Debug, Deserialize)]
+/// CreateStackBody.
 struct CreateStackBody {
     /// Stack name. Must be unique per host (the storage layer enforces).
     name: String,
@@ -1014,26 +1048,37 @@ struct CreateStackBody {
 /// Hook shape on POST /stacks. Mirrors the TOML manifest.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct HookBody {
+    /// `on` field.
     on: String,
+    /// `cmd` field.
     cmd: Vec<String>,
     #[serde(default = "default_hook_timeout_ms")]
+    /// `timeout_ms` field.
     timeout_ms: u64,
     #[serde(default = "default_hook_on_error")]
+    /// `on_error` field.
     on_error: String,
 }
 
+/// `default_hook_timeout_ms`.
 fn default_hook_timeout_ms() -> u64 {
     60_000
 }
+/// `default_hook_on_error`.
 fn default_hook_on_error() -> String {
     "abort".into()
 }
 
 #[derive(Debug, Serialize)]
+/// CreateStackResponse.
 struct CreateStackResponse {
+    /// `id` field.
     id: String,
+    /// `name` field.
     name: String,
+    /// `host_id` field.
     host_id: String,
+    /// `written_sha256` field.
     written_sha256: String,
 }
 
@@ -1171,6 +1216,7 @@ async fn phase_0_13_persist_manifest_bundle(
     Ok(manifest_toml_for_agent)
 }
 
+/// `sha256_hex_of`.
 fn sha256_hex_of(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -1434,11 +1480,15 @@ async fn post_stack_diff(
 }
 
 #[derive(Debug, Deserialize)]
+/// ListServicesQuery.
 struct ListServicesQuery {
+    /// `stack_id` field.
     stack_id: Option<i64>,
+    /// `host_id` field.
     host_id: Option<String>,
 }
 
+/// `GET` handler for services.
 async fn list_services(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<ListServicesQuery>,
@@ -1491,6 +1541,7 @@ async fn list_services(
     Json(dtos).into_response()
 }
 
+/// `GET` handler for service.
 async fn get_service(
     State(_handles): State<Arc<ControllerHandles>>,
     Path(_id): Path<String>,
@@ -1688,15 +1739,19 @@ async fn collect_other_instances(
 }
 
 #[derive(Debug, Deserialize)]
+/// SparklineQuery.
 struct SparklineQuery {
     #[serde(default = "default_range")]
+    /// `range` field.
     range: String,
 }
 
+/// `default_range`.
 fn default_range() -> String {
     "24h".to_string()
 }
 
+/// `GET` handler for host sparkline.
 async fn get_host_sparkline(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
@@ -1747,18 +1802,23 @@ async fn get_host_sparkline(
     .into_response()
 }
 
+/// `parse_host_id`.
 fn parse_host_id(s: &str) -> Result<HostId, String> {
     let ulid = ulid::Ulid::from_string(s).map_err(|e| format!("invalid host id: {e}"))?;
     Ok(HostId::from(ulid))
 }
 
 #[derive(Debug, Deserialize)]
+/// InstallShQuery.
 pub struct InstallShQuery {
+    /// `token` field.
     pub token: Option<String>,
 }
 
+/// `INSTALL_SH_TEMPLATE` constant.
 const INSTALL_SH_TEMPLATE: &str = include_str!("../templates/install.sh.tmpl");
 
+/// `install_sh`.
 pub async fn install_sh(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<InstallShQuery>,
@@ -1808,22 +1868,34 @@ pub async fn install_sh(
 // ============== placement scheduler endpoints ==============
 
 #[derive(Debug, Clone, Serialize)]
+/// PlacementRowDto.
 struct PlacementRowDto {
+    /// `service_id` field.
     service_id: i64,
+    /// `service_name` field.
     service_name: Option<String>,
+    /// `stack_id` field.
     stack_id: Option<i64>,
+    /// `host_id` field.
     host_id: String,
+    /// `hostname` field.
     hostname: Option<String>,
+    /// `replica_index` field.
     replica_index: u32,
+    /// `state` field.
     state: String,
+    /// `assigned_at` field.
     assigned_at: chrono::DateTime<chrono::Utc>,
+    /// `last_event` field.
     last_event: Option<String>,
 }
 
+/// `GET` handler for placements.
 async fn list_placements(State(handles): State<Arc<ControllerHandles>>) -> Response {
     placement_rows_response(&handles, None).await
 }
 
+/// `GET` handler for placements by stack.
 async fn list_placements_by_stack(
     State(handles): State<Arc<ControllerHandles>>,
     Path(stack_id): Path<i64>,
@@ -1831,6 +1903,7 @@ async fn list_placements_by_stack(
     placement_rows_response(&handles, Some(stack_id)).await
 }
 
+/// WebSocket handler for placement roresponse.
 async fn placement_rows_response(
     handles: &ControllerHandles,
     filter_stack: Option<i64>,

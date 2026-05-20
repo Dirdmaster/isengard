@@ -30,10 +30,12 @@ use crate::image_ref::ImageRef;
 /// Default TTL for cached tag lists. Spec calls for 1 hour.
 pub const DEFAULT_TTL_SECS: u64 = 3600;
 
-/// One cached `list_tags` result + when it was fetched.
+/// One cached `list_tags` result plus when it was fetched.
 #[derive(Debug, Clone)]
 struct CachedTags {
+    /// Tag list shared with every reader for this key.
     tags: Arc<Vec<String>>,
+    /// Wall-clock instant the fetch landed.
     fetched_at: Instant,
 }
 
@@ -45,6 +47,7 @@ pub struct TagCache {
     /// async mutex is held across the fetch await so concurrent callers
     /// for the same key share the result.
     entries: StdMutex<HashMap<String, Arc<AsyncMutex<Option<CachedTags>>>>>,
+    /// Cache entry lifetime.
     ttl: std::time::Duration,
 }
 
@@ -70,6 +73,7 @@ impl TagCache {
         Self::new(std::time::Duration::from_secs(DEFAULT_TTL_SECS))
     }
 
+    /// Builds the per-image cache key.
     fn key(image: &ImageRef) -> String {
         format!("{}/{}", image.registry, image.repository)
     }

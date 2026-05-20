@@ -62,10 +62,17 @@ pub fn read_resource(uri: &str) -> Option<&'static str> {
                 .and_then(|f| f.contents_utf8())
         }
         ResourceUri::Api { krate, symbol } => {
-            let file_path = format!("{krate}/docs/{symbol}.md");
-            API_DOCS
-                .get_file(&file_path)
-                .and_then(|f| f.contents_utf8())
+            // Try the workspace-member layout first
+            // (`crates/<crate>/docs/<symbol>.md`). When the URI was
+            // minted for a plugin, the crate directory is
+            // `isengard-plugins/<plugin>/docs/`; fall through to that
+            // layout when the direct lookup misses.
+            let direct = format!("{krate}/docs/{symbol}.md");
+            if let Some(body) = API_DOCS.get_file(&direct).and_then(|f| f.contents_utf8()) {
+                return Some(body);
+            }
+            let plugin = format!("isengard-plugins/{krate}/docs/{symbol}.md");
+            API_DOCS.get_file(&plugin).and_then(|f| f.contents_utf8())
         }
         ResourceUri::Skill(name) => {
             let file_path = format!("{name}.md");

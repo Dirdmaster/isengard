@@ -29,16 +29,25 @@ use serde::{Deserialize, Serialize};
 use crate::deployments::DeploymentDto;
 
 #[derive(Debug, Serialize, Deserialize)]
+/// DeploymentGroupDto.
 pub struct DeploymentGroupDto {
+    /// `id` field.
     pub id: String,
+    /// `stack_id` field.
     pub stack_id: i64,
+    /// `service_name` field.
     pub service_name: String,
+    /// `parallelism` field.
     pub parallelism: String,
+    /// `state` field.
     pub state: String,
     /// Lowercase 32-char hex ids (matches the storage layer's encoding).
     pub target_hosts: Vec<String>,
+    /// `started_at` field.
     pub started_at: String,
+    /// `finished_at` field.
     pub finished_at: Option<String>,
+    /// `error` field.
     pub error: Option<String>,
 }
 
@@ -62,6 +71,7 @@ impl From<DeploymentGroup> for DeploymentGroupDto {
     }
 }
 
+/// `host_id_hex`.
 fn host_id_hex(bytes: [u8; 16]) -> String {
     let mut s = String::with_capacity(32);
     for b in bytes {
@@ -71,25 +81,34 @@ fn host_id_hex(bytes: [u8; 16]) -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// DeploymentGroupDetailDto.
 pub struct DeploymentGroupDetailDto {
     #[serde(flatten)]
+    /// `group` field.
     pub group: DeploymentGroupDto,
+    /// `deployments` field.
     pub deployments: Vec<DeploymentDto>,
 }
 
 #[derive(Debug, Deserialize)]
+/// ListGroupsQuery.
 pub struct ListGroupsQuery {
+    /// `stack_id` field.
     pub stack_id: Option<i64>,
+    /// `state` field.
     pub state: Option<String>,
+    /// `limit` field.
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
+/// SetParallelismBody.
 pub struct SetParallelismBody {
     /// `"1"`, `"2"`, ..., `"N"`, `"all"`, or `null` (clears the override).
     pub parallelism: Option<String>,
 }
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/deployment-groups", get(list_groups))
@@ -236,8 +255,11 @@ async fn set_parallelism(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// ParallelismDto.
 pub struct ParallelismDto {
+    /// `stack_id` field.
     pub stack_id: i64,
+    /// `parallelism` field.
     pub parallelism: Option<String>,
 }
 

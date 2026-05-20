@@ -28,8 +28,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
 
+/// `SECRET_MASK` constant.
 const SECRET_MASK: &str = "***";
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/backup/config", get(get_config).put(put_config))
@@ -41,6 +43,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .with_state(handles)
 }
 
+/// `json_err`.
 fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
 }
@@ -52,10 +55,15 @@ fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
 /// unchanged") or a real value (replaces what's stored).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupConfigDto {
+    /// `enabled` field.
     pub enabled: bool,
+    /// `destination` field.
     pub destination: DestinationConfig,
+    /// `interval_secs` field.
     pub interval_secs: u64,
+    /// `retention_keep` field.
     pub retention_keep: u32,
+    /// `passphrase_fingerprint` field.
     pub passphrase_fingerprint: String,
     /// Sent on PUT to update the fingerprint without ever revealing the
     /// passphrase to the dashboard server. Optional; if present, recomputes
@@ -65,13 +73,21 @@ pub struct BackupConfigDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// BackupRunDto.
 pub struct BackupRunDto {
+    /// `id` field.
     pub id: i64,
+    /// `started_at` field.
     pub started_at: String,
+    /// `finished_at` field.
     pub finished_at: Option<String>,
+    /// `status` field.
     pub status: String,
+    /// `object_name` field.
     pub object_name: Option<String>,
+    /// `size_bytes` field.
     pub size_bytes: Option<i64>,
+    /// `error` field.
     pub error: Option<String>,
 }
 
@@ -94,15 +110,25 @@ impl From<BackupRun> for BackupRunDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// RestoreRunDto.
 pub struct RestoreRunDto {
+    /// `id` field.
     pub id: i64,
+    /// `source_object` field.
     pub source_object: String,
+    /// `source_backup_run_id` field.
     pub source_backup_run_id: Option<i64>,
+    /// `started_at` field.
     pub started_at: String,
+    /// `finished_at` field.
     pub finished_at: Option<String>,
+    /// `status` field.
     pub status: String,
+    /// `previous_db_backup_path` field.
     pub previous_db_backup_path: Option<String>,
+    /// `bytes_restored` field.
     pub bytes_restored: Option<i64>,
+    /// `error` field.
     pub error: Option<String>,
 }
 
@@ -127,30 +153,46 @@ impl From<RestoreRun> for RestoreRunDto {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// RestoreRequestDto.
 pub struct RestoreRequestDto {
     /// Object name on the destination, e.g. `snapshot-20260506T120000Z.db.age`.
     pub object_name: String,
+    /// `passphrase` field.
     pub passphrase: String,
     #[serde(default)]
+    /// `dry_run` field.
     pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// RestoreOutcomeDto.
 pub struct RestoreOutcomeDto {
+    /// `run_id` field.
     pub run_id: i64,
+    /// `source_object` field.
     pub source_object: String,
+    /// `restored_at` field.
     pub restored_at: String,
+    /// `previous_db_backup_path` field.
     pub previous_db_backup_path: String,
+    /// `bytes_restored` field.
     pub bytes_restored: u64,
+    /// `dry_run` field.
     pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// BackupRunManifestDto.
 pub struct BackupRunManifestDto {
+    /// `id` field.
     pub id: i64,
+    /// `object_name` field.
     pub object_name: String,
+    /// `size_bytes` field.
     pub size_bytes: i64,
+    /// `started_at` field.
     pub started_at: String,
+    /// `finished_at` field.
     pub finished_at: Option<String>,
     /// Stored fingerprint of the passphrase the backup was encrypted with
     /// (12 hex chars, SHA-256 prefix). The UI compares this against the
@@ -161,6 +203,7 @@ pub struct BackupRunManifestDto {
 
 // ---------------- Handlers ----------------
 
+/// `mask`.
 fn mask(cfg: BackupConfig) -> BackupConfigDto {
     let dest = match cfg.destination {
         DestinationConfig::S3 {
@@ -194,6 +237,7 @@ fn mask(cfg: BackupConfig) -> BackupConfigDto {
     }
 }
 
+/// `GET` handler for config.
 async fn get_config(State(handles): State<Arc<ControllerHandles>>) -> Response {
     match BackupConfig::load(&handles.inventory).await {
         Ok(cfg) => Json(mask(cfg)).into_response(),
@@ -204,6 +248,7 @@ async fn get_config(State(handles): State<Arc<ControllerHandles>>) -> Response {
     }
 }
 
+/// `PUT` handler for config.
 async fn put_config(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<BackupConfigDto>,
@@ -277,6 +322,7 @@ async fn put_config(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `run_now`.
 async fn run_now(State(_handles): State<Arc<ControllerHandles>>) -> Response {
     let runner = match runner_handle() {
         Some(r) => r,
@@ -296,11 +342,14 @@ async fn run_now(State(_handles): State<Arc<ControllerHandles>>) -> Response {
 }
 
 #[derive(Debug, Deserialize)]
+/// RunsQuery.
 struct RunsQuery {
     #[serde(default)]
+    /// `limit` field.
     limit: Option<u32>,
 }
 
+/// `GET` handler for runs.
 async fn list_runs(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<RunsQuery>,
@@ -433,6 +482,7 @@ async fn restore(
     }
 }
 
+/// `GET` handler for restore runs.
 async fn list_restore_runs(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<RunsQuery>,

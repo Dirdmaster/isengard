@@ -1,10 +1,11 @@
-//! Lifecycle-hook event subscriber on the webhooks plugin (#54).
+//! Lifecycle-hook event subscriber.
 //!
-//! Distinct from the 12a webhook subscriber. Listens for the four
-//! deployment lifecycle events; for each, looks up the deployment's blue
-//! and green container_hooks rows and enqueues `webhook_deliveries` rows
-//! with `source='lifecycle'`. The 12a worker drains those alongside
-//! webhook deliveries (the worker is source-aware as of T6).
+//! Distinct from the general 12a webhook subscriber. Listens for the
+//! deployment lifecycle events on the bus; for each, looks up the
+//! deployment's `container_hooks` rows and enqueues
+//! `webhook_deliveries` rows with `source = lifecycle`. The shared
+//! worker drains those alongside webhook deliveries (it's
+//! source-aware).
 
 use std::sync::Arc;
 
@@ -18,16 +19,22 @@ use serde::Serialize;
 use tokio::sync::broadcast::Receiver;
 use tracing::{debug, warn};
 
-/// One of the four lifecycle hook moments. Maps from the bus event kind.
+/// One of the lifecycle hook moments.
+///
+/// Maps from the bus event kind via [`lifecycle_kind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookKind {
+    /// Fired on `deployment.spinning_up`.
     PreDeploy,
+    /// Fired on `deployment.completed`.
     PostDeploy,
+    /// Fired on `deployment.aborted` and `deployment.failed`.
     OnFailure,
 }
 
 impl HookKind {
+    /// Returns the snake-case discriminant carried on the wire.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PreDeploy => "pre_deploy",
@@ -37,10 +44,10 @@ impl HookKind {
     }
 }
 
-/// Map a bus event kind to the lifecycle hook kind it should fire.
-/// `deployment.spinning_up` -> pre_deploy, `deployment.completed` ->
-/// post_deploy, `deployment.aborted` and `deployment.failed` ->
-/// on_failure. Other kinds return `None` and are ignored.
+/// Maps a bus event kind to the [`HookKind`] it should fire.
+///
+/// Returns `None` for any event kind that doesn't drive a lifecycle
+/// hook.
 pub fn lifecycle_kind(event_kind: &str) -> Option<HookKind> {
     match event_kind {
         "deployment.spinning_up" => Some(HookKind::PreDeploy),
@@ -52,26 +59,41 @@ pub fn lifecycle_kind(event_kind: &str) -> Option<HookKind> {
 
 /// Per-event payload POSTed to the configured hook URL.
 ///
-/// Mirrors the `metadata.deployment` shape the agent already emits for
-/// every deployment.* event so receivers see consistent fields. Adds the
-/// `kind` discriminator and an emit-time `timestamp` so receivers can
-/// detect replays.
+/// Mirrors the `metadata.deployment` shape the agent already emits
+/// for every `deployment.*` event so receivers see consistent fields.
+/// Adds the [`HookKind`] discriminator and an emit-time `timestamp`
+/// so receivers can detect replays.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecyclePayload<'a> {
+    /// Hook kind discriminant (`pre_deploy`, `post_deploy`,
+    /// `on_failure`).
     pub kind: &'static str,
+    /// Deployment ULID.
     pub deployment_id: &'a str,
+    /// Host this deployment targets, rendered as a ULID string.
     pub host_id: String,
+    /// Surrogate stack id from storage.
     pub stack_id: i64,
+    /// Compose service name.
     pub service: &'a str,
+    /// Outgoing blue (previous) container digest.
     pub blue_digest: &'a str,
+    /// Incoming green (new) container digest.
     pub green_digest: &'a str,
+    /// Blue container name when known.
     pub blue_container: Option<&'a str>,
+    /// Green container name when known.
     pub green_container: Option<&'a str>,
+    /// Current deployment state.
     pub state: &'a str,
+    /// Emit-time timestamp.
     pub timestamp: chrono::DateTime<Utc>,
 }
 
-/// Run the subscriber loop until the bus is closed.
+/// Runs the lifecycle subscriber loop until the bus closes.
+///
+/// Filters via [`lifecycle_kind`]; matched events fan out through
+/// [`on_lifecycle`].
 pub async fn run(inventory: Arc<Inventory>, mut rx: Receiver<Event>) {
     loop {
         match rx.recv().await {
@@ -96,10 +118,21 @@ pub async fn run(inventory: Arc<Inventory>, mut rx: Receiver<Event>) {
     }
 }
 
-/// Process one matched lifecycle event. Pulls the embedded `Deployment`
-/// from `event.metadata.deployment`, looks up `container_hooks` rows for
-/// blue + green container names, enqueues a delivery for each row that
-/// has a URL configured for `kind`.
+/// Processes one matched lifecycle event.
+///
+/// Pulls the embedded `Deployment` from `event.metadata.deployment`,
+/// looks up `container_hooks` rows for blue + green container names
+/// AND the service name (the hook table is keyed by container
+/// name, but the deployment's green/blue are container ids in
+/// production; checking the service name catches hooks configured
+/// on the compose service). For each row that has a URL configured
+/// for the matched `kind`, enqueues a delivery.
+///
+/// # Errors
+///
+/// Returns an error when the per-container hook lookup or the
+/// payload JSON serialization fails. Malformed `metadata.deployment`
+/// logs a warn and returns `Ok(())`.
 pub async fn on_lifecycle(
     inventory: &Inventory,
     event: &Event,
@@ -117,18 +150,10 @@ pub async fn on_lifecycle(
         }
     };
 
-    // Each container the deployment knows about: green is the new one,
-    // blue is the previous one. Some deployments only have one (e.g.
-    // first spin-up has no blue). We look both up because a hook
-    // configured on either still applies.
     let names: Vec<&str> = std::iter::once(dep.green_container.as_deref().unwrap_or("").trim())
         .chain(std::iter::once(
             dep.blue_container.as_deref().unwrap_or("").trim(),
         ))
-        // Also try the service_name itself: container_hooks is keyed by
-        // container_name, but the deployment's green/blue are container
-        // ids in production. We additionally try service_name so that a
-        // hook configured on the compose service catches.
         .chain(std::iter::once(dep.service_name.as_str()))
         .filter(|n| !n.is_empty())
         .collect();
@@ -280,7 +305,6 @@ mod tests {
     #[tokio::test]
     async fn missing_hook_row_silent_no_op() {
         let (inv, _host, dep) = setup().await;
-        // No upsert_container_hooks call.
         on_lifecycle(
             &inv,
             &ev("deployment.spinning_up", &dep),
@@ -354,7 +378,6 @@ mod tests {
             ..Default::default()
         };
         e.metadata = serde_json::json!({"deployment": "not a deployment object"});
-        // Must not error, must not enqueue.
         on_lifecycle(&inv, &e, HookKind::PreDeploy).await.unwrap();
         let rows = inv
             .list_deliveries_by_source(DeliverySource::Lifecycle, 50)
@@ -366,7 +389,6 @@ mod tests {
     #[tokio::test]
     async fn no_url_for_kind_skips_enqueue() {
         let (inv, host, dep) = setup().await;
-        // Hook row with only post_deploy URL.
         inv.upsert_container_hooks(UpsertContainerHooks {
             host_id: host,
             container_id: "blog-web-green".into(),
@@ -378,7 +400,6 @@ mod tests {
         })
         .await
         .unwrap();
-        // Pre-deploy event arrives -> no enqueue.
         on_lifecycle(
             &inv,
             &ev("deployment.spinning_up", &dep),

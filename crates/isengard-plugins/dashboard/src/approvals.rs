@@ -68,17 +68,27 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tracing::{debug, warn};
 
+/// `TELEGRAM_WEBHOOK_SECRET_ENV` constant.
 const TELEGRAM_WEBHOOK_SECRET_ENV: &str = "ISENGARD_TELEGRAM_WEBHOOK_SECRET";
+/// `TELEGRAM_BOT_TOKEN_ENV` constant.
 const TELEGRAM_BOT_TOKEN_ENV: &str = "ISENGARD_TELEGRAM_BOT_TOKEN";
+/// `TELEGRAM_API_BASE_ENV` constant.
 const TELEGRAM_API_BASE_ENV: &str = "ISENGARD_TELEGRAM_API_BASE";
+/// `TELEGRAM_SECRET_HEADER` constant.
 const TELEGRAM_SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
 
+/// `DISCORD_PUBLIC_KEY_ENV` constant.
 const DISCORD_PUBLIC_KEY_ENV: &str = "ISENGARD_DISCORD_PUBLIC_KEY";
+/// `DISCORD_BOT_TOKEN_ENV` constant.
 const DISCORD_BOT_TOKEN_ENV: &str = "ISENGARD_DISCORD_BOT_TOKEN";
+/// `DISCORD_API_BASE_ENV` constant.
 const DISCORD_API_BASE_ENV: &str = "ISENGARD_DISCORD_API_BASE";
+/// `DISCORD_SIGNATURE_HEADER` constant.
 const DISCORD_SIGNATURE_HEADER: &str = "x-signature-ed25519";
+/// `DISCORD_TIMESTAMP_HEADER` constant.
 const DISCORD_TIMESTAMP_HEADER: &str = "x-signature-timestamp";
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/approvals", get(list_approvals))
@@ -96,22 +106,39 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalDto {
+    /// `action_id` field.
     pub action_id: String,
+    /// `state` field.
     pub state: ApprovalState,
+    /// `host_id` field.
     pub host_id: String,
+    /// `stack` field.
     pub stack: String,
+    /// `service` field.
     pub service: String,
+    /// `container_name` field.
     pub container_name: String,
+    /// `image` field.
     pub image: String,
+    /// `current_digest` field.
     pub current_digest: String,
+    /// `proposed_digest` field.
     pub proposed_digest: String,
+    /// `diff_url` field.
     pub diff_url: Option<String>,
+    /// `approver_channel` field.
     pub approver_channel: Option<String>,
+    /// `expires_at` field.
     pub expires_at: DateTime<Utc>,
+    /// `decided_at` field.
     pub decided_at: Option<DateTime<Utc>>,
+    /// `decided_by` field.
     pub decided_by: Option<String>,
+    /// `metadata` field.
     pub metadata: Option<serde_json::Value>,
+    /// `created_at` field.
     pub created_at: DateTime<Utc>,
+    /// `updated_at` field.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -141,11 +168,15 @@ impl From<PendingApprovalRow> for ApprovalDto {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+/// ApprovalListQuery.
 pub struct ApprovalListQuery {
     /// One of `open` (default), `decided`, `all`.
     pub state: Option<String>,
+    /// `host_id` field.
     pub host_id: Option<String>,
+    /// `stack` field.
     pub stack: Option<String>,
+    /// `service` field.
     pub service: Option<String>,
     /// RFC3339 timestamp; rows older than this are excluded.
     pub since: Option<String>,
@@ -153,6 +184,7 @@ pub struct ApprovalListQuery {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// DecisionDto.
 pub struct DecisionDto {
     /// One of `approve`, `reject`, `snooze`.
     pub decision: String,
@@ -164,7 +196,9 @@ pub struct DecisionDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// DecisionResponseDto.
 pub struct DecisionResponseDto {
+    /// `approval` field.
     pub approval: ApprovalDto,
     /// `true` iff a `force_update` HostAction was queued for the agent.
     pub dispatched_apply_update: bool,
@@ -174,10 +208,13 @@ pub struct DecisionResponseDto {
 }
 
 #[derive(Debug, Serialize)]
+/// ErrorBody.
 struct ErrorBody {
+    /// `error` field.
     error: String,
 }
 
+/// `err`.
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ErrorBody { error: msg.into() })).into_response()
 }
@@ -189,12 +226,16 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 /// Parsed, validated form of the `DecisionDto.decision` string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParsedDecision {
+    /// `Approve` variant.
     Approve,
+    /// `Reject` variant.
     Reject,
+    /// `Snooze` variant.
     Snooze(u32),
 }
 
 impl ParsedDecision {
+    /// Converts into storage.
     fn to_storage(self) -> ApprovalDecision {
         match self {
             Self::Approve => ApprovalDecision::Approve,
@@ -203,6 +244,7 @@ impl ParsedDecision {
         }
     }
 
+    /// `event_kind`.
     fn event_kind(self) -> &'static str {
         match self {
             Self::Approve => UPDATE_APPROVED,
@@ -241,6 +283,7 @@ fn parse_dashboard_decision(body: &DecisionDto) -> Result<ParsedDecision, Respon
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// `GET` handler for approvals.
 async fn list_approvals(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<ApprovalListQuery>,
@@ -299,6 +342,7 @@ async fn list_approvals(
     }
 }
 
+/// `GET` handler for approval.
 async fn get_approval(
     State(handles): State<Arc<ControllerHandles>>,
     Path(action_id): Path<String>,
@@ -316,6 +360,7 @@ async fn get_approval(
     }
 }
 
+/// `decide_approval`.
 async fn decide_approval(
     State(handles): State<Arc<ControllerHandles>>,
     Path(action_id): Path<String>,
@@ -486,6 +531,7 @@ async fn apply_decision(
     Json(resp).into_response()
 }
 
+/// `parse_host_id`.
 fn parse_host_id(s: &str) -> Result<isengard_storage::HostId, String> {
     let ulid = s.parse::<ulid::Ulid>().map_err(|e| format!("{e}"))?;
     Ok(isengard_storage::HostId::from(ulid))
@@ -499,36 +545,50 @@ fn parse_host_id(s: &str) -> Result<isengard_storage::HostId, String> {
 /// we care about are deserialized; everything else is ignored.
 #[derive(Debug, Deserialize)]
 struct TelegramUpdate {
+    /// `callback_query` field.
     callback_query: Option<TelegramCallbackQuery>,
 }
 
 #[derive(Debug, Deserialize)]
+/// TelegramCallbackQuery.
 struct TelegramCallbackQuery {
+    /// `id` field.
     id: String,
     #[serde(default)]
+    /// `from` field.
     from: Option<TelegramUser>,
     #[serde(default)]
+    /// `data` field.
     data: Option<String>,
     #[serde(default)]
+    /// `message` field.
     message: Option<TelegramMessageRef>,
 }
 
 #[derive(Debug, Deserialize)]
+/// TelegramUser.
 struct TelegramUser {
     #[serde(default)]
+    /// `username` field.
     username: Option<String>,
     #[serde(default)]
+    /// `first_name` field.
     first_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// TelegramMessageRef.
 struct TelegramMessageRef {
+    /// `message_id` field.
     message_id: i64,
+    /// `chat` field.
     chat: TelegramChatRef,
 }
 
 #[derive(Debug, Deserialize)]
+/// TelegramChatRef.
 struct TelegramChatRef {
+    /// `id` field.
     id: i64,
 }
 
@@ -538,11 +598,15 @@ struct TelegramChatRef {
 /// alternative to making a separate POST to /answerCallbackQuery.
 #[derive(Debug, Serialize)]
 struct AnswerCallbackQueryReply<'a> {
+    /// `method` field.
     method: &'a str,
+    /// `callback_query_id` field.
     callback_query_id: &'a str,
+    /// `text` field.
     text: &'a str,
 }
 
+/// `telegram_callback`.
 async fn telegram_callback(
     State(handles): State<Arc<ControllerHandles>>,
     headers: HeaderMap,
@@ -610,7 +674,7 @@ async fn telegram_callback(
 
     // 5. Apply the decision via the shared path. We don't return the
     // `DecisionResponseDto` directly because Telegram expects a specific
-    // response shape; we just need to confirm it succeeded.
+    // response shape; the caller only needs to confirm it succeeded.
     let storage_decision = parsed.parsed.to_storage();
     let decide_res = handles
         .inventory
@@ -797,8 +861,11 @@ async fn telegram_callback(
 }
 
 #[derive(Debug)]
+/// ParsedCallbackData.
 struct ParsedCallbackData {
+    /// `action_id` field.
     action_id: String,
+    /// `parsed` field.
     parsed: ParsedDecision,
 }
 
@@ -857,6 +924,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// `render_decided_message_text`.
 fn render_decided_message_text(
     decision: ParsedDecision,
     decided_by: &str,
@@ -893,40 +961,53 @@ struct DiscordInteraction {
     #[serde(rename = "type")]
     kind: u8,
     #[serde(default)]
+    /// `data` field.
     data: Option<DiscordInteractionData>,
     #[serde(default)]
+    /// `member` field.
     member: Option<DiscordMember>,
     #[serde(default)]
+    /// `user` field.
     user: Option<DiscordUser>,
     #[serde(default)]
+    /// `message` field.
     message: Option<DiscordMessageRef>,
 }
 
 #[derive(Debug, Deserialize)]
+/// DiscordInteractionData.
 struct DiscordInteractionData {
     #[serde(default)]
+    /// `custom_id` field.
     custom_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// DiscordMember.
 struct DiscordMember {
     #[serde(default)]
+    /// `user` field.
     user: Option<DiscordUser>,
 }
 
 #[derive(Debug, Deserialize)]
+/// DiscordUser.
 struct DiscordUser {
     #[serde(default)]
+    /// `username` field.
     username: Option<String>,
     #[serde(default)]
+    /// `global_name` field.
     global_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// DiscordMessageRef.
 struct DiscordMessageRef {
     /// Snowflake string. Parsed to i64 at use site.
     id: String,
     #[serde(default)]
+    /// `channel_id` field.
     channel_id: Option<String>,
 }
 
@@ -936,22 +1017,30 @@ struct DiscordMessageRef {
 #[derive(Debug, Serialize)]
 struct DiscordPong {
     #[serde(rename = "type")]
+    /// `kind` field.
     kind: u8,
 }
 
 #[derive(Debug, Serialize)]
+/// DiscordUpdateMessage.
 struct DiscordUpdateMessage<'a> {
     #[serde(rename = "type")]
+    /// `kind` field.
     kind: u8,
+    /// `data` field.
     data: DiscordUpdateMessageData<'a>,
 }
 
 #[derive(Debug, Serialize)]
+/// DiscordUpdateMessageData.
 struct DiscordUpdateMessageData<'a> {
+    /// `content` field.
     content: &'a str,
+    /// `components` field.
     components: &'a [serde_json::Value],
 }
 
+/// `discord_callback`.
 async fn discord_callback(
     State(handles): State<Arc<ControllerHandles>>,
     headers: HeaderMap,
@@ -1025,6 +1114,7 @@ async fn discord_callback(
     }
 }
 
+/// `discord_message_component`.
 async fn discord_message_component(
     handles: &Arc<ControllerHandles>,
     interaction: DiscordInteraction,
@@ -1150,6 +1240,7 @@ async fn discord_message_component(
 /// keeps its inline copy because it predates the helper. The data shape is
 /// stable enough that a future refactor could collapse them.
 struct CallbackOutcome {
+    /// `dispatched_apply_update` field.
     dispatched_apply_update: bool,
 }
 
@@ -1266,6 +1357,7 @@ async fn apply_callback_side_effects(
     }
 }
 
+/// `resolve_discord_decided_by`.
 fn resolve_discord_decided_by(i: &DiscordInteraction) -> String {
     if let Some(member) = i.member.as_ref() {
         if let Some(u) = member.user.as_ref() {
@@ -1288,6 +1380,7 @@ fn resolve_discord_decided_by(i: &DiscordInteraction) -> String {
     "discord".to_string()
 }
 
+/// `discord_update_message_response`.
 fn discord_update_message_response(text: &str) -> Response {
     let body = DiscordUpdateMessage {
         kind: 7,

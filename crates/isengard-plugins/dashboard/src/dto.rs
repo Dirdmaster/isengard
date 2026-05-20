@@ -9,15 +9,25 @@ use serde::{Deserialize, Serialize};
 use crate::deployments::DeploymentDto;
 
 #[derive(Debug, Clone, Serialize)]
+/// HostDto.
 pub struct HostDto {
+    /// `id` field.
     pub id: String,
+    /// `fingerprint` field.
     pub fingerprint: String,
+    /// `hostname` field.
     pub hostname: String,
+    /// `os` field.
     pub os: String,
+    /// `arch` field.
     pub arch: String,
+    /// `agent_version` field.
     pub agent_version: String,
+    /// `docker_version` field.
     pub docker_version: String,
+    /// `enrolled_at` field.
     pub enrolled_at: DateTime<Utc>,
+    /// `last_seen_at` field.
     pub last_seen_at: Option<DateTime<Utc>>,
     /// Wisp: which runtime backend this host's agent is
     /// driving (`docker`, `wisp`, ...). `"docker"` for pre-0.5
@@ -55,18 +65,31 @@ impl From<Host> for HostDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// EventDto.
 pub struct EventDto {
+    /// `id` field.
     pub id: i64,
+    /// `kind` field.
     pub kind: String,
+    /// `host_id` field.
     pub host_id: Option<String>,
+    /// `container_name` field.
     pub container_name: Option<String>,
+    /// `image` field.
     pub image: Option<String>,
+    /// `old_digest` field.
     pub old_digest: Option<String>,
+    /// `new_digest` field.
     pub new_digest: Option<String>,
+    /// `error` field.
     pub error: Option<String>,
+    /// `summary` field.
     pub summary: String,
+    /// `metadata` field.
     pub metadata: serde_json::Value,
+    /// `occurred_at` field.
     pub occurred_at: DateTime<Utc>,
+    /// `received_at` field.
     pub received_at: DateTime<Utc>,
 }
 
@@ -97,11 +120,17 @@ impl From<EventRow> for EventDto {
 /// Live event frame for WebSocket broadcasts.
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveEventDto {
+    /// `kind` field.
     pub kind: String,
+    /// `host_id` field.
     pub host_id: Option<String>,
+    /// `container_name` field.
     pub container_name: Option<String>,
+    /// `image` field.
     pub image: Option<String>,
+    /// `summary` field.
     pub summary: String,
+    /// `occurred_at` field.
     pub occurred_at: DateTime<Utc>,
 }
 
@@ -119,44 +148,62 @@ impl From<&Event> for LiveEventDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// EnrollmentDto.
 pub struct EnrollmentDto {
+    /// `agent_id` field.
     pub agent_id: String,
+    /// `enrollment_token` field.
     pub enrollment_token: String,
+    /// `install_command` field.
     pub install_command: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// SettingsDto.
 pub struct SettingsDto {
+    /// `values` field.
     pub values: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// PatchSettingsBody.
 pub struct PatchSettingsBody {
+    /// `values` field.
     pub values: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
+/// EnrollRequest.
 pub struct EnrollRequest {
+    /// `hostname` field.
     pub hostname: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// PatchHostRequest.
 pub struct PatchHostRequest {
     // No patchable fields after kill-fleets. Kept as a placeholder so the
     // handler retains its JSON body extractor; future fields land here.
     #[serde(default, skip_serializing)]
+    /// `_placeholder` field.
     pub _placeholder: Option<()>,
 }
 
 #[derive(Debug, Serialize)]
+/// DeleteResponse.
 pub struct DeleteResponse {
+    /// `deleted` field.
     pub deleted: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// EventsQuery.
 pub struct EventsQuery {
+    /// `limit` field.
     pub limit: Option<i64>,
+    /// `kind` field.
     pub kind: Option<String>,
+    /// `host_id` field.
     pub host_id: Option<String>,
     /// Filter events whose `metadata.deployment.id`
     /// matches this id. Used by the History tab row-expand timeline.
@@ -164,17 +211,24 @@ pub struct EventsQuery {
 }
 
 #[derive(Debug, Deserialize, Default)]
+/// HostsQuery.
 pub struct HostsQuery {
+    /// `state` field.
     pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// StackDto.
 pub struct StackDto {
+    /// `id` field.
     pub id: String,
+    /// `host_id` field.
     pub host_id: String,
+    /// `name` field.
     pub name: String,
     /// One of "compose", "manual", "inferred".
     pub source: String,
+    /// `discovered_at` field.
     pub discovered_at: DateTime<Utc>,
 }
 
@@ -191,16 +245,21 @@ impl From<Stack> for StackDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// ServiceDto.
 pub struct ServiceDto {
     /// Service primary key (i64) rendered as a string for JSON consistency.
     pub id: String,
+    /// `host_id` field.
     pub host_id: String,
     /// Hostname resolved from inventory; `None` when the host could not be
     /// looked up (deleted out-of-band, or batch translation skipped it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// `stack_id` field.
     pub stack_id: Option<String>,
+    /// `name` field.
     pub name: String,
+    /// `image` field.
     pub image: String,
     /// v0.5.3: one of `"pulling"`, `"creating"`, `"running"`,
     /// `"restarting"`, `"stopped"`, `"failed"`, `"unknown"`. Older
@@ -208,7 +267,9 @@ pub struct ServiceDto {
     /// `"exited"`, `"dead"`); the controller normalises those via
     /// `ServiceState::from_str` before persistence.
     pub state: String,
+    /// `last_seen_at` field.
     pub last_seen_at: DateTime<Utc>,
+    /// `deploy_strategy_override` field.
     pub deploy_strategy_override: Option<String>,
 }
 
@@ -242,15 +303,22 @@ impl ServiceDto {
 /// fleet-wide routing rules attached to the service.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceDetailDto {
+    /// `service` field.
     pub service: ServiceDto,
+    /// `other_instances` field.
     pub other_instances: Vec<ServiceDto>,
+    /// `effective_policy` field.
     pub effective_policy: ResolvedPolicy,
+    /// `last_deployment` field.
     pub last_deployment: Option<DeploymentDto>,
+    /// `recent_events` field.
     pub recent_events: Vec<EventDto>,
+    /// `routing_rules` field.
     pub routing_rules: Vec<RoutingRule>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// SparklineDto.
 pub struct SparklineDto {
     /// Number of buckets (typically 24 for a 24h range, one per hour).
     pub buckets: Vec<u32>,
@@ -384,15 +452,25 @@ pub struct ContainerDto {
     /// 16-char hex digest. The default `isd ps` column shows the first
     /// 12 chars; `--no-trunc` shows the full value.
     pub id: String,
+    /// `runtime_container_id` field.
     pub runtime_container_id: String,
+    /// `image` field.
     pub image: String,
+    /// `command` field.
     pub command: Option<String>,
+    /// `state` field.
     pub state: String,
+    /// `status_message` field.
     pub status_message: Option<String>,
+    /// `names` field.
     pub names: String,
+    /// `stack` field.
     pub stack: Option<String>,
+    /// `service` field.
     pub service: Option<String>,
+    /// `host_id` field.
     pub host_id: String,
+    /// `host_name` field.
     pub host_name: Option<String>,
     /// True when the host's last heartbeat is older than the
     /// configured threshold. `state` is left as last reported; the
@@ -401,9 +479,13 @@ pub struct ContainerDto {
     /// Seconds since the host's last heartbeat. 0 when the host is
     /// currently considered online.
     pub host_offline_secs: i64,
+    /// `created_at` field.
     pub created_at: Option<DateTime<Utc>>,
+    /// `first_seen_at` field.
     pub first_seen_at: DateTime<Utc>,
+    /// `last_seen_at` field.
     pub last_seen_at: DateTime<Utc>,
+    /// `removed_at` field.
     pub removed_at: Option<DateTime<Utc>>,
 }
 

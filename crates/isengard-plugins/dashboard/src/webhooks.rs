@@ -32,6 +32,7 @@ use isengard_storage::webhook::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/webhooks", get(list_webhooks).post(create_webhook))
@@ -51,12 +52,19 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookDto {
+    /// `id` field.
     pub id: i64,
+    /// `url` field.
     pub url: String,
+    /// `secret_masked` field.
     pub secret_masked: String,
+    /// `event_kinds` field.
     pub event_kinds: String,
+    /// `enabled` field.
     pub enabled: bool,
+    /// `created_at` field.
     pub created_at: DateTime<Utc>,
+    /// `updated_at` field.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -76,11 +84,12 @@ impl From<Webhook> for WebhookDto {
 
 /// One-time-show DTO returned ONLY from `POST /webhooks` and the auto-generate
 /// flow: includes the plaintext secret. Storage retains the same secret
-/// indefinitely (this DTO is just the API response envelope).
+/// indefinitely (this DTO is the API response envelope only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookCreatedDto {
     #[serde(flatten)]
+    /// `webhook` field.
     pub webhook: WebhookDto,
     /// Plaintext secret. Returned exactly once on create.
     pub secret: String,
@@ -88,7 +97,9 @@ pub struct WebhookCreatedDto {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// CreateWebhookDto.
 pub struct CreateWebhookDto {
+    /// `url` field.
     pub url: String,
     /// Operator-supplied secret. If absent or empty, the server generates one.
     #[serde(default)]
@@ -97,41 +108,58 @@ pub struct CreateWebhookDto {
     #[serde(default)]
     pub event_kinds: Option<String>,
     #[serde(default = "default_true")]
+    /// `enabled` field.
     pub enabled: bool,
 }
 
+/// `default_true`.
 fn default_true() -> bool {
     true
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// UpdateWebhookDto.
 pub struct UpdateWebhookDto {
     #[serde(default)]
+    /// `url` field.
     pub url: Option<String>,
     #[serde(default)]
+    /// `secret` field.
     pub secret: Option<String>,
     #[serde(default)]
+    /// `event_kinds` field.
     pub event_kinds: Option<String>,
     #[serde(default)]
+    /// `enabled` field.
     pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// WebhookDeliveryDto.
 pub struct WebhookDeliveryDto {
+    /// `id` field.
     pub id: i64,
+    /// `webhook_id` field.
     pub webhook_id: Option<i64>,
     /// Which subsystem produced this row.
     pub source: DeliverySource,
     /// Inline destination URL for `lifecycle` / `gate` rows.
     pub url: Option<String>,
+    /// `event_kind` field.
     pub event_kind: String,
+    /// `status` field.
     pub status: DeliveryStatus,
+    /// `attempts` field.
     pub attempts: i64,
+    /// `last_attempt_at` field.
     pub last_attempt_at: Option<DateTime<Utc>>,
+    /// `last_error` field.
     pub last_error: Option<String>,
+    /// `next_retry_at` field.
     pub next_retry_at: Option<DateTime<Utc>>,
+    /// `created_at` field.
     pub created_at: DateTime<Utc>,
 }
 
@@ -155,27 +183,35 @@ impl From<WebhookDelivery> for WebhookDeliveryDto {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// DeliveriesQuery.
 pub struct DeliveriesQuery {
     #[serde(default)]
+    /// `status` field.
     pub status: Option<String>,
     #[serde(default)]
+    /// `limit` field.
     pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// DeliveriesBySourceQuery.
 pub struct DeliveriesBySourceQuery {
     /// `webhook` | `lifecycle` | `gate`
     pub source: String,
     #[serde(default)]
+    /// `limit` field.
     pub limit: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
+/// ErrorBody.
 struct ErrorBody {
+    /// `error` field.
     error: String,
 }
 
+/// `err`.
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ErrorBody { error: msg.into() })).into_response()
 }
@@ -197,12 +233,14 @@ pub fn mask_secret(s: &str) -> String {
     format!("****{tail}")
 }
 
+/// `generate_secret`.
 fn generate_secret() -> String {
     let mut buf = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut buf);
     hex::encode(buf)
 }
 
+/// `GET` handler for webhooks.
 async fn list_webhooks(State(handles): State<Arc<ControllerHandles>>) -> Response {
     match handles.inventory.list_webhooks().await {
         Ok(rows) => {
@@ -216,6 +254,7 @@ async fn list_webhooks(State(handles): State<Arc<ControllerHandles>>) -> Respons
     }
 }
 
+/// `POST` handler for webhook.
 async fn create_webhook(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<CreateWebhookDto>,
@@ -259,6 +298,7 @@ async fn create_webhook(
     }
 }
 
+/// `GET` handler for webhook.
 async fn get_webhook(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
@@ -273,6 +313,7 @@ async fn get_webhook(
     }
 }
 
+/// `PUT` handler for webhook.
 async fn update_webhook(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
@@ -294,6 +335,7 @@ async fn update_webhook(
     }
 }
 
+/// `DELETE` handler for webhook.
 async fn delete_webhook(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
@@ -308,6 +350,7 @@ async fn delete_webhook(
     }
 }
 
+/// `GET` handler for deliveries.
 async fn list_deliveries(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
@@ -338,6 +381,7 @@ async fn list_deliveries(
     }
 }
 
+/// `GET` handler for deliveries by source.
 async fn list_deliveries_by_source(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<DeliveriesBySourceQuery>,
@@ -366,6 +410,7 @@ async fn list_deliveries_by_source(
     }
 }
 
+/// `test_webhook`.
 async fn test_webhook(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
