@@ -4,7 +4,6 @@ target/
 .idea/
 .vscode/
 .superpowers/
-docs/
 legacy-go/
 # Match nested node_modules too (e.g. crates/.../dashboard/web/node_modules).
 # Without **/ the host's macOS-built node_modules leaks into the Docker
@@ -20,5 +19,10 @@ legacy-go/
 **/.output/
 **/.bun/
 **/dist/
-*.md
-!README.md
+
+# docs/, skills/, and crates/<crate>/docs/*.md stay IN the build context.
+# isengard-mcp bakes them into the binary at compile time via
+# include_dir!; excluding them panics the proc macro during cargo build
+# release. The Docus site under website/ is not consumed by the binary
+# and would only bloat the build context, so keep it ignored.
+website/
