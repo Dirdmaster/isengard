@@ -26,6 +26,7 @@ pub mod placement;
 pub mod proxy;
 pub mod runtime;
 pub mod secret_fetch;
+pub mod sshd_config;
 pub mod stack_secrets;
 pub mod sync;
 pub mod tls;
@@ -214,7 +215,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
                 &opts.controller_url,
                 &enroll_token,
                 host_info,
-                bootstrap_trust,
+                bootstrap_trust.clone(),
             )
             .await
             {
@@ -247,6 +248,27 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             )
             .await?;
             info!(agent_id = %agent_id_str, "enrolled");
+
+            // SSH bastion install: fetch the controller's SSH user-cert
+            // authority pubkey + drop it into the host's sshd config.
+            // Best-effort by design. Enrollment is the source of truth;
+            // a failure here logs a warning and continues.
+            match enroll::fetch_ssh_ca(&opts.controller_url, &bootstrap_trust).await {
+                Ok(pubkey) => match sshd_config::install_ssh_ca(&pubkey).await {
+                    Ok(true) => info!("ssh bastion installed and sshd reloaded"),
+                    Ok(false) => info!(
+                        "ssh bastion install skipped ({} set)",
+                        sshd_config::DISABLE_ENV_VAR
+                    ),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ssh bastion install failed (continuing enroll)")
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "fetching ssh ca pubkey failed (continuing enroll)")
+                }
+            }
+
             (agent_id_str, outcome.heartbeat_interval_secs)
         }
     };

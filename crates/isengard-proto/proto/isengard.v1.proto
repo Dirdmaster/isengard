@@ -51,6 +51,17 @@ service Controller {
   // never persists plaintext to disk: the value lands in a tmpfs
   // mount inside the operator's workload container.
   rpc FetchSecret(FetchSecretRequest) returns (FetchSecretResponse);
+
+  // Agent fetches the controller's SSH user-certificate authority
+  // public key, then installs it as a `TrustedUserCAKeys` drop-in for
+  // the host's sshd. After install + reload, any user cert signed by
+  // the controller's SSH CA can SSH into this host. Used by
+  // `isd ssh <host>` (cert minted on demand by the dashboard).
+  //
+  // The endpoint serves public data (a CA pubkey), so it is allowed
+  // through the controller's auth interceptor without an mTLS client
+  // cert. The agent calls it right after mTLS enrollment succeeds.
+  rpc GetSshCa(GetSshCaRequest) returns (GetSshCaResponse);
 }
 
 // ============ GET CA PEM ============
@@ -137,6 +148,19 @@ message FetchSecretResponse {
   bytes value = 1;
   // RFC3339 timestamp of the last controller-side rotation.
   string updated_at = 2;
+}
+
+// ============ GET SSH CA ============
+
+// Empty request body. Reserved for future shape stability.
+message GetSshCaRequest {
+}
+
+// Controller's SSH user-certificate authority public key in OpenSSH
+// authorized_keys format (`ssh-ed25519 AAAA... comment\n`). Suitable
+// for direct write into `TrustedUserCAKeys` on the agent host.
+message GetSshCaResponse {
+  bytes pubkey = 1;
 }
 
 // ============ SYNC ============

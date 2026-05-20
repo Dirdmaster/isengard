@@ -15,7 +15,7 @@
 use anyhow::{Context, Result, anyhow};
 
 use isengard_proto::pb::controller_client::ControllerClient;
-use isengard_proto::pb::{EnrollRequest, GetCaPemRequest};
+use isengard_proto::pb::{EnrollRequest, GetCaPemRequest, GetSshCaRequest};
 use isengard_storage::host::HostId;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 
@@ -183,6 +183,37 @@ pub async fn fetch_and_verify_ca(
     }
 
     Ok(pem)
+}
+
+/// Fetch the controller's SSH user-cert authority public key over the
+/// fingerprint-verified bootstrap channel.
+///
+/// Run after `enroll()` succeeds but before mTLS-only operations
+/// begin. The `GetSshCa` RPC is in the controller's `PUBLIC_METHODS`
+/// allow-list, so the bootstrap TLS config (server-cert verified by
+/// fingerprint) is enough to authenticate it.
+///
+/// # Errors
+///
+/// Returns `Err` when the bootstrap channel can't dial or when the
+/// RPC itself fails.
+pub async fn fetch_ssh_ca(controller_url: &str, trust: &BootstrapTrust) -> anyhow::Result<Vec<u8>> {
+    let bootstrap_tls = build_bootstrap_tls(trust)?;
+    let channel = tonic::transport::Channel::from_shared(controller_url.to_string())
+        .with_context(|| format!("invalid controller url {controller_url:?}"))?
+        .tls_config(bootstrap_tls)
+        .context("install bootstrap tls config for GetSshCa")?
+        .connect()
+        .await
+        .with_context(|| format!("connect bootstrap channel to {controller_url}"))?;
+
+    let pubkey = ControllerClient::new(channel)
+        .get_ssh_ca(GetSshCaRequest {})
+        .await
+        .context("GetSshCa RPC failed")?
+        .into_inner()
+        .pubkey;
+    Ok(pubkey)
 }
 
 /// Build a tonic [`Channel`] that skips server-cert verification.

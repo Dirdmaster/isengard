@@ -8,7 +8,8 @@ use std::sync::Arc;
 use isengard_proto::pb::controller_server::Controller;
 use isengard_proto::pb::{
     AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, FetchSecretRequest,
-    FetchSecretResponse, GetCaPemRequest, GetCaPemResponse, RenewCertRequest, RenewCertResponse,
+    FetchSecretResponse, GetCaPemRequest, GetCaPemResponse, GetSshCaRequest, GetSshCaResponse,
+    RenewCertRequest, RenewCertResponse,
 };
 use isengard_storage::{Inventory, Journal};
 use tokio_stream::wrappers::ReceiverStream;
@@ -59,6 +60,11 @@ pub struct ControllerService {
     /// `on_heartbeat_labels` here; `enroll` calls `on_host_enroll`;
     /// `disconnect_monitor.rs` calls `on_host_disconnect_long`.
     pub scheduler: Option<Arc<crate::scheduler::Scheduler>>,
+    /// SSH user-certificate authority. The `GetSshCa` RPC returns
+    /// `public_key_openssh()` so agents install it as a
+    /// `TrustedUserCAKeys` drop-in. Later phases use `sign_user_cert`
+    /// to mint short-lived operator certs via the dashboard.
+    pub ssh_ca: Arc<crate::ssh_ca::SshAuthority>,
 }
 
 impl ControllerService {
@@ -77,6 +83,7 @@ impl ControllerService {
         compose_broker: Arc<ComposeBroker>,
         secrets: Arc<SecretsStore>,
         scheduler: Option<Arc<crate::scheduler::Scheduler>>,
+        ssh_ca: Arc<crate::ssh_ca::SshAuthority>,
     ) -> Self {
         Self {
             inventory,
@@ -92,6 +99,7 @@ impl ControllerService {
             compose_broker,
             secrets,
             scheduler,
+            ssh_ca,
         }
     }
 
@@ -120,6 +128,7 @@ impl ControllerService {
         // will surface MasterKeyMissing, which lets exercise of error
         // paths without writing key files in the test process.
         let secrets = Arc::new(SecretsStore::new_locked(inventory.clone()));
+        let ssh_ca = Arc::new(crate::ssh_ca::SshAuthority::for_tests().expect("ssh_ca for_tests"));
         Self {
             inventory,
             journal,
@@ -136,6 +145,7 @@ impl ControllerService {
             // Tests stay scheduler-less; the placement scheduler is only
             // wired in via `run_controller`.
             scheduler: None,
+            ssh_ca,
         }
     }
 }
@@ -154,6 +164,17 @@ impl Controller for ControllerService {
         // call through without an mTLS handshake.
         let pem = self.ca.root_cert_pem().as_bytes().to_vec();
         Ok(Response::new(GetCaPemResponse { pem }))
+    }
+
+    async fn get_ssh_ca(
+        &self,
+        _request: Request<GetSshCaRequest>,
+    ) -> Result<Response<GetSshCaResponse>, Status> {
+        // Unauthenticated: the response is the controller's SSH user-
+        // cert authority public key. Agents drop it into
+        // `TrustedUserCAKeys` right after mTLS enrollment.
+        let pubkey = self.ssh_ca.public_key_openssh().to_vec();
+        Ok(Response::new(GetSshCaResponse { pubkey }))
     }
 
     async fn enroll(

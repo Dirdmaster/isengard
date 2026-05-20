@@ -14,7 +14,8 @@ use isengard_core::join_token;
 use isengard_proto::pb::controller_server::{Controller, ControllerServer};
 use isengard_proto::pb::{
     AgentMessage, ControllerMessage, EnrollRequest, EnrollResponse, FetchSecretRequest,
-    FetchSecretResponse, GetCaPemRequest, GetCaPemResponse, RenewCertRequest, RenewCertResponse,
+    FetchSecretResponse, GetCaPemRequest, GetCaPemResponse, GetSshCaRequest, GetSshCaResponse,
+    RenewCertRequest, RenewCertResponse,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
@@ -63,6 +64,13 @@ impl Controller for StubController {
         &self,
         _: Request<FetchSecretRequest>,
     ) -> Result<Response<FetchSecretResponse>, Status> {
+        unimplemented!("not exercised in pre-enroll fingerprint tests")
+    }
+
+    async fn get_ssh_ca(
+        &self,
+        _: Request<GetSshCaRequest>,
+    ) -> Result<Response<GetSshCaResponse>, Status> {
         unimplemented!("not exercised in pre-enroll fingerprint tests")
     }
 }
