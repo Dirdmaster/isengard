@@ -45,8 +45,9 @@ pub struct CreateArgs {
     /// picker over the running containers when omitted.
     #[arg(long)]
     pub service: Option<String>,
-    /// Upstream port. Prompted when omitted; default is the
-    /// container's sole private port when it has exactly one.
+    /// Upstream port. Auto-detected from the container's exposed
+    /// ports when omitted (single port wins; if multiple, the first
+    /// common HTTP-ish port wins; else docker's first reported port).
     #[arg(long)]
     pub port: Option<u16>,
     /// Upstream protocol (http or https).
@@ -181,9 +182,10 @@ async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
 
 /// Interactive wizard. Lists running containers on the resolved docker
 /// context, lets the operator pick one via a fuzzy-substring filter,
-/// then prompts for the missing port (auto-defaulting when the chosen
-/// container has exactly one private port) and the public hostname.
-/// Already-supplied fields pass through unchanged.
+/// auto-detects the upstream port from the container's exposed ports,
+/// then prompts for the public hostname. Already-supplied fields pass
+/// through unchanged; pass `--port` explicitly to override the
+/// auto-detected choice.
 async fn run_wizard(mut args: CreateArgs, context: Option<&str>) -> Result<CreateArgs> {
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
     let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;
@@ -210,29 +212,38 @@ async fn run_wizard(mut args: CreateArgs, context: Option<&str>) -> Result<Creat
 
     let rows: Vec<ContainerRow> = candidates.into_iter().map(ContainerRow::from).collect();
 
-    if args.service.is_none() {
+    let picked_row = if args.service.is_none() {
         let picked = inquire::Select::new("Pick the upstream container", rows.clone())
             .with_help_message("type to filter")
             .with_page_size(15)
             .prompt()
             .map_err(|e| anyhow!("picker cancelled: {e}"))?;
         args.service = Some(picked.service_name.clone());
-        if args.port.is_none() {
-            args.port = Some(prompt_port(&picked)?);
-        }
-    } else if args.port.is_none() {
-        // --service was supplied but --port wasn't. Try to match the
-        // service name against the docker view so we can still default
-        // the port; fall back to a plain prompt if nothing matches.
+        Some(picked)
+    } else {
+        // --service supplied but no --port: still need the container's
+        // port info to auto-detect. Match the service name against
+        // the docker view.
         let svc = args.service.as_deref().unwrap();
-        let matched = rows.iter().find(|r| r.service_name == svc);
-        args.port = Some(match matched {
-            Some(row) => prompt_port(row)?,
-            None => inquire::CustomType::<u16>::new("Upstream port")
-                .with_error_message("ports are 1..=65535")
-                .prompt()
-                .map_err(|e| anyhow!("port prompt cancelled: {e}"))?,
-        });
+        rows.iter().find(|r| r.service_name == svc).cloned()
+    };
+
+    if args.port.is_none() {
+        let row = picked_row.as_ref().ok_or_else(|| {
+            anyhow!(
+                "service {:?} not found among running containers on {docker_uri}; \
+                 pass --port explicitly or pick from the wizard",
+                args.service.as_deref().unwrap_or("")
+            )
+        })?;
+        let port = auto_detect_port(&row.private_ports).ok_or_else(|| {
+            anyhow!(
+                "container {:?} exposes no ports; pass --port explicitly",
+                row.service_name
+            )
+        })?;
+        eprintln!("  using upstream port {port}");
+        args.port = Some(port);
     }
 
     if args.public_hostname.is_none() {
@@ -255,32 +266,31 @@ async fn run_wizard(mut args: CreateArgs, context: Option<&str>) -> Result<Creat
     Ok(args)
 }
 
-/// Prompt for the upstream port. When the picked container has
-/// exactly one distinct private port, pre-fill it as the default so
-/// the operator can just hit Enter.
-fn prompt_port(row: &ContainerRow) -> Result<u16> {
-    let mut prompt =
-        inquire::CustomType::<u16>::new("Upstream port").with_error_message("ports are 1..=65535");
-    if let [only] = row.private_ports.as_slice() {
-        prompt = prompt
-            .with_default(*only)
-            .with_help_message("press Enter to accept the container's exposed port");
-    } else if !row.private_ports.is_empty() {
-        // Multiple candidates: surface them so the operator picks
-        // knowingly. Pre-filling would be a coin flip.
-        let listed = row
-            .private_ports
-            .iter()
-            .map(u16::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        prompt = prompt.with_help_message(Box::leak(
-            format!("container exposes: {listed}").into_boxed_str(),
-        ));
+/// Pick the most likely upstream HTTP port from a container's exposed
+/// private ports.
+///
+/// Heuristic:
+///   1. Exactly one port -> use it.
+///   2. Otherwise, prefer the first port that matches a common HTTP
+///      vocabulary (80, 443, 3000, 5000, 8000, 8080, 8081, 8443, 9000).
+///   3. Otherwise, fall back to the first port docker reported.
+///   4. Empty -> None.
+///
+/// Real-world calibration for the typical homelab containers:
+///   - plex (32400)            -> 32400 (single)
+///   - radarr/sonarr/etc       -> single port, used directly
+///   - qbittorrent (8080, 6881)-> 8080 (common-HTTP wins over 6881 BT)
+///   - flaresolverr (8191, 8192) -> 8191 (neither common; first wins)
+fn auto_detect_port(ports: &[u16]) -> Option<u16> {
+    if let [only] = ports {
+        return Some(*only);
     }
-    prompt
-        .prompt()
-        .map_err(|e| anyhow!("port prompt cancelled: {e}"))
+    const COMMON_HTTP: &[u16] = &[80, 443, 3000, 5000, 8000, 8080, 8081, 8443, 9000];
+    ports
+        .iter()
+        .copied()
+        .find(|p| COMMON_HTTP.contains(p))
+        .or_else(|| ports.first().copied())
 }
 
 /// Display row for the inquire `Select`. Carries both the displayed
@@ -453,6 +463,36 @@ async fn delete_rule(session: &Session, id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_detect_port_single() {
+        assert_eq!(auto_detect_port(&[32400]), Some(32400));
+        assert_eq!(auto_detect_port(&[7878]), Some(7878));
+    }
+
+    #[test]
+    fn auto_detect_port_prefers_common_http() {
+        // qbittorrent-shape: web UI on 8080, BT on 6881. We want 8080
+        // regardless of docker's enumeration order.
+        assert_eq!(auto_detect_port(&[6881, 8080]), Some(8080));
+        assert_eq!(auto_detect_port(&[8080, 6881]), Some(8080));
+        // Common ports beat arbitrary-app ports.
+        assert_eq!(auto_detect_port(&[9091, 80]), Some(80));
+        assert_eq!(auto_detect_port(&[12345, 3000]), Some(3000));
+    }
+
+    #[test]
+    fn auto_detect_port_falls_back_to_first_when_no_common_match() {
+        // flaresolverr-shape: 8191 API, 8192 metrics. Neither in the
+        // common list; docker reports 8191 first, that wins.
+        assert_eq!(auto_detect_port(&[8191, 8192]), Some(8191));
+        assert_eq!(auto_detect_port(&[55555, 44444]), Some(55555));
+    }
+
+    #[test]
+    fn auto_detect_port_empty_is_none() {
+        assert_eq!(auto_detect_port(&[]), None);
+    }
 
     #[test]
     fn create_args_minimum_required_no_host() {
