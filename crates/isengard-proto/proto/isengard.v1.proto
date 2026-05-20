@@ -2,484 +2,638 @@ syntax = "proto3";
 
 package isengard.v1;
 
-// Controller-side service. Agents call into it.
+// Controller-facing gRPC surface. Agents are the clients, the controller
+// is the server.
 //
-// v1 wire surface, scoped for Phase 2 (Enroll + Sync only). Phase 3+ message
-// variants are scaffolded as oneof fields so the schema stays stable.
+// The v1 wire is stable: every additive change lands as a new oneof
+// variant or a new field number. Older agents and controllers keep
+// talking to newer peers by ignoring unknown fields, the way protobuf
+// has always worked.
 service Controller {
-  // Unauthenticated. Returns the controller's root CA PEM so a freshly
-  // installed agent can verify it against the SHA-256 fingerprint
-  // embedded in its packed join token, then pin the verified PEM as
-  // the trust root for the actual `Enroll` RPC.
+  // Returns the controller's root CA PEM. Unauthenticated.
   //
-  // Called over a skip-verify TLS channel: the agent has no CA yet, so
-  // tonic cannot validate the controller's server cert here. The
-  // fingerprint comparison the agent does next is what prevents MITM.
-  // Trust-the-transport from the operator's side: this endpoint
-  // returns public data (the CA cert itself).
+  // A fresh agent has no trust anchor yet. It calls this over a
+  // skip-verify TLS channel, then compares the served CA's SHA-256
+  // against the fingerprint embedded in its packed join token. On
+  // match, the verified PEM becomes the pinned trust root for the
+  // real `Enroll` call.
+  //
+  // The endpoint serves public data (a CA cert), so trusting the
+  // transport is fine. The fingerprint comparison the agent does
+  // next is what prevents MITM.
   rpc GetCaPem(GetCaPemRequest) returns (GetCaPemResponse);
 
-  // One-shot at agent startup. Agent presents host metadata, receives a
-  // controller-assigned ULID + the heartbeat interval the controller wants.
+  // One-shot at agent startup. Agent presents its host metadata and
+  // join token. Controller returns a freshly minted ULID, an mTLS
+  // cert bundle, and the heartbeat interval the controller wants.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
 
-  // Long-lived bidirectional stream. After enrolling, the agent opens this
-  // stream once and reconnects on drop with exponential backoff.
+  // Long-lived bidirectional stream. Opens once after enrollment;
+  // reconnects on drop with exponential backoff.
   //
-  //   client -> server: SyncHello (first frame), Heartbeat, then Phase 3+
-  //   server -> client: HeartbeatAck, then Phase 3+ (Command, ConfigUpdate)
+  //   client -> server: SyncHello (first frame), then Heartbeat,
+  //                     Event, ContainerLabelsReport, LogChunk, etc.
+  //   server -> client: HeartbeatAck, ProxyConfig, WriteCompose,
+  //                     AbortDeployment, StartLogStream, etc.
   rpc Sync(stream AgentMessage) returns (stream ControllerMessage);
 
-  // Phase 14: agent rotates its mTLS client cert before expiry. Authenticated
-  // by the existing cert presented on the connection.
+  // Agent rotates its mTLS client cert before expiry.
+  //
+  // Authenticated by the existing cert presented on the connection.
+  // The controller reads the host id from the client cert's CN; the
+  // request body carries no host id by design (see RenewCertRequest).
   rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 
-  // v0.3.6: agent fetches an Isengard-managed secret value at container
-  // start time. Authenticated by the agent's mTLS client cert; the
-  // controller side decrypts on demand and returns the plaintext bytes.
-  // Plaintext is never persisted on the agent: it lands in a tmpfs
+  // Agent fetches an Isengard-managed secret value at container start.
+  //
+  // Authenticated by the agent's mTLS client cert. The controller
+  // decrypts on demand and returns the plaintext bytes. The agent
+  // never persists plaintext to disk: the value lands in a tmpfs
   // mount inside the operator's workload container.
   rpc FetchSecret(FetchSecretRequest) returns (FetchSecretResponse);
 }
 
 // ============ GET CA PEM ============
 
+// Empty request body. Reserved for future shape stability; the
+// fingerprint flow needs nothing from the agent today.
 message GetCaPemRequest {
-  // Reserved for future shape stability. The fingerprint flow doesn't
-  // need any request fields today: the controller serves one CA.
 }
 
+// PEM-encoded root CA bytes.
 message GetCaPemResponse {
-  // PEM-encoded X.509 root certificate. Agent compares its SHA-256
-  // against the fingerprint embedded in the join token.
+  // PEM-encoded X.509 root certificate. The agent's SHA-256 of this
+  // value must match the fingerprint embedded in the join token.
   bytes pem = 1;
 }
 
 // ============ ENROLL ============
 
+// One-shot enrollment request from agent to controller.
 message EnrollRequest {
-  // Phase 14: replaces the bearer-token interceptor. Token is the
-  // base32-encoded short-lived enrollment token minted by the controller.
+  // Base32-encoded short-lived enrollment token minted by the
+  // controller. Replaces the older bearer-token interceptor.
   string token = 1;
+  // Agent host's reported hostname.
   string hostname = 2;
+  // Agent host's reported OS string.
   string os = 3;
+  // Agent build version.
   string version = 4;
 }
 
+// Successful enrollment response. The bundle pins the agent's identity
+// for every subsequent RPC.
 message EnrollResponse {
+  // Controller-minted ULID identifying this host.
   bytes host_id = 1;
-  // Phase 14: cert bundle for mTLS.
+  // PEM-encoded agent client cert for mTLS.
   string agent_cert_pem = 2;
+  // PEM-encoded agent private key.
   string agent_key_pem = 3;
+  // PEM-encoded controller root CA the agent pins as its trust anchor.
   string ca_root_pem = 4;
+  // How often the agent should emit `Heartbeat`.
   uint32 heartbeat_interval_secs = 5;
 }
 
+// Empty cert-renewal request. The controller authenticates the caller
+// via mTLS and reads the host id from the client cert's CN.
+//
+// Carrying host_id in the body would have allowed a horizontal
+// escalation: agent A asking for a fresh cert minted for agent B.
+// The omission is deliberate.
 message RenewCertRequest {
-  // Phase 14 Bl-1 fix: host_id is intentionally omitted. The controller's
-  // CertAuthInterceptor authenticates the caller via mTLS and the renew_cert
-  // handler reads the host_id from the client cert's CN. Trusting a
-  // request-body host_id allowed a horizontal-escalation attack where agent
-  // A could request a fresh cert minted for agent B.
 }
 
+// Renewed mTLS bundle.
 message RenewCertResponse {
+  // New PEM-encoded agent client cert.
   string agent_cert_pem = 1;
+  // New PEM-encoded agent private key.
   string agent_key_pem = 2;
-  // RFC3339
+  // RFC3339 expiry timestamp of the new cert.
   string expires_at = 3;
 }
 
-// ============ SECRETS (v0.3.6) ============
+// ============ SECRETS ============
 
-// Agent -> controller: "I'm starting a container that needs the secret named
-// `name`; please decrypt and ship me the bytes." Authenticated by the
-// agent's mTLS client cert; the controller's interceptor already gated the
-// connection. Plaintext is returned in `value`.
+// Agent -> controller: fetch the named secret for a container start.
+//
+// Authenticated by the agent's mTLS client cert. The controller's
+// interceptor has already gated the connection.
 message FetchSecretRequest {
+  // Secret name, scoped per-fleet on the controller side.
   string name = 1;
 }
 
-// Controller -> agent: secret value bytes plus the timestamp of last
-// rotation, so the agent can avoid recreating containers when nothing has
-// changed.
+// Controller -> agent: secret value plus last-rotation timestamp.
+//
+// The timestamp lets the agent skip recreating containers when the
+// on-disk value is still current.
 message FetchSecretResponse {
-  // Raw value bytes. Treat as opaque; agents write to tmpfs without any
-  // re-encoding (matches Docker / Kubernetes secret semantics).
-  bytes value      = 1;
-  // RFC3339; lets the agent skip work when the on-disk value is up to date.
+  // Raw value bytes. Opaque to the agent; written verbatim to tmpfs.
+  // Matches Docker / Kubernetes secret semantics.
+  bytes value = 1;
+  // RFC3339 timestamp of the last controller-side rotation.
   string updated_at = 2;
 }
 
 // ============ SYNC ============
 
+// One event the agent observed and shipped up the Sync stream. Mirrors
+// `isengard_core::Event`; field-by-field conversion lives in the Rust
+// wrapper.
 message Event {
+  // Event kind discriminator (e.g. `container.up`, `deploy.complete`).
   string kind = 1;
+  // RFC3339 timestamp when the agent observed the event.
   string occurred_at = 2;
+  // One-line human-readable summary.
   string summary = 3;
+  // Container name, when the event ties to one.
   optional string container_name = 4;
+  // Container image, when relevant.
   optional string image = 5;
+  // Previous image digest, for update / rollback events.
   optional string old_digest = 6;
+  // New image digest, for update / rollback events.
   optional string new_digest = 7;
+  // Error string, when the event reports a failure.
   optional string error = 8;
+  // Serialized JSON object carrying event-kind-specific extras.
   optional string metadata_json = 9;
 }
 
+// Agent -> controller frame on the Sync stream. Every variant is
+// additive; older agents send a strict subset.
 message AgentMessage {
   oneof payload {
-    // First frame of every Sync stream. Identifies the agent post-enroll.
+    // First frame of every Sync stream. Identifies the post-enroll agent.
     SyncHello                hello                    = 1;
+    // Periodic liveness + state snapshot.
     Heartbeat                heartbeat                = 2;
+    // An observed event ([`Event`]).
     Event                    event                    = 3;
+    // Container labels snapshot the proxy and label-driven plugins
+    // consume.
     ContainerLabelsReport    container_labels_report  = 4;
+    // Container is gone; drop prior labels for `container_id`.
     ContainerLabelsRemoved   container_labels_removed = 5;
-    // Phase 13B: log line emitted by the agent in response to a controller-
-    // initiated `StartLogStream`. Multiplexed by `subscription_id`.
+    // One log line emitted in response to a controller-initiated
+    // `StartLogStream`. Multiplexed by `subscription_id`.
     LogChunk                 log_chunk                = 6;
-    // v0.3c: agent reports a freshly imported (or refreshed) compose.yaml
-    // for a stack so the controller can serve it on
-    // `GET /api/v1/stacks/<id>/compose` without round-tripping to the host.
+    // Freshly imported (or refreshed) compose.yaml for a stack on
+    // this host. The controller persists it and serves it on
+    // `GET /api/v1/stacks/<id>/compose`.
     StackComposeReport       stack_compose_report     = 7;
-    // v0.3d: agent acknowledges a `WriteCompose` ControllerMessage.
-    // Carries the request_id the controller minted so the dashboard's
-    // PUT /api/v1/stacks/<id>/compose can resolve the right pending call.
+    // Acknowledgment of a `WriteCompose` ControllerMessage. The
+    // controller resolves the matching dashboard PUT by request_id.
     WriteComposeAck          write_compose_ack        = 8;
   }
 }
 
+// First frame of every Sync stream. Carries the post-enroll agent id
+// so the controller can route subsequent frames without reading the
+// mTLS cert on every message.
 message SyncHello {
+  // ULID string assigned at enrollment.
   string agent_id = 1;
 }
 
+// One stack the agent sees on this host.
 message StackInfo {
+  // Stack name.
   string name = 1;
-  // One of: "compose", "manual", "inferred".
+  // Provenance: `compose`, `manual`, or `inferred`.
   string source = 2;
   // Container names that belong to this stack on this host.
   repeated string services = 3;
 }
 
+// One service the agent sees on this host.
 message ServiceInfo {
+  // Service / container name.
   string name = 1;
+  // Image reference.
   string image = 2;
-  // One of: "running", "stopped", "restarting", "unknown".
+  // Lifecycle state: `running`, `stopped`, `restarting`, `unknown`.
   string state = 3;
-  // Stack name this service belongs to (if any). Same value the agent reported
-  // in the matching StackInfo.
+  // Stack name this service belongs to, when known. Matches the
+  // value the agent reports in the corresponding StackInfo.
   optional string stack = 4;
 }
 
+// Controller-queued action the agent must execute next time it asks.
 message PendingAction {
+  // Server-assigned action id.
   uint64 id = 1;
-  // One of: "force_update", "decommission".
+  // Action kind: `force_update`, `decommission`.
   string kind = 2;
   // JSON-encoded HostActionKind payload.
   string payload_json = 3;
 }
 
+// Periodic agent -> controller liveness + state snapshot.
+//
+// Sent every `heartbeat_interval_secs` (set on enrollment). The
+// controller treats heartbeat freshness as the host's online signal.
 message Heartbeat {
-  uint64 ts_ms = 1; // agent's local clock at send time
+  // Agent's local wall clock at send time. Milliseconds since Unix
+  // epoch.
+  uint64 ts_ms = 1;
+  // Stacks the agent sees on this host.
   repeated StackInfo stacks = 2;
+  // Services the agent sees on this host.
   repeated ServiceInfo services = 3;
-  // Phase 0.5 wisp: which runtime backend the agent is talking to
-  // (`docker`, `wisp`, ...). Additive: empty string from older
-  // agents is treated by the controller as `docker` (the only
-  // backend prior to 0.5).
+  // Runtime backend driving containers (`docker`, `wisp`, ...). Empty
+  // string from older agents is treated by the controller as `docker`.
   string runtime_backend = 4;
-  // Phase 0.18: one entry per runtime container observed on this host
-  // during this tick. Containers ride alongside `services` for one
-  // release; once the controller's container-first projection covers
-  // every dashboard surface the `services` array can be retired.
-  // Older agents that don't ship containers send an empty repeated;
-  // older controllers that don't read containers ignore the field.
+  // One entry per runtime container observed on this host this tick.
+  // Rides alongside `services` for one release; the controller's
+  // container-first projection is the long-term home.
   repeated ContainerInfo containers = 5;
-  // Phase 0.14: per-host gossiped labels (sourced from
-  // `/etc/isengard/agent.toml` `[labels]` table and
-  // `ISENGARD_LABEL_*` env vars) so the controller's placement
-  // scheduler can match `where:` selectors. Field 6 (plan said 5
-  // but containers already owns 5; documented in
-  // 2026-05-15-placement-scheduler default-and-document log).
-  // Empty map from older agents is fine; selectors that reference a
-  // missing label simply do not match.
+  // Per-host gossiped labels (from `/etc/isengard/agent.toml`
+  // `[labels]` and `ISENGARD_LABEL_*` env vars). The controller's
+  // placement scheduler matches `where:` selectors against this map.
+  // An empty map from older agents means no labels: selectors that
+  // reference a missing label do not match.
   map<string, string> labels = 6;
 }
 
-// Phase 0.18: per-container snapshot the agent stamps once per
-// heartbeat. State vocabulary the agent emits is fixed: `running`,
-// `restarting`, `paused`, `created`, `exited`, `dead`, `removing`.
-// `unknown` is never emitted; if the agent can't read state it omits
-// the container from the snapshot.
+// Per-container snapshot stamped once per heartbeat.
+//
+// State vocabulary is fixed: `running`, `restarting`, `paused`,
+// `created`, `exited`, `dead`, `removing`. `unknown` is never emitted:
+// if the agent can't read state it omits the container.
 message ContainerInfo {
+  // Runtime-assigned container id (docker / wisp).
   string runtime_container_id = 1;
+  // Image reference.
   string image                = 2;
+  // Entry command string.
   string command              = 3;
+  // Lifecycle state (see message-level comment for vocabulary).
   string state                = 4;
+  // Human-readable status detail.
   string status_message       = 5;
+  // Comma-joined container names (matches docker's display).
   string names                = 6;
+  // Stack name this container belongs to.
   string stack                = 7;
+  // Service name (compose key) this container fills.
   string service              = 8;
+  // Creation time as ms since Unix epoch.
   int64  created_at_ms        = 9;
-  // Agent's clock at the moment the snapshot was captured. The
-  // controller uses min(server_now, observed_at_ms / 1000) for
-  // last_seen_at so we don't trust a wildly skewed agent clock.
+  // Agent's clock at snapshot capture, ms since epoch. The controller
+  // uses min(server_now, observed_at_ms / 1000) for last_seen_at so a
+  // wildly skewed agent clock can't bias staleness.
   int64  observed_at_ms       = 10;
 }
 
+// Controller -> agent frame on the Sync stream.
 message ControllerMessage {
   oneof payload {
+    // Server time + queued PendingAction list.
     HeartbeatAck     heartbeat_ack     = 1;
-    // Phase 3+: Command       command       = 2;
-    // Phase 4+: ConfigUpdate  config_update = 3;
+    // Reserved: Command       (field 2).
+    // Reserved: ConfigUpdate  (field 3).
+    // Per-host proxy config push.
     ProxyConfig      proxy_config      = 4;
+    // Cancel an in-flight blue-green deployment.
     AbortDeployment  abort_deployment  = 5;
-    // Phase 13B: ask the agent to begin tailing a container's logs and
-    // emit `LogChunk` AgentMessages tagged with the same subscription_id.
+    // Begin tailing a container's logs.
     StartLogStream   start_log_stream  = 6;
-    // Phase 13B: cancel a previously started log subscription. Idempotent.
+    // Cancel a previously started log subscription.
     StopLogStream    stop_log_stream   = 7;
-    // v0.3d: dashboard "Save" -> controller -> agent: write the supplied
-    // YAML to `/etc/isengard/stacks/<stack>/compose.yaml`. The agent fires
-    // its own inotify path immediately after, which drives the reconcile
-    // loop from the same code path as a `vim` save.
+    // Write the supplied YAML to a stack's compose.yaml on disk.
     WriteCompose     write_compose     = 8;
   }
 }
 
-// Controller → agent: cancel an in-flight blue-green deployment. The agent
-// looks up the matching `CancellationToken` on the supervisor and fires it,
-// driving the running [`Driver`] task into its abort path. Plan B 10f.
+// Controller -> agent: cancel an in-flight blue-green deployment.
+//
+// The agent looks up the matching `CancellationToken` on the supervisor
+// and fires it, driving the running deployment driver into its abort
+// path.
 message AbortDeployment {
+  // ULID of the deployment to cancel.
   string deployment_id = 1;
 }
 
+// Controller -> agent: heartbeat acknowledgment.
 message HeartbeatAck {
+  // Controller's wall clock at ack time, ms since Unix epoch. The
+  // agent uses this to detect clock drift and to compute last_seen_at
+  // bounds.
   uint64 server_time_ms = 1;
+  // Controller-queued actions the agent should execute.
   repeated PendingAction pending_actions = 2;
 }
 
-// ============ PROXY (Phase 8) ============
+// ============ PROXY ============
 
 // How TLS is terminated for a given route.
-//   EDGE   = TLS terminates upstream (or unencrypted), proxy passes through
-//   ACME   = proxy obtains + manages a certificate via ACME (Let's Encrypt)
-//   MANUAL = operator-supplied certificate stored on the host
+//
+//   EDGE   = TLS terminates upstream (or unencrypted); proxy is pass-through.
+//   ACME   = proxy obtains and manages a cert via ACME (Let's Encrypt).
+//   MANUAL = operator-supplied cert stored on the host.
 enum TlsMode {
+  // Default protobuf zero value. Never emitted; reject on read.
   TLS_MODE_UNSPECIFIED = 0;
+  // TLS terminates upstream.
   TLS_MODE_EDGE        = 1;
+  // Proxy manages cert via ACME.
   TLS_MODE_ACME        = 2;
+  // Operator-supplied cert on disk.
   TLS_MODE_MANUAL      = 3;
 }
 
 // Backend container the proxy forwards to.
 message Upstream {
+  // Runtime container id (docker / wisp).
   string container_id   = 1;
+  // Container IP on its Isengard bridge network.
   string container_ip   = 2;
+  // Container's listening port.
   uint32 container_port = 3;
 }
 
 // Optional health check the proxy performs against the upstream.
+//
 // Empty `path` means TCP-only liveness (connect + close).
 message Healthcheck {
+  // HTTP path probed. Empty for TCP-only.
   string path          = 1;
+  // Probe interval in seconds.
   uint32 interval_secs = 2;
 }
 
-// One public-hostname → upstream mapping plus the policy that surrounds it.
+// One public-hostname -> upstream mapping plus the surrounding policy.
 message RoutingRule {
+  // Controller-assigned rule id.
   int64       id              = 1;
+  // Public hostname clients hit (e.g. `blog.example.com`).
   string      public_hostname = 2;
+  // Backend container the proxy forwards to.
   Upstream    upstream        = 3;
+  // TLS termination mode.
   TlsMode     tls_mode        = 4;
+  // Optional health check.
   Healthcheck healthcheck     = 5;
-  // Adapter id ("none", "websocket", future protocol shims). "none" by default.
+  // Protocol adapter id: `none` (default), `websocket`, future shims.
   string      adapter         = 6;
 }
 
 // Per-host proxy configuration knobs.
 message ProxySettings {
+  // Plain HTTP listen port.
   uint32 http_port           = 1;
+  // HTTPS listen port.
   uint32 https_port          = 2;
+  // ACME registration contact.
   string acme_contact_email  = 3;
   // Sampling rate in [0, 1] for verbose access logs. 0 = none, 1 = all.
   double log_sample_rate     = 4;
 }
 
-// Full proxy configuration the controller pushes to an agent. Generation
-// monotonically increases; agents may ignore older generations on reorder.
+// Full proxy configuration the controller pushes to an agent.
+//
+// `generation` monotonically increases. Agents may ignore older
+// generations on out-of-order delivery.
 message ProxyConfig {
+  // Host the config targets.
   string                host_id        = 1;
+  // Monotonic config version.
   uint64                generation     = 2;
+  // Route table.
   repeated RoutingRule  rules          = 3;
+  // Per-host knobs.
   ProxySettings         settings       = 4;
-  // DNS-01 wildcard certs the controller has issued. Each agent installs
-  // these in its boringssl cert resolver alongside any HTTP-01 per-host
-  // certs it owns. Empty list = no wildcards configured (or the controller
-  // hasn't issued one yet).
+  // DNS-01 wildcard certs the controller issued. The agent installs
+  // these alongside any HTTP-01 per-host certs it owns. Empty when
+  // no wildcards are configured (or the controller hasn't issued
+  // one yet).
   repeated WildcardCert wildcard_certs = 5;
 }
 
-// Controller -> agent: a wildcard cert the controller obtained via DNS-01.
-// Carries PEM material in-band on the existing Sync stream (mTLS-protected,
-// so private key transit is over an authenticated, encrypted channel).
+// Controller -> agent: a wildcard cert obtained via DNS-01.
 //
-// `identifiers` is the full SAN list (e.g. `["*.vallee.casa", "vallee.casa"]`).
-// The agent installs the cert under each identifier so SNI matches either
-// the apex or any subdomain covered by the wildcard.
+// PEM material rides in-band on the existing Sync stream. The stream
+// is mTLS-protected, so the private key crosses an authenticated,
+// encrypted channel.
+//
+// `identifiers` lists the full SAN set (e.g. `["*.vallee.casa",
+// "vallee.casa"]`). The agent installs the cert under each identifier
+// so SNI matches the apex or any subdomain the wildcard covers.
 message WildcardCert {
+  // Full SAN list the cert covers.
   repeated string identifiers = 1;
+  // PEM-encoded certificate chain.
   string          cert_pem    = 2;
+  // PEM-encoded private key.
   string          key_pem     = 3;
 }
 
-// Agent → controller: container metadata snapshot used to derive routing rules
-// from labels (e.g. `isengard.proxy.host=blog.example.com`).
+// Agent -> controller: container metadata snapshot.
+//
+// The label-driven router derives routing rules from these (e.g.
+// `isengard.proxy.host=blog.example.com`).
 message ContainerLabelsReport {
+  // Runtime container id.
   string              container_id   = 1;
+  // Container name.
   string              container_name = 2;
+  // Image reference.
   string              image          = 3;
+  // Full label map from the container's manifest.
   map<string, string> labels         = 4;
 }
 
-// Agent → controller: previously reported container is gone.
+// Agent -> controller: previously reported container is gone. Drop
+// any cached labels keyed by `container_id`.
 message ContainerLabelsRemoved {
+  // Runtime container id whose state vanished.
   string container_id = 1;
 }
 
-// Controller -> agent (v0.3d): write the supplied YAML to the host's
-// `/etc/isengard/stacks/<stack_name>/compose.yaml`, refreshing the sibling
-// `meta.toml` on success. The agent's inotify watcher will see the
-// rename and trigger the reconcile loop just like a `vim` save would.
+// Controller -> agent: write the supplied YAML to
+// `/etc/isengard/stacks/<stack_name>/compose.yaml` and refresh the
+// sibling `meta.toml`.
+//
+// The agent's inotify watcher sees the rename and triggers the
+// reconcile loop the same way a `vim` save would.
 //
 // `expected_sha256` is the file hash the dashboard saw when it loaded
 // the editor. The agent compares against the on-disk hash before
-// writing; mismatch -> `WriteComposeAck` with `kind = CONFLICT`.
+// writing; mismatch returns `WriteComposeAck { kind = CONFLICT }`.
 //
 // `force = true` skips the conflict check (used by the dashboard's
-// "Force overwrite" CTA). Defaults to false.
+// "Force overwrite" CTA).
 message WriteCompose {
+  // Dashboard-supplied request correlation id.
   string request_id      = 1;
+  // Stack name (matches the on-disk directory name).
   string stack_name      = 2;
+  // Full compose YAML to write.
   string compose_yaml    = 3;
+  // Hash the dashboard saw at load time. Empty disables the check.
   string expected_sha256 = 4;
+  // Override the conflict check.
   bool   force           = 5;
-  // Phase 0.13: verbatim stack.toml. Empty when the operator deploys a
-  // compose-only stack (legacy path). Persisted on the agent at
-  // /etc/isengard/stacks/<name>/stack.toml alongside compose.yml. The
-  // agent does NOT parse it; behavior is driven by the explicit
-  // `secrets` and `hooks` fields below.
+  // Verbatim stack.toml. Empty for compose-only stacks. Persisted at
+  // `/etc/isengard/stacks/<name>/stack.toml`. The agent does NOT
+  // parse it; behavior is driven by the explicit `secrets` and
+  // `hooks` fields below.
   string manifest_toml   = 6;
-  // Phase 0.13: per-stack secret names to mount into every service in
-  // the stack. Values arrive via the v0.3.6 FetchSecret RPC.
+  // Per-stack secret names mounted into every service in the stack.
+  // Values are fetched via `FetchSecret`.
   repeated string secrets = 7;
-  // Phase 0.13: lifecycle hooks (pre-deploy, post-deploy, failure)
-  // executed on the host (NOT inside any container).
+  // Lifecycle hooks executed on the host (NOT inside any container).
   repeated LifecycleHook hooks = 8;
-  // Phase 0.13: controller-minted ULID per deploy. Threaded into hook
-  // env as ISENGARD_DEPLOYMENT_ID; written to the audit row for this
-  // deploy. Pre-0.13 controllers leave this empty; pre-0.13 agents
-  // ignore it.
+  // Controller-minted ULID for this deploy. Threaded into hook env
+  // as `ISENGARD_DEPLOYMENT_ID`; written to the audit row for this
+  // deploy. Older controllers leave this empty; older agents ignore
+  // it.
   string deployment_id   = 9;
 }
 
-// Phase 0.13: single lifecycle hook entry. cmd[0] is the program;
-// cmd[1..] the args. Agent spawns with cwd =
-// /etc/isengard/stacks/<stack>/, layered env per spec
-// (ISENGARD_STACK, ISENGARD_HOST_ID, ISENGARD_DEPLOYMENT_ID,
-// ISENGARD_HOOK_EVENT, ISENGARD_MANIFEST_PATH; failure hook also
-// receives ISENGARD_FAILURE_REASON and ISENGARD_FAILURE_DETAIL).
-// timeout_ms enforced via tokio::time::timeout; SIGTERM, then SIGKILL
-// after 5s on expiry. on_error is abort (default) or continue.
+// One lifecycle hook entry attached to a stack deploy.
+//
+// `cmd[0]` is the program; `cmd[1..]` are its args. The agent spawns
+// the hook with `cwd = /etc/isengard/stacks/<stack>/`, layered env
+// per the deploy spec (`ISENGARD_STACK`, `ISENGARD_HOST_ID`,
+// `ISENGARD_DEPLOYMENT_ID`, `ISENGARD_HOOK_EVENT`,
+// `ISENGARD_MANIFEST_PATH`; the failure hook also receives
+// `ISENGARD_FAILURE_REASON` and `ISENGARD_FAILURE_DETAIL`).
+//
+// `timeout_ms` is enforced via `tokio::time::timeout`. On expiry the
+// agent sends SIGTERM, then SIGKILL after 5s. `on_error` is `abort`
+// (default) or `continue`.
 message LifecycleHook {
+  // Hook event: `pre-deploy`, `post-deploy`, `failure`.
   string on          = 1;
+  // Program + args. cmd[0] is the executable.
   repeated string cmd = 2;
+  // Timeout in milliseconds before SIGTERM.
   uint64 timeout_ms  = 3;
+  // Failure behavior: `abort` (default) or `continue`.
   string on_error    = 4;
 }
 
-// Agent -> controller (v0.3d): outcome of a `WriteCompose`. The controller
-// resolves the pending dashboard PUT keyed by `request_id`.
+// Agent -> controller: outcome of a `WriteCompose`.
+//
+// The controller resolves the pending dashboard PUT keyed by
+// `request_id`.
 message WriteComposeAck {
+  // Result discriminator.
   enum Kind {
+    // Default protobuf zero. Never emitted; reject on read.
     KIND_UNSPECIFIED = 0;
+    // Write succeeded.
     KIND_OK          = 1;
-    // On-disk hash didn't match `expected_sha256`. `current_sha256` and
-    // `current_yaml` carry the truth so the dashboard can show a diff.
+    // On-disk hash didn't match `expected_sha256`. `current_sha256`
+    // and `current_yaml` carry the truth so the dashboard can show
+    // a diff.
     KIND_CONFLICT    = 2;
-    // Anything else: I/O error, parse failure, etc. `error` is a one-line
-    // human-readable message.
+    // I/O error, parse failure, anything else. `error` carries a
+    // one-line human-readable message.
     KIND_ERROR       = 3;
   }
+  // Echoed request id from the corresponding `WriteCompose`.
   string request_id     = 1;
+  // Outcome.
   Kind   kind           = 2;
+  // Error string, populated for `KIND_ERROR`.
   string error          = 3;
+  // Current on-disk hash, populated for `KIND_CONFLICT`.
   string current_sha256 = 4;
+  // Current on-disk YAML, populated for `KIND_CONFLICT`.
   string current_yaml   = 5;
-  // Hash of the YAML the agent just wrote. Echoed back so the dashboard
-  // can use it as the next If-Match.
+  // Hash of the YAML the agent wrote. The dashboard uses this as
+  // the next If-Match.
   string written_sha256 = 6;
 }
 
-// Agent -> controller (v0.3c): imported compose.yaml for a stack on this
-// host. Sent once on first discovery; subsequent reports overwrite the
-// stored copy. The controller persists it to the `stacks.compose_yaml`
-// column and serves it from `GET /api/v1/stacks/<id>/compose`.
+// Agent -> controller: imported compose.yaml for a stack on this host.
+//
+// Sent once on first discovery; subsequent reports overwrite the stored
+// copy. The controller persists it to `stacks.compose_yaml` and serves
+// it from `GET /api/v1/stacks/<id>/compose`.
 message StackComposeReport {
-  // Stack name as reported in `Heartbeat.stacks[].name`.
+  // Stack name (matches `Heartbeat.stacks[].name`).
   string stack_name = 1;
-  // YAML body. Raw text, no compression. Generated by the agent's
-  // `compose_export::build_compose`.
+  // YAML body, raw text, no compression. Built by the agent's
+  // compose exporter.
   string compose_yaml = 2;
-  // sha256 hex of `compose_yaml`. Lets the controller dedupe identical
-  // re-reports across reconnects without parsing.
+  // sha256 hex of `compose_yaml`. Lets the controller dedupe
+  // identical re-reports across reconnects without parsing.
   string sha256 = 3;
-  // RFC3339 timestamp when the agent wrote this YAML to disk. Echoed
-  // straight through to the dashboard so users see "imported at X".
+  // RFC3339 timestamp when the agent wrote the YAML to disk.
+  // Surfaced verbatim to the dashboard as "imported at X".
   string imported_at = 4;
 }
 
-// ============ LOGS (Phase 13B) ============
+// ============ LOGS ============
 
-// Controller → agent: open a `docker logs -f` style tail on `container_name`
-// and stream chunks back tagged with `subscription_id`. The agent uses bollard
-// (`containers.logs(LogsOptions { follow:true, stdout:true, stderr:true,
-// timestamps:true, tail })`) and emits one `AgentMessage::LogChunk` per line.
+// Controller -> agent: open a `docker logs -f` style tail on
+// `container_name` and stream chunks back tagged with `subscription_id`.
+//
+// The agent uses bollard:
+// `containers.logs(LogsOptions { follow: true, stdout: true, stderr:
+// true, timestamps: true, tail })` and emits one
+// `AgentMessage::LogChunk` per line.
 message StartLogStream {
-  string subscription_id = 1; // controller-issued opaque id (ULID string)
+  // Controller-issued opaque id (ULID string).
+  string subscription_id = 1;
+  // Container name to tail.
   string container_name  = 2;
-  uint32 tail            = 3; // initial backfill size; 0 = none
-  bool   follow          = 4; // true = continuous stream
+  // Initial backfill size. 0 = none.
+  uint32 tail            = 3;
+  // true = continuous stream; false = backfill-only.
+  bool   follow          = 4;
 }
 
-// Controller → agent: cancel a previously started subscription. Idempotent.
+// Controller -> agent: cancel a previously started subscription.
+// Idempotent.
 message StopLogStream {
+  // Subscription to cancel.
   string subscription_id = 1;
 }
 
-// Agent → controller: one log line, or a control frame for the multiplexed
-// subscription identified by `subscription_id`.
+// Agent -> controller: one log line, or a control frame, for the
+// multiplexed subscription identified by `subscription_id`.
 message LogChunk {
-  // Frame kind. Backfill / Line carry an actual line; Dropped carries a count
-  // of lines lost to backpressure since the last successful send; Unavailable
-  // carries a reason and ends the stream.
+  // Frame kind. BACKFILL / LINE carry an actual line; DROPPED carries
+  // a count of lines lost to backpressure since the last successful
+  // send; UNAVAILABLE carries a reason and ends the stream.
   enum Kind {
+    // Default protobuf zero. Never emitted; reject on read.
     KIND_UNSPECIFIED  = 0;
+    // Historical line emitted during initial backfill.
     KIND_BACKFILL     = 1;
+    // Live tailing line.
     KIND_LINE         = 2;
+    // Line(s) dropped due to backpressure. See `dropped` and `reason`.
     KIND_DROPPED      = 3;
+    // Stream ended. See `reason`.
     KIND_UNAVAILABLE  = 4;
   }
+  // Subscription id this frame belongs to.
   string subscription_id = 1;
+  // Frame kind.
   Kind   kind            = 2;
-  // RFC3339 timestamp when the daemon emitted the line (timestamps=true). Set
-  // for KIND_BACKFILL / KIND_LINE; empty otherwise.
+  // RFC3339 timestamp the daemon stamped on the line. Set for
+  // BACKFILL / LINE; empty otherwise.
   string occurred_at     = 3;
-  // "stdout" or "stderr"; empty for non-line frames.
+  // `stdout` or `stderr`; empty for non-line frames.
   string stream          = 4;
-  // The actual log line, UTF-8 (lossy decode of non-UTF8 bytes), trailing
+  // The log line, UTF-8 (lossy decode of non-UTF8 bytes), trailing
   // newline stripped.
   string line            = 5;
-  // Populated for KIND_DROPPED.
+  // Number of lines dropped. Populated for KIND_DROPPED.
   uint32 dropped         = 6;
-  // Populated for KIND_DROPPED / KIND_UNAVAILABLE.
+  // Drop / unavailable reason. Populated for KIND_DROPPED and
+  // KIND_UNAVAILABLE.
   string reason          = 7;
 }
