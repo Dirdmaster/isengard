@@ -1,12 +1,12 @@
 //! Policy DAO: CRUD over the `policies` table.
 //!
-//! See spec §"DAO (in `isengard-storage::policy`)" of
-//! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
-//!
-//! `Policy` and `PolicyScopeType` live in `isengard-core::policy`; this
-//! module owns the row shape and the DAO methods on `Inventory`. The
-//! scope-type enum is re-exported below so existing call sites
+//! Migration `0016` lands `policies`. `Policy` and `PolicyScopeType`
+//! live in `isengard-core::policy`; this module owns the row shape
+//! and the DAO methods on [`Inventory`]. The scope-type enum is
+//! re-exported below so existing call sites
 //! (`isengard_storage::policy::PolicyScopeType`) keep compiling.
+//!
+//! [`Inventory`]: crate::Inventory
 
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -18,29 +18,42 @@ use isengard_core::policy_loader::{LoadedPolicy, PolicyLoader, PolicyLoaderError
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// A row from the `policies` table. `body` is the parsed `Policy`; the raw
-/// JSON column is dropped on read (the resolver only ever needs the typed
-/// view).
+/// A row from the `policies` table.
+///
+/// `body` is the parsed [`Policy`]; the raw JSON column is dropped on
+/// read (the resolver only needs the typed view).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyRow {
+    /// Surrogate key.
     pub id: i64,
+    /// Scope rank (`global`, `fleet`, `stack`, `service`, `container`).
     pub scope_type: PolicyScopeType,
+    /// Scope key. Free-form text; meaning depends on `scope_type`.
     pub scope_key: String,
+    /// Parsed policy body.
     pub body: Policy,
+    /// When the row was first inserted.
     pub created_at: DateTime<Utc>,
+    /// When the body was last replaced.
     pub updated_at: DateTime<Utc>,
 }
 
-/// Insert payload. Distinct from `PolicyRow` so the caller doesn't have to
-/// invent an id or pretend to know the timestamps.
+/// Insert payload.
+///
+/// Distinct from `PolicyRow` so the caller doesn't have to invent an
+/// id or pretend to know the timestamps.
 #[derive(Debug, Clone)]
 pub struct InsertPolicy {
+    /// Scope rank.
     pub scope_type: PolicyScopeType,
+    /// Scope key.
     pub scope_key: String,
+    /// Policy body.
     pub body: Policy,
 }
 
 impl crate::inventory::Inventory {
+    /// Insert a policy row and return the freshly-decoded record.
     pub async fn insert_policy(&self, ins: InsertPolicy) -> Result<PolicyRow> {
         let body_json = serde_json::to_string(&ins.body).map_err(|e| Error::Decode {
             reason: format!("serializing Policy body: {e}"),
@@ -68,6 +81,7 @@ impl crate::inventory::Inventory {
             })
     }
 
+    /// Look up one policy row by `(scope_type, scope_key)`.
     pub async fn get_policy(
         &self,
         scope_type: PolicyScopeType,
@@ -88,8 +102,12 @@ impl crate::inventory::Inventory {
         row.map(row_to_policy).transpose()
     }
 
-    /// List every policy row, ordered by scope rank (Global, Fleet, Stack,
-    /// Service, Container) and then by id within a rank for stable ordering.
+    /// Every policy row, ordered by scope rank.
+    ///
+    /// Returns rows in `Global -> Fleet -> Stack -> Service ->
+    /// Container` order, then by `id` within a rank for stable
+    /// ordering. The resolver consumes the list top-to-bottom so
+    /// broader rules land before the per-container override.
     pub async fn list_policies(&self) -> Result<Vec<PolicyRow>> {
         let rows = sqlx::query(
             r#"
@@ -113,8 +131,10 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_policy).collect()
     }
 
-    /// Insert if absent, replace body otherwise. `created_at` is preserved on
-    /// update; `updated_at` is bumped to "now".
+    /// Insert if absent, replace body otherwise.
+    ///
+    /// `created_at` is preserved on update; `updated_at` is bumped to
+    /// "now".
     pub async fn upsert_policy(
         &self,
         scope_type: PolicyScopeType,
@@ -149,12 +169,14 @@ impl crate::inventory::Inventory {
             })
     }
 
-    /// Pause a service-scope policy for `duration`. Upserts a
-    /// service-scope row at `service_key` with `paused_until = now +
-    /// duration`. If a row already exists, preserves every other field
-    /// and only updates `paused_until`. Used by the `Keep` failure
-    /// handler so the next updater scan skips the service for 24h
-    /// after a deploy goes wrong.
+    /// Pause a service-scope policy for `until`.
+    ///
+    /// Upserts a service-scope row at `service_key` with
+    /// `paused_until = until`. If a row already exists, every other
+    /// field is preserved and only `paused_until` is updated (Keep
+    /// should not silently widen the policy). Used by the `Keep`
+    /// failure handler so the next updater scan skips the service
+    /// for 24h after a deploy goes wrong.
     ///
     /// Returns the upserted row.
     pub async fn pause_service_policy(
@@ -176,7 +198,8 @@ impl crate::inventory::Inventory {
             .await
     }
 
-    /// Returns true iff a row was actually deleted.
+    /// Delete a policy row by scope.
+    /// Returns `true` iff a row was actually deleted.
     pub async fn delete_policy(
         &self,
         scope_type: PolicyScopeType,
@@ -191,14 +214,20 @@ impl crate::inventory::Inventory {
     }
 }
 
-/// Production [`PolicyLoader`] backed by an `Arc<Inventory>`. The agent
-/// runtime constructs one of these and threads it through `PluginContext`
-/// so the updater plugin can fetch policies without a hard storage dep.
+/// Production [`PolicyLoader`] backed by an `Arc<Inventory>`.
+///
+/// The agent runtime constructs one and threads it through
+/// `PluginContext` so the updater plugin can fetch policies without
+/// a hard storage dep.
+///
+/// [`Inventory`]: crate::Inventory
 pub struct InventoryPolicyLoader {
+    /// Backing inventory handle.
     inv: Arc<crate::inventory::Inventory>,
 }
 
 impl InventoryPolicyLoader {
+    /// Wrap an existing inventory for use as the core policy loader.
     pub fn new(inv: Arc<crate::inventory::Inventory>) -> Self {
         Self { inv }
     }
@@ -240,6 +269,7 @@ impl PolicyLoader for InventoryPolicyLoader {
     }
 }
 
+/// Decode one `policies` row into a [`PolicyRow`].
 fn row_to_policy(r: sqlx::sqlite::SqliteRow) -> Result<PolicyRow> {
     use sqlx::Row;
     let scope_type_s: String = r.try_get("scope_type")?;

@@ -1,15 +1,19 @@
-//! `placements` + `agent_labels` DAO.
+//! `placements` and `agent_labels` DAOs.
 //!
-//! Two tables, two surfaces:
+//! Migration `0030` lands both tables together. They form the
+//! scheduler's data plane:
 //!
 //! - `agent_labels`: per-host label key/value pairs reported on every
-//!   heartbeat. Replaced wholesale via [`replace_agent_labels`] when the
-//!   agent's set changes. The scheduler reads via [`list_agent_labels`]
-//!   without a heartbeat round-trip.
-//! - `placements`: scheduler-owned assignment of a service replica to a
-//!   host. One row per `(service_id, replica_index)` in steady state.
-//!   Inserts go through [`upsert_placement`]; the scheduler diffs against
-//!   `list_placements_by_service` on every reconcile tick.
+//!   heartbeat. Replaced wholesale via `Inventory::replace_agent_labels`
+//!   when the agent's set changes. The scheduler reads via
+//!   `Inventory::list_agent_labels` without a heartbeat round-trip.
+//! - `placements`: scheduler-owned assignment of a service replica to
+//!   a host. One row per `(service_id, replica_index)` in steady
+//!   state. Inserts go through `Inventory::upsert_placement`; the
+//!   scheduler diffs against `Inventory::list_placements_by_service`
+//!   on every reconcile tick.
+//!
+//! [`Inventory`]: crate::Inventory
 
 use std::collections::BTreeMap;
 
@@ -21,22 +25,23 @@ use crate::error::{Error, Result};
 use crate::host::HostId;
 use crate::service::ServiceId;
 
-/// The state of a single placement row. The lifecycle is:
-///
-/// ```text
-/// pending -> active -> draining -> (deleted)
-///                  \-> failed (terminal until operator clears)
-/// ```
+#[doc = include_str!("../docs/placement-state.md")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlacementState {
+    /// Scheduler wrote the row; agent has not started the replica yet.
     Pending,
+    /// Agent reports the replica as up.
     Active,
+    /// Replica is being drained (rolling update or operator action).
     Draining,
+    /// Terminal failure; the scheduler stops touching the row until
+    /// the operator clears it.
     Failed,
 }
 
 impl PlacementState {
+    /// Canonical lowercase spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -46,6 +51,11 @@ impl PlacementState {
         }
     }
 
+    /// Parse a state TEXT column.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] for unknown strings.
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "pending" => Ok(Self::Pending),
@@ -59,36 +69,54 @@ impl PlacementState {
     }
 }
 
-/// One row from the `placements` table. `replica_index` is zero-based.
-/// `last_event` is a free-form JSON string the scheduler writes when it
-/// emits a placement.* event so an operator can correlate.
+/// One row from the `placements` table.
+///
+/// `replica_index` is zero-based. `last_event` is a free-form JSON
+/// string the scheduler writes when it emits a `placement.*` event so
+/// an operator can correlate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementRow {
+    /// Surrogate key.
     pub id: i64,
+    /// Service the replica belongs to.
     pub service_id: ServiceId,
+    /// Host the replica is placed on.
     pub host_id: HostId,
+    /// Zero-based replica index within the service.
     pub replica_index: u32,
+    /// Current placement state.
     pub state: PlacementState,
+    /// When the scheduler first wrote this assignment.
     pub assigned_at: DateTime<Utc>,
+    /// JSON envelope of the most recent placement event.
     pub last_event: Option<String>,
 }
 
-/// Insert / upsert payload. `replica_index` is the caller's responsibility:
-/// the scheduler computes it before calling here.
+/// Insert / upsert payload.
+///
+/// `replica_index` is the caller's responsibility: the scheduler
+/// computes it before calling here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpsertPlacement {
+    /// Service the replica belongs to.
     pub service_id: ServiceId,
+    /// Host the replica is placed on.
     pub host_id: HostId,
+    /// Zero-based replica index.
     pub replica_index: u32,
+    /// Target state.
     pub state: PlacementState,
+    /// Event envelope to record alongside the row.
     pub last_event: Option<String>,
 }
 
 impl crate::inventory::Inventory {
     // ===== agent_labels =====
 
-    /// Read the full label set for a host. Returns an empty map when no rows
-    /// exist (older agents, or pre-first-heartbeat).
+    /// Read the full label set for a host.
+    ///
+    /// Returns an empty map when no rows exist (older agents, or
+    /// pre-first-heartbeat).
     pub async fn list_agent_labels(&self, host_id: HostId) -> Result<BTreeMap<String, String>> {
         let host_bytes = host_id.to_bytes().to_vec();
         let rows =
@@ -105,9 +133,11 @@ impl crate::inventory::Inventory {
         Ok(out)
     }
 
-    /// Replace the host's label set wholesale. Deletes any rows not present
-    /// in `labels`. Runs in a single transaction so an in-flight reader
-    /// either sees the old set in full or the new set in full.
+    /// Replace the host's label set wholesale.
+    ///
+    /// Deletes any rows not present in `labels`. Runs in a single
+    /// transaction so an in-flight reader either sees the old set in
+    /// full or the new set in full.
     pub async fn replace_agent_labels(
         &self,
         host_id: HostId,
@@ -133,7 +163,7 @@ impl crate::inventory::Inventory {
 
     // ===== placements =====
 
-    /// List all placement rows for a service, ordered by replica_index.
+    /// All placement rows for a service, ordered by `replica_index`.
     pub async fn list_placements_by_service(
         &self,
         service_id: ServiceId,
@@ -152,8 +182,10 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_placement).collect()
     }
 
-    /// List all placement rows for a host. Used by the scheduler when a host
-    /// disconnects to find which services need re-placement.
+    /// All placement rows for a host.
+    ///
+    /// Used by the scheduler when a host disconnects to find which
+    /// services need re-placement.
     pub async fn list_placements_by_host(&self, host_id: HostId) -> Result<Vec<PlacementRow>> {
         let host_bytes = host_id.to_bytes().to_vec();
         let rows = sqlx::query(
@@ -170,7 +202,7 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_placement).collect()
     }
 
-    /// List every placement row in the database, ordered for deterministic
+    /// Every placement row in the database, ordered for deterministic
     /// scheduler bootstrap.
     pub async fn list_all_placements(&self) -> Result<Vec<PlacementRow>> {
         let rows = sqlx::query(
@@ -186,9 +218,10 @@ impl crate::inventory::Inventory {
     }
 
     /// Upsert a placement keyed on `(service_id, host_id, replica_index)`.
-    /// Sets `assigned_at` to "now" on insert; preserves the existing value
-    /// on update so re-asserting a still-active placement does not bump the
-    /// timestamp.
+    ///
+    /// Sets `assigned_at` to "now" on insert; preserves the existing
+    /// value on update so re-asserting a still-active placement does
+    /// not bump the timestamp.
     pub async fn upsert_placement(&self, p: UpsertPlacement) -> Result<PlacementRow> {
         let host_bytes = p.host_id.to_bytes().to_vec();
         sqlx::query(
@@ -217,6 +250,7 @@ impl crate::inventory::Inventory {
             })
     }
 
+    /// Fetch one placement row by its primary tuple.
     pub async fn get_placement(
         &self,
         service_id: ServiceId,
@@ -239,6 +273,8 @@ impl crate::inventory::Inventory {
         row.map(row_to_placement).transpose()
     }
 
+    /// Delete one placement row by its primary tuple.
+    /// Returns `true` when a row was actually removed.
     pub async fn delete_placement(
         &self,
         service_id: ServiceId,
@@ -258,6 +294,7 @@ impl crate::inventory::Inventory {
     }
 }
 
+/// Decode one `placements` row into a [`PlacementRow`].
 fn row_to_placement(r: sqlx::sqlite::SqliteRow) -> Result<PlacementRow> {
     let host_bytes: Vec<u8> = r.try_get("host_id")?;
     let host_id = HostId::from_db_bytes(host_bytes)?;
@@ -277,6 +314,7 @@ fn row_to_placement(r: sqlx::sqlite::SqliteRow) -> Result<PlacementRow> {
     })
 }
 
+/// Parse the `placements.assigned_at` text column.
 fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));

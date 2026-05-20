@@ -1,5 +1,4 @@
-//! `Deployment` entity: tracks one in-flight or completed deployment.
-//! See spec §Storage.
+#![doc = include_str!("../docs/deployments.md")]
 
 use crate::error::{Error, Result};
 use crate::host::HostId;
@@ -8,14 +7,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+/// Deployment strategy stored in the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeployStrategy {
+    /// Parallel color, then swap, then tear down the old color.
     BlueGreen,
+    /// Recreate the container at the new image; no parallel color.
     InPlace,
 }
 
 impl DeployStrategy {
+    /// Canonical kebab-case spelling.
     pub fn as_str(&self) -> &'static str {
         match self {
             DeployStrategy::BlueGreen => "blue-green",
@@ -37,36 +40,49 @@ impl FromStr for DeployStrategy {
     }
 }
 
+/// Lifecycle state for a deployment row.
+///
+/// See the module docs for the transition diagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentState {
+    /// Row written; driver has not yet started spinning the green color.
     Pending,
+    /// Green container is being created / pulled / started.
     SpinningUp,
+    /// Health passed; proxy is swapping traffic to green.
     Switching,
+    /// Old (blue) color is draining outstanding connections.
     Draining,
+    /// Blue container is being removed.
     DestroyingBlue,
-    /// Post-switch collapse recovery: green went unhealthy after the swap,
-    /// driver is rolling back to the snapshotted blue upstream. Non-terminal
-    /// (transitions to `Failed` once the swap-back completes).
+    /// Post-switch collapse recovery: green went unhealthy after the
+    /// swap, driver is rolling back to the snapshotted blue upstream.
+    /// Non-terminal (transitions to `Failed` once the swap-back
+    /// completes).
     Recovering,
-    /// The supervisor's `Rollback` failure-handler branch. The
-    /// driver is re-pulling `previous_digest` and recreating the container
+    /// The supervisor's `Rollback` failure-handler branch. The driver
+    /// is re-pulling `previous_digest` and recreating the container
     /// at that image. Non-terminal: transitions to `RolledBack` on
     /// success or `RollbackFailed` on error.
     RollingBack,
+    /// Steady-state success.
     Done,
+    /// Operator aborted the deploy.
     Aborted,
+    /// Deploy failed past the supervisor's recovery options.
     Failed,
-    /// Terminal success of the rollback handler. The previous
-    /// digest is now serving traffic.
+    /// Terminal success of the rollback handler. The previous digest
+    /// is now serving traffic.
     RolledBack,
-    /// Terminal failure of the rollback handler. The original
-    /// failure was real and the rollback itself broke (image gone from
+    /// Terminal failure of the rollback handler. The original failure
+    /// was real and the rollback itself broke (image gone from
     /// registry, resource exhaustion at recreate, etc).
     RollbackFailed,
 }
 
 impl DeploymentState {
+    /// Canonical snake_case spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -85,7 +101,7 @@ impl DeploymentState {
     }
 
     /// Terminal states: a deployment in one of these doesn't transition
-    /// further on its own. Adds `RolledBack` and `RollbackFailed`.
+    /// further on its own. Includes `RolledBack` and `RollbackFailed`.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -119,71 +135,112 @@ impl FromStr for DeploymentState {
     }
 }
 
+/// One row from `deployments`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deployment {
+    /// ULID id rendered as a string.
     pub id: String,
+    /// Host the deployment runs on.
     pub host_id: HostId,
+    /// Stack the deployment belongs to.
     pub stack_id: StackId,
+    /// Service name within the stack.
     pub service_name: String,
+    /// Strategy used for this deployment.
     pub strategy: DeployStrategy,
+    /// Current lifecycle state.
     pub state: DeploymentState,
+    /// Name of the blue (existing) container.
     pub blue_container: Option<String>,
+    /// Name of the green (incoming) container.
     pub green_container: Option<String>,
+    /// Image digest serving as blue.
     pub blue_digest: String,
+    /// Image digest the deploy is moving to.
     pub green_digest: String,
+    /// Optional public hostname the rule serves.
     pub public_hostname: Option<String>,
+    /// Optional healthcheck path.
     pub health_path: Option<String>,
+    /// Optional upstream container port.
     pub container_port: Option<i64>,
+    /// When the healthcheck loop began.
     pub healthcheck_started_at: Option<DateTime<Utc>>,
+    /// When the green color first passed health.
     pub healthcheck_passed_at: Option<DateTime<Utc>>,
+    /// When the proxy swapped traffic to green.
     pub switched_at: Option<DateTime<Utc>>,
+    /// When the blue color finished draining.
     pub drained_at: Option<DateTime<Utc>>,
+    /// When the row reached a terminal state.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Failure reason string.
     pub error: Option<String>,
+    /// Auxiliary JSON envelope.
     pub metadata_json: Option<String>,
+    /// When the row was inserted.
     pub created_at: DateTime<Utc>,
+    /// When the row was last updated.
     pub updated_at: DateTime<Utc>,
-    /// Set when this deployment is part of a multi-host
-    /// rolling group. `None` for single-host deploys (orchestrator-bypass).
+    /// Set when this deployment is part of a multi-host rolling group.
+    /// `None` for single-host deploys (orchestrator-bypass).
     #[serde(default)]
     pub group_id: Option<String>,
     /// Snapshot of the blue digest taken at deployment start.
+    ///
     /// Populated only when the resolved policy's `on_failure == Rollback`,
     /// so the supervisor can re-pull this exact image if the deployment
     /// fails healthcheck. NULL means "rollback not eligible".
     #[serde(default)]
     pub previous_digest: Option<String>,
     /// Timestamp the supervisor entered the rollback branch.
+    ///
     /// Set regardless of rollback success so the dashboard can render
     /// "Rolled back at HH:MM" without parsing the error string.
     #[serde(default)]
     pub rollback_attempted_at: Option<DateTime<Utc>>,
 }
 
+/// Insert payload for a deployment row.
 #[derive(Debug, Clone)]
 pub struct InsertDeployment {
+    /// ULID id (caller mints it).
     pub id: String,
+    /// Host the deployment targets.
     pub host_id: HostId,
+    /// Stack the deployment belongs to.
     pub stack_id: StackId,
+    /// Service name.
     pub service_name: String,
+    /// Strategy.
     pub strategy: DeployStrategy,
+    /// Initial state (typically `Pending`).
     pub state: DeploymentState,
+    /// Blue container name, when known.
     pub blue_container: Option<String>,
+    /// Green container name, when known.
     pub green_container: Option<String>,
+    /// Blue digest.
     pub blue_digest: String,
+    /// Green digest.
     pub green_digest: String,
+    /// Optional public hostname.
     pub public_hostname: Option<String>,
+    /// Optional healthcheck path.
     pub health_path: Option<String>,
+    /// Optional upstream port.
     pub container_port: Option<i64>,
+    /// Auxiliary JSON envelope.
     pub metadata_json: Option<String>,
     /// When the resolved policy's `on_failure == Rollback`, the
-    /// supervisor seeds this with `blue_digest` so the driver can re-pull
-    /// it if green fails. `None` keeps the row rollback-ineligible (the
-    /// existing default behaviour).
+    /// supervisor seeds this with `blue_digest` so the driver can
+    /// re-pull it if green fails. `None` keeps the row
+    /// rollback-ineligible (the existing default behaviour).
     pub previous_digest: Option<String>,
 }
 
 impl crate::inventory::Inventory {
+    /// Insert a deployment row and return the fully-populated record.
     pub async fn insert_deployment(&self, ins: InsertDeployment) -> Result<Deployment> {
         let host_bytes = ins.host_id.0.to_bytes().to_vec();
         sqlx::query(
@@ -221,6 +278,7 @@ impl crate::inventory::Inventory {
             })
     }
 
+    /// Fetch one deployment by id.
     pub async fn get_deployment(&self, id: &str) -> Result<Option<Deployment>> {
         let row = sqlx::query(
             r#"
@@ -242,6 +300,7 @@ impl crate::inventory::Inventory {
         Ok(Some(row_to_deployment(&r)?))
     }
 
+    /// Every non-terminal deployment for `host_id`, oldest first.
     pub async fn list_in_flight_deployments(&self, host_id: HostId) -> Result<Vec<Deployment>> {
         let host_bytes = host_id.0.to_bytes().to_vec();
         let rows = sqlx::query(
@@ -264,6 +323,8 @@ impl crate::inventory::Inventory {
         rows.iter().map(row_to_deployment).collect()
     }
 
+    /// Every non-terminal deployment for `(host_id, service_name)`,
+    /// oldest first.
     pub async fn list_in_flight_for_service(
         &self,
         host_id: HostId,
@@ -292,6 +353,7 @@ impl crate::inventory::Inventory {
         rows.iter().map(row_to_deployment).collect()
     }
 
+    /// History of deployments for one stack, newest first, capped at `limit`.
     pub async fn list_deployments_by_stack(
         &self,
         stack_id: StackId,
@@ -319,6 +381,7 @@ impl crate::inventory::Inventory {
         rows.iter().map(row_to_deployment).collect()
     }
 
+    /// Transition a deployment to a new state. Bumps `updated_at`.
     pub async fn update_deployment_state(&self, id: &str, state: DeploymentState) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -330,6 +393,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Record the green container name once the driver has created it.
     pub async fn set_deployment_green_container(&self, id: &str, container: &str) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET green_container = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -341,6 +405,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Stamp `healthcheck_passed_at`.
     pub async fn set_deployment_healthcheck_passed(
         &self,
         id: &str,
@@ -356,6 +421,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Stamp `switched_at` (when the proxy moved traffic to green).
     pub async fn set_deployment_switched(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET switched_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -367,6 +433,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Stamp `drained_at` (when the blue color drained).
     pub async fn set_deployment_drained(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET drained_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -378,6 +445,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Stamp `finished_at` (terminal-state timestamp).
     pub async fn set_deployment_finished(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET finished_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -389,6 +457,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Set the failure reason string.
     pub async fn set_deployment_error(&self, id: &str, error: &str) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -400,10 +469,11 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Stamp the moment the supervisor entered the rollback
-    /// branch. Set regardless of whether the rollback eventually
-    /// succeeded: the dashboard reads this to render "Rolled back at
-    /// HH:MM" without parsing the error string.
+    /// Stamp the moment the supervisor entered the rollback branch.
+    ///
+    /// Set regardless of whether the rollback eventually succeeded:
+    /// the dashboard reads this to render "Rolled back at HH:MM"
+    /// without parsing the error string.
     pub async fn set_deployment_rollback_attempted(
         &self,
         id: &str,
@@ -420,9 +490,10 @@ impl crate::inventory::Inventory {
     }
 
     /// Patch `previous_digest` after the row has been inserted.
-    /// Primary write happens at INSERT time when the resolved policy is
-    /// `on_failure == Rollback`; this setter exists for tests and for
-    /// any future "enable rollback mid-flight" flow.
+    ///
+    /// Primary write happens at INSERT time when the resolved policy
+    /// is `on_failure == Rollback`; this setter exists for tests and
+    /// for any future "enable rollback mid-flight" flow.
     pub async fn set_deployment_previous_digest(&self, id: &str, digest: &str) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET previous_digest = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -434,9 +505,11 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Upsert a Deployment row received from a remote source (controller-side use).
-    /// Idempotent INSERT OR REPLACE keyed on `id`. Each upsert carries the full row,
-    /// so latest-write-wins per field. Used by the controller's event subscriber.
+    /// Upsert a deployment row received from a remote source (controller-side use).
+    ///
+    /// Idempotent `INSERT OR REPLACE` keyed on `id`. Each upsert
+    /// carries the full row, so latest-write-wins per field. Used by
+    /// the controller's event subscriber.
     pub async fn upsert_deployment_from_remote(&self, d: &Deployment) -> Result<()> {
         let host_bytes = d.host_id.0.to_bytes().to_vec();
         let to_rfc = |dt: Option<chrono::DateTime<chrono::Utc>>| dt.map(|t| t.to_rfc3339());
@@ -483,9 +556,11 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Link an existing deployment row to a group. Used by the controller
-    /// orchestrator after it has dispatched a wave of deployments and wants to
-    /// associate them with their parent group.
+    /// Link an existing deployment row to a group.
+    ///
+    /// Used by the controller orchestrator after it has dispatched a
+    /// wave of deployments and wants to associate them with their
+    /// parent group.
     pub async fn set_deployment_group(&self, deployment_id: &str, group_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE deployments SET group_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -497,9 +572,10 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// List every deployment that belongs to `group_id`, oldest first. Used by
-    /// the dashboard's group panel and by the orchestrator's wave-completion
-    /// check.
+    /// Every deployment belonging to `group_id`, oldest first.
+    ///
+    /// Used by the dashboard's group panel and by the orchestrator's
+    /// wave-completion check.
     pub async fn list_deployments_by_group(&self, group_id: &str) -> Result<Vec<Deployment>> {
         let rows = sqlx::query(
             r#"
@@ -521,6 +597,10 @@ impl crate::inventory::Inventory {
         rows.iter().map(row_to_deployment).collect()
     }
 
+    /// Bulk-fail every in-flight deployment on `host_id` with `reason`.
+    ///
+    /// Used when a host enrolls fresh and the controller needs to
+    /// flush stale rows pointing at the prior identity.
     pub async fn mark_orphan_deployments_failed(
         &self,
         host_id: HostId,
@@ -542,6 +622,7 @@ impl crate::inventory::Inventory {
     }
 }
 
+/// Decode one `deployments` row into a [`Deployment`].
 fn row_to_deployment(r: &sqlx::sqlite::SqliteRow) -> Result<Deployment> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = r.try_get("host_id")?;
@@ -676,7 +757,7 @@ mod tests {
             .expect("insert");
         let before = d.updated_at;
 
-        // Sleep just long enough for SQLite's CURRENT_TIMESTAMP (second resolution) to tick.
+        // Sleep long enough for SQLite's CURRENT_TIMESTAMP (second resolution) to tick.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         inv.update_deployment_state(&d.id, DeploymentState::SpinningUp)
             .await

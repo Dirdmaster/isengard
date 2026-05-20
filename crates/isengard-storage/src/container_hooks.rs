@@ -1,14 +1,16 @@
-//! `container_hooks` DAO. (#54).
+//! `container_hooks` DAO (#54).
 //!
-//! Stores per-container lifecycle hook configuration parsed from
-//! `isengard.hooks.*` Docker labels by the controller-side
-//! `HookLabelIngest`. Two read paths:
+//! Migration `0021` lands `container_hooks`. Stores per-container
+//! lifecycle hook configuration parsed from `isengard.hooks.*` Docker
+//! labels by the controller-side `HookLabelIngest`.
+//!
+//! Two read paths:
 //!
 //! - The lifecycle subscriber on the webhooks plugin reads
-//!   `(host_id, container_name)` rows whenever a `deployment.*` event fires
-//!   so it can enqueue a delivery to the matching URL.
-//! - The dashboard's "Lifecycle hooks" view lists rows by host so operators
-//!   can confirm what's configured.
+//!   `(host_id, container_name)` rows whenever a `deployment.*` event
+//!   fires so it can enqueue a delivery to the matching URL.
+//! - The dashboard's "Lifecycle hooks" view lists rows by host so
+//!   operators can confirm what's configured.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,35 +21,55 @@ use crate::host::HostId;
 /// One row in `container_hooks`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerHooks {
+    /// Surrogate key.
     pub id: i64,
+    /// Host the container runs on.
     pub host_id: HostId,
+    /// Container id reported by the runtime.
     pub container_id: String,
+    /// Container name (the lookup key with `host_id`).
     pub container_name: String,
+    /// URL to POST before a deploy starts.
     pub pre_deploy_url: Option<String>,
+    /// URL to POST after a deploy completes.
     pub post_deploy_url: Option<String>,
+    /// URL to POST when a deploy fails.
     pub on_failure_url: Option<String>,
+    /// HMAC secret for the outbound POSTs. `None` means unsigned.
     pub secret: Option<String>,
+    /// First-seen timestamp.
     pub created_at: DateTime<Utc>,
+    /// Most-recent label-write timestamp.
     pub updated_at: DateTime<Utc>,
 }
 
-/// Upsert payload. Empty (all `None`) means "delete this row" via the
-/// `delete_*` methods rather than upserting an empty shell.
+/// Upsert payload.
+///
+/// Empty (all `None` URLs) means "delete this row" via the `delete_*`
+/// methods rather than upserting an empty shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpsertContainerHooks {
+    /// Host the container runs on.
     pub host_id: HostId,
+    /// Runtime container id.
     pub container_id: String,
+    /// Container name (lookup key).
     pub container_name: String,
+    /// Pre-deploy hook URL.
     pub pre_deploy_url: Option<String>,
+    /// Post-deploy hook URL.
     pub post_deploy_url: Option<String>,
+    /// Failure hook URL.
     pub on_failure_url: Option<String>,
+    /// HMAC secret for the outbound POSTs.
     pub secret: Option<String>,
 }
 
 impl UpsertContainerHooks {
-    /// Returns true iff at least one of the URL fields is set. The ingest
-    /// uses this to decide between upsert (some URL present) and delete
-    /// (no URLs at all).
+    /// Returns true iff at least one of the URL fields is set.
+    ///
+    /// The ingest uses this to decide between upsert (some URL present)
+    /// and delete (no URLs at all).
     pub fn has_any_url(&self) -> bool {
         self.pre_deploy_url.is_some()
             || self.post_deploy_url.is_some()
@@ -56,9 +78,11 @@ impl UpsertContainerHooks {
 }
 
 impl crate::inventory::Inventory {
-    /// Upsert by `(host_id, container_name)`. Updates `container_id` if it
-    /// has changed (rebuild after a `docker compose up` recreates the
-    /// container with a new id but the same name).
+    /// Upsert by `(host_id, container_name)`.
+    ///
+    /// Updates `container_id` if it has changed (rebuild after a
+    /// `docker compose up` recreates the container with a new id but
+    /// the same name).
     pub async fn upsert_container_hooks(
         &self,
         ins: UpsertContainerHooks,
@@ -99,6 +123,7 @@ impl crate::inventory::Inventory {
             })
     }
 
+    /// Fetch the hooks row for `(host_id, container_name)`.
     pub async fn get_container_hooks(
         &self,
         host_id: HostId,
@@ -121,6 +146,7 @@ impl crate::inventory::Inventory {
         row.map(row_to_hooks).transpose()
     }
 
+    /// Every hooks row for a given host, sorted by container name.
     pub async fn list_container_hooks_by_host(
         &self,
         host_id: HostId,
@@ -142,6 +168,8 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_hooks).collect()
     }
 
+    /// Delete the hooks row keyed by `(host_id, container_name)`.
+    /// Returns `true` when a row was actually removed.
     pub async fn delete_container_hooks_by_name(
         &self,
         host_id: HostId,
@@ -157,6 +185,9 @@ impl crate::inventory::Inventory {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Delete the hooks row keyed by `(host_id, container_id)`.
+    /// Used when the runtime reports a container removal and the
+    /// caller has the runtime id but not the operator name.
     pub async fn delete_container_hooks_by_id(
         &self,
         host_id: HostId,
@@ -173,6 +204,7 @@ impl crate::inventory::Inventory {
     }
 }
 
+/// Decode one `container_hooks` row into a [`ContainerHooks`].
 fn row_to_hooks(r: sqlx::sqlite::SqliteRow) -> Result<ContainerHooks> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = r.try_get("host_id")?;
@@ -200,6 +232,7 @@ fn row_to_hooks(r: sqlx::sqlite::SqliteRow) -> Result<ContainerHooks> {
     })
 }
 
+/// Parse an RFC3339 or SQLite `CURRENT_TIMESTAMP` string.
 fn parse_dt(s: String) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .or_else(|_| {

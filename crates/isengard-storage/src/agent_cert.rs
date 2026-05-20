@@ -1,7 +1,14 @@
-//! Per-agent leaf certificates issued by the controller's CA. Each row holds
-//! the issued PEM (no key — the agent generates the keypair locally and only
-//! sends the CSR), validity bounds, and revocation state. The `serial` is
-//! the X.509 serial (binary) and serves as the primary key.
+//! Per-agent leaf certificates issued by the controller's CA.
+//!
+//! Migration `0014` lands `agent_certs`. Each row holds the issued PEM
+//! (no key: the agent generates the keypair locally and only sends
+//! the CSR), validity bounds, and revocation state. The `serial` is
+//! the X.509 serial (binary) and is the primary key.
+//!
+//! Revocation is split into two paths: [`Inventory::revoke_cert`]
+//! drops one serial, [`Inventory::revoke_all_active_for_host`] kicks
+//! a host off entirely (every active cert at once, returns the
+//! serials it touched).
 
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -10,20 +17,30 @@ use crate::error::Error;
 use crate::host::HostId;
 use crate::{Inventory, Result};
 
+/// One row from `agent_certs`.
 #[derive(Debug, Clone)]
 pub struct AgentCert {
+    /// X.509 serial (binary). Primary key.
     pub serial: Vec<u8>,
+    /// Host this leaf was minted for.
     pub host_id: HostId,
+    /// Issued PEM.
     pub cert_pem: String,
+    /// Validity start.
     pub issued_at: DateTime<Utc>,
+    /// Validity end.
     pub expires_at: DateTime<Utc>,
+    /// `Some(ts)` when the cert has been revoked.
     pub revoked_at: Option<DateTime<Utc>>,
+    /// Operator-readable reason set at revocation time.
     pub revoke_reason: Option<String>,
 }
 
 impl Inventory {
-    /// Insert a freshly-signed agent leaf cert. Caller supplies all fields;
-    /// `revoked_at` and `revoke_reason` are expected to be `None` at issuance.
+    /// Insert a freshly-signed agent leaf cert.
+    ///
+    /// Caller supplies all fields; `revoked_at` and `revoke_reason`
+    /// are expected to be `None` at issuance.
     pub async fn insert_agent_cert(&self, cert: AgentCert) -> Result<()> {
         let host_bytes = cert.host_id.to_bytes().to_vec();
         let issued = cert.issued_at.to_rfc3339();
@@ -42,9 +59,11 @@ impl Inventory {
         Ok(())
     }
 
-    /// Return the most recently-issued non-revoked cert for `host_id`, or
-    /// `None` if the host has no active cert. Used by the dashboard to show
-    /// per-host cert status and by the renewal task to detect "current" cert.
+    /// The most recently-issued non-revoked cert for `host_id`.
+    ///
+    /// Returns `None` if the host has no active cert. Used by the
+    /// dashboard to show per-host cert status and by the renewal task
+    /// to detect "current" cert.
     pub async fn active_cert_for_host(&self, host_id: HostId) -> Result<Option<AgentCert>> {
         let host_bytes = host_id.to_bytes().to_vec();
         let row = sqlx::query(
@@ -64,8 +83,12 @@ impl Inventory {
         }
     }
 
-    /// Mark a cert as revoked. Errors if the serial doesn't exist or the cert
-    /// was already revoked (rows-affected == 0).
+    /// Mark a single cert as revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Conflict`] if the serial doesn't exist or the
+    /// cert was already revoked (rows-affected == 0).
     pub async fn revoke_cert(&self, serial: &[u8], reason: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let res = sqlx::query(
@@ -84,17 +107,18 @@ impl Inventory {
         Ok(())
     }
 
-    /// Imp-3 fix: atomically revoke EVERY currently-active cert for `host_id`,
-    /// returning the serials that were just revoked. Pre-fix the controller's
-    /// `revoke_agent` only revoked the most-recently-issued active cert;
-    /// after a renewal the older active cert kept working until separately
-    /// revoked. The fix moves the "kick this host off" semantics from
-    /// "newest cert" to "every active cert".
+    /// Atomically revoke every currently-active cert for `host_id`.
     ///
-    /// Returns an empty Vec if the host has no active certs (already
-    /// revoked / never had one) — this is NOT an error so callers can use
-    /// the same code path for "revoke whatever's there" without bothering
-    /// to look first.
+    /// Returns the serials that were revoked. Pre-fix the
+    /// controller's `revoke_agent` only revoked the most-recently-issued
+    /// active cert; after a renewal the older active cert kept working
+    /// until separately revoked. The fix moves the "kick this host off"
+    /// semantics from "newest cert" to "every active cert" (Imp-3).
+    ///
+    /// Returns an empty `Vec` if the host has no active certs (already
+    /// revoked or never had one). That case is not an error so callers
+    /// can use the same code path for "revoke whatever's there"
+    /// without checking first.
     pub async fn revoke_all_active_for_host(
         &self,
         host_id: HostId,
@@ -132,10 +156,12 @@ impl Inventory {
         Ok(serials)
     }
 
-    /// Return the serials of every revoked cert. The interceptor uses this
-    /// to populate its in-memory revocation set on startup; mutations after
-    /// startup are pushed via [`Inventory::revoke_cert`] + an in-process
-    /// notify channel (handled at the controller layer).
+    /// Every revoked serial.
+    ///
+    /// The interceptor uses this to populate its in-memory revocation
+    /// set on startup; mutations after startup are pushed via
+    /// [`Inventory::revoke_cert`] plus an in-process notify channel
+    /// (handled at the controller layer).
     pub async fn revoked_serials(&self) -> Result<Vec<Vec<u8>>> {
         let rows = sqlx::query("SELECT serial FROM agent_certs WHERE revoked_at IS NOT NULL")
             .fetch_all(self.pool())
@@ -145,6 +171,7 @@ impl Inventory {
     }
 }
 
+/// Decode one `agent_certs` row into an [`AgentCert`].
 fn decode_agent_cert_row(r: sqlx::sqlite::SqliteRow) -> Result<AgentCert> {
     let serial: Vec<u8> = r.get(0);
     let host_bytes: Vec<u8> = r.get(1);
@@ -173,6 +200,8 @@ fn decode_agent_cert_row(r: sqlx::sqlite::SqliteRow) -> Result<AgentCert> {
     })
 }
 
+/// Parse an RFC3339 or SQLite `CURRENT_TIMESTAMP` string for column
+/// `field`. Returns [`Error::Decode`] naming the field on failure.
 fn parse_db_timestamp(s: &str, field: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .or_else(|_| {

@@ -1,7 +1,11 @@
-//! Short-lived enrollment tokens. The plaintext token is shown to the
-//! operator exactly once at mint time; only its SHA-256 hash is persisted.
-//! Tokens carry a role (currently always `agent`) and an expiry; consumption
-//! is atomic via a conditional `UPDATE`.
+//! Short-lived enrollment tokens.
+//!
+//! Migration `0014` lands the original `enrollment_tokens` table;
+//! `0015` adds the `cancelled_at` column for Imp-4. The plaintext
+//! token is shown to the operator exactly once at mint time; only
+//! its SHA-256 hash is persisted. Tokens carry a role (currently
+//! always [`TokenRole::Agent`]) and an expiry; consumption is
+//! atomic via a conditional `UPDATE`.
 
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -10,18 +14,27 @@ use crate::error::Error;
 use crate::host::HostId;
 use crate::{Inventory, Result};
 
+/// Role attached to a minted enrollment token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenRole {
+    /// Token mints an agent leaf cert when redeemed.
     Agent,
 }
 
 impl TokenRole {
+    /// Canonical string used for the `role` TEXT column.
     fn as_str(self) -> &'static str {
         match self {
             TokenRole::Agent => "agent",
         }
     }
 
+    /// Parse a role TEXT column.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] for unknown values; this guards against
+    /// an older or newer agent writing a role this binary cannot honour.
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "agent" => Ok(TokenRole::Agent),
@@ -32,22 +45,30 @@ impl TokenRole {
     }
 }
 
+/// One row from `enrollment_tokens`.
 #[derive(Debug, Clone)]
 pub struct EnrollmentTokenRecord {
+    /// SHA-256 hash of the plaintext token.
     pub token_hash: Vec<u8>,
+    /// Role the token mints.
     pub role: TokenRole,
+    /// When the token stops being usable.
     pub expires_at: DateTime<Utc>,
+    /// `Some(ts)` when a host redeemed the token.
     pub consumed_at: Option<DateTime<Utc>>,
+    /// `Some(host)` when a host redeemed the token.
     pub consumed_by: Option<HostId>,
-    /// Imp-4 fix: distinct from consumed_at — cancellation marks the token
-    /// unusable without falsely claiming a host redeemed it. Filled by
-    /// [`Inventory::cancel_enrollment_token`].
+    /// Imp-4 fix: distinct from `consumed_at`. Cancellation marks the
+    /// token unusable without falsely claiming a host redeemed it.
+    /// Filled by [`Inventory::cancel_enrollment_token`].
     pub cancelled_at: Option<DateTime<Utc>>,
+    /// When the row was inserted.
     pub created_at: DateTime<Utc>,
 }
 
 impl Inventory {
-    /// Insert a new enrollment token row keyed by its SHA-256 `token_hash`.
+    /// Insert a new enrollment token row keyed by its SHA-256
+    /// `token_hash`.
     pub async fn insert_enrollment_token(
         &self,
         token_hash: Vec<u8>,
@@ -66,8 +87,10 @@ impl Inventory {
         Ok(())
     }
 
-    /// Look up a token by hash. Returns `None` if the token doesn't exist,
-    /// has been consumed, has been cancelled (Imp-4), or has expired.
+    /// Look up a token by hash.
+    ///
+    /// Returns `None` if the token doesn't exist, has been consumed,
+    /// has been cancelled (Imp-4), or has expired.
     pub async fn find_active_token(&self, hash: &[u8]) -> Result<Option<EnrollmentTokenRecord>> {
         let now = Utc::now().to_rfc3339();
         let row = sqlx::query(
@@ -86,10 +109,13 @@ impl Inventory {
         }
     }
 
-    /// Atomically consume a token by binding it to `host_id`. Errors if the
-    /// token is missing or already consumed (rows-affected == 0). Cancelled
-    /// tokens are also rejected — once an operator pulls the rug on an
-    /// invitation, no enrollment can revive it.
+    /// Atomically consume a token by binding it to `host_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Conflict`] if the token is missing or already
+    /// consumed. Cancelled tokens are also rejected: once an operator
+    /// pulls the rug on an invitation, no enrollment can revive it.
     pub async fn consume_enrollment_token(&self, hash: &[u8], host_id: HostId) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let host_bytes = host_id.to_bytes().to_vec();
@@ -112,10 +138,15 @@ impl Inventory {
         Ok(())
     }
 
-    /// Imp-4 fix: mark an unused token as cancelled. Distinct from
-    /// [`Self::consume_enrollment_token`] so the audit trail doesn't
-    /// pretend a sentinel HostId enrolled. Returns an error if the token
-    /// is missing, already consumed, or already cancelled.
+    /// Mark an unused token as cancelled (Imp-4).
+    ///
+    /// Distinct from [`Self::consume_enrollment_token`] so the audit
+    /// trail doesn't pretend a sentinel `HostId` enrolled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Conflict`] if the token is missing, already
+    /// consumed, or already cancelled.
     pub async fn cancel_enrollment_token(&self, hash: &[u8]) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let res = sqlx::query(
@@ -137,8 +168,9 @@ impl Inventory {
     }
 
     /// List all currently-active (unexpired, unconsumed, uncancelled)
-    /// enrollment tokens, most recently created first. Used by the dashboard
-    /// to show pending invitations.
+    /// enrollment tokens, most recently created first.
+    ///
+    /// Used by the dashboard to show pending invitations.
     pub async fn list_active_tokens(&self) -> Result<Vec<EnrollmentTokenRecord>> {
         let now = Utc::now().to_rfc3339();
         let rows = sqlx::query(
@@ -155,6 +187,7 @@ impl Inventory {
     }
 }
 
+/// Decode one `enrollment_tokens` row into an [`EnrollmentTokenRecord`].
 fn decode_token_row(r: sqlx::sqlite::SqliteRow) -> Result<EnrollmentTokenRecord> {
     let token_hash: Vec<u8> = r.get(0);
     let role_str: String = r.get(1);
@@ -191,9 +224,9 @@ fn decode_token_row(r: sqlx::sqlite::SqliteRow) -> Result<EnrollmentTokenRecord>
     })
 }
 
-/// Parse a timestamp written either explicitly as RFC3339 (our `to_rfc3339()`
-/// binds) or implicitly by SQLite's `CURRENT_TIMESTAMP` default (which uses
-/// `"YYYY-MM-DD HH:MM:SS"`).
+/// Parse a timestamp written either explicitly as RFC3339 (our
+/// `to_rfc3339()` binds) or implicitly by SQLite's `CURRENT_TIMESTAMP`
+/// default (which uses `"YYYY-MM-DD HH:MM:SS"`).
 fn parse_db_timestamp(s: &str, field: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .or_else(|_| {

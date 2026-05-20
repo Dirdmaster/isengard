@@ -1,7 +1,4 @@
-//! Webhook DAO: CRUD over `webhooks` and `webhook_deliveries`.
-//!
-//! See spec §"Storage" + §"DAO" of
-//! `docs/superpowers/specs/2026-05-06-phase-12a-outbound-webhooks-design.md`.
+#![doc = include_str!("../docs/webhooks.md")]
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,12 +9,12 @@ use crate::error::{Error, Result};
 /// Wildcard token in `event_kinds` that matches every event.
 pub const KIND_WILDCARD: &str = "*";
 
-/// Where a `webhook_deliveries` row originated. (#54 #55).
+/// Where a `webhook_deliveries` row originated (#54 #55).
 ///
-/// `Webhook` rows reference a `webhooks(id)` row (the 12a shape). `Lifecycle`
-/// and `Gate` rows carry their URL+secret inline because there is no parent
-/// row: lifecycle hooks are configured per-container via Docker labels, and
-/// gates are configured per-policy.
+/// `Webhook` rows reference a `webhooks(id)` row (the 12a shape).
+/// `Lifecycle` and `Gate` rows carry their URL+secret inline because
+/// there is no parent row: lifecycle hooks are configured per-container
+/// via Docker labels, and gates are configured per-policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliverySource {
@@ -30,6 +27,7 @@ pub enum DeliverySource {
 }
 
 impl DeliverySource {
+    /// Canonical snake_case spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Webhook => "webhook",
@@ -70,6 +68,7 @@ pub enum DeliveryStatus {
 }
 
 impl DeliveryStatus {
+    /// Canonical snake_case spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -100,89 +99,127 @@ impl FromStr for DeliveryStatus {
 /// A row from the `webhooks` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Webhook {
+    /// Surrogate key.
     pub id: i64,
+    /// Destination URL.
     pub url: String,
+    /// HMAC secret for signing outbound POSTs.
     pub secret: String,
     /// Comma-separated list of event kinds. `"*"` matches all.
     pub event_kinds: String,
+    /// Whether the dispatcher should consider this row.
     pub enabled: bool,
+    /// When the row was inserted.
     pub created_at: DateTime<Utc>,
+    /// When the row was last edited.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Insert payload for a webhook.
 #[derive(Debug, Clone)]
 pub struct InsertWebhook {
+    /// Destination URL.
     pub url: String,
+    /// HMAC secret.
     pub secret: String,
+    /// Event kinds filter.
     pub event_kinds: String,
+    /// Enabled flag.
     pub enabled: bool,
 }
 
-/// Update payload. Any `Some` field overwrites; `None` keeps the existing value.
+/// Update payload.
+///
+/// Any `Some` field overwrites; `None` keeps the existing value.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateWebhook {
+    /// New URL.
     pub url: Option<String>,
+    /// New secret.
     pub secret: Option<String>,
+    /// New event filter.
     pub event_kinds: Option<String>,
+    /// New enabled flag.
     pub enabled: Option<bool>,
 }
 
 /// A row from the `webhook_deliveries` table.
 ///
 /// Post-Phase-12b/c the table holds three kinds of deliveries (see
-/// [`DeliverySource`]). For `Webhook` rows the URL+secret are looked up via
-/// `webhook_id`; for `Lifecycle` and `Gate` rows they are stored on the row
-/// itself in `url` + `secret`.
+/// [`DeliverySource`]). For `Webhook` rows the URL+secret are looked
+/// up via `webhook_id`; for `Lifecycle` and `Gate` rows they are
+/// stored on the row itself in `url` and `secret`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebhookDelivery {
+    /// Surrogate key.
     pub id: i64,
     /// `Some` for `source=webhook` rows, `None` for lifecycle / gate rows.
     pub webhook_id: Option<i64>,
+    /// Discriminator: which delivery shape produced this row.
     pub source: DeliverySource,
-    /// Inline destination URL. Used by lifecycle / gate rows; `None` for
-    /// `webhook` rows (worker resolves via `webhook_id`).
+    /// Inline destination URL. Used by lifecycle / gate rows; `None`
+    /// for `webhook` rows (worker resolves via `webhook_id`).
     pub url: Option<String>,
     /// Inline HMAC secret. Used by lifecycle / gate rows; `None` for
     /// `webhook` rows.
     pub secret: Option<String>,
+    /// Event kind that triggered the delivery.
     pub event_kind: String,
+    /// JSON payload to POST.
     pub payload_json: String,
+    /// Current status.
     pub status: DeliveryStatus,
+    /// Attempts so far.
     pub attempts: i64,
+    /// When the worker last tried.
     pub last_attempt_at: Option<DateTime<Utc>>,
+    /// Last failure reason.
     pub last_error: Option<String>,
+    /// When the worker should next try (pending rows only).
     pub next_retry_at: Option<DateTime<Utc>>,
+    /// When the row was queued.
     pub created_at: DateTime<Utc>,
 }
 
-/// Insert payload for a `source=webhook` delivery row (path).
+/// Insert payload for a `source=webhook` delivery row.
 #[derive(Debug, Clone)]
 pub struct InsertDelivery {
+    /// Parent webhook id.
     pub webhook_id: i64,
+    /// Event kind that triggered the delivery.
     pub event_kind: String,
+    /// JSON payload to POST.
     pub payload_json: String,
 }
 
 /// Insert payload for a `source=lifecycle` delivery row.
 #[derive(Debug, Clone)]
 pub struct InsertLifecycleDelivery {
+    /// Destination URL.
     pub url: String,
+    /// Optional HMAC secret.
     pub secret: Option<String>,
+    /// Event kind.
     pub event_kind: String,
+    /// JSON payload.
     pub payload_json: String,
 }
 
 /// Insert payload for a `source=gate` delivery row.
 #[derive(Debug, Clone)]
 pub struct InsertGateDelivery {
+    /// Destination URL.
     pub url: String,
+    /// Optional HMAC secret.
     pub secret: Option<String>,
+    /// Event kind.
     pub event_kind: String,
+    /// JSON payload.
     pub payload_json: String,
 }
 
 impl crate::inventory::Inventory {
+    /// Insert a webhook row and return the populated record.
     pub async fn insert_webhook(&self, ins: InsertWebhook) -> Result<Webhook> {
         let res = sqlx::query(
             r#"
@@ -203,6 +240,7 @@ impl crate::inventory::Inventory {
         })
     }
 
+    /// Fetch a webhook by id.
     pub async fn get_webhook(&self, id: i64) -> Result<Option<Webhook>> {
         let row = sqlx::query(
             r#"
@@ -216,6 +254,7 @@ impl crate::inventory::Inventory {
         row.map(row_to_webhook).transpose()
     }
 
+    /// Every webhook in id order.
     pub async fn list_webhooks(&self) -> Result<Vec<Webhook>> {
         let rows = sqlx::query(
             r#"
@@ -228,6 +267,7 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_webhook).collect()
     }
 
+    /// Webhooks with `enabled = 1`, in id order.
     pub async fn list_enabled_webhooks(&self) -> Result<Vec<Webhook>> {
         let rows = sqlx::query(
             r#"
@@ -240,6 +280,11 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_webhook).collect()
     }
 
+    /// Patch a webhook row.
+    ///
+    /// Each `Some` field overwrites the corresponding column; `None`
+    /// preserves the existing value via SQLite's `COALESCE`. Returns
+    /// `None` if `id` doesn't match a row.
     pub async fn update_webhook(&self, id: i64, body: UpdateWebhook) -> Result<Option<Webhook>> {
         // Coalesce: SQLite's COALESCE(?, col) keeps the existing value when
         // the bound param is NULL, so we don't need a custom dynamic query.
@@ -269,7 +314,7 @@ impl crate::inventory::Inventory {
         self.get_webhook(id).await
     }
 
-    /// Returns true iff a row was actually deleted.
+    /// Delete a webhook by id. Returns `true` iff a row was removed.
     pub async fn delete_webhook(&self, id: i64) -> Result<bool> {
         let r = sqlx::query("DELETE FROM webhooks WHERE id = ?")
             .bind(id)
@@ -278,6 +323,7 @@ impl crate::inventory::Inventory {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Insert a `source=webhook` delivery row.
     pub async fn insert_delivery(&self, ins: InsertDelivery) -> Result<WebhookDelivery> {
         let res = sqlx::query(
             r#"
@@ -299,8 +345,10 @@ impl crate::inventory::Inventory {
     }
 
     /// Insert a delivery row for a container lifecycle hook.
-    /// `webhook_id` is left NULL; `url` + `secret` carry the destination
-    /// directly so the worker can dispatch without a parent row.
+    ///
+    /// `webhook_id` is left NULL; `url` and `secret` carry the
+    /// destination directly so the worker can dispatch without a
+    /// parent row.
     pub async fn insert_lifecycle_delivery(
         &self,
         ins: InsertLifecycleDelivery,
@@ -325,9 +373,10 @@ impl crate::inventory::Inventory {
         })
     }
 
-    /// Insert a delivery row representing one external-gate
-    /// evaluation. The row is the audit trail; the synchronous evaluator
-    /// stamps the outcome via `mark_delivery_*` paths just like webhook rows.
+    /// Insert a delivery row representing one external-gate evaluation.
+    ///
+    /// The row is the audit trail; the synchronous evaluator stamps
+    /// the outcome via `mark_delivery_*` paths the same as webhook rows.
     pub async fn insert_gate_delivery(&self, ins: InsertGateDelivery) -> Result<WebhookDelivery> {
         let res = sqlx::query(
             r#"
@@ -349,6 +398,7 @@ impl crate::inventory::Inventory {
         })
     }
 
+    /// Fetch a delivery by id.
     pub async fn get_delivery(&self, id: i64) -> Result<Option<WebhookDelivery>> {
         let row = sqlx::query(
             r#"
@@ -364,6 +414,10 @@ impl crate::inventory::Inventory {
         row.map(row_to_delivery).transpose()
     }
 
+    /// List deliveries for one webhook id.
+    ///
+    /// `status_filter` is optional; `None` returns every status.
+    /// Newest first, capped by `limit`.
     pub async fn list_deliveries(
         &self,
         webhook_id: i64,
@@ -408,9 +462,10 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_delivery).collect()
     }
 
-    /// List deliveries filtered by source. Used by the
-    /// dashboard "Lifecycle hooks" / "Gates" tabs to show traffic that has
-    /// no parent webhook row.
+    /// List deliveries filtered by source.
+    ///
+    /// Used by the dashboard "Lifecycle hooks" / "Gates" tabs to show
+    /// traffic that has no parent webhook row.
     pub async fn list_deliveries_by_source(
         &self,
         source: DeliverySource,
@@ -434,6 +489,7 @@ impl crate::inventory::Inventory {
     }
 
     /// Pull pending deliveries due now (or with no scheduled time yet).
+    ///
     /// Caller is responsible for dispatching and writing back state.
     pub async fn claim_pending_deliveries(
         &self,
@@ -459,6 +515,7 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(row_to_delivery).collect()
     }
 
+    /// Mark a delivery row as `success`. Clears error fields.
     pub async fn mark_delivery_success(
         &self,
         id: i64,
@@ -484,6 +541,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Mark a delivery row back into `pending` with a scheduled retry.
     pub async fn mark_delivery_pending(
         &self,
         id: i64,
@@ -513,6 +571,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Mark a delivery as terminally `failed` (e.g. 4xx response).
     pub async fn mark_delivery_failed(
         &self,
         id: i64,
@@ -540,6 +599,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Mark a delivery as `exhausted` (retry cap hit).
     pub async fn mark_delivery_exhausted(
         &self,
         id: i64,
@@ -568,6 +628,7 @@ impl crate::inventory::Inventory {
     }
 }
 
+/// Parse an RFC3339 or SQLite `CURRENT_TIMESTAMP` string.
 fn parse_dt(s: String) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .or_else(|_| {
@@ -580,10 +641,12 @@ fn parse_dt(s: String) -> Result<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+/// Like [`parse_dt`] but tolerates NULL columns.
 fn parse_dt_opt(s: Option<String>) -> Result<Option<DateTime<Utc>>> {
     s.map(parse_dt).transpose()
 }
 
+/// Decode one `webhooks` row into a [`Webhook`].
 fn row_to_webhook(r: sqlx::sqlite::SqliteRow) -> Result<Webhook> {
     use sqlx::Row;
     let enabled_int: i64 = r.try_get("enabled")?;
@@ -598,6 +661,7 @@ fn row_to_webhook(r: sqlx::sqlite::SqliteRow) -> Result<Webhook> {
     })
 }
 
+/// Decode one `webhook_deliveries` row into a [`WebhookDelivery`].
 fn row_to_delivery(r: sqlx::sqlite::SqliteRow) -> Result<WebhookDelivery> {
     use sqlx::Row;
     let status_s: String = r.try_get("status")?;
@@ -621,8 +685,10 @@ fn row_to_delivery(r: sqlx::sqlite::SqliteRow) -> Result<WebhookDelivery> {
     })
 }
 
-/// Match a webhook's `event_kinds` filter against an event kind. The filter
-/// is a comma-separated list; whitespace is trimmed; `*` matches all.
+/// Match a webhook's `event_kinds` filter against an event kind.
+///
+/// The filter is a comma-separated list; whitespace is trimmed;
+/// [`KIND_WILDCARD`] matches all.
 pub fn kind_matches(filter: &str, kind: &str) -> bool {
     for tok in filter.split(',') {
         let t = tok.trim();

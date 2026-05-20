@@ -1,17 +1,19 @@
 //! Containers entity: one runtime-level container observed on a host.
 //!
-//! Containers become the leaf unit for `isd ps`. Each row is
-//! keyed by a 16-char hex digest of `sha256(host_id || "|" ||
-//! runtime_container_id)` so the operator-visible id is globally unique
-//! per fleet and stable across reconnects. The native runtime id (bollard
-//! container id, wisp handle) is kept alongside in `runtime_container_id`.
+//! Migration `0029` lands the `containers` table. Containers are the
+//! leaf unit for `isd ps`. Each row is keyed by a 16-char hex digest
+//! of `sha256(host_id || "|" || runtime_container_id)` so the
+//! operator-visible id is globally unique per fleet and stable across
+//! reconnects. The native runtime id (bollard container id, wisp
+//! handle) is kept alongside in `runtime_container_id`.
 //!
-//! Lifecycle: the controller upserts one row per `ContainerInfo` carried
-//! in a heartbeat (see [`upsert_container`]). When a container falls out
-//! of the agent's snapshot the controller calls [`mark_containers_removed`]
-//! to stamp `removed_at`. A janitor periodically calls
-//! [`reap_removed_before`] to drop rows older than the retention window
-//! (default 1h; see the controller's reaper).
+//! Lifecycle: the controller upserts one row per `ContainerInfo`
+//! carried in a heartbeat (see [`upsert_container`]). When a
+//! container falls out of the agent's snapshot the controller calls
+//! [`mark_containers_removed`] to stamp `removed_at`. A janitor
+//! periodically calls [`reap_removed_before`] to drop rows older
+//! than the retention window (default 1h; see the controller's
+//! reaper).
 //!
 //! Filtering surface lives on [`ContainerListFilter`] passed to
 //! [`list_containers`]. The fields mirror the dashboard's
@@ -28,15 +30,19 @@ pub struct ContainerRow {
     /// 16-char hex digest, stable across reconnects for the same
     /// `(host_id, runtime_container_id)` pair.
     pub id: String,
+    /// Host the container runs on.
     pub host_id: HostId,
     /// Optional link to the per-host service row. Heartbeat ingest can
     /// leave this NULL when the agent has not yet derived a service
     /// name for the container.
     pub service_id: Option<i64>,
-    /// Bollard / wisp native id. Operators rarely need this; it is kept
-    /// so `isd container inspect` can round-trip through the backend.
+    /// Bollard / wisp native id. Operators rarely need this; it is
+    /// kept so `isd container inspect` can round-trip through the
+    /// backend.
     pub runtime_container_id: String,
+    /// Image reference reported by the runtime.
     pub image: String,
+    /// Command line, when the runtime exposes it.
     pub command: Option<String>,
     /// Lowercase string vocabulary the agent emits:
     /// `running`, `restarting`, `paused`, `created`, `exited`, `dead`,
@@ -44,12 +50,13 @@ pub struct ContainerRow {
     pub state: String,
     /// Agent-rendered status (e.g. `Up 5m`, `Exited (0) 1h ago`).
     pub status_message: Option<String>,
-    /// Comma-separated container names. Bollard yields one; wisp yields
-    /// the single handle name.
+    /// Comma-separated container names. Bollard yields one; wisp
+    /// yields the single handle name.
     pub names: String,
-    /// Denormalised stack / service names so list queries don't have to
-    /// join through `service_id`.
+    /// Denormalised stack name so list queries don't have to join
+    /// through `service_id`.
     pub stack: Option<String>,
+    /// Denormalised service name.
     pub service: Option<String>,
     /// Unix seconds when the runtime created the container. May be 0
     /// when the agent could not read it.
@@ -57,32 +64,44 @@ pub struct ContainerRow {
     /// Unix seconds when the controller first observed this id.
     pub first_seen_at: i64,
     /// Unix seconds derived from `min(server_now, info.observed_at_ms /
-    /// 1000)`. Tied to the agent's clock so we render a sensible LAST
-    /// SEEN when the controller's clock has drifted.
+    /// 1000)`. Tied to the agent's clock so we render a sensible
+    /// LAST SEEN when the controller's clock has drifted.
     pub last_seen_at: i64,
-    /// Unix seconds when the controller noticed the container was gone
-    /// from the agent's snapshot. NULL while alive.
+    /// Unix seconds when the controller noticed the container was
+    /// gone from the agent's snapshot. NULL while alive.
     pub removed_at: Option<i64>,
 }
 
 /// Query filter for [`list_containers`].
+///
+/// Every populated field becomes an `AND` predicate. The defaults
+/// (`include_removed = false`, all `Option`s `None`) return active
+/// containers across every host.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerListFilter {
+    /// Restrict to one host.
     pub host_id: Option<HostId>,
+    /// Restrict to one stack name.
     pub stack: Option<String>,
+    /// Restrict to one service name.
     pub service: Option<String>,
+    /// Restrict to a single state string.
     pub state: Option<String>,
-    /// When false (default), rows with `removed_at IS NOT NULL` are hidden.
+    /// When false (default), rows with `removed_at IS NOT NULL` are
+    /// hidden.
     pub include_removed: bool,
+    /// Optional SQL `LIMIT`.
     pub limit: Option<i64>,
+    /// Optional SQL `OFFSET`.
     pub offset: Option<i64>,
 }
 
-/// Upsert a container row keyed by `id`. On conflict, every mutable
-/// field is overwritten with the supplied row but `first_seen_at` is
-/// preserved (the SQL self-references the existing column on the UPDATE
-/// branch). Use this for the heartbeat ingest path: one row per
-/// `ContainerInfo` per heartbeat.
+/// Upsert a container row keyed by `id`.
+///
+/// On conflict, every mutable field is overwritten with the supplied
+/// row but `first_seen_at` is preserved (the SQL self-references the
+/// existing column on the UPDATE branch). Used for the heartbeat
+/// ingest path: one row per `ContainerInfo` per heartbeat.
 pub async fn upsert_container(pool: &SqlitePool, row: &ContainerRow) -> Result<()> {
     sqlx::query(
         r#"
@@ -133,10 +152,11 @@ pub async fn upsert_container(pool: &SqlitePool, row: &ContainerRow) -> Result<(
 
 /// Mark every container row for `host_id` whose `id` is NOT in
 /// `alive_ids` and whose `removed_at IS NULL` as removed at `at`.
+///
 /// Returns the number of rows changed. No-op when `alive_ids` is empty
-/// and there are no other rows for the host (the IN clause becomes a
-/// degenerate `NOT IN ()` which SQLite evaluates as true, so we handle
-/// the empty case by building the SQL without the `NOT IN` predicate).
+/// and there are no other rows for the host. The empty-case branch
+/// builds the SQL without the `NOT IN` predicate because SQLite
+/// evaluates `NOT IN ()` as true.
 pub async fn mark_containers_removed(
     pool: &SqlitePool,
     host_id: HostId,
@@ -174,9 +194,10 @@ pub async fn mark_containers_removed(
     Ok(result.rows_affected())
 }
 
-/// List containers, applying every populated field in `filter`. Rows
-/// are returned ordered by `last_seen_at DESC, id ASC` so the most
-/// recent activity is at the top with a deterministic tie-break.
+/// List containers, applying every populated field in `filter`.
+///
+/// Rows are returned ordered by `last_seen_at DESC, id ASC` so the
+/// most recent activity is at the top with a deterministic tie-break.
 pub async fn list_containers(
     pool: &SqlitePool,
     filter: ContainerListFilter,
@@ -233,8 +254,9 @@ pub async fn list_containers(
     rows.into_iter().map(decode_row).collect()
 }
 
-/// Fetch a single container by its operator-visible id (the 16-char hex
-/// digest). Returns `Ok(None)` when no row matches.
+/// Fetch a single container by its operator-visible id.
+///
+/// Returns `Ok(None)` when no row matches.
 pub async fn get_container(pool: &SqlitePool, id: &str) -> Result<Option<ContainerRow>> {
     let row = sqlx::query(
         "SELECT id, host_id, service_id, runtime_container_id, image, \
@@ -260,6 +282,7 @@ pub async fn reap_removed_before(pool: &SqlitePool, cutoff: i64) -> Result<u64> 
     Ok(result.rows_affected())
 }
 
+/// Decode one `containers` row into a [`ContainerRow`].
 fn decode_row(row: sqlx::sqlite::SqliteRow) -> Result<ContainerRow> {
     let host_bytes: Vec<u8> = row.try_get("host_id")?;
     let host_id = HostId::from_db_bytes(host_bytes)?;

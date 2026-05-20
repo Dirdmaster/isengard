@@ -1,7 +1,6 @@
-//! SQLite-backed inventory storage for the Isengard controller.
-//!
-//! Surface: hosts table only. Containers and journal land in
-//! later phases as new migrations.
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 pub mod acme_account;
 pub mod adapter_config;

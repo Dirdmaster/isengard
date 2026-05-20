@@ -1,12 +1,4 @@
-//! Queued action for a host. The agent pulls these on its next heartbeat.
-//!
-//! Extends this module with pending-approval rows. Approval rows
-//! live in the same `host_actions` table but use a separate kind string
-//! (`update_pending_approval`) plus the new lifecycle columns added by
-//! migration 0017 (`action_id`, `state`, `expires_at`, `decided_at`,
-//! `decided_by`, `metadata_json`, `updated_at`). Approval rows set
-//! `delivered_at = CURRENT_TIMESTAMP` on insert so they never bleed into the
-//! agent's `pending_actions` stream (which filters `delivered_at IS NULL`).
+#![doc = include_str!("../docs/host-actions.md")]
 
 use crate::error::{Error, Result};
 use crate::host::HostId;
@@ -14,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+/// Surrogate key for `host_actions` rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HostActionId(pub i64);
@@ -24,14 +17,26 @@ impl std::fmt::Display for HostActionId {
     }
 }
 
+/// Typed payload for an agent-pull action.
+///
+/// Stored in the `payload_json` column verbatim; the `kind` column
+/// holds the discriminant for cheap filtering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostActionKind {
-    ForceUpdate { stack_name: Option<String> },
+    /// Force the agent to re-check images. `stack_name = None` means
+    /// every stack on the host.
+    ForceUpdate {
+        /// Restrict to a single stack; `None` means every stack.
+        stack_name: Option<String>,
+    },
+    /// Decommission the host: revoke certs, drop the row, close the
+    /// connection.
     Decommission,
 }
 
 impl HostActionKind {
+    /// Wire-format `kind` column value.
     pub fn kind_str(&self) -> &'static str {
         match self {
             Self::ForceUpdate { .. } => "force_update",
@@ -39,18 +44,28 @@ impl HostActionKind {
         }
     }
 
+    /// Serialize the kind to its `payload_json` representation. Falls
+    /// back to `{}` only if the serde-derived encoding fails, which
+    /// shouldn't happen for these closed variants.
     pub fn payload_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
     }
 }
 
+/// One agent-pull row read back from `host_actions`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostAction {
+    /// Surrogate key.
     pub id: HostActionId,
+    /// Host the action targets.
     pub host_id: HostId,
+    /// Typed payload.
     pub kind: HostActionKind,
+    /// When the row was queued.
     pub created_at: DateTime<Utc>,
+    /// When the agent picked it up.
     pub delivered_at: Option<DateTime<Utc>>,
+    /// Result string written by the agent at delivery time.
     pub result: Option<String>,
 }
 
@@ -65,14 +80,20 @@ pub const APPROVAL_KIND: &str = "update_pending_approval";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalState {
+    /// Waiting on an operator decision.
     PendingOpen,
+    /// Operator approved; controller can dispatch the apply.
     PendingApproved,
+    /// Operator rejected.
     PendingRejected,
+    /// Expired without a decision (auto-transition).
     PendingExpired,
+    /// Snoozed for a fixed window.
     PendingSnoozed,
 }
 
 impl ApprovalState {
+    /// Canonical snake_case spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::PendingOpen => "pending_open",
@@ -83,6 +104,7 @@ impl ApprovalState {
         }
     }
 
+    /// True for every terminal state (anything other than `PendingOpen`).
     pub fn is_decided(self) -> bool {
         !matches!(self, Self::PendingOpen)
     }
@@ -106,42 +128,62 @@ impl FromStr for ApprovalState {
     }
 }
 
-/// Filter coarseness used by `list_pending_approvals`.
+/// Filter coarseness used by `Inventory::list_pending_approvals`.
 ///
-/// `Open` matches `pending_open`. `Decided` matches the four terminal states
-/// (`approved`, `rejected`, `expired`, `snoozed`). `All` is unbounded.
+/// `Open` matches `pending_open`. `Decided` matches the four terminal
+/// states (`approved`, `rejected`, `expired`, `snoozed`). `All` is
+/// unbounded.
+///
+/// [`Inventory`]: crate::Inventory
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStateFilter {
+    /// Only rows in `pending_open`. Default.
     #[default]
     Open,
+    /// Any terminal state.
     Decided,
+    /// Any state.
     All,
 }
 
-/// Typed body for `kind="update_pending_approval"` rows. Stored verbatim in
-/// the existing `payload_json` column.
+/// Typed body for `kind = "update_pending_approval"` rows.
+///
+/// Stored verbatim in the existing `payload_json` column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct UpdateApprovalBody {
+    /// Host the update targets.
     pub host_id: HostId,
+    /// Stack name.
     pub stack: String,
+    /// Service name.
     pub service: String,
+    /// Container name on the host.
     pub container_name: String,
+    /// Image reference (without digest).
     pub image: String,
+    /// Currently-deployed digest.
     pub current_digest: String,
+    /// Proposed digest.
     pub proposed_digest: String,
+    /// Optional URL to a diff or release notes.
     pub diff_url: Option<String>,
+    /// Notifier channel that surfaced the approval.
     pub approver_channel: Option<String>,
 }
 
-/// What an operator (or the auto-expire task) decides to do with an open
-/// approval row.
+/// What an operator (or the auto-expire task) decides to do with an
+/// open approval row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
+    /// Apply the proposed digest.
     Approve,
+    /// Keep the current digest.
     Reject,
+    /// Postpone the decision; the wrapped `u32` is the snooze window
+    /// in hours.
     SnoozeHours(u32),
 }
 
@@ -156,49 +198,75 @@ impl ApprovalDecision {
     }
 }
 
-/// Filter shape passed to `list_pending_approvals`.
+/// Filter shape passed to `Inventory::list_pending_approvals`.
+///
+/// [`Inventory`]: crate::Inventory
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApprovalFilter {
+    /// Restrict by state coarseness.
     pub state: Option<ApprovalStateFilter>,
+    /// Restrict to one host.
     pub host_id: Option<HostId>,
+    /// Restrict to one stack name.
     pub stack: Option<String>,
+    /// Restrict to one service name.
     pub service: Option<String>,
+    /// Inclusive lower bound on `created_at`.
     pub since: Option<DateTime<Utc>>,
+    /// Optional SQL `LIMIT`.
     pub limit: Option<u32>,
 }
 
-/// Typed view of one `host_actions` row whose kind is `update_pending_approval`.
+/// Typed view of one `host_actions` row whose kind is
+/// `update_pending_approval`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingApprovalRow {
-    /// External ULID identifier (TEXT). The integer `host_actions.id` is kept
-    /// internal to the DAO; callers use this string id everywhere.
+    /// External ULID identifier (TEXT). The integer `host_actions.id`
+    /// is kept internal to the DAO; callers use this string id
+    /// everywhere.
     pub action_id: String,
+    /// Current lifecycle state.
     pub state: ApprovalState,
+    /// Decoded body.
     pub body: UpdateApprovalBody,
+    /// When the row stops being decidable.
     pub expires_at: DateTime<Utc>,
+    /// When the row reached a terminal state.
     pub decided_at: Option<DateTime<Utc>>,
+    /// Operator (or `system:auto-expire`) that decided.
     pub decided_by: Option<String>,
+    /// Auxiliary JSON (notifier message ids, etc).
     pub metadata_json: Option<serde_json::Value>,
+    /// When the row was inserted.
     pub created_at: DateTime<Utc>,
+    /// When the row was last touched.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Insert payload. The DAO mints the ULID; the caller supplies semantics.
 #[derive(Debug, Clone)]
 pub struct InsertPendingApproval {
+    /// Typed body.
     pub body: UpdateApprovalBody,
+    /// Hard expiry.
     pub expires_at: DateTime<Utc>,
+    /// Notifier channel that surfaced the approval.
     pub approver_channel: Option<String>,
 }
 
-/// Returned by `decide_pending_approval`. Bundles the freshly-transitioned
-/// row with a flag the dashboard layer uses to decide whether to dispatch a
-/// downstream `apply_update` action.
+/// Returned by `Inventory::decide_pending_approval`.
+///
+/// Bundles the freshly-transitioned row with a flag the dashboard
+/// layer uses to decide whether to dispatch a downstream
+/// `apply_update` action.
+///
+/// [`Inventory`]: crate::Inventory
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecidedApproval {
+    /// The row as it stands after the transition.
     pub row: PendingApprovalRow,
-    /// `true` iff the decision was `Approve`. Caller is responsible for
-    /// queuing the actual `apply_update` HostAction.
+    /// `true` iff the decision was `Approve`. Caller is responsible
+    /// for queuing the actual `apply_update` HostAction.
     pub should_dispatch_apply_update: bool,
 }
 
@@ -208,6 +276,7 @@ pub struct DecidedApproval {
 
 impl crate::inventory::Inventory {
     /// Insert a brand-new pending-approval row in state `pending_open`.
+    ///
     /// The ULID is minted internally and returned in the row.
     pub async fn insert_pending_approval(
         &self,
@@ -334,9 +403,15 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(approval_row_from_sqlite).collect()
     }
 
-    /// Atomic transition `pending_open -> approved/rejected/snoozed`. Returns
-    /// the freshly-decided row. Errors with `Conflict` if the row was already
-    /// decided (or doesn't exist).
+    /// Atomic transition `pending_open -> approved/rejected/snoozed`.
+    ///
+    /// Returns the freshly-decided row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Conflict`] if the row is already decided or
+    /// doesn't exist; the message names the current state so the
+    /// dashboard can render a precise error.
     pub async fn decide_pending_approval(
         &self,
         action_id: &str,
@@ -390,9 +465,11 @@ impl crate::inventory::Inventory {
         })
     }
 
-    /// Bulk-transition every `pending_open` row whose `expires_at` is at or
-    /// before `now` into `pending_expired`. Returns the rows that flipped so
-    /// the caller can emit `update.expired` events.
+    /// Bulk-transition every `pending_open` row whose `expires_at` is
+    /// at or before `now` into `pending_expired`.
+    ///
+    /// Returns the rows that flipped so the caller can emit
+    /// `update.expired` events.
     pub async fn expire_pending_approvals(
         &self,
         now: DateTime<Utc>,
@@ -450,9 +527,11 @@ impl crate::inventory::Inventory {
         Ok(out)
     }
 
-    /// Idempotence helper: is there already an open approval row for this
-    /// (host_id, stack, service, proposed_digest) tuple? Returns the most
-    /// recent open row if any.
+    /// Idempotence helper.
+    ///
+    /// Is there already an open approval row for this
+    /// `(host_id, stack, service, proposed_digest)` tuple? Returns
+    /// the most recent open row if any.
     pub async fn find_open_approval_for_proposed_digest(
         &self,
         host_id: HostId,
@@ -481,9 +560,11 @@ impl crate::inventory::Inventory {
         row.map(approval_row_from_sqlite).transpose()
     }
 
-    /// Stash notifier metadata (Telegram chat_id + message_id) on an existing
-    /// approval row. T6 uses this to remember which message to edit when the
-    /// approval is decided. Idempotent: re-calling overwrites prior values.
+    /// Stash Telegram notifier metadata on an existing approval row.
+    ///
+    /// T6 uses this to remember which message to edit when the
+    /// approval is decided. Idempotent: re-calling overwrites prior
+    /// values.
     pub async fn set_approval_message_metadata(
         &self,
         action_id: &str,
@@ -500,11 +581,12 @@ impl crate::inventory::Inventory {
         .await
     }
 
-    /// Stash Discord notifier metadata (channel_id + message_id) on an existing
-    /// approval row. Used so the dashboard callback can edit the
-    /// originating Discord message after a decision. Idempotent and disjoint
-    /// from `set_approval_message_metadata` so Telegram + Discord can coexist
-    /// on the same row.
+    /// Stash Discord notifier metadata on an existing approval row.
+    ///
+    /// Used so the dashboard callback can edit the originating
+    /// Discord message after a decision. Idempotent and disjoint from
+    /// [`Self::set_approval_message_metadata`] so Telegram and
+    /// Discord can coexist on the same row.
     pub async fn set_discord_approval_message_metadata(
         &self,
         action_id: &str,
@@ -527,9 +609,10 @@ impl crate::inventory::Inventory {
         .await
     }
 
-    /// Read-modify-write merge for the approval row's metadata_json. Each
-    /// `(key, value)` pair is upserted into the JSON object. Other keys are
-    /// preserved.
+    /// Read-modify-write merge for the approval row's metadata_json.
+    ///
+    /// Each `(key, value)` pair is upserted into the JSON object.
+    /// Other keys are preserved.
     async fn merge_approval_metadata(
         &self,
         action_id: &str,
@@ -580,6 +663,7 @@ const APPROVAL_SELECT_SQL: &str = "SELECT host_id, payload_json, action_id, stat
             decided_at, decided_by, metadata_json, created_at, updated_at \
      FROM host_actions";
 
+/// Decode one `host_actions` row into a typed approval row.
 fn approval_row_from_sqlite(row: sqlx::sqlite::SqliteRow) -> Result<PendingApprovalRow> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = row.try_get("host_id")?;

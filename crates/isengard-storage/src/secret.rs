@@ -1,20 +1,22 @@
-//! Isengard-managed secrets store. Rows hold a ChaCha20-Poly1305
-//! ciphertext for an operator-supplied value; the controller reads the
-//! 32-byte master key from a bind-mounted file on boot
-//! (`ISENGARD_MASTER_KEY_FILE`, default `/run/secrets/master.key`) and
-//! never persists it.
+//! Isengard-managed secrets store.
 //!
-//! The DAO surface intentionally trades in raw ciphertext bytes: the
-//! encryption layer lives one level up (controller crate) so the storage
-//! crate stays free of crypto deps. Callers must encrypt before
-//! `upsert_secret` and decrypt after `get_secret_ciphertext`.
+//! Migration `0025` lands the `secrets` table. Rows hold a
+//! ChaCha20-Poly1305 ciphertext for an operator-supplied value; the
+//! controller reads the 32-byte master key from a bind-mounted file
+//! at boot (`ISENGARD_MASTER_KEY_FILE`, default
+//! `/run/secrets/master.key`) and never persists it.
+//!
+//! The DAO trades in raw ciphertext bytes. The encryption layer lives
+//! one level up (controller crate) so the storage crate stays free of
+//! crypto deps. Callers encrypt before [`Inventory::upsert_secret`]
+//! and decrypt after [`Inventory::get_secret_ciphertext`].
 //!
 //! Naming rules (enforced at the API boundary, not the DB): names are
-//! `[a-zA-Z0-9._-]{1,64}`. The DB only enforces non-empty + uniqueness.
+//! `[a-zA-Z0-9._-]{1,64}`. The DB only enforces non-empty and uniqueness.
 //!
-//! Plaintext is NEVER stored, NEVER logged, NEVER returned through any
-//! list endpoint. The `SecretMeta` struct intentionally omits the
-//! ciphertext field; the only call that exposes ciphertext is
+//! Plaintext is never stored, never logged, never returned through any
+//! list endpoint. [`SecretMeta`] intentionally omits the ciphertext
+//! field; the only call that exposes ciphertext is
 //! [`Inventory::get_secret_ciphertext`], used by the controller's
 //! decrypt path.
 
@@ -25,21 +27,33 @@ use sqlx::Row;
 use crate::error::Error;
 use crate::{Inventory, Result};
 
-/// Public-safe metadata for a stored secret. The plaintext value is never
-/// exposed through this struct: list endpoints serialize this directly.
+/// Public-safe metadata for a stored secret.
+///
+/// The plaintext value is never exposed through this struct: list
+/// endpoints serialize this directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretMeta {
+    /// Secret name (the lookup key).
     pub name: String,
+    /// When the secret was first inserted.
     pub created_at: DateTime<Utc>,
+    /// When the ciphertext was last rotated.
     pub updated_at: DateTime<Utc>,
+    /// Operator identity that created the row, when known.
     pub created_by: Option<String>,
 }
 
 impl Inventory {
-    /// Insert or replace a secret's ciphertext. Caller is responsible for
-    /// encrypting `ciphertext` (e.g. via `age` passphrase) before calling.
-    /// Returns whether a new row was inserted (true) or an existing row was
-    /// replaced (false).
+    /// Insert or replace a secret's ciphertext.
+    ///
+    /// Caller is responsible for encrypting `ciphertext` before calling.
+    /// Returns whether a new row was inserted (`true`) or an existing
+    /// row was replaced (`false`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] if `name` fails
+    /// [`validate_secret_name`].
     pub async fn upsert_secret(
         &self,
         name: &str,
@@ -83,9 +97,16 @@ impl Inventory {
         Ok(!existed)
     }
 
-    /// Insert a secret. Errors with [`Error::Conflict`] if the name is
-    /// already present. Used by the `POST /api/v1/secrets` handler so the
-    /// operator gets an explicit 409 instead of a silent overwrite.
+    /// Insert a secret, refusing to overwrite.
+    ///
+    /// Used by the `POST /api/v1/secrets` handler so the operator
+    /// gets an explicit 409 instead of a silent overwrite.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Conflict`] if the name is already present.
+    /// Returns [`Error::Decode`] if `name` fails
+    /// [`validate_secret_name`].
     pub async fn insert_secret_strict(
         &self,
         name: &str,
@@ -113,9 +134,11 @@ impl Inventory {
         Ok(())
     }
 
-    /// Fetch the raw ciphertext for `name`. Returns `None` if no such
-    /// secret. Caller is expected to decrypt with the controller's master
-    /// passphrase. Plaintext is never logged here.
+    /// Fetch the raw ciphertext for `name`.
+    ///
+    /// Returns `None` if no such secret exists. Caller is expected to
+    /// decrypt with the controller's master key. Plaintext is never
+    /// logged here.
     pub async fn get_secret_ciphertext(&self, name: &str) -> Result<Option<Vec<u8>>> {
         validate_secret_name(name)?;
         let row: Option<sqlx::sqlite::SqliteRow> =
@@ -126,8 +149,10 @@ impl Inventory {
         Ok(row.map(|r| r.get::<Vec<u8>, _>(0)))
     }
 
-    /// Fetch metadata (no ciphertext) for `name`. Useful for the GET-by-id
-    /// endpoint that returns "this secret exists, here's when it was set".
+    /// Fetch metadata (no ciphertext) for `name`.
+    ///
+    /// Used by the GET-by-id endpoint that answers "this secret
+    /// exists, here's when it was set".
     pub async fn get_secret_meta(&self, name: &str) -> Result<Option<SecretMeta>> {
         validate_secret_name(name)?;
         let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
@@ -142,9 +167,10 @@ impl Inventory {
         }
     }
 
-    /// List every stored secret, name + timestamps only. Plaintext is
-    /// NEVER returned through this surface; the `value` column is not
-    /// even selected.
+    /// List every stored secret, name plus timestamps.
+    ///
+    /// Plaintext is never returned through this surface; the
+    /// `ciphertext` column is not even selected.
     pub async fn list_secrets(&self) -> Result<Vec<SecretMeta>> {
         let rows = sqlx::query(
             "SELECT name, created_at, updated_at, created_by
@@ -155,8 +181,7 @@ impl Inventory {
         rows.into_iter().map(decode_meta_row).collect()
     }
 
-    /// Delete a secret. Returns `true` if a row was removed, `false` if
-    /// none matched.
+    /// Delete a secret. Returns `true` if a row was removed.
     pub async fn delete_secret(&self, name: &str) -> Result<bool> {
         validate_secret_name(name)?;
         let res = sqlx::query("DELETE FROM secrets WHERE name = ?")
@@ -167,9 +192,9 @@ impl Inventory {
     }
 
     /// Quick predicate. Retained for symmetry with the dashboard but no
-    /// longer used as a boot gate (the controller now refuses to start
+    /// longer used as a boot gate: the controller refuses to start
     /// if the master key file is missing, regardless of whether the DB
-    /// has stored secrets).
+    /// has stored secrets.
     pub async fn has_any_secret(&self) -> Result<bool> {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM secrets")
             .fetch_one(self.pool())
@@ -178,6 +203,7 @@ impl Inventory {
     }
 }
 
+/// Decode one `secrets` row into a [`SecretMeta`] (no ciphertext).
 fn decode_meta_row(r: sqlx::sqlite::SqliteRow) -> Result<SecretMeta> {
     let name: String = r.get(0);
     let created_at: String = r.get(1);
@@ -191,6 +217,8 @@ fn decode_meta_row(r: sqlx::sqlite::SqliteRow) -> Result<SecretMeta> {
     })
 }
 
+/// Parse an RFC3339 or SQLite `CURRENT_TIMESTAMP` string for column
+/// `field`. Returns [`Error::Decode`] naming the field on failure.
 fn parse_db_timestamp(s: &str, field: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .or_else(|_| {
@@ -203,9 +231,16 @@ fn parse_db_timestamp(s: &str, field: &str) -> Result<DateTime<Utc>> {
         })
 }
 
-/// Names must be non-empty, <=64 chars, and match `[A-Za-z0-9._-]+`. The
-/// pattern is what `compose` files allow for `secrets:` keys and lets us
-/// safely substitute names into file paths (e.g. `/run/secrets/<name>`).
+/// Validate a secret name against the project rules.
+///
+/// Names must be non-empty, at most 64 chars, and match
+/// `[A-Za-z0-9._-]+`. The pattern is what compose files allow for
+/// `secrets:` keys and lets the controller safely substitute names
+/// into file paths (e.g. `/run/secrets/<name>`).
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] with a reason naming the violation.
 pub fn validate_secret_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::Decode {

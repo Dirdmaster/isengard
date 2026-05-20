@@ -126,7 +126,7 @@ async fn upsert_inserts_when_absent_then_updates_existing() {
     let first_updated_at = inserted.updated_at;
 
     // SQLite's strftime('%Y-%m-%dT%H:%M:%fZ', 'now') is millisecond resolution;
-    // sleep just past one millisecond so the new updated_at is observably greater.
+    // sleep past one millisecond so the new updated_at is observably greater.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     body.strategy = Some(UpdateStrategy::Any);
