@@ -101,6 +101,23 @@ impl Tunnel {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if let Ok(Some(status)) = child.try_wait() {
+                // When an existing ControlMaster socket is reachable
+                // (the common case after `isd init` or any prior
+                // `isd` command set one up), ssh dispatches the
+                // forward request to the master and exits cleanly.
+                // The master owns the forward; the local port is now
+                // listening even though our spawned client is gone.
+                // Treat exit-0-with-listening-port as success.
+                let listening = tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+                    .await
+                    .is_ok();
+                if status.success() && listening {
+                    return Ok(Tunnel {
+                        child,
+                        local_port,
+                        stderr_buf,
+                    });
+                }
                 let stderr = stderr_buf.lock().await.clone();
                 anyhow::bail!(
                     "ssh LocalForward to {target:?} (-> {remote_host}:{remote_port}) failed (exit {status}): {}",
