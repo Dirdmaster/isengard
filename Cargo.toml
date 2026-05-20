@@ -143,6 +143,13 @@ similar = "2.6"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "x509-parser", "ring"] }
 rand = "0.8"
 
+# SSH user-certificate authority for the Isengard SSH bastion. The controller
+# holds an ed25519 keypair, signs short-lived OpenSSH user certs, and every
+# fleet host trusts the corresponding pubkey via `TrustedUserCAKeys`. The
+# `std` feature pulls in `std::error::Error` impls; `getrandom` enables
+# `OsRng` for the cert-builder's random nonce path.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "std", "getrandom"] }
+
 # ACME client (RFC 8555). Used by the controller's DNS-01 flow for wildcard
 # certificate issuance via Let's Encrypt. 0.8 is required because LE has begun
 # returning challenge objects for unknown ChallengeType variants without a

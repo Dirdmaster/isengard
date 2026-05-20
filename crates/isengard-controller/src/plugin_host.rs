@@ -78,6 +78,7 @@ mod tests {
             .await
             .unwrap();
         let secrets = Arc::new(crate::secrets::SecretsStore::new_locked(inventory.clone()));
+        let ssh_ca = Arc::new(crate::ssh_ca::SshAuthority::for_tests().unwrap());
         let handles = Arc::new(ControllerHandles {
             inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),
@@ -90,6 +91,7 @@ mod tests {
             compose_broker: Arc::new(crate::compose_broker::ComposeBroker::new()),
             secrets,
             ca,
+            ssh_ca,
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into

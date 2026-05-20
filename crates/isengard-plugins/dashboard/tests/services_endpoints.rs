@@ -49,6 +49,7 @@ async fn setup_app() -> (axum::Router, Arc<ControllerHandles>) {
             inv.clone(),
         )),
         ca,
+        ssh_ca: Arc::new(isengard_controller::ssh_ca::SshAuthority::for_tests().unwrap()),
     });
     let app = api::router(handles.clone());
     (app, handles)

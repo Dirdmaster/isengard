@@ -68,6 +68,7 @@ async fn setup_app() -> (Router, Router, Arc<Inventory>, HostId, StackId) {
             inv.clone(),
         )),
         ca,
+        ssh_ca: Arc::new(isengard_controller::ssh_ca::SshAuthority::for_tests().unwrap()),
     });
 
     let groups_app = isengard_plugin_dashboard::deployment_groups::router(handles.clone());
