@@ -1,9 +1,10 @@
-//! Container-scope lifecycle-hook ingest from Docker labels (#54).
+//! Container-scope lifecycle-hook ingest from Docker labels.
 //!
-//! Mirrors `policy_ingest.rs`: tail `ContainerLabelsReport` /
-//! `ContainerLabelsRemoved` agent messages, parse `isengard.hooks.*` labels,
-//! upsert / delete rows in `container_hooks`. The lifecycle subscriber on
-//! the webhooks plugin reads this table when deployment events fire.
+//! Mirrors [`crate::policy_ingest`]: tail `ContainerLabelsReport` and
+//! `ContainerLabelsRemoved` agent messages, parse `isengard.hooks.*`
+//! labels, upsert or delete rows in `container_hooks`. The lifecycle
+//! subscriber on the webhooks plugin reads this table when deployment
+//! events fire.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,17 +15,21 @@ use isengard_proto::pb::{ContainerLabelsRemoved, ContainerLabelsReport};
 use isengard_storage::{HostId, Inventory, UpsertContainerHooks};
 use tokio::sync::Mutex;
 
-/// Owns the controller-side ingest of container lifecycle-hook labels.
+/// Owns the controller-side ingest of container lifecycle-hook
+/// labels.
 ///
-/// Holds an in-memory `(host_id, container_id) -> container_name` map so
-/// the remove path can find the right row to delete (the wire payload only
-/// carries `container_id`).
+/// Holds an in-memory `(host_id, container_id) -> container_name` map
+/// so the remove path can find the right row to delete (the wire
+/// payload only carries `container_id`).
 pub struct HookLabelIngest {
+    /// Shared inventory for `container_hooks` writes.
     inv: Arc<Inventory>,
+    /// `(host_id, container_id) -> container_name`.
     by_container: Mutex<HashMap<(HostId, String), String>>,
 }
 
 impl HookLabelIngest {
+    /// Builds an ingest worker over the shared inventory.
     pub fn new(inv: Arc<Inventory>) -> Self {
         Self {
             inv,
@@ -32,13 +37,17 @@ impl HookLabelIngest {
         }
     }
 
-    /// Ingest a `ContainerLabelsReport` into `container_hooks`.
+    /// Ingests a `ContainerLabelsReport` into `container_hooks`.
     ///
-    /// - Parse `isengard.hooks.*`. If at least one URL is present, upsert
-    ///   the row by `(host_id, container_name)`.
-    /// - If no URLs are present, delete any existing row.
-    /// - Track the `(host_id, container_id) -> container_name` mapping so
-    ///   the remove path can find the row.
+    /// Parses `isengard.hooks.*`. When at least one URL is present,
+    /// upserts the row by `(host_id, container_name)`. When no URLs
+    /// are present, deletes any existing row. Tracks the
+    /// `(host_id, container_id) -> container_name` mapping so the
+    /// remove path can find the row.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure.
     pub async fn ingest(&self, host_id: HostId, report: &ContainerLabelsReport) -> Result<()> {
         let parsed = parse_hook_labels(&report.labels);
 
@@ -83,10 +92,17 @@ impl HookLabelIngest {
         Ok(())
     }
 
-    /// Drop the container_hooks row for a removed container. Looks up the
-    /// container_name from the in-memory map; if absent, the row is
-    /// deleted-by-id which still works because the table indexes
-    /// `(host_id, container_id)`.
+    /// Drops the `container_hooks` row for a removed container.
+    ///
+    /// Looks up the container name from the in-memory map; when
+    /// absent, the row is deleted by id (the table indexes
+    /// `(host_id, container_id)`) as a belt-and-braces against missed
+    /// reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ok(())` even on individual delete failures (logged
+    /// internally); only catastrophic inventory failures bubble up.
     pub async fn ingest_removed(&self, host_id: HostId, ev: &ContainerLabelsRemoved) -> Result<()> {
         let name_opt = {
             let mut guard = self.by_container.lock().await;

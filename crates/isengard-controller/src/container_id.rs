@@ -1,20 +1,22 @@
-//! Derive the operator-visible container id from
-//! `sha256(host_id || "|" || runtime_container_id)[..8]` (16 hex chars).
+//! Derives the operator-visible container id.
 //!
-//! 64 bits of entropy. Collision-resistant per cluster. Stable: the same
-//! host + runtime id always hashes to the same id, so reconnects and
-//! agent restarts don't churn the row. Globally unique without
-//! depending on host-local id spaces (so `isd container inspect <id>`
-//! does not need a `--host` flag).
+//! Shape: `sha256(host_id || "|" || runtime_container_id)[..8]`, hex
+//! encoded (16 chars, 64 bits of entropy).
+//!
+//! Collision-resistant per cluster. Stable: the same host plus runtime
+//! id always hashes to the same id, so reconnects and agent restarts
+//! don't churn the row. Globally unique without depending on host-local
+//! id spaces, which means `isd container inspect <id>` doesn't need a
+//! `--host` flag.
 
 use sha2::{Digest, Sha256};
 
-/// Compute the 16-char lowercase hex digest of
+/// Computes the 16-char lowercase hex digest of
 /// `sha256(host_id_display || "|" || runtime_id)[..8]`.
 ///
 /// `host_id` is the [`isengard_storage::host::HostId`] in its display
-/// form (Crockford ULID). Passing the display string (rather than the
-/// raw 16 bytes) keeps the derivation reproducible from anywhere the
+/// form (Crockford ULID). Passing the display string rather than the
+/// raw 16 bytes keeps the derivation reproducible from anywhere the
 /// operator can read the ULID: dashboard URL, CLI flag, JSON dump.
 pub fn derive_container_id(host_id: &str, runtime_id: &str) -> String {
     let mut hasher = Sha256::new();

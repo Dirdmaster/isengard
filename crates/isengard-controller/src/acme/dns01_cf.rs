@@ -26,48 +26,69 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, sleep};
 
+/// Let's Encrypt production directory URL.
 pub const LE_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
+/// Let's Encrypt staging directory URL (lax rate limits, untrusted
+/// roots).
 pub const LE_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
-/// Wall-clock budgets for the order lifecycle.
+/// Maximum time an ACME order may spend reaching `Ready` / `Valid`.
 const ORDER_FINALIZE_TIMEOUT: Duration = Duration::from_secs(180);
+/// Maximum time spent polling for the issued certificate after
+/// `finalize`.
 const CERT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Interval between successive order/cert polls.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Time to wait between TXT record create and "challenge ready" notification.
-/// CF propagates within a few seconds for most paths but LE itself queries
-/// authoritative nameservers, which means propagation across CF's edge to the
-/// auth servers is what matters. 15s is conservative and matches the lego /
-/// certbot CF defaults.
+/// Wait between TXT record create and the `set_ready` notification
+/// to LE.
+///
+/// CF propagates within a few seconds for most paths, but LE queries
+/// authoritative nameservers; propagation across CF's edge to those
+/// auth servers is what matters. 15 seconds is conservative and
+/// matches the lego and certbot CF defaults.
 const DNS_PROPAGATION_WAIT: Duration = Duration::from_secs(15);
 
-/// Abstraction over the DNS provider so unit tests can drive the flow with a
-/// mock (no real CF calls). `present` creates the TXT record at
-/// `_acme-challenge.<base_domain>` with `value`; `cleanup` removes whatever
-/// `present` returned a handle to.
+/// Abstraction over the DNS provider so unit tests can drive the flow
+/// with a mock and no real CF calls.
+///
+/// `present` creates the TXT record at `_acme-challenge.<base_domain>`
+/// with `value`; `cleanup` removes whatever `present` returned a
+/// handle to.
 #[async_trait]
 pub trait DnsProvider: Send + Sync {
+    /// Creates the challenge TXT record and returns a handle to it.
     async fn present(&self, base_domain: &str, value: &str) -> Result<DnsRecordHandle>;
+    /// Deletes the TXT record identified by `handle`.
     async fn cleanup(&self, handle: DnsRecordHandle) -> Result<()>;
 }
 
+/// Identifier returned by [`DnsProvider::present`] so [`DnsProvider::cleanup`]
+/// can target the right record.
 #[derive(Debug, Clone)]
 pub struct DnsRecordHandle {
+    /// CF zone id.
     pub zone_id: String,
+    /// CF record id.
     pub record_id: String,
 }
 
+/// Production [`DnsProvider`] backed by [`CloudflareApi`].
 pub struct CloudflareDnsProvider {
+    /// Underlying CF client.
     api: CloudflareApi,
 }
 
 impl CloudflareDnsProvider {
+    /// Builds a provider from a raw API token.
     pub fn new(api_token: String) -> Self {
         Self {
             api: CloudflareApi::new(api_token),
         }
     }
 
+    /// Builds a provider from a pre-configured [`CloudflareApi`].
+    /// Useful for tests that want to inject a wiremock base URL.
     pub fn with_api(api: CloudflareApi) -> Self {
         Self { api }
     }
@@ -113,27 +134,39 @@ impl DnsProvider for CloudflareDnsProvider {
     }
 }
 
-/// Reusable DNS-01 ACME client. The `Account` is initialised lazily on the
-/// first `order_wildcard()` call and cached for the lifetime of the client;
-/// restart-survival comes from the persisted credentials in `acme_account`.
+/// Reusable DNS-01 ACME client.
+///
+/// The `Account` is initialised lazily on the first `order_wildcard`
+/// call and cached for the lifetime of the client. Restart-survival
+/// comes from the persisted credentials in `acme_account`.
 pub struct AcmeDns01Client<P: DnsProvider> {
+    /// Shared inventory for account persistence.
     inventory: Arc<Inventory>,
+    /// `mailto:<email>` contact for the ACME account.
     contact_email: String,
+    /// Directory URL (production or staging).
     directory_url: String,
+    /// DNS provider used to install + clean up challenge records.
     dns: P,
+    /// Lazily-initialised ACME account, cached for the client's life.
     account_cache: OnceCell<Account>,
 }
 
+/// Bundle returned by [`AcmeDns01Client::order_wildcard`].
 #[derive(Debug, Clone)]
 pub struct IssuedCert {
-    /// All requested identifiers, in order. The first is treated as the
-    /// SAN that drives Common Name; the rest are SANs.
+    /// All requested identifiers, in order. The first drives the
+    /// Common Name; the rest are SANs.
     pub identifiers: Vec<String>,
+    /// PEM-encoded certificate chain.
     pub cert_pem: String,
+    /// PEM-encoded leaf private key.
     pub key_pem: String,
 }
 
 impl<P: DnsProvider> AcmeDns01Client<P> {
+    /// Builds a client over the shared inventory, contact email,
+    /// directory URL, and DNS provider.
     pub fn new(
         inventory: Arc<Inventory>,
         contact_email: String,
@@ -149,14 +182,18 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
         }
     }
 
-    /// Get or create the LE account, persisted in storage so we don't
-    /// re-register on restarts.
+    /// Gets or creates the LE account, persisted in storage so the
+    /// controller doesn't re-register on restarts.
     async fn account(&self) -> Result<&Account> {
         self.account_cache
             .get_or_try_init(|| async { self.load_or_register_account().await })
             .await
     }
 
+    /// Reconstructs the persisted account when possible, otherwise
+    /// registers a fresh one (and persists it). Falls back to fresh
+    /// registration on directory or email change and on credentials
+    /// JSON shape drift (e.g. across an instant-acme dependency bump).
     async fn load_or_register_account(&self) -> Result<Account> {
         if let Some(saved) = self.inventory.get_acme_account().await? {
             // Re-use the saved account only if directory + email match. A
@@ -234,8 +271,24 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
         Ok(account)
     }
 
-    /// Order a single cert covering `identifiers` (typically `["*.foo", "foo"]`
-    /// for a wildcard with the apex). All identifiers are validated via DNS-01.
+    /// Orders a single cert covering `identifiers` (typically
+    /// `["*.foo", "foo"]` for a wildcard with the apex).
+    ///
+    /// All identifiers are validated via DNS-01.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on:
+    ///
+    /// - empty `identifiers`;
+    /// - any DNS provider failure (no TXT record installed);
+    /// - LE refusing the authorization or returning `Invalid`;
+    /// - timeout reaching `Ready`/`Valid`;
+    /// - timeout downloading the issued certificate.
+    ///
+    /// The caller (the scheduler) MUST apply backoff before retrying;
+    /// calling this in a tight loop will burn LE's per-account order
+    /// quota.
     pub async fn order_wildcard(&self, identifiers: &[String]) -> Result<IssuedCert> {
         if identifiers.is_empty() {
             return Err(anyhow!("order_wildcard called with empty identifier list"));
@@ -373,6 +426,9 @@ impl<P: DnsProvider> AcmeDns01Client<P> {
     }
 }
 
+/// Best-effort cleanup of every TXT record handle in `handles`.
+/// Failures are swallowed so the cleanup path doesn't surface errors
+/// the caller can't act on.
 async fn cleanup_all<P: DnsProvider + ?Sized>(dns: &P, handles: Vec<DnsRecordHandle>) {
     for h in handles {
         let _ = dns.cleanup(h).await;

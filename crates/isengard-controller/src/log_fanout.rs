@@ -1,12 +1,13 @@
-//! In-memory fanout from agent-emitted `LogChunk` frames to the
-//! per-WebSocket-client receiver each dashboard subscription owns.
+//! In-memory fanout from agent `LogChunk` frames to per-WebSocket
+//! receivers.
 //!
-//! The dashboard plugin calls `register(sub_id)` to get an `mpsc::Receiver`
-//! for a fresh subscription. The controller's Sync handler routes inbound
-//! `AgentMessage::LogChunk` frames into the matching sender via `route()`.
-//! When the WebSocket client disconnects, the dashboard plugin calls
-//! `unregister(sub_id)` and the next agent-emitted chunk for the dead
-//! subscription is dropped at the controller boundary.
+//! The dashboard plugin calls [`LogFanout::register`] for a fresh
+//! subscription and reads chunks from the returned `mpsc::Receiver`.
+//! The controller's Sync handler routes inbound `AgentMessage::LogChunk`
+//! frames through [`LogFanout::route`]. When the WebSocket client
+//! disconnects, the dashboard plugin calls [`LogFanout::unregister`]
+//! and subsequent chunks for the dead subscription drop at the
+//! controller boundary.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,43 +16,53 @@ use isengard_proto::pb::LogChunk;
 use tokio::sync::{Mutex, mpsc};
 use tracing::debug;
 
-/// Per-subscription bounded queue. Sized for ~256 lines of head-room before
-/// `try_send` returns `Full`; on overflow the controller emits a `dropped`
-/// frame to the WebSocket client and continues.
+/// Per-subscription bounded queue size.
+///
+/// 256 lines of head-room before `try_send` returns `Full`; on
+/// overflow the controller emits a `dropped` frame to the WebSocket
+/// client and continues.
 const QUEUE_SIZE: usize = 256;
 
-/// Registry: subscription_id -> Sender. Receivers are owned by whoever called
-/// `register` (the WebSocket task).
+/// Registry mapping `subscription_id` to its outbound sender.
+///
+/// Receivers are owned by whoever called [`LogFanout::register`] (the
+/// WebSocket task).
 #[derive(Default)]
 pub struct LogFanout {
+    /// `subscription_id` -> outbound sender.
     senders: Mutex<HashMap<String, mpsc::Sender<LogChunk>>>,
 }
 
 impl LogFanout {
+    /// Builds a shareable empty fanout.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Register a fresh subscription. Returns the receiver the WebSocket task
-    /// reads from. Idempotent: re-registering the same id replaces the
-    /// previous sender (the previous receiver simply stops getting frames).
+    /// Registers a fresh subscription.
+    ///
+    /// Returns the receiver the WebSocket task reads from. Idempotent:
+    /// re-registering the same id replaces the previous sender, and
+    /// the previous receiver stops getting frames.
     pub async fn register(&self, sub_id: String) -> mpsc::Receiver<LogChunk> {
         let (tx, rx) = mpsc::channel(QUEUE_SIZE);
         self.senders.lock().await.insert(sub_id, tx);
         rx
     }
 
-    /// Drop the registration. After this returns, any further `route()` for
-    /// the id is a no-op.
+    /// Drops the registration. Subsequent [`LogFanout::route`] calls
+    /// for the id no-op.
     pub async fn unregister(&self, sub_id: &str) {
         self.senders.lock().await.remove(sub_id);
     }
 
-    /// Forward an agent-emitted chunk to the matching subscription. Returns
-    /// `Outcome::Routed` on success, `Outcome::Dropped` on a full queue, and
-    /// `Outcome::Unknown` when the subscription isn't registered (typical
-    /// after a client disconnect; the controller-side `StopLogStream` raced
-    /// the agent's last in-flight chunks).
+    /// Forwards an agent-emitted chunk to the matching subscription.
+    ///
+    /// Returns [`Outcome::Routed`] on success, [`Outcome::Dropped`] on a
+    /// full queue, and [`Outcome::Unknown`] when the subscription isn't
+    /// registered. The `Unknown` case is typical after a client
+    /// disconnect: the controller-side `StopLogStream` raced the
+    /// agent's last in-flight chunks.
     pub async fn route(&self, chunk: LogChunk) -> Outcome {
         let sub_id = chunk.subscription_id.clone();
         let map = self.senders.lock().await;
@@ -73,11 +84,15 @@ impl LogFanout {
     }
 }
 
-/// Outcome of a single `route()` call.
+/// Outcome of a single [`LogFanout::route`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// Chunk enqueued for the subscriber.
     Routed,
+    /// Subscriber's queue was full; chunk dropped at the controller
+    /// boundary.
     Dropped,
+    /// No subscription with that id.
     Unknown,
 }
 

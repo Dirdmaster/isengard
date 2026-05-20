@@ -1,18 +1,29 @@
-//! Routing rule reconciler: turns the storage view of `routing_rules` into
-//! `ProxyConfig` messages addressed at individual hosts.
+//! Routing rule reconciler: turns the storage view of `routing_rules`
+//! into per-host `ProxyConfig` messages.
 //!
-//! Per-host monotonic `generation`: only increments when the rule-set hash
-//! actually changes. Agents use the generation to discard stale pushes that
-//! arrive out of order.
+//! Each host has a monotonic `generation` that only increments when the
+//! rule-set hash changes. Agents use the generation to discard stale
+//! pushes that arrive out of order.
 //!
-//! Task 14: per-host sender registry. The Sync RPC handler registers its
-//! outbound `mpsc::Sender` here (keyed by `HostId`) on stream open and
-//! unregisters on close. `push_to_host` builds the latest `ProxyConfig` and
-//! shoves it down whichever sender is currently registered (best-effort —
-//! drop on full queue rather than block the caller).
+//! # Sender registry
 //!
-//! Task 17 will extend this with `ingest_labels` to translate
-//! `ContainerLabelsReport` payloads into routing rules.
+//! The Sync RPC handler registers its outbound `mpsc::Sender` here
+//! (keyed by [`HostId`]) on stream open and unregisters on close.
+//! [`RoutingPusher::push_to_host`] builds the latest `ProxyConfig` and
+//! shoves it down whichever sender is currently registered, best-effort:
+//! a full queue drops the message rather than blocking the caller, and
+//! the next push will carry the freshest config anyway.
+//!
+//! The same registry doubles as the channel for arbitrary
+//! `ControllerMessage` payloads (`StartLogStream`, `StopLogStream`,
+//! `AbortDeployment`) via [`RoutingPusher::send_to_host`] and
+//! [`RoutingPusher::send_message_to_host`].
+//!
+//! # Label ingest
+//!
+//! [`RoutingPusher::ingest_labels`] translates `ContainerLabelsReport`
+//! payloads into routing rules; [`RoutingPusher::ingest_labels_removed`]
+//! drops the label-source rules when the container goes away.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,38 +43,50 @@ use tonic::Status;
 
 use crate::acme::WildcardCertStore;
 
+/// Per-host generation tracking. Only increments when the input hash
+/// actually changes.
 #[derive(Default)]
 struct PerHostState {
     /// Last generation pushed to (or built for) the host.
     generation: u64,
-    /// Hash of the rule-set used to compute the last generation. If a new
-    /// build hashes to the same value, generation does NOT increment.
+    /// Hash of the rule-set used to compute the last generation. When a
+    /// new build hashes to the same value, generation does not
+    /// increment.
     last_hash: u64,
 }
 
-/// Outbound message type as carried on the Sync gRPC stream. The registry
-/// stores this directly (rather than a bare `Sender<ControllerMessage>`) so
-/// the Sync handler can hand its actual sender in without an adapter task.
+/// Outbound message channel for the Sync gRPC stream.
+///
+/// The registry stores this shape directly (rather than a bare
+/// `Sender<ControllerMessage>`) so the Sync handler hands its actual
+/// outbound sender in without an adapter task.
 pub type OutboundSender = mpsc::Sender<Result<ControllerMessage, Status>>;
 
+/// Sender registry keyed by host id.
 #[derive(Default)]
 struct Senders {
+    /// One outbound sender per currently-connected host.
     by_host: HashMap<HostId, OutboundSender>,
 }
 
-/// Reconciler that turns storage `routing_rules` into proto `ProxyConfig`
-/// messages, one host at a time, with monotonic per-host generation.
+/// Reconciler that turns storage `routing_rules` into proto
+/// `ProxyConfig` messages, one host at a time, with monotonic per-host
+/// generation.
 pub struct RoutingPusher {
+    /// Shared inventory for routing-rule reads.
     inv: Arc<Inventory>,
+    /// Per-host generation tracking.
     by_host: Mutex<HashMap<HostId, PerHostState>>,
+    /// Per-host outbound sender registry.
     senders: Mutex<Senders>,
     /// Wildcard certs the controller has issued. Snapshotted on every
-    /// `build_for_host` so each push includes the current cert material.
-    /// Optional so non-ACME deployments don't pay any cost.
+    /// build so each push includes the current cert material. Optional
+    /// so non-ACME deployments pay no cost.
     wildcard_certs: Option<Arc<WildcardCertStore>>,
 }
 
 impl RoutingPusher {
+    /// Builds a pusher without wildcard cert support.
     pub fn new(inv: Arc<Inventory>) -> Self {
         Self {
             inv,
@@ -73,16 +96,23 @@ impl RoutingPusher {
         }
     }
 
-    /// Attach the wildcard cert store. Called from `run_controller` when
-    /// the ACME subsystem is enabled.
+    /// Attaches the wildcard cert store.
+    ///
+    /// [`crate::run_controller`] calls this when the ACME subsystem is
+    /// enabled.
     pub fn with_wildcard_certs(mut self, store: Arc<WildcardCertStore>) -> Self {
         self.wildcard_certs = Some(store);
         self
     }
 
-    /// Build the latest `ProxyConfig` for a host. Generation increments only
-    /// when the rule-set or the wildcard-cert set has actually changed since
-    /// the previous build.
+    /// Builds the latest `ProxyConfig` for `host_id`.
+    ///
+    /// Generation increments only when the rule-set or the
+    /// wildcard-cert set has actually changed since the previous build.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage read failure.
     pub async fn build_for_host(&self, host_id: HostId) -> Result<ProxyConfig> {
         let rules = self.inv.list_routing_rules_for_host(host_id).await?;
         let wildcards = match &self.wildcard_certs {
@@ -121,27 +151,30 @@ impl RoutingPusher {
         })
     }
 
-    /// Register the Sync outbound sender for a host. Replaces any previous
-    /// sender (last-writer-wins; a reconnecting agent supersedes its old
-    /// stream which is already torn down on the agent side).
+    /// Registers the Sync outbound sender for `host`.
+    ///
+    /// Last-writer-wins: a reconnecting agent's new sender supersedes
+    /// the previous one (which is already torn down on the agent side).
     pub async fn register_sender(&self, host: HostId, tx: OutboundSender) {
         let mut s = self.senders.lock().await;
         s.by_host.insert(host, tx);
     }
 
-    /// Drop the registered sender for a host (called on stream close).
+    /// Drops the registered sender for `host`.
+    ///
+    /// Called by the Sync handler on stream close.
     pub async fn unregister_sender(&self, host: HostId) {
         let mut s = self.senders.lock().await;
         s.by_host.remove(&host);
     }
 
-    /// Send an arbitrary `ControllerMessage` (e.g. `StartLogStream`,
-    /// `StopLogStream`) to the host's current Sync sender. Returns `true` on a
-    /// successful enqueue, `false` if the host has no registered sender or the
-    /// sender's queue is full / closed.
+    /// Sends an arbitrary `ControllerMessage` (e.g. `StartLogStream`,
+    /// `StopLogStream`) to `host`'s current Sync sender.
     ///
-    /// Best-effort: full queues drop the message. The caller chooses whether
-    /// to retry.
+    /// Returns `true` on a successful enqueue, `false` when `host` has
+    /// no registered sender or the sender's queue is full or closed.
+    /// Best-effort: full queues drop the message and the caller decides
+    /// whether to retry.
     pub async fn send_to_host(&self, host: HostId, msg: ControllerMessage) -> bool {
         let senders = self.senders.lock().await;
         match senders.by_host.get(&host) {
@@ -150,10 +183,16 @@ impl RoutingPusher {
         }
     }
 
-    /// Push the latest `ProxyConfig` to the host's currently registered
-    /// sender (if any). Best-effort: a full queue drops the message rather
-    /// than blocking — the next `push_to_host` will carry the freshest
-    /// config anyway.
+    /// Pushes the latest `ProxyConfig` to `host`'s currently registered
+    /// sender, if any.
+    ///
+    /// Best-effort: a full queue drops the message rather than
+    /// blocking. The next `push_to_host` carries the freshest config
+    /// anyway.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage read failure inside `build_for_host`.
     pub async fn push_to_host(&self, host: HostId) -> Result<()> {
         let cfg = self.build_for_host(host).await?;
         let senders = self.senders.lock().await;
@@ -166,10 +205,17 @@ impl RoutingPusher {
         Ok(())
     }
 
-    /// Push the latest `ProxyConfig` to every host with a currently
-    /// registered Sync sender. Used by the ACME wildcard pusher: when the
-    /// scheduler issues or renews a cert, every connected agent should get
-    /// the new cert material on the next sweep.
+    /// Pushes the latest `ProxyConfig` to every host with a currently
+    /// registered Sync sender.
+    ///
+    /// The ACME wildcard pusher calls this on issuance or renewal so
+    /// every connected agent gets the new cert material without waiting
+    /// for its next reconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Ok(())` even when per-host pushes fail. Per-host errors
+    /// are logged at `warn`.
     pub async fn push_to_all_hosts(&self) -> Result<()> {
         let hosts: Vec<HostId> = {
             let senders = self.senders.lock().await;
@@ -183,12 +229,16 @@ impl RoutingPusher {
         Ok(())
     }
 
-    /// Send an arbitrary `ControllerMessage` to a specific host. Returns
-    /// `Err` if the host isn't currently connected (no Sync stream
-    /// registered) or if the outbound channel rejects the send. Used by
-    /// the dashboard's abort endpoint (Plan B 10f) to deliver
-    /// `AbortDeployment` immediately rather than piggybacking on the next
-    /// proxy_config push.
+    /// Sends an arbitrary `ControllerMessage` to a specific host.
+    ///
+    /// The dashboard's abort endpoint uses this to deliver
+    /// `AbortDeployment` immediately rather than piggybacking on the
+    /// next proxy_config push.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `host_id` is not currently connected or when
+    /// the outbound channel rejects the send.
     pub async fn send_message_to_host(
         &self,
         host_id: HostId,
@@ -205,13 +255,23 @@ impl RoutingPusher {
         Ok(())
     }
 
-    /// Translate a `ContainerLabelsReport` into routing rules. Any existing
-    /// label-source rules for the same container are deleted first, so the
-    /// report becomes the single source of truth: adds, edits and removals
-    /// of individual labels all converge to the same end state.
+    /// Translates a `ContainerLabelsReport` into routing rules.
     ///
-    /// Resolving the `stack_id` from the container's compose project label
-    /// is a TODO for Plan B.
+    /// Any existing label-source rules for the same container are
+    /// deleted first, so the report becomes the single source of
+    /// truth: adds, edits, and removals of individual labels all
+    /// converge to the same end state. UI rules that share a hostname
+    /// with a label rule lose: their overrides snapshot forward onto
+    /// the new label rule and the UI row is deleted.
+    ///
+    /// Resolving the `stack_id` from the container's compose project
+    /// label is a TODO for Plan B.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failures during rule listing or
+    /// override copy. Per-rule UNIQUE collisions are logged at `warn`
+    /// and skipped (first-writer-wins on hostname).
     pub async fn ingest_labels(
         &self,
         host_id: HostId,
@@ -300,9 +360,15 @@ impl RoutingPusher {
         Ok(())
     }
 
-    /// Drop every label-source rule whose `source_container_id` matches the
-    /// removed container. No-op if there are no such rules (e.g. the
-    /// container never carried `isengard.expose*` labels).
+    /// Drops every label-source rule whose `source_container_id`
+    /// matches the removed container.
+    ///
+    /// No-op when the container never carried `isengard.expose*`
+    /// labels.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure.
     pub async fn ingest_labels_removed(
         &self,
         host_id: HostId,
@@ -320,6 +386,7 @@ impl RoutingPusher {
     }
 }
 
+/// Converts a storage `RoutingRule` into its proto wire form.
 fn to_proto(r: StorageRule) -> ProtoRule {
     ProtoRule {
         id: r.id.0,
@@ -345,6 +412,13 @@ fn to_proto(r: StorageRule) -> ProtoRule {
     }
 }
 
+/// Computes a generation-bumping hash over the rule set, every rule's
+/// overrides, and the current wildcard cert set.
+///
+/// Override changes bump the hash because the agent needs to see the
+/// new override-driven config; cert PEM changes bump the hash because a
+/// renewed wildcard must reach the agent without waiting for an
+/// unrelated rule edit.
 async fn hash_rules_and_wildcards(
     inv: &Inventory,
     rules: &[StorageRule],

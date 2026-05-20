@@ -1,13 +1,12 @@
-//! Controller-side plugin host. Walks the inventory for plugins with
-//! `Capability::Controller`, inits each with a context including the bus +
-//! journal, starts them, and (for `EventSubscriber` plugins) spawns a per-
-//! plugin task that drains the bus and calls `handle`.
+//! Controller-side plugin host.
 //!
-//! v1 has no clean dynamic-cast for "is this plugin an EventSubscriber?"
-//! since `Plugin` is the type-erased trait object. We work around it by
-//! making EVERY controller plugin self-subscribe in its `start` if it wants
-//! events — passed the bus via context (already there). The host doesn't
-//! need to know.
+//! Walks the inventory for plugins with `Capability::Controller`, inits
+//! each with a context carrying the [`ControllerHandles`] bundle (via
+//! `Arc<dyn Any>`), starts them, and returns the live set. Plugins that
+//! want to subscribe to the event bus do so themselves in their
+//! `start` body: the [`Plugin`] trait object hides the per-plugin
+//! capability set so the host can't introspect for an
+//! `EventSubscriber` impl.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -18,13 +17,20 @@ use tracing::{info, warn};
 
 use crate::ControllerHandles;
 
+/// One running controller plugin. The host hands these back so the
+/// caller can drive them through `stop` on shutdown.
 pub struct LoadedPlugin {
+    /// Name from the plugin's [`isengard_core::PluginRegistration`].
     pub name: &'static str,
+    /// Owned trait object.
     pub plugin: Box<dyn Plugin>,
 }
 
-/// Construct + init + start every controller-side plugin in the inventory.
-/// Returns the loaded plugins so the caller can drive them through stop on shutdown.
+/// Constructs, inits, and starts every controller-side plugin.
+///
+/// Failures during init or start are logged at `warn` and the offending
+/// plugin is skipped (the controller keeps running). Returns the
+/// successfully-started set.
 pub async fn load_controller_plugins(
     handles: Arc<ControllerHandles>,
     config: Value,
@@ -50,7 +56,7 @@ pub async fn load_controller_plugins(
     loaded
 }
 
-/// Stop every loaded plugin. Called on controller shutdown.
+/// Stops every loaded plugin. Called on controller shutdown.
 pub async fn stop_controller_plugins(loaded: &mut [LoadedPlugin]) {
     for lp in loaded.iter_mut() {
         if let Err(e) = lp.plugin.stop().await {

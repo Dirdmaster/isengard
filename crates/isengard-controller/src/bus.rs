@@ -1,9 +1,12 @@
-//! In-process event bus. Publishers (the gRPC handler, internal tasks) call
-//! `publish`; subscribers (controller-side plugins) call `subscribe` to get
-//! a `broadcast::Receiver`.
+//! In-process event bus.
 //!
-//! Capacity is generous (1024). Slow subscribers will Lag-and-drop, which
-//! is the right semantics — a stuck notifier mustn't backpressure the
+//! Publishers (the Sync handler, [`crate::disconnect_monitor`], the
+//! scheduler) call [`EventBus::publish`]; subscribers (controller-side
+//! plugins, the [`crate::stack_deploy_orchestrator`]) call
+//! [`EventBus::subscribe`] for a `broadcast::Receiver`.
+//!
+//! Capacity is generous (1024). Slow subscribers `Lag` and drop, which
+//! is the right semantics: a stuck notifier must not backpressure the
 //! journal write path.
 
 use std::sync::Arc;
@@ -11,14 +14,21 @@ use std::sync::Arc;
 use isengard_core::Event;
 use tokio::sync::broadcast;
 
+/// Per-subscriber buffer capacity. Above this a slow subscriber `Lag`s
+/// and drops; the publisher never blocks.
 const BUS_CAPACITY: usize = 1024;
 
+/// Broadcast channel wrapper for [`Event`].
+///
+/// Cheap to clone: the [`broadcast::Sender`] sits behind an [`Arc`].
 #[derive(Clone)]
 pub struct EventBus {
+    /// Shared sender. Subscribers register receivers against it.
     inner: Arc<broadcast::Sender<Event>>,
 }
 
 impl EventBus {
+    /// Builds a fresh bus with 1024 slots per subscriber.
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(BUS_CAPACITY);
         Self {
@@ -26,16 +36,22 @@ impl EventBus {
         }
     }
 
+    /// Returns a new receiver. The receiver only sees events published
+    /// after `subscribe` returns.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.inner.subscribe()
     }
 
-    /// Publish to all current subscribers. Errors mean nobody is listening
-    /// — that's normal at startup and we don't surface it.
+    /// Publishes to every current subscriber.
+    ///
+    /// A send error means no subscriber is listening. That is normal at
+    /// startup (plugins haven't subscribed yet) and is not surfaced.
     pub fn publish(&self, event: Event) {
         let _ = self.inner.send(event);
     }
 
+    /// Returns the number of active receivers. Used by tests and by the
+    /// dashboard's bus-health surface.
     pub fn subscriber_count(&self) -> usize {
         self.inner.receiver_count()
     }

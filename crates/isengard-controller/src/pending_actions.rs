@@ -1,10 +1,21 @@
-//! Collect pending host_actions for a host and convert them to wire-format
-//! PendingActions for inclusion in the HeartbeatAck. Each action is marked
-//! delivered as it's collected — we don't block the reply on agent acknowledgement.
+//! Pending-action collector for the heartbeat ack path.
+//!
+//! Reads `host_actions` rows for the host, converts them to wire-format
+//! `PendingAction` payloads, and marks each delivered as it goes.
+//! Delivery is not gated on agent acknowledgement: the controller
+//! optimistically marks dispatched and lets the agent's idempotent
+//! action handlers absorb any duplicates.
 
 use isengard_proto::pb::PendingAction as ProtoPendingAction;
 use isengard_storage::{HostId, Inventory, Result};
 
+/// Collects `host_actions` for `host_id` into the wire form, marking
+/// each row delivered as it's collected.
+///
+/// # Errors
+///
+/// Returns `Err` on storage failures during the pending list or the
+/// mark-delivered step.
 pub async fn collect_pending_actions(
     inv: &Inventory,
     host_id: HostId,

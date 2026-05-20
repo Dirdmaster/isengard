@@ -1,26 +1,32 @@
-//! Controller-side ACME with DNS-01 challenge for wildcard cert issuance.
+//! Controller-side ACME with DNS-01 challenge for wildcard cert
+//! issuance.
 //!
-//! Shipped HTTP-01: each agent owns the cert for the
-//! hostnames it routes. That works for per-host names but not for wildcards:
-//! `*.vallee.casa` cannot be validated via HTTP-01 because the wildcard
-//! covers names without a corresponding HTTP responder. Let's Encrypt
-//! requires DNS-01 for any wildcard.
+//! Shipped HTTP-01: each agent owns the cert for the hostnames it
+//! routes. That works for per-host names but not for wildcards:
+//! `*.vallee.casa` cannot be validated via HTTP-01 because the
+//! wildcard covers names without a corresponding HTTP responder.
+//! Let's Encrypt requires DNS-01 for any wildcard.
 //!
-//! This module is the controller-side complement. The flow:
-//!   1. Operator sets `ISENGARD_ACME_EMAIL`, `ISENGARD_CF_DNS_API_TOKEN`,
-//!      `ISENGARD_ACME_DOMAINS`, optionally `ISENGARD_ACME_DIRECTORY`.
-//!   2. On boot the controller spawns the renewal scheduler (`scheduler.rs`).
-//!   3. The scheduler issues / renews via `dns01_cf.rs`, persists the cert
-//!      in `WildcardCertStore` (`store.rs`), and stores metadata (validity,
-//!      next renewal time) in the existing `tls_certs` table.
-//!   4. The routing pusher (`routing.rs`) snapshots the store on each push
-//!      so every connected agent receives the cert in its `ProxyConfig`.
-//!   5. Agents install the cert in their existing pingora cert resolver;
-//!      SNI for any name covered by the wildcard now serves this cert.
+//! This module is the controller-side complement.
 //!
-//! Coexistence with HTTP-01: additive. Per-host certs continue to work via
-//! the agent's HTTP-01 path; wildcard certs come from here. The agent's
-//! cert callback resolves SNI by hostname, so it sees one merged store.
+//! 1. Operator sets `ISENGARD_ACME_EMAIL`,
+//!    `ISENGARD_CF_DNS_API_TOKEN`, `ISENGARD_ACME_DOMAINS`, optionally
+//!    `ISENGARD_ACME_DIRECTORY`.
+//! 2. On boot the controller spawns the renewal scheduler ([`scheduler`]).
+//! 3. The scheduler issues and renews via [`dns01_cf`], persists the
+//!    cert in [`WildcardCertStore`] ([`store`]), and stores metadata
+//!    (validity, next renewal time) in the `tls_certs` table.
+//! 4. [`crate::routing::RoutingPusher`] snapshots the store on each
+//!    push so every connected agent receives the cert in its
+//!    `ProxyConfig`.
+//! 5. Agents install the cert in their existing pingora cert
+//!    resolver; SNI for any name covered by the wildcard now serves
+//!    this cert.
+//!
+//! Coexistence with HTTP-01 is additive. Per-host certs continue to
+//! work via the agent's HTTP-01 path; wildcard certs come from here.
+//! The agent's cert callback resolves SNI by hostname, so it sees one
+//! merged store.
 
 pub mod cf_api;
 pub mod dns01_cf;
@@ -38,19 +44,24 @@ pub use scheduler::{
 };
 pub use store::{WildcardCert, WildcardCertStore};
 
-/// Controller boot config for the ACME subsystem. Empty means disabled.
+/// Controller boot config for the ACME subsystem.
+///
+/// Empty fields mean the subsystem stays disabled.
 #[derive(Debug, Clone, Default)]
 pub struct AcmeConfig {
+    /// ACME account contact email (`mailto:<email>`).
     pub email: Option<String>,
+    /// Cloudflare API token (DNS:Edit scope).
     pub cf_api_token: Option<String>,
+    /// Comma-separated domain list (e.g. `*.foo.com,foo.com`).
     pub domains: String,
-    /// Defaults to `LE_PRODUCTION_URL` when empty.
+    /// Directory URL. Defaults to [`LE_PRODUCTION_URL`] when empty.
     pub directory_url: String,
 }
 
 impl AcmeConfig {
-    /// Returns Some(...) when all required fields are present, else None
-    /// (the ACME subsystem stays disabled).
+    /// Returns `Some(...)` when every required field is present,
+    /// otherwise `None` (the ACME subsystem stays disabled).
     pub fn validated(self) -> Option<ValidatedAcmeConfig> {
         let email = self.email?;
         let token = self.cf_api_token?;
@@ -68,11 +79,17 @@ impl AcmeConfig {
     }
 }
 
+/// [`AcmeConfig`] after [`AcmeConfig::validated`] has confirmed every
+/// required field is present.
 #[derive(Debug, Clone)]
 pub struct ValidatedAcmeConfig {
+    /// ACME account contact email.
     pub email: String,
+    /// Cloudflare API token.
     pub cf_api_token: String,
+    /// Parsed wildcard groups.
     pub groups: Vec<WildcardGroup>,
+    /// Resolved directory URL.
     pub directory_url: String,
 }
 

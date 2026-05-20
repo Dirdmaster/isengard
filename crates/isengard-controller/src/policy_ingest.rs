@@ -1,22 +1,24 @@
 //! Container-scope policy ingest from Docker labels.
 //!
-//! See spec §"Discovery path" + §"Cleanup" of
-//! `docs/superpowers/specs/2026-05-06-phase-9b1-container-label-discovery-design.md`.
+//! Spec: `docs/superpowers/specs/2026-05-06-phase-9b1-container-label-discovery-design.md`
+//! (`Discovery path` and `Cleanup`).
 //!
-//! The agent's `labels.rs` watcher already ships `ContainerLabelsReport` /
+//! The agent's label watcher ships `ContainerLabelsReport` and
 //! `ContainerLabelsRemoved` for any container that carries
-//! `isengard.policy.*` (or `isengard.expose*`). This module consumes those
-//! payloads on the controller side and turns them into rows in the
-//! `policies` table at `(scope_type=container, scope_key=<host_id>/<name>)`.
+//! `isengard.policy.*` or `isengard.expose*`. This module consumes
+//! those payloads on the controller side and turns them into rows in
+//! the `policies` table at `(scope_type=container,
+//! scope_key=<host_id>/<name>)`.
 //!
 //! Cleanup is two-layered:
 //!
-//! 1. Event-driven: `ContainerLabelsRemoved` deletes the row immediately,
-//!    using an in-memory `(host_id, container_id) -> scope_key` map filled
-//!    at upsert time (the removed event only carries `container_id`).
-//! 2. Periodic reaper: `reap_orphaned_container_policies` deletes
-//!    container-scope rows older than 24h. Belt-and-braces against missed
-//!    `destroy` events (e.g. agent down during the event).
+//! 1. Event-driven: `ContainerLabelsRemoved` deletes the row
+//!    immediately, using an in-memory
+//!    `(host_id, container_id) -> scope_key` map filled at upsert
+//!    time (the removed event only carries `container_id`).
+//! 2. Periodic reaper: [`reap_orphaned_container_policies`] deletes
+//!    container-scope rows older than 24h. Belt-and-braces against
+//!    missed `destroy` events (e.g. agent down during the event).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,17 +40,19 @@ fn container_scope_key(host_id: HostId, container_name: &str) -> String {
 
 /// Owns the controller-side ingest of container-scope policy labels.
 ///
-/// Holds an in-memory `(host_id, container_id) -> scope_key` map so the
-/// remove path can find the row to delete (the wire payload only carries
-/// `container_id`, not name).
+/// Holds an in-memory `(host_id, container_id) -> scope_key` map so
+/// the remove path can find the row to delete (the wire payload only
+/// carries `container_id`, not name).
 pub struct PolicyLabelIngest {
+    /// Shared inventory for `policies` writes.
     inv: Arc<Inventory>,
-    /// `(host_id, container_id) -> scope_key`. Populated on upsert; drained
-    /// on remove.
+    /// `(host_id, container_id) -> scope_key`. Populated on upsert;
+    /// drained on remove.
     by_container: Mutex<HashMap<(HostId, String), String>>,
 }
 
 impl PolicyLabelIngest {
+    /// Builds an ingest worker over the shared inventory.
     pub fn new(inv: Arc<Inventory>) -> Self {
         Self {
             inv,
@@ -56,21 +60,24 @@ impl PolicyLabelIngest {
         }
     }
 
-    /// Ingest a `ContainerLabelsReport` into the `policies` table.
+    /// Ingests a `ContainerLabelsReport` into the `policies` table.
     ///
-    /// Behavior:
+    /// - Parses `isengard.policy.*` labels into a `Policy`. On parse
+    ///   error, logs at `warn` and returns `Ok(())` without touching
+    ///   the row (the container's other ingest paths still run).
+    /// - When the parsed body has any field set, upserts a
+    ///   container-scope row at `<host_id>/<container_name>`.
+    /// - When the parsed body is `Policy::default()` (no policy
+    ///   labels present), deletes any row that previously existed for
+    ///   this container. Lets a container drop its policy by removing
+    ///   the labels.
     ///
-    /// - Parse `isengard.policy.*` labels into a `Policy`. On parse error,
-    ///   log at warn and return `Ok(())` without touching the row (the
-    ///   container's other ingest paths still run).
-    /// - If the parsed body has any field set, `upsert` a container-scope
-    ///   row at `<host_id>/<container_name>`.
-    /// - If the parsed body is `Policy::default()` (no policy labels
-    ///   present), delete any row that previously existed for this
-    ///   container. Lets a container drop its policy by removing the labels.
+    /// Records the `(host_id, container_id) -> scope_key` association
+    /// so the remove path can resolve the `scope_key`.
     ///
-    /// Records the `(host_id, container_id) -> scope_key` association so
-    /// the remove path can resolve the scope_key.
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure during the upsert or delete.
     pub async fn ingest(&self, host_id: HostId, report: &ContainerLabelsReport) -> Result<()> {
         let scope_key = container_scope_key(host_id, &report.container_name);
 
@@ -131,12 +138,17 @@ impl PolicyLabelIngest {
         Ok(())
     }
 
-    /// Drop the container-scope policy row for a removed container.
+    /// Drops the container-scope policy row for a removed container.
     ///
-    /// `ContainerLabelsRemoved` only carries `container_id`, so we look up
-    /// the scope_key from the in-memory map. If the map has no entry (the
-    /// remove arrived without a prior report on this controller boot), the
-    /// periodic reaper will catch the row by `updated_at` age.
+    /// `ContainerLabelsRemoved` only carries `container_id`, so the
+    /// path looks up the `scope_key` from the in-memory map. When the
+    /// map has no entry (the remove arrived without a prior report on
+    /// this controller boot), the periodic reaper catches the row by
+    /// `updated_at` age.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure.
     pub async fn ingest_removed(&self, host_id: HostId, ev: &ContainerLabelsRemoved) -> Result<()> {
         let scope_key = {
             let mut guard = self.by_container.lock().await;
@@ -161,19 +173,23 @@ impl PolicyLabelIngest {
     }
 }
 
-/// Reap container-scope policy rows whose `updated_at` is older than
-/// `max_age`. Returns the number of rows deleted.
+/// Reaps container-scope policy rows whose `updated_at` is older
+/// than `max_age`. Returns the number of rows deleted.
 ///
 /// The agent re-emits a fresh `ContainerLabelsReport` for every live
-/// labeled container at every sync-stream open (initial scan) plus on every
-/// `start` / `update` Docker event, which causes `upsert_policy` to bump
-/// `updated_at`. So a row whose `updated_at` is more than `max_age` old has
-/// almost certainly been orphaned (container destroyed during agent
-/// downtime, or container's host disconnected long enough that we missed
-/// the destroy event).
+/// labeled container at every sync-stream open (initial scan) and on
+/// every `start`/`update` Docker event, which causes `upsert_policy`
+/// to bump `updated_at`. A row whose `updated_at` is more than
+/// `max_age` old has almost certainly been orphaned (container
+/// destroyed during agent downtime, or the container's host
+/// disconnected long enough that the destroy event went missing).
 ///
-/// Conservative default for production: 24h. Pure function over inventory
-/// + a `now` clock so unit tests don't need to wait.
+/// Conservative default for production: 24h. Pure function over the
+/// inventory and a `now` clock so unit tests don't need to wait.
+///
+/// # Errors
+///
+/// Returns `Err` on storage failure during the list or any delete.
 pub async fn reap_orphaned_container_policies(
     inv: &Inventory,
     now: DateTime<Utc>,

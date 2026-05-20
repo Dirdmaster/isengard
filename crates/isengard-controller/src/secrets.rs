@@ -54,42 +54,66 @@ const KEY_LEN: usize = 32;
 /// Length of the ChaCha20-Poly1305 nonce in bytes.
 const NONCE_LEN: usize = 12;
 
-/// Errors raised by the secrets store. Distinct from sqlx errors so the
-/// HTTP layer can map them cleanly to 4xx vs 5xx.
+/// Errors raised by the secrets store.
+///
+/// Distinct from sqlx errors so the HTTP layer can map cleanly to 4xx
+/// versus 5xx and so the gRPC handler can pick the right `Status`.
 #[derive(Debug, Error)]
 pub enum SecretsError {
+    /// Master key file is missing or not readable. Includes the
+    /// underlying io error.
     #[error(
         "master key file not readable (set ISENGARD_MASTER_KEY_FILE or write /run/secrets/master.key): {0}"
     )]
     MasterKeyUnreadable(#[source] std::io::Error),
 
+    /// Master key file is the wrong size. The controller fails to
+    /// start rather than guess at padding.
     #[error("master key file is {actual} bytes; expected 32")]
-    MasterKeyWrongSize { actual: usize },
+    MasterKeyWrongSize {
+        /// Actual file size in bytes.
+        actual: usize,
+    },
 
+    /// Store is locked. The controller refused to boot, or a test
+    /// constructed a locked store explicitly.
     #[error("secrets store has no master key loaded; controller cannot encrypt or decrypt")]
     MasterKeyMissing,
 
+    /// No row with that secret name.
     #[error("secret {0:?} not found")]
     NotFound(String),
 
+    /// Underlying storage error (sqlx, migration, etc).
     #[error("storage: {0}")]
     Storage(#[from] isengard_storage::Error),
 
+    /// AEAD encrypt step failed.
     #[error("encrypt: {0}")]
     Encrypt(chacha20poly1305::Error),
 
+    /// AEAD decrypt step failed (corrupt ciphertext, swapped row,
+    /// wrong key).
     #[error("decrypt: {0}")]
     Decrypt(chacha20poly1305::Error),
 
+    /// Ciphertext shorter than the nonce; can't even attempt
+    /// decryption.
     #[error("ciphertext shorter than nonce ({actual} < 12)")]
-    CiphertextTruncated { actual: usize },
+    CiphertextTruncated {
+        /// Actual ciphertext length in bytes.
+        actual: usize,
+    },
 
+    /// Generic IO error (not bound to a specific code path).
     #[error("io: {0}")]
     Io(#[source] std::io::Error),
 }
 
-/// Wrapper around the raw 32-byte master key. `SecretBox` ensures the
-/// bytes aren't accidentally `Debug`-logged or copied into traces.
+/// Wrapper around the raw 32-byte master key.
+///
+/// [`SecretBox`] ensures the bytes aren't accidentally `Debug`-logged
+/// or copied into traces.
 type MasterKey = SecretBox<[u8; KEY_LEN]>;
 
 /// Controller-side handle for the secrets store.
@@ -97,16 +121,21 @@ type MasterKey = SecretBox<[u8; KEY_LEN]>;
 /// Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct SecretsStore {
+    /// Shared inventory pool. The `secrets` table lives there.
     inv: Arc<Inventory>,
+    /// Master key, or `None` for a locked store.
+    ///
     /// `None` only in the rare unlocked-fresh-install case where the
-    /// controller booted before any master key was provisioned. All
-    /// encrypt/decrypt paths return [`SecretsError::MasterKeyMissing`]
-    /// in that state.
+    /// controller booted before any master key was provisioned. Every
+    /// encrypt and decrypt path returns
+    /// [`SecretsError::MasterKeyMissing`] in that state.
     key: Option<Arc<MasterKey>>,
 }
 
 impl SecretsStore {
-    /// Build a store from the inventory and a raw 32-byte master key.
+    /// Builds a store from the inventory and a raw 32-byte master
+    /// key.
+    ///
     /// Used directly by the bootstrap subcommand and by tests.
     pub fn new(inv: Arc<Inventory>, key: [u8; KEY_LEN]) -> Self {
         Self {
@@ -115,30 +144,43 @@ impl SecretsStore {
         }
     }
 
-    /// Build a store with no master key. Encrypt/decrypt calls will
-    /// return [`SecretsError::MasterKeyMissing`]. Useful for tests of
-    /// the locked-store path.
+    /// Builds a store with no master key.
+    ///
+    /// Encrypt and decrypt calls return
+    /// [`SecretsError::MasterKeyMissing`]. Useful for tests of the
+    /// locked-store path.
     pub fn new_locked(inv: Arc<Inventory>) -> Self {
         Self { inv, key: None }
     }
 
-    /// Read the master key from the path in `ISENGARD_MASTER_KEY_FILE`
-    /// (default `/run/secrets/master.key`). Use this from controller
-    /// boot. Errors when the file is missing, unreadable, or wrong size;
-    /// caller should bubble up so the controller fails loud at startup.
+    /// Reads the master key from the path in
+    /// [`MASTER_KEY_FILE_ENV`] (default
+    /// [`DEFAULT_MASTER_KEY_FILE`]) and builds a store.
+    ///
+    /// Use this from controller boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the file is missing, unreadable, or the
+    /// wrong size. Bubble up so the controller fails loud at startup.
     pub fn from_env(inv: Arc<Inventory>) -> Result<Self, SecretsError> {
         let path = master_key_path_from_env();
         let key = read_master_key(&path)?;
         Ok(Self::new(inv, key))
     }
 
-    /// True iff the controller has the master key in memory.
+    /// Returns `true` when the controller has the master key in
+    /// memory.
     pub fn is_unlocked(&self) -> bool {
         self.key.is_some()
     }
 
-    /// Insert a brand-new secret. Errors on duplicate name (use
-    /// [`SecretsStore::put`] for upsert).
+    /// Inserts a brand-new secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on duplicate name (use [`SecretsStore::put`] for
+    /// upsert) or any encryption or storage failure.
     pub async fn create(
         &self,
         name: &str,
@@ -154,8 +196,14 @@ impl SecretsStore {
         Ok(())
     }
 
-    /// Upsert: replace if present, insert if missing. Returns whether a
-    /// new row was inserted.
+    /// Upserts a secret: replaces if present, inserts if missing.
+    ///
+    /// Returns `true` when a new row was inserted, `false` when an
+    /// existing row was replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on encryption or storage failure.
     pub async fn put(
         &self,
         name: &str,
@@ -168,7 +216,15 @@ impl SecretsStore {
         Ok(inserted)
     }
 
-    /// Fetch + decrypt. Used by the agent-facing handler (mTLS-gated).
+    /// Fetches and decrypts a secret.
+    ///
+    /// The agent-facing `FetchSecret` handler calls this; the auth
+    /// layer has already gated the call behind a valid client cert.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on missing row, decrypt failure, or storage
+    /// failure.
     pub async fn fetch(&self, name: &str) -> Result<Vec<u8>, SecretsError> {
         let cipher = self
             .inv
@@ -178,7 +234,12 @@ impl SecretsStore {
         self.decrypt(name, &cipher)
     }
 
-    /// Public-safe metadata for one secret, no value.
+    /// Returns public-safe metadata for one secret. Never includes
+    /// the value or the ciphertext.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure.
     pub async fn meta(
         &self,
         name: &str,
@@ -186,12 +247,22 @@ impl SecretsStore {
         Ok(self.inv.get_secret_meta(name).await?)
     }
 
-    /// List every secret's metadata.
+    /// Lists every secret's metadata. Never includes values or
+    /// ciphertexts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure.
     pub async fn list(&self) -> Result<Vec<isengard_storage::SecretMeta>, SecretsError> {
         Ok(self.inv.list_secrets().await?)
     }
 
-    /// Delete by name.
+    /// Deletes a secret by name. Returns `true` when a row was
+    /// removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure.
     pub async fn delete(&self, name: &str) -> Result<bool, SecretsError> {
         let removed = self.inv.delete_secret(name).await?;
         if removed {
@@ -200,9 +271,15 @@ impl SecretsStore {
         Ok(removed)
     }
 
-    /// Boot-time guard: verify the master key file is readable and the
-    /// store is unlocked. Called once at controller startup; if it
-    /// returns an error the controller refuses to start.
+    /// Boot-time guard: confirms the store is unlocked.
+    ///
+    /// Called once at controller startup. When it returns an error
+    /// the controller refuses to start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecretsError::MasterKeyMissing`] when the store is
+    /// locked.
     pub async fn boot_check(&self) -> Result<(), SecretsError> {
         if !self.is_unlocked() {
             warn!(
@@ -214,6 +291,9 @@ impl SecretsStore {
         Ok(())
     }
 
+    /// Encrypts `plaintext` for `name` with a fresh 12-byte nonce.
+    /// Wire format is `nonce || aead-output`. AAD is `name.as_bytes()`
+    /// to defend against row swaps.
     fn encrypt(&self, name: &str, plaintext: &[u8]) -> Result<Vec<u8>, SecretsError> {
         let key_box = self
             .key
@@ -245,6 +325,9 @@ impl SecretsStore {
         Ok(out)
     }
 
+    /// Reverse of [`SecretsStore::encrypt`]. Splits the wire blob into
+    /// nonce and ciphertext, runs AEAD decrypt with `name.as_bytes()`
+    /// as AAD.
     fn decrypt(&self, name: &str, blob: &[u8]) -> Result<Vec<u8>, SecretsError> {
         let key_box = self
             .key
@@ -265,8 +348,8 @@ impl SecretsStore {
     }
 }
 
-/// Resolve the master key file path from the environment, falling back
-/// to the default mount path.
+/// Resolves the master key file path from the environment, falling
+/// back to [`DEFAULT_MASTER_KEY_FILE`].
 pub fn master_key_path_from_env() -> PathBuf {
     std::env::var(MASTER_KEY_FILE_ENV)
         .ok()
@@ -275,10 +358,13 @@ pub fn master_key_path_from_env() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MASTER_KEY_FILE))
 }
 
-/// Read a 32-byte master key from `path`. Returns
-/// [`SecretsError::MasterKeyUnreadable`] when the file is missing or
-/// unreadable, [`SecretsError::MasterKeyWrongSize`] when the file is
-/// the wrong length.
+/// Reads a 32-byte master key from `path`.
+///
+/// # Errors
+///
+/// Returns [`SecretsError::MasterKeyUnreadable`] when the file is
+/// missing or unreadable, and [`SecretsError::MasterKeyWrongSize`]
+/// when the file is the wrong length.
 pub fn read_master_key(path: &Path) -> Result<[u8; KEY_LEN], SecretsError> {
     let bytes = std::fs::read(path).map_err(SecretsError::MasterKeyUnreadable)?;
     if bytes.len() != KEY_LEN {
@@ -291,10 +377,11 @@ pub fn read_master_key(path: &Path) -> Result<[u8; KEY_LEN], SecretsError> {
     Ok(arr)
 }
 
-/// Generate a fresh 32-byte master key. Used by the optional
-/// controller-side init helper; the installer normally generates the
-/// key via `openssl rand 32` so it never round-trips through the
-/// controller binary.
+/// Generates a fresh 32-byte master key.
+///
+/// Used by the optional controller-side init helper; the installer
+/// normally generates the key via `openssl rand 32` so it never
+/// round-trips through the controller binary.
 pub fn generate_master_key() -> [u8; KEY_LEN] {
     let mut k = [0u8; KEY_LEN];
     rand::thread_rng().fill_bytes(&mut k);
