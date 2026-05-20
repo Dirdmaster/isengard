@@ -33,7 +33,9 @@ pub const DEBOUNCE: Duration = Duration::from_millis(500);
 /// and reconcile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackComposeChanged {
+    /// Bare stack name (the directory name under the watched root).
     pub stack_name: String,
+    /// Absolute path to the `compose.yaml` that changed.
     pub path: PathBuf,
 }
 
@@ -109,7 +111,7 @@ pub fn spawn_with_debounce(
             };
             // Best-effort: the consumer is faster than the filesystem
             // event rate by orders of magnitude, but if the receiver
-            // hung up we just drop.
+            // hung up the event drops.
             match raw_tx_for_cb.try_send(raw) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => warn!("compose_watcher: raw channel full, dropping"),
@@ -171,9 +173,12 @@ pub fn spawn_with_debounce(
 }
 
 #[derive(Debug)]
+/// Internal struct: RawEvent.
 struct RawEvent {
+    /// `path` field.
     path: PathBuf,
     #[allow(dead_code)]
+    /// `kind` field.
     kind: EventKind,
 }
 

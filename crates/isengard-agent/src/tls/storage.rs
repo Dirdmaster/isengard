@@ -2,7 +2,7 @@
 //!
 //! Layout: `<root>/<hostname>.crt` and `<root>/<hostname>.key`. The `.key`
 //! file is `chmod 0600` on Unix so only the agent process (and root) can
-//! read it. The `.crt` keeps the umask default — it's a public cert.
+//! read it. The `.crt` keeps the umask default: it's a public cert.
 //!
 //! Async throughout: callers (ACME issuance, cert_store warm-load) live in
 //! the tokio runtime, and we want to avoid blocking the executor on disk IO.
@@ -15,14 +15,17 @@ use tokio::fs;
 /// A cert/key pair, both PEM-encoded.
 #[derive(Debug, Clone)]
 pub struct CertFiles {
+    /// Leaf cert plus chain, PEM-encoded.
     pub cert_pem: String,
+    /// Private key, PEM-encoded.
     pub key_pem: String,
 }
 
-/// Filesystem store rooted at a single directory. Cheap to clone (just a
+/// Filesystem store rooted at a single directory. Cheap to clone (only a
 /// `PathBuf`); safe to share across tasks.
 #[derive(Debug, Clone)]
 pub struct TlsStorage {
+    /// `root` field.
     root: PathBuf,
 }
 
@@ -139,6 +142,7 @@ impl TlsStorage {
     }
 }
 
+/// Internal helper: ensure dir.
 async fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)
         .await
@@ -213,6 +217,7 @@ impl TlsStorage {
     }
 }
 
+/// Internal helper: collect paired hostnames.
 async fn collect_paired_hostnames(mut rd: tokio::fs::ReadDir) -> Vec<String> {
     use std::collections::HashSet;
     let mut crts: HashSet<String> = HashSet::new();

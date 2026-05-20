@@ -40,8 +40,10 @@ use super::{
 /// `Arc<bollard::Docker>` reused for every call.
 #[derive(Debug)]
 pub struct BollardBackend {
+    /// `pub` field.
     pub(crate) docker: std::sync::Arc<bollard::Docker>,
     #[allow(dead_code)] // wisp backend will need this; bollard backend doesn't yet
+    /// `pub` field.
     pub(crate) state_dir: std::path::PathBuf,
 }
 
@@ -496,12 +498,14 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
     }
 }
 
+/// Internal helper: parse rfc3339.
 fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp() as u64))
 }
 
+/// Internal helper: map state str.
 fn map_state_str(state: &str) -> ContainerState {
     match state.to_lowercase().as_str() {
         "running" => ContainerState::Running,
@@ -742,7 +746,7 @@ impl RuntimeBackend for BollardBackend {
         id: &str,
         _hc: &HealthcheckSpec,
     ) -> Result<HealthState, RuntimeError> {
-        // Bollard impl: docker runs the healthcheck in-container; we just
+        // Bollard impl: docker runs the healthcheck in-container; we only
         // read whatever state docker has recorded.
         let inspect = self
             .docker
@@ -773,6 +777,7 @@ impl RuntimeBackend for BollardBackend {
     }
 }
 
+/// Internal helper: map log output.
 fn map_log_output(out: bollard::container::LogOutput) -> LogChunk {
     let (source, bytes) = match out {
         bollard::container::LogOutput::StdOut { message } => (LogSource::Stdout, message),
@@ -783,6 +788,7 @@ fn map_log_output(out: bollard::container::LogOutput) -> LogChunk {
     LogChunk { source, bytes }
 }
 
+/// Internal helper: map docker event.
 fn map_docker_event(ev: bollard::secret::EventMessage) -> Option<RuntimeEvent> {
     let actor = ev.actor.as_ref()?;
     let container_id = actor.id.clone()?;

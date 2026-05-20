@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 /// (success or failure).
 #[derive(Debug, Default)]
 pub struct ChallengeState {
+    /// `inner` field.
     inner: RwLock<HashMap<String, String>>,
 }
 

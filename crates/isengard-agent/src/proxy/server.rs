@@ -46,8 +46,9 @@ use tokio::sync::oneshot;
 ///
 /// Uses `std::sync::Mutex` (NOT `tokio::sync::Mutex`): the lock is only held
 /// briefly to do `.take()` on the inner Option, never across `.await`.
-/// Holding it across an await would deadlock — keep it that way.
+/// Holding it across an await would deadlock: keep it that way.
 struct OneshotShutdown {
+    /// `rx` field.
     rx: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
@@ -60,7 +61,7 @@ impl ShutdownSignalWatch for OneshotShutdown {
                 let _ = rx.await;
             }
             None => {
-                // Already consumed — park forever.
+                // Already consumed: park forever.
                 std::future::pending::<()>().await;
             }
         }
@@ -125,6 +126,9 @@ pub async fn run_for_test(
     .await;
 }
 
+/// Bind the Pingora listeners and run them until the process exits. The
+/// HTTPS listener is registered only when a cert store has been installed
+/// onto `state`.
 pub async fn run(state: ProxyState, http_port: u16, https_port: u16) {
     let cert_store_opt = state.cert_store.read().await.clone();
 

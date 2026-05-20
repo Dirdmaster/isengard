@@ -5,10 +5,19 @@
 
 use std::time::Duration;
 
+/// Internal constant: BASE MS.
 const BASE_MS: u64 = 1_000;
+/// Internal constant: CAP MS.
 const CAP_MS: u64 = 60_000;
+/// Internal constant: JITTER PCT.
 const JITTER_PCT: f64 = 0.20;
 
+/// Stateful backoff counter for the agent's reconnect loop.
+///
+/// Constructed once per loop. [`Self::next_delay`] returns the wait before
+/// the next attempt and advances the counter; [`Self::reset`] flips back
+/// to the base after a stream stays open long enough to prove the
+/// connection was healthy.
 #[derive(Debug, Clone)]
 pub struct Backoff {
     /// Current attempt number (0 = first attempt, no backoff yet).
@@ -16,6 +25,7 @@ pub struct Backoff {
 }
 
 impl Backoff {
+    /// Construct a fresh backoff with the attempt counter at 0.
     pub fn new() -> Self {
         Self { attempt: 0 }
     }
@@ -40,7 +50,7 @@ impl Backoff {
         let unjittered_ms = BASE_MS.saturating_mul(1u64 << exp).min(CAP_MS);
 
         // Apply ±20% jitter using a tiny LCG so we don't pull rand as a dep
-        // here. The randomness only needs to be "good enough" — not crypto.
+        // here. The randomness only needs to be "good enough": not crypto.
         let jitter = jitter_factor();
         let jittered_ms = ((unjittered_ms as f64) * jitter) as u64;
         // Clamp to [1, CAP * (1 + JITTER_PCT)] to avoid 0-ms pathological case.

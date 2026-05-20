@@ -3,7 +3,7 @@
 //! `Die`, pushes a `ContainerLabelsRemoved`.
 //!
 //! The watcher also runs an initial scan at startup so a freshly-connected
-//! agent reports the world it sees, not just deltas.
+//! agent reports the world it sees, not only deltas.
 //!
 //! A container is reported when it carries either:
 //!
@@ -92,6 +92,7 @@ pub async fn watch(
     Ok(())
 }
 
+/// Internal helper: initial scan.
 async fn initial_scan(
     backend: &dyn RuntimeBackend,
     out: &mpsc::Sender<AgentMessage>,
@@ -140,6 +141,7 @@ pub(crate) fn is_reportable_label_key(key: &str) -> bool {
     key.starts_with("isengard.expose") || key.starts_with("isengard.policy.")
 }
 
+/// Internal helper: inspect to report.
 async fn inspect_to_report(
     backend: &dyn RuntimeBackend,
     cid: &str,

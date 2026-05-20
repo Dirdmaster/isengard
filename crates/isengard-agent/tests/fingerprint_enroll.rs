@@ -78,7 +78,7 @@ async fn spawn_stub_controller(served_pem: Vec<u8>) -> String {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Self-signed leaf for the listener. The agent's skip-verify
-    // channel won't validate this; we just need to terminate TLS.
+    // channel won't validate this; the test only needs to terminate TLS.
     let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
         .expect("mint self-signed cert");
     let cert_pem = cert.cert.pem();
@@ -106,7 +106,7 @@ async fn spawn_stub_controller(served_pem: Vec<u8>) -> String {
     });
 
     // Tiny grace window so the listener is accepting before the test
-    // dials it. The actual handshake retries inside tonic; this just
+    // dials it. The actual handshake retries inside tonic; the sleep
     // avoids a flake on the first connect.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     url

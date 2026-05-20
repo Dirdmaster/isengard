@@ -64,12 +64,14 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
+    /// Construct an empty proxy state. Defaults everything; the agent
+    /// installs cert store and event sink later in startup.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Install (or replace) the outbound event sink. Spawns a tiny task to
-    /// avoid forcing the caller into an `async` context — agent startup is
+    /// avoid forcing the caller into an `async` context: agent startup is
     /// synchronous around the proxy bring-up.
     pub fn set_event_sink(&self, tx: mpsc::Sender<Event>) {
         let evt = self.event_tx.clone();
@@ -195,7 +197,7 @@ pub async fn apply_config_with_backend(
     // Critical section: re-check generation under the write lock, install,
     // and bump the counter atomically. Without the re-check, two concurrent
     // `apply_config(N)` and `apply_config(N+1)` calls can both pass the
-    // lock-free pre-check and race on the install — and whichever acquires
+    // lock-free pre-check and race on the install: and whichever acquires
     // the write lock SECOND wins, even if it carries the older generation.
     // The recheck below ensures the installed registry always matches the
     // stored last_generation at the moment of release.
@@ -228,7 +230,7 @@ pub async fn apply_config_with_backend(
     }
 
     // Spawn the healthcheck sweep exactly once per process; subsequent
-    // `apply_config` calls just refresh the registry it reads from.
+    // `apply_config` calls refresh the registry it reads from.
     HC_SPAWNED.get_or_init(|| {
         healthcheck::spawn_loops(state.clone());
     });
@@ -305,7 +307,7 @@ const RESTART_WINDOW: Duration = Duration::from_secs(300);
 /// backoff. Returns once the restart budget is exhausted (Task 20 will turn
 /// this terminal log into a `proxy.crashloop` event).
 ///
-/// Note: Pingora 0.4 has no programmatic shutdown API — `Server::run_forever`
+/// Note: Pingora 0.4 has no programmatic shutdown API: `Server::run_forever`
 /// only returns by calling `std::process::exit(0)` after a graceful SIGTERM.
 /// In practice the inner task does not exit cleanly during normal operation;
 /// the supervisor exists to catch panics from `bootstrap` / port-bind failures.

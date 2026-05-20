@@ -28,9 +28,13 @@ use crate::runtime::{ContainerState, ListFilter, RuntimeBackend};
 /// are unaffected.
 #[derive(Debug, Clone)]
 pub struct ContainerSnapshot {
+    /// Container name, leading slash already trimmed.
     pub name: String,
+    /// Image reference as the runtime reports it.
     pub image: String,
+    /// Lifecycle state string (`running`, `exited`, ...).
     pub state: String,
+    /// Container labels.
     pub labels: HashMap<String, String>,
     /// Bollard / wisp native id. Empty when the legacy (no-backend)
     /// fallback path produced this snapshot from a bollard ContainerSummary

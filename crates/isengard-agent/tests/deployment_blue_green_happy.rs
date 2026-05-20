@@ -2,7 +2,7 @@
 //! that within ~3 minutes the deployment row reaches Done, the proxy
 //! routes to the new green container, and the blue container is gone.
 //!
-//! Gated behind `#[ignore]` — run with
+//! Gated behind `#[ignore]`: run with
 //! `cargo test -p isengard-agent --test deployment_blue_green_happy -- --ignored --nocapture`.
 //! Requires a running Docker daemon.
 

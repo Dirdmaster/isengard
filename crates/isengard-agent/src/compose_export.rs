@@ -131,7 +131,7 @@ fn build_service(inspect: &ContainerInspectResponse) -> anyhow::Result<(Value, B
 
     // container_name: emitted only when it differs from the default
     // `<project>_<service>_1` style. We can't compute the default without
-    // reading `com.docker.compose.project`; just pass the actual name
+    // reading `com.docker.compose.project`; pass the actual name
     // through. Compose with `container_name` ignores the auto-rename.
     if let Some(name) = inspect.name.as_deref() {
         let trimmed = name.trim_start_matches('/').to_string();
@@ -411,6 +411,7 @@ fn format_duration_ns(ns: i64) -> String {
     }
 }
 
+/// Internal helper: restart policy str.
 fn restart_policy_str(p: RestartPolicyNameEnum) -> Option<&'static str> {
     match p {
         RestartPolicyNameEnum::EMPTY => None,
@@ -433,6 +434,7 @@ fn filter_labels(labels: &std::collections::HashMap<String, String>) -> Vec<(Str
     out
 }
 
+/// Internal helper: string seq.
 fn string_seq(items: &[String]) -> Value {
     Value::Sequence(items.iter().cloned().map(Value::String).collect())
 }

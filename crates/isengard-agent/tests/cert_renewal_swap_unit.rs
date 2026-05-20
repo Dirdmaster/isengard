@@ -10,7 +10,7 @@
 //! `Arc<RwLock<Endpoint>>` holds a *different* Endpoint after the renewal
 //! than before. We can't compare Endpoint values directly (no PartialEq),
 //! so we read the on-disk cert serial before and after and assert they
-//! differ — proving the renewal happened — and assert that a fresh
+//! differ: proving the renewal happened: and assert that a fresh
 //! `connect()` from the post-swap endpoint succeeds (proving the new
 //! identity is wired up).
 
@@ -151,7 +151,7 @@ async fn renewal_swaps_endpoint_in_holder() {
 
     // Force renewal by hand: bypass the 50%-TTL gate by spawning the loop
     // with a 100ms tick AND backdating the cert mtime would be uglier than
-    // just calling the public `should_renew` logic via a synthetic bundle.
+    // calling the public `should_renew` logic via a synthetic bundle.
     // The cleanest path is to replace the bundle on disk with a freshly
     // signed leaf whose validity window puts us past the 50% mark.
     let backdated_leaf = ca
@@ -164,7 +164,7 @@ async fn renewal_swaps_endpoint_in_holder() {
     };
     cert_store::save(state_dir.path(), &backdated_bundle).unwrap();
     // Rebuild the endpoint to use this short-lived cert (otherwise the
-    // renew RPC dials with the previous key — still valid, but the test
+    // renew RPC dials with the previous key: still valid, but the test
     // is clearer if the pre-swap endpoint matches the on-disk bundle).
     *endpoint_holder.write().await = build_mtls_endpoint(&url, &backdated_bundle).unwrap();
 
@@ -192,7 +192,7 @@ async fn renewal_swaps_endpoint_in_holder() {
     });
 
     // Poll the on-disk cert until its serial differs from the backdated one
-    // (proving the renewal landed) — bounded so a hung test fails loudly.
+    // (proving the renewal landed): bounded so a hung test fails loudly.
     let backdated_serial = cert_serial(&backdated_bundle.cert_pem);
     let mut renewed_serial = backdated_serial.clone();
     let deadline = std::time::Instant::now() + StdDuration::from_secs(3);
@@ -217,7 +217,7 @@ async fn renewal_swaps_endpoint_in_holder() {
     // The renewal task should have swapped the Endpoint. We can't compare
     // Endpoint values, but we can verify the holder's connect() works with
     // the freshly-loaded on-disk bundle (and would have failed if the old
-    // backdated cert were still pinned in TLS config — backdated TTL is 2s
+    // backdated cert were still pinned in TLS config: backdated TTL is 2s
     // so it's expired by now).
     let final_endpoint = endpoint_holder.read().await.clone();
     let _channel = final_endpoint

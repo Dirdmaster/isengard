@@ -2,7 +2,7 @@
 //! never passes. Asserts the deployment aborts within deadline_secs,
 //! green is cleaned up, blue stays serving.
 //!
-//! Gated behind `#[ignore]` — run with
+//! Gated behind `#[ignore]`: run with
 //! `cargo test -p isengard-agent --test deployment_blue_green_aborts_on_healthcheck -- --ignored --nocapture`.
 //! Requires a running Docker daemon.
 //!
@@ -128,7 +128,7 @@ async fn blue_green_aborts_when_green_healthcheck_never_passes() {
         })
         .expect("blue should have an IP");
 
-    // Routing rule with a path that nginx returns 404 for — we'll point the
+    // Routing rule with a path that nginx returns 404 for: we'll point the
     // healthcheck at it. HealthChecker.check_once returns false on non-2xx,
     // so green will never go healthy and the deployment must abort at the
     // 120s deadline.

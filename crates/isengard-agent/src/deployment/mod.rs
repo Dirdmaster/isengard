@@ -31,18 +31,31 @@ use ulid::Ulid;
 /// resolved (or known to be absent).
 #[derive(Debug, Clone)]
 pub struct UpdateTrigger {
+    /// Container id of the currently-running (blue) workload.
     pub container_id: String,
+    /// Host id this agent runs on. Echoed to the deployment row.
     pub host_id: HostId,
+    /// Owning stack id from inventory.
     pub stack_id: StackId,
+    /// Compose service name.
     pub service_name: String,
+    /// Image digest the blue container is running.
     pub blue_digest: String,
+    /// Image digest the deploy is moving to.
     pub green_digest: String,
+    /// Image reference (`repo:tag` or `repo@sha256:...`).
     pub image_ref: String,
+    /// Optional routed hostname the proxy serves traffic on.
     pub public_hostname: Option<String>,
+    /// Optional container port the upstream entry points at.
     pub container_port: Option<u16>,
+    /// Optional probe path the healthcheck hits.
     pub health_path: Option<String>,
+    /// `true` when the container or compose defines a healthcheck.
     pub has_healthcheck: bool,
+    /// Read-write bind / volume mounts (drive the in-place decision).
     pub rw_volume_mounts: Vec<String>,
+    /// Value of the `isengard.deploy.strategy` label, when set.
     pub label_strategy: Option<String>,
 }
 
@@ -52,22 +65,29 @@ pub struct UpdateTrigger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorOutcome {
     /// Inserted a `Deployment` row + spawned a [`Driver`] task. The updater
-    /// must NOT recreate — the driver owns the lifecycle now.
-    BlueGreenSpawned { deployment_id: String },
+    /// must NOT recreate: the driver owns the lifecycle now.
+    BlueGreenSpawned {
+        /// Newly inserted deployment row id.
+        deployment_id: String,
+    },
     /// Container is not eligible for blue-green; updater should run the
     /// existing in-place recreate path.
     InPlaceForUpdater,
     /// A non-terminal deployment for this `(host, service)` already exists.
-    /// Skip — no row inserted, no driver spawned.
+    /// Skip: no row inserted, no driver spawned.
     AlreadyInFlight,
 }
 
 /// Owns the blue-green decision + Driver-spawn pipeline. One per agent
 /// process, shared across plugins via `Arc`. See spec §`mod.rs`.
 pub struct DeploymentSupervisor {
+    /// `inventory` field.
     inventory: Inventory,
+    /// `docker` field.
     docker: Arc<bollard::Docker>,
+    /// `proxy_state` field.
     proxy_state: ProxyState,
+    /// `emitter` field.
     emitter: Arc<dyn EventEmitter>,
     /// Live `CancellationToken`s keyed by deployment id. Inserted before
     /// spawning a [`Driver`], removed when the driver task returns. Plan
@@ -83,6 +103,7 @@ pub struct DeploymentSupervisor {
 }
 
 impl DeploymentSupervisor {
+    /// Construct a fresh supervisor with no policy loader.
     pub fn new(
         inventory: Inventory,
         docker: Arc<bollard::Docker>,
@@ -154,7 +175,7 @@ impl DeploymentSupervisor {
         let Some(loader) = self.policy_loader.as_ref() else {
             return (FailureHandling::Notify, false);
         };
-        // Fleet name lookup. `None` is fine: the resolver simply skips
+        // Fleet name lookup. `None` is fine: the resolver skips
         // fleet-scoped rows. `Err` is treated the same as None: we
         // never block on policy evaluation.
         let fleet = loader.fleet_for(trigger.host_id.0).await.ok().flatten();
@@ -182,7 +203,7 @@ impl DeploymentSupervisor {
             fleet: fleet.as_deref(),
             // Stack scope_key uses the bare stack name; the supervisor
             // doesn't have it directly, so we look it up best-effort
-            // via the inventory. Failure here just means stack-scoped
+            // via the inventory. Failure here means stack-scoped
             // rows don't apply, which is harmless (less specific
             // scopes still resolve).
             stack: None,
@@ -201,7 +222,7 @@ impl DeploymentSupervisor {
     ///
     /// Returns quickly: the driver runs in a detached `tokio::spawn`.
     pub async fn handle_update_trigger(&self, trigger: UpdateTrigger) -> Result<SupervisorOutcome> {
-        // Dedupe first — a second updater tick should not race a driver
+        // Dedupe first: a second updater tick should not race a driver
         // already mid-deploy for the same service.
         let in_flight = self
             .inventory
@@ -214,7 +235,7 @@ impl DeploymentSupervisor {
         // Consult the stored service-level override as a fallback. Container
         // label always wins; the stored override is for cases where the user
         // set a strategy via the UI/CLI without redeploying with new labels.
-        // Lookup is best-effort — a missing service row or DB hiccup must
+        // Lookup is best-effort: a missing service row or DB hiccup must
         // not block the deploy, so we swallow errors and treat them as "no
         // override".
         let stored_override = self
@@ -335,7 +356,10 @@ impl DeploymentSupervisor {
 /// `DispatchOutcome::PerformInPlace` so the updater still does *something*
 /// useful instead of leaving the container stale.
 pub struct SupervisorDispatcher {
+    /// Supervisor the dispatcher forwards triggers into.
     pub supervisor: Arc<DeploymentSupervisor>,
+    /// Inventory used to enrich each trigger with `public_hostname` /
+    /// `health_path` before dispatch.
     pub inventory: Inventory,
 }
 
@@ -428,7 +452,7 @@ mod supervisor_tests {
             })
             .await
             .unwrap();
-        // bollard's `connect_with_local_defaults` is lazy — it does not
+        // bollard's `connect_with_local_defaults` is lazy: it does not
         // open the socket until the first request, so this works in any
         // CI environment regardless of whether Docker is actually
         // running. The supervisor tests below never reach the docker
@@ -529,7 +553,7 @@ mod supervisor_tests {
             .unwrap();
 
         // Trigger has the full BG-eligible shape (routing rule + healthcheck)
-        // and NO container label — the stored "in-place" override should
+        // and NO container label: the stored "in-place" override should
         // win and route to InPlaceForUpdater anyway.
         let mut t = trigger(host, stack, true);
         t.label_strategy = None;

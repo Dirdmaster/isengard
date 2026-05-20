@@ -25,27 +25,44 @@ use thiserror::Error;
 /// File name the agent writes a verbatim manifest to inside each stack dir.
 pub const STACK_MANIFEST_FILE: &str = "stack.toml";
 
+/// Errors [`read_stack_secrets`] can return.
 #[derive(Debug, Error)]
 pub enum StackSecretsError {
+    /// Filesystem read failed.
     #[error("read {path}: {source}")]
     Io {
+        /// File path that failed to read.
         path: String,
+        /// Underlying IO error.
         #[source]
         source: std::io::Error,
     },
 
+    /// Manifest is not valid TOML.
     #[error("parse {path}: {source}")]
     Toml {
+        /// Manifest path.
         path: String,
+        /// Underlying TOML parse error.
         #[source]
         source: toml::de::Error,
     },
 
+    /// Top-level `secrets` exists but isn't an array of strings.
     #[error("{path}: top-level `secrets` must be an array of strings")]
-    Shape { path: String },
+    Shape {
+        /// Manifest path.
+        path: String,
+    },
 
+    /// A secret name failed the character-set check.
     #[error("{path}: secret name {name:?} contains invalid characters")]
-    InvalidName { path: String, name: String },
+    InvalidName {
+        /// Manifest path.
+        path: String,
+        /// Offending secret name.
+        name: String,
+    },
 }
 
 /// Read the stack-level `secrets = [...]` list out of `<dir>/stack.toml`.

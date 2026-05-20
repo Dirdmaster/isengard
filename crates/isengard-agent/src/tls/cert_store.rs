@@ -15,14 +15,23 @@ use tokio::sync::RwLock;
 /// `add_chain_cert`, `key` via `set_private_key`.
 #[derive(Clone)]
 pub struct CertEntry {
+    /// Leaf certificate the SNI callback installs.
     pub leaf: X509,
+    /// Intermediate chain certificates, root last.
     pub chain: Vec<X509>,
+    /// Private key paired with `leaf`.
     pub key: PKey<Private>,
 }
 
+/// In-memory cert cache keyed by lowercased hostname. Cloning is cheap:
+/// every clone shares the same underlying cache via `Arc`.
 #[derive(Clone)]
 pub struct CertStore {
+    /// Disk-backed fallback used to seed and refresh the cache.
     storage: TlsStorage,
+    /// `hostname -> entry` cache. Wrapped in `Arc<RwLock<_>>` so the SNI
+    /// hot path takes a read lock while writes go through the controller
+    /// push.
     cache: Arc<RwLock<HashMap<String, Arc<CertEntry>>>>,
 }
 
@@ -36,6 +45,8 @@ impl std::fmt::Debug for CertStore {
 }
 
 impl CertStore {
+    /// Construct an empty store backed by `storage`. The cache is empty
+    /// until [`Self::hydrate`] runs or a controller push installs an entry.
     pub fn new(storage: TlsStorage) -> Self {
         Self {
             storage,
@@ -152,6 +163,7 @@ impl CertStore {
         self.storage.delete(hostname).await
     }
 
+    /// Internal helper: load from disk.
     async fn load_from_disk(&self, hostname: &str) -> Result<Arc<CertEntry>> {
         let files = self.storage.read(hostname).await?;
         let entry = parse_entry(&files.cert_pem, &files.key_pem)?;
@@ -159,6 +171,7 @@ impl CertStore {
     }
 }
 
+/// Internal helper: parse entry.
 fn parse_entry(cert_pem: &str, key_pem: &str) -> Result<CertEntry> {
     let mut chain = X509::stack_from_pem(cert_pem.as_bytes())
         .context("parsing cert PEM (X509::stack_from_pem)")?;

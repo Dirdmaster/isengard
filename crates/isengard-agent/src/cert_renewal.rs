@@ -4,7 +4,7 @@
 //! 50% of its validity window, calls `RenewCert` against the controller and
 //! atomically swaps the new bundle into place. The mTLS Endpoint shared with
 //! the sync loop (via `Arc<RwLock<Endpoint>>`) is rebuilt from the freshly
-//! written bundle so the next reconnect picks up the new identity — no agent
+//! written bundle so the next reconnect picks up the new identity: no agent
 //! restart needed (Imp-2 fix; pre-fix the live Endpoint kept the old cert
 //! bytes baked in until the process restarted).
 
@@ -37,7 +37,7 @@ pub fn should_renew(issued_at: DateTime<Utc>, expires_at: DateTime<Utc>) -> bool
 ///
 /// `controller_url` and `endpoint_builder` together let us regenerate the
 /// Endpoint from a freshly-loaded bundle. The builder takes the same shape as
-/// `lib.rs::build_mtls_endpoint` — passed in instead of imported to keep this
+/// `lib.rs::build_mtls_endpoint`: passed in instead of imported to keep this
 /// module from pulling in the agent-options/types graph.
 pub async fn run_renewal_loop(
     state_dir: PathBuf,
@@ -68,6 +68,7 @@ pub async fn run_renewal_loop(
 /// the mTLS config (lives in `lib.rs::build_mtls_endpoint`).
 pub type EndpointBuilder = Arc<dyn Fn(&str, &CertBundle) -> Result<Endpoint> + Send + Sync>;
 
+/// Internal helper: maybe renew.
 async fn maybe_renew(
     state_dir: &Path,
     host_id: HostId,
@@ -112,7 +113,7 @@ async fn maybe_renew(
 
     // Imp-2: rebuild the Endpoint with the freshly-written bundle and swap
     // it in. Sync's reconnect loop snapshots the inner Endpoint on every
-    // attempt, so the new cert takes effect on the next stream cycle —
+    // attempt, so the new cert takes effect on the next stream cycle :
     // no agent restart required.
     let new_endpoint = endpoint_builder(controller_url, &new_bundle)
         .context("rebuild mTLS endpoint with renewed cert")?;
@@ -122,6 +123,7 @@ async fn maybe_renew(
     Ok(())
 }
 
+/// Internal helper: parse validity.
 fn parse_validity(cert_pem: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
     use x509_parser::pem::parse_x509_pem;
     let (_, pem) = parse_x509_pem(cert_pem.as_bytes())?;

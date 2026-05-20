@@ -32,17 +32,26 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     /// String.
     async fn create_container(&self, spec: &ContainerCreateSpec) -> Result<String, RuntimeError>;
 
+    /// Start a previously-created container.
     async fn start_container(&self, id: &str) -> Result<(), RuntimeError>;
+    /// Stop a running container with `timeout_s` for graceful SIGTERM.
     async fn stop_container(&self, id: &str, timeout_s: u32) -> Result<(), RuntimeError>;
+    /// Remove a container. `force` removes a still-running one.
     async fn remove_container(&self, id: &str, force: bool) -> Result<(), RuntimeError>;
 
+    /// List containers matching `filter`.
     async fn list_containers(
         &self,
         filter: ListFilter,
     ) -> Result<Vec<ContainerSnapshot>, RuntimeError>;
+    /// Inspect one container by id. Returns `None` when the runtime has no
+    /// such container.
     async fn inspect_container(&self, id: &str) -> Result<Option<ContainerSnapshot>, RuntimeError>;
 
+    /// Attach `container_id` to `network`. Bollard / dockerd uses this to
+    /// add secondary networks beyond the create-time primary.
     async fn connect_network(&self, container_id: &str, network: &str) -> Result<(), RuntimeError>;
+    /// Detach `container_id` from `network`.
     async fn disconnect_network(
         &self,
         container_id: &str,

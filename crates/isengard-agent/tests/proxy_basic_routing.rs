@@ -89,7 +89,7 @@ async fn route_by_host_header_returns_origin_response() {
     });
 
     // Give Pingora time to bind and initialise its connection subsystem.
-    // 300ms is too short — requests racing the bind get 502 with no upstream
+    // 300ms is too short: requests racing the bind get 502 with no upstream
     // attempt. 1500ms is comfortably past the warm-up window.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 

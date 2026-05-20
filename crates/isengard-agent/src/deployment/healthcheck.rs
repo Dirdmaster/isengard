@@ -18,32 +18,42 @@ use std::time::Duration;
 /// One probe attempt: when it ran and whether `check_once` returned true.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptResult {
+    /// When the probe ran.
     pub at: DateTime<Utc>,
+    /// `true` when `check_once` returned healthy.
     pub passed: bool,
 }
 
 /// Returned when `wait_for_healthy` exhausts its deadline without seeing
 /// `success_threshold` consecutive passes. The last (up to 5) attempts are
-/// included for diagnostics — enough to see the recent failure pattern
+/// included for diagnostics: enough to see the recent failure pattern
 /// without unbounded memory growth on long deadlines.
 #[derive(Debug, Clone)]
 pub struct HealthcheckTimeout {
+    /// Last up-to-5 attempts in chronological order.
     pub last_attempts: Vec<AttemptResult>,
 }
 
+/// Internal constant: MAX TRACKED ATTEMPTS.
 const MAX_TRACKED_ATTEMPTS: usize = 5;
 
 /// Polling wrapper. Defaults: 1s interval, 3 consecutive passes, no initial
 /// delay, 60s deadline. Override with the `with_*` builder methods.
 pub struct DeploymentHealthcheck {
+    /// `inner` field.
     inner: HealthChecker,
+    /// `interval` field.
     interval: Duration,
+    /// `success_threshold` field.
     success_threshold: u32,
+    /// `initial_delay` field.
     initial_delay: Duration,
+    /// `deadline` field.
     deadline: Duration,
 }
 
 impl DeploymentHealthcheck {
+    /// Build a wrapper around `inner` with default cadence + thresholds.
     pub fn new(inner: HealthChecker) -> Self {
         Self {
             inner,
@@ -54,21 +64,25 @@ impl DeploymentHealthcheck {
         }
     }
 
+    /// Set the poll interval.
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
 
+    /// Set the number of consecutive passes required to declare healthy.
     pub fn with_success_threshold(mut self, success_threshold: u32) -> Self {
         self.success_threshold = success_threshold;
         self
     }
 
+    /// Set the grace period before the first probe.
     pub fn with_initial_delay(mut self, initial_delay: Duration) -> Self {
         self.initial_delay = initial_delay;
         self
     }
 
+    /// Set the overall deadline.
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
         self
@@ -225,8 +239,8 @@ mod tests {
         // 3..=4, then 200 forever. With threshold=3, success is only possible
         // AFTER the failure window IF the counter resets on every failure.
         // If reset were broken (counter persisted), we would see Ok() after
-        // the very first pass-streak collapses — but in that case the run
-        // would never reach 3 consecutive passes either, so the test simply
+        // the very first pass-streak collapses: but in that case the run
+        // would never reach 3 consecutive passes either, so the test
         // requires Ok() and asserts it took longer than 3 intervals. The
         // strict proof: minimum elapsed must include the failure window.
         use std::sync::Arc;
@@ -294,7 +308,7 @@ mod tests {
         let min_expected = interval * 6;
         assert!(
             elapsed >= min_expected,
-            "elapsed {:?} < min {:?} — counter likely did not reset on failure",
+            "elapsed {:?} < min {:?}: counter likely did not reset on failure",
             elapsed,
             min_expected
         );

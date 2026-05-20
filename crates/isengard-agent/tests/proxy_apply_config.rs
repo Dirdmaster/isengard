@@ -79,7 +79,7 @@ async fn stale_generation_is_ignored() {
 /// Without the in-lock re-check (introduced after slice-4 review on PR #18),
 /// two concurrent `apply_config(N)` and `apply_config(N+1)` calls could both
 /// pass the lock-free pre-check, then race to acquire the registry write
-/// lock — and whichever arrived SECOND would win, even with the older
+/// lock: and whichever arrived SECOND would win, even with the older
 /// generation. The current implementation re-checks `last_generation` under
 /// the lock and drops the older config if it lost the race.
 ///
@@ -134,7 +134,7 @@ async fn concurrent_applies_higher_generation_wins() {
 /// The controller's per-host `generation` counter lives in memory
 /// (`routing::by_host`) and resets to 0 on controller restart. The agent's
 /// `last_generation` keeps its prior high value across the agent's sync
-/// reconnect — so the very first push from the freshly-restarted controller
+/// reconnect: so the very first push from the freshly-restarted controller
 /// (generation=1) would be discarded as "stale" by the agent's monotonicity
 /// check, leaving the agent serving the old config forever.
 ///
@@ -175,7 +175,7 @@ async fn last_generation_reset_on_stream_open_unblocks_low_gen_push() {
     assert_eq!(state.last_generation.load(Ordering::Acquire), 5);
 
     // Without the reset, the next line (a fresh post-restart push at
-    // generation=1) would be dropped as stale — agent stays serving old.test.
+    // generation=1) would be dropped as stale: agent stays serving old.test.
     state.last_generation.store(0, Ordering::Release);
 
     // Fresh controller's first push: generation=1.

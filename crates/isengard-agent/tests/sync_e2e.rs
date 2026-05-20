@@ -86,7 +86,7 @@ async fn agent_heartbeats_advance_last_seen_at() {
     seed_token(controller_state.path(), TEST_TOKEN, "test").await;
 
     // Spawn the agent. It will enroll then open the sync stream and send
-    // heartbeats. The handle leaks intentionally — test process exits at
+    // heartbeats. The handle leaks intentionally: test process exits at
     // function end.
     let opts = AgentOptions {
         controller_url: format!("http://{addr}"),

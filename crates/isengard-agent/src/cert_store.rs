@@ -5,22 +5,36 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// On-disk cert bundle the agent uses for mTLS dials. All three PEMs
+/// live in `<state_dir>/certs/`. Mode 0600 on `agent.key`; 0644 on the
+/// rest.
 #[derive(Debug, Clone)]
 pub struct CertBundle {
+    /// Controller CA root PEM. The trust anchor every agent RPC validates
+    /// against.
     pub ca_pem: String,
+    /// Agent's signed leaf cert PEM. CN = agent's `HostId`.
     pub cert_pem: String,
+    /// Agent's private key PEM, paired with `cert_pem`.
     pub key_pem: String,
 }
 
+/// Path to the bundle directory under `state_dir`.
 pub fn cert_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("certs")
 }
 
+/// True when all three bundle files exist on disk.
 pub fn exists(state_dir: &Path) -> bool {
     let d = cert_dir(state_dir);
     d.join("ca.pem").exists() && d.join("agent.crt").exists() && d.join("agent.key").exists()
 }
 
+/// Load the bundle from disk.
+///
+/// # Errors
+///
+/// Returns an error when any of the three files is missing or unreadable.
 pub fn load(state_dir: &Path) -> Result<CertBundle> {
     let d = cert_dir(state_dir);
     Ok(CertBundle {
@@ -30,6 +44,13 @@ pub fn load(state_dir: &Path) -> Result<CertBundle> {
     })
 }
 
+/// Atomically persist the bundle to disk. Creates the directory if
+/// missing; chmods `agent.key` to 0600.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or any of the
+/// three file writes fails.
 pub fn save(state_dir: &Path, bundle: &CertBundle) -> Result<()> {
     let d = cert_dir(state_dir);
     std::fs::create_dir_all(&d).context("mkdir certs/")?;
@@ -40,6 +61,7 @@ pub fn save(state_dir: &Path, bundle: &CertBundle) -> Result<()> {
     Ok(())
 }
 
+/// Internal helper: write atomic.
 fn write_atomic(target: &Path, data: &[u8], mode: u32) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;

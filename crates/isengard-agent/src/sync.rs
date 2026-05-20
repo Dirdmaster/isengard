@@ -34,7 +34,7 @@ use crate::proxy::ProxyState;
 use crate::runtime::RuntimeBackend;
 
 /// Shared handle to the agent's mDNS responder. Optional: tests + docker-less
-/// environments boot the agent without one, in which case the sync loop just
+/// environments boot the agent without one, in which case the sync loop
 /// skips advertise calls.
 pub type MdnsHandle = Arc<tokio::sync::Mutex<MdnsResponder>>;
 
@@ -49,7 +49,11 @@ pub type MdnsHandle = Arc<tokio::sync::Mutex<MdnsResponder>>;
 /// channel.
 #[derive(Clone)]
 pub struct ComposeContext {
+    /// Root directory the agent owns for compose stacks (e.g.
+    /// `/etc/isengard/stacks`). One subdirectory per stack.
     pub root: std::path::PathBuf,
+    /// This agent's stable host id, as the controller sees it. Echoed
+    /// back in `WriteComposeAck` and `meta.toml`.
     pub host_id: String,
     /// Outbound event sink for hook audit events. Optional: tests that
     /// don't care about hooks can pass `None` and the WriteCompose
@@ -270,7 +274,7 @@ pub async fn run_sync_loop<S: LogSource>(
                         // v1: log receipt. Real execution (force-update via updater
                         // plugin signal, decommission, etc.) lands in v1.x. The
                         // controller marks the action delivered as soon as it
-                        // includes it in the ack — see Task 5.
+                        // includes it in the ack: see Task 5.
                         info!(
                             action_id = action.id,
                             kind = %action.kind,
@@ -283,7 +287,7 @@ pub async fn run_sync_loop<S: LogSource>(
                     // Clone the rule list before handing the config to the
                     // proxy: mDNS apply runs after the proxy has installed
                     // the upstream registry so a router request that lands
-                    // first sees an upstream, not just a DNS record.
+                    // first sees an upstream, not only a DNS record.
                     let rules_for_mdns = cfg.rules.clone();
                     let backend_for_apply = read_backend.as_deref();
                     if let Err(e) = crate::proxy::apply_config_with_backend(
@@ -580,14 +584,14 @@ pub async fn run_sync_loop<S: LogSource>(
 
     // Wait for cancel OR for either spawned task to end OR for an outbound
     // event to drain. If a task ends before cancel fires, that means the
-    // stream broke (controller died, network dropped, etc.) — we return Err
+    // stream broke (controller died, network dropped, etc.): we return Err
     // so the outer reconnect loop retries. Outbound events are forwarded as
     // AgentMessage::Event frames; we loop until one of the terminal arms
     // fires.
     //
     // `read_consumed` / `hb_consumed` track which handle (if any) was polled
     // to completion by the select. We must NOT await a JoinHandle a second
-    // time after select consumed its output — tokio panics with
+    // time after select consumed its output: tokio panics with
     // "JoinHandle polled after completion".
     let mut read_consumed = false;
     let mut hb_consumed = false;
@@ -609,7 +613,7 @@ pub async fn run_sync_loop<S: LogSource>(
             }
             maybe_ev = events_rx.recv() => {
                 let Some(core_ev) = maybe_ev else {
-                    // Receiver closed — agent shutting down. Treat like cancel.
+                    // Receiver closed: agent shutting down. Treat like cancel.
                     info!("events channel closed, shutting down sync");
                     break Ok(());
                 };
@@ -624,7 +628,7 @@ pub async fn run_sync_loop<S: LogSource>(
             }
             maybe_msg = agent_msg_rx.recv() => {
                 let Some(msg) = maybe_msg else {
-                    // Pre-built AgentMessage channel closed — treat like cancel.
+                    // Pre-built AgentMessage channel closed: treat like cancel.
                     info!("agent_msg channel closed, shutting down sync");
                     break Ok(());
                 };
@@ -739,7 +743,7 @@ pub async fn run_sync_with_reconnect<S: LogSource>(
 
         match result {
             Ok(()) => {
-                // Graceful cancel — exit.
+                // Graceful cancel: exit.
                 info!("sync loop exited cleanly via cancel");
                 return Ok(());
             }
