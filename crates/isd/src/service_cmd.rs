@@ -10,18 +10,22 @@ use serde::{Deserialize, Serialize};
 use crate::session::Session;
 use crate::stack_cmd::{ServiceApiRow, StackApiRow};
 
+/// CLI flags for `isd service`.
 #[derive(Debug, Args)]
 pub struct ServiceArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: ServiceCommand,
 }
 
+/// Sub-verbs under `isd service`.
 #[derive(Debug, Subcommand)]
 pub enum ServiceCommand {
     /// List services across stacks.
     Ls(LsArgs),
 }
 
+/// CLI flags for `isd service ls`.
 #[derive(Debug, Args)]
 pub struct LsArgs {
     /// Output format.
@@ -29,22 +33,35 @@ pub struct LsArgs {
     pub format: crate::output::Format,
 }
 
+/// One row in the rendered `service ls` table.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceLsRow {
+    /// Owning stack name; `None` for unstacked services.
     pub stack: Option<String>,
+    /// Service name.
     pub name: String,
+    /// Host the service runs on (hostname when known, ULID fallback).
     pub host: String,
+    /// Operational state.
     pub state: String,
+    /// Image reference.
     pub image: String,
+    /// Last heartbeat timestamp.
     pub last_seen_at: DateTime<Utc>,
 }
 
+/// Dispatch to the matching `service` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: ServiceArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         ServiceCommand::Ls(a) => run_ls(a, context).await,
     }
 }
 
+/// Fetch stacks + services and render one joined row per service.
 async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;
@@ -68,6 +85,8 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// GET `url` and deserialize the JSON body as `T`. Used by `run_ls` to
+/// pull the two parallel endpoints with one error-surface shape.
 async fn fetch<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) -> Result<T> {
     use anyhow::Context as _;
     let resp = session
@@ -85,6 +104,8 @@ async fn fetch<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) -> Resu
         .with_context(|| format!("decoding response from {url}"))
 }
 
+/// Join services to stacks by `stack_id` and sort by (stack, name).
+/// Unstacked services land with `stack = None`.
 pub fn build_rows(stacks: &[StackApiRow], services: &[ServiceApiRow]) -> Vec<ServiceLsRow> {
     let mut rows: Vec<ServiceLsRow> = services
         .iter()
@@ -111,6 +132,7 @@ pub fn build_rows(stacks: &[StackApiRow], services: &[ServiceApiRow]) -> Vec<Ser
     rows
 }
 
+/// Render `service ls` rows as a comfy-table.
 fn render_table(rows: &[ServiceLsRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)

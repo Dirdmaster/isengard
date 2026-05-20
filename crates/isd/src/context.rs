@@ -10,12 +10,15 @@ use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
 use crate::docker_context;
 
+/// CLI flags for `isd context`.
 #[derive(Debug, Args)]
 pub struct ContextArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: ContextCommand,
 }
 
+/// Sub-verbs under `isd context`.
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
     /// List docker contexts. `*` marks the current one.
@@ -30,16 +33,21 @@ pub enum ContextCommand {
     Rm(RmArgs),
 }
 
+/// CLI flags for `isd context use`.
 #[derive(Debug, Args)]
 pub struct UseArgs {
+    /// Context name to mark current.
     pub name: String,
 }
 
+/// CLI flags for `isd context show`.
 #[derive(Debug, Args)]
 pub struct ShowArgs {
+    /// Context name. Defaults to the current context.
     pub name: Option<String>,
 }
 
+/// CLI flags for `isd context create`.
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Context name.
@@ -57,6 +65,7 @@ pub struct CreateArgs {
     pub r#use: bool,
 }
 
+/// CLI flags for `isd context rm`.
 #[derive(Debug, Args)]
 pub struct RmArgs {
     /// Context name(s) to remove.
@@ -67,6 +76,11 @@ pub struct RmArgs {
     pub force: bool,
 }
 
+/// Dispatch to the matching `context` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: ContextArgs) -> Result<()> {
     match args.command {
         ContextCommand::List => run_list().await,
@@ -77,6 +91,8 @@ pub async fn run(args: ContextArgs) -> Result<()> {
     }
 }
 
+/// Print every docker context as a table, marking the current one
+/// with `*` in the first column.
 async fn run_list() -> Result<()> {
     let contexts = docker_context::list_contexts()?;
     let mut t = Table::new();
@@ -99,12 +115,15 @@ async fn run_list() -> Result<()> {
     Ok(())
 }
 
+/// Write `currentContext` in `~/.docker/config.json` to `args.name`.
 async fn run_use(args: UseArgs) -> Result<()> {
     docker_context::set_current_context(&args.name)?;
     println!("Current docker context is now {:?}.", args.name);
     Ok(())
 }
 
+/// Print one context's name, kind, and docker endpoint. Defaults to
+/// the current context when `args.name` is unset.
 async fn run_show(args: ShowArgs) -> Result<()> {
     let name = match args.name {
         Some(n) => n,
@@ -117,6 +136,9 @@ async fn run_show(args: ShowArgs) -> Result<()> {
     Ok(())
 }
 
+/// Shell out to `docker context create`, optionally setting the new
+/// context as current. Thin wrapper so the docker CLI's own input
+/// validation drives the experience.
 async fn run_create(args: CreateArgs) -> Result<()> {
     let mut cmd = tokio::process::Command::new("docker");
     cmd.arg("context")
@@ -144,6 +166,8 @@ async fn run_create(args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
+/// Shell out to `docker context rm` with the resolved names and the
+/// optional `--force` flag.
 async fn run_rm(args: RmArgs) -> Result<()> {
     let mut cmd = tokio::process::Command::new("docker");
     cmd.arg("context").arg("rm");

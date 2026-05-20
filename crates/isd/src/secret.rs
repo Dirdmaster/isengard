@@ -48,12 +48,15 @@ pub enum Scope {
     Global,
 }
 
+/// CLI flags for `isd secret`.
 #[derive(Debug, Args)]
 pub struct SecretArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: SecretCommand,
 }
 
+/// Sub-verbs under `isd secret`.
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
     /// Upsert a secret value.
@@ -64,6 +67,7 @@ pub enum SecretCommand {
     Rm(RmArgs),
 }
 
+/// CLI flags for `isd secret put`.
 #[derive(Debug, Args)]
 pub struct PutArgs {
     /// Secret name.
@@ -76,6 +80,7 @@ pub struct PutArgs {
     pub scope: Scope,
 }
 
+/// CLI flags for `isd secret rm`.
 #[derive(Debug, Args)]
 pub struct RmArgs {
     /// Secret name to delete.
@@ -85,6 +90,7 @@ pub struct RmArgs {
     pub scope: Scope,
 }
 
+/// CLI flags for `isd secret list`.
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// List secrets in one context or every saved context.
@@ -92,24 +98,40 @@ pub struct ListArgs {
     pub scope: Scope,
 }
 
+/// PUT body. Carries only the plaintext value; the controller
+/// encrypts under the context's master.key.
 #[derive(Debug, Serialize)]
 struct PutBody {
+    /// The secret value, transmitted in plaintext over the
+    /// session's TLS/SSH channel.
     value: String,
 }
 
+/// Controller error envelope. Read so the controller's free-form
+/// message can be relayed verbatim.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // surfaced verbatim in user-facing error messages
 struct ErrorBody {
+    /// Operator-readable error message from the controller.
     error: String,
 }
 
+/// One row in `GET /api/v1/secrets`. Names are listed, values are not.
 #[derive(Debug, Deserialize)]
 struct SecretEntry {
+    /// Secret name (the operator-facing identifier).
     name: String,
+    /// RFC3339 timestamp when the secret was first inserted.
     created_at: String,
+    /// RFC3339 timestamp of the most recent value update.
     updated_at: String,
 }
 
+/// Dispatch to the matching `secret` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: SecretArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         SecretCommand::Put(a) => run_put(a, context).await,
@@ -118,6 +140,8 @@ pub async fn run(args: SecretArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
+/// Resolve the value (stdin or `--from-file`), then PUT it to one
+/// context or fan out across every saved context per `--scope`.
 async fn run_put(args: PutArgs, context: Option<&str>) -> Result<()> {
     let value = read_value(args.from_file.as_deref())?;
     if value.is_empty() {
@@ -168,6 +192,8 @@ async fn run_put_global(name: &str, value: String) -> Result<()> {
     Ok(())
 }
 
+/// Open a session against `ctx` and PUT the value. Helper for the
+/// global-scope fan-out.
 async fn put_to_context(ctx: &DockerContextSummary, name: &str, value: String) -> Result<()> {
     let session = Session::from_context(ResolvedContext {
         name: ctx.name.clone(),
@@ -177,6 +203,7 @@ async fn put_to_context(ctx: &DockerContextSummary, name: &str, value: String) -
     put_secret(&session, name, value).await
 }
 
+/// Dispatch to the context-scope or global-scope listing.
 async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
     match args.scope {
         Scope::Context => run_list_context(context).await,
@@ -184,6 +211,8 @@ async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
+/// `secret ls --scope context`: GET + render a `NAME / CREATED /
+/// UPDATED` table for the current context.
 async fn run_list_context(context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let entries = list_secrets(&session).await?;
@@ -214,6 +243,8 @@ async fn run_list_context(context: Option<&str>) -> Result<()> {
 /// couldn't be — secrets are write-only from the operator side), so
 /// "partial" does NOT detect value divergence; it only detects name
 /// coverage. The operator decides what to do.
+/// `secret ls --scope global`: walk every context, aggregate by name,
+/// classify coverage, and print one row per distinct name.
 async fn run_list_global() -> Result<()> {
     let contexts = load_all_contexts()?;
     if contexts.is_empty() {
@@ -248,11 +279,16 @@ pub(crate) struct GlobalSnapshot {
 }
 
 impl GlobalSnapshot {
+    /// Number of contexts whose listing failed. Used by callers to
+    /// decide whether the whole operation should fail with an
+    /// actionable error.
     pub(crate) fn unreachable_count(&self) -> usize {
         self.unreachable.len()
     }
 }
 
+/// Walk every context once, building the [`GlobalSnapshot`] used by
+/// the global-scope list and the coverage classifier.
 async fn collect_global_snapshot(contexts: &[DockerContextSummary]) -> GlobalSnapshot {
     use std::collections::BTreeMap;
     let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -277,6 +313,7 @@ async fn collect_global_snapshot(contexts: &[DockerContextSummary]) -> GlobalSna
     }
 }
 
+/// Open a session against `ctx` and GET the secrets list.
 async fn list_from_context(ctx: &DockerContextSummary) -> Result<Vec<SecretEntry>> {
     let session = Session::from_context(ResolvedContext {
         name: ctx.name.clone(),
@@ -342,6 +379,7 @@ pub(crate) fn classify_coverage(present_in: usize, reachable: usize) -> &'static
     }
 }
 
+/// Delete a secret in one context or across every saved context.
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
     match args.scope {
         Scope::Context => {
@@ -388,10 +426,15 @@ async fn run_rm_global(name: &str) -> Result<()> {
 /// labels them differently so the operator can tell whether anything
 /// actually changed.
 enum RmOutcome {
+    /// The controller returned 2xx for the DELETE.
     Removed,
+    /// The controller returned 404; idempotent success.
     AlreadyGone,
 }
 
+/// DELETE the secret in `ctx`, classifying the result as
+/// [`RmOutcome::Removed`] or [`RmOutcome::AlreadyGone`] so the
+/// global-scope summary can attribute correctly.
 async fn rm_from_context(ctx: &DockerContextSummary, name: &str) -> Result<RmOutcome> {
     let session = Session::from_context(ResolvedContext {
         name: ctx.name.clone(),
@@ -420,6 +463,11 @@ async fn rm_from_context(ctx: &DockerContextSummary, name: &str) -> Result<RmOut
     Err(anyhow!("DELETE {url} -> {status}: {body}"))
 }
 
+/// Read the secret value from a file or stdin.
+///
+/// Refuses to read when stdin is a TTY (the operator almost certainly
+/// meant to pipe). Strips one trailing newline so `echo hunter2 |`
+/// works as expected.
 fn read_value(from_file: Option<&std::path::Path>) -> Result<String> {
     match from_file {
         Some(p) => std::fs::read_to_string(p)
@@ -443,6 +491,7 @@ fn read_value(from_file: Option<&std::path::Path>) -> Result<String> {
     }
 }
 
+/// `PUT /api/v1/secrets/<name>`.
 async fn put_secret(session: &Session, name: &str, value: String) -> Result<()> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/secrets/{name}");
@@ -461,6 +510,7 @@ async fn put_secret(session: &Session, name: &str, value: String) -> Result<()> 
     Err(anyhow!("PUT {url} -> {status}: {body}"))
 }
 
+/// `GET /api/v1/secrets`.
 async fn list_secrets(session: &Session) -> Result<Vec<SecretEntry>> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/secrets");
@@ -474,6 +524,8 @@ async fn list_secrets(session: &Session) -> Result<Vec<SecretEntry>> {
     Ok(entries)
 }
 
+/// `DELETE /api/v1/secrets/<name>` with 404 surfaced as a "not found"
+/// error.
 async fn delete_secret(session: &Session, name: &str) -> Result<()> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/secrets/{name}");
@@ -506,12 +558,16 @@ pub(crate) fn load_all_contexts() -> Result<Vec<DockerContextSummary>> {
 /// Tracks three buckets so the summary line can distinguish "synced"
 /// from "already gone" (for rm) from "failed".
 pub(crate) struct ScopeReport {
+    /// Contexts where the operation succeeded.
     pub(crate) successes: Vec<String>,
+    /// Contexts where DELETE returned 404 (idempotent success).
     pub(crate) already_gone: Vec<String>,
+    /// Contexts where the operation failed, with the error.
     pub(crate) failures: Vec<(String, anyhow::Error)>,
 }
 
 impl ScopeReport {
+    /// Build an empty report.
     pub(crate) fn new() -> Self {
         Self {
             successes: Vec::new(),
@@ -520,18 +576,22 @@ impl ScopeReport {
         }
     }
 
+    /// Record `ctx` as a successful application.
     pub(crate) fn push_ok(&mut self, ctx: &str) {
         self.successes.push(ctx.to_string());
     }
 
+    /// Record `ctx` as already-gone (404 on DELETE).
     pub(crate) fn push_already_gone(&mut self, ctx: &str) {
         self.already_gone.push(ctx.to_string());
     }
 
+    /// Record `ctx` as a failure with the error chain.
     pub(crate) fn push_err(&mut self, ctx: &str, err: anyhow::Error) {
         self.failures.push((ctx.to_string(), err));
     }
 
+    /// True when any per-context failure was recorded.
     pub(crate) fn has_failures(&self) -> bool {
         !self.failures.is_empty()
     }
@@ -576,6 +636,9 @@ impl ScopeReport {
 /// Render an error chain as one short line for the summary. Walks the
 /// `source()` chain only enough to surface the most actionable string
 /// (e.g. "timeout", "connection refused") without dumping a stack.
+/// Walk an `anyhow::Error`'s `source()` chain and surface the deepest
+/// message as a one-line, length-capped string for the global-scope
+/// failure summary.
 fn short_err(err: &anyhow::Error) -> String {
     // Find the deepest cause that contains useful text; fall back to the
     // top-level message. Keeps the summary readable when reqwest wraps
@@ -596,6 +659,8 @@ fn short_err(err: &anyhow::Error) -> String {
 }
 
 /// Truncate a timestamp to `YYYY-MM-DD HH:MM` for terse table output.
+/// Truncate an RFC3339 timestamp to `YYYY-MM-DD HH:MM` for terse
+/// table output. Pass-through when the input is too short to truncate.
 fn short_ts(ts: &str) -> String {
     // RFC3339: 2026-05-08T10:34:56+00:00. Replace 'T' with space, drop
     // seconds + offset.

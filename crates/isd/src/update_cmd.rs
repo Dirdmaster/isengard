@@ -104,6 +104,7 @@ pub struct UpdateArgs {
 /// We deliberately ignore the rest of the (large) payload.
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
+    /// Release tag name (e.g. `v0.5.2`).
     tag_name: String,
 }
 

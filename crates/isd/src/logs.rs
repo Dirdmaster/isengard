@@ -26,6 +26,7 @@ use futures_util::StreamExt;
 use crate::index_resolve;
 use crate::ps;
 
+/// CLI flags for `isd logs`.
 #[derive(Debug, Args)]
 pub struct LogsArgs {
     /// Container selector: #N from `isd ps`, container name, container ID,
@@ -42,6 +43,15 @@ pub struct LogsArgs {
     pub timestamps: bool,
 }
 
+/// Tail or stream logs for one or more containers. Multi-target
+/// streams are merged via `select_all` and each line prefixed with
+/// the container name (docker-compose style).
+///
+/// # Errors
+///
+/// Returns `Err` when resolution yields no targets, when any target
+/// lives on a different context (cross-host streaming is not wired
+/// yet), or when the docker backend fails to attach.
 pub async fn run(args: LogsArgs, context: Option<&str>) -> Result<()> {
     let targets = index_resolve::resolve(std::slice::from_ref(&args.target))?;
     if targets.is_empty() {

@@ -1,24 +1,23 @@
-//! `isd`: the Isengard operator CLI. Talks to a controller over the same
-//! REST + WebSocket surface the dashboard uses.
+//! Operator CLI for the Isengard cluster.
 //!
-//! `isd` reads docker's context store at `~/.docker/contexts/`
-//! directly. No parallel credentials.toml. Operator creates contexts with
-//! `docker context create <name> --docker host=ssh://...`; `isd context
-//! use <name>` writes the same `currentContext` field `docker context use`
-//! does. `--context <name>` overrides per invocation.
+//! `isd` talks to a controller over the REST + WebSocket surface the
+//! dashboard uses, and to docker daemons directly via the operator's
+//! docker context store at `~/.docker/contexts/`. There is no parallel
+//! `credentials.toml`: contexts come from docker. `--context <name>`
+//! overrides the active context per invocation.
 //!
-//! Subcommands:
-//!  - `isd context list | use | show`
-//!  - `isd ps`: list stacks + services
-//!  - `isd open <stack>`: open the stack's primary host in a browser
-//!  - `isd logs <selector> -f`: tail container logs (#N, name, ID, range)
-//!  - `isd deploy | diff | edit`: stack-level compose-as-truth
-//!  - `isd gateway`: dev DNS + reverse proxy bridging the operator's Mac
-//!  - `isd secret put | list | rm`: managed-secret CRUD
-//!  - `isd route create | list | rm`: routing-rule CRUD
-//!  - `isd hosts list`: enumerate enrolled hosts (ULID, hostname, labels)
-//!  - `isd update`: self-replace the operator binary from a GitHub Release
-//!  - `isd upgrade`: pull a new controller + agent image tag, recreate
+//! Subcommand groups (see [`help_render::GROUPS`] for the full layout):
+//!
+//!  - Containers: `ps`, `logs`, `stop`, `start`, `restart`, `rm`, `kill`.
+//!  - Stacks: `stack ls | ps | deploy | diff | edit | manifest`, `open`.
+//!  - Cluster: `hosts`, `service ls`, `route`, `secret`, `placement`,
+//!    `join`, `join-token`.
+//!  - Setup: `init`, `uninit`, `upgrade`, `context`, `update`.
+//!  - Backup: `backup`, `restore`.
+//!  - Editor: `lsp`, `mcp`.
+
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 use clap::{Parser, Subcommand};
 
@@ -58,6 +57,8 @@ mod update_cmd;
 mod upgrade_cmd;
 mod watch;
 
+/// Top-level clap parser for `isd`. Holds the global flags (`--log`,
+/// `--context`) and the resolved subcommand.
 #[derive(Parser, Debug)]
 #[command(
     name = "isd",
@@ -73,10 +74,15 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     context: Option<String>,
 
+    /// Resolved subcommand. `None` defaults to `Ps` (see [`default_command`]).
     #[command(subcommand)]
     command: Option<Command>,
 }
 
+/// One subcommand variant per top-level verb. Headlines (the `///` lines)
+/// drive both `clap`'s auto-help and the grouped renderer in
+/// [`help_render`]. Adding a variant means slotting it into
+/// [`help_render::GROUPS`] (a unit test enforces that).
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Manage saved controller contexts.
@@ -146,6 +152,10 @@ enum Command {
     Mcp,
 }
 
+/// Process entry point. Intercepts the bare-`isd` / `isd -h` path so the
+/// grouped help renderer runs instead of clap's flat list, parses the
+/// CLI, initialises tracing, dispatches to the matching subcommand, and
+/// turns any error into a one-line `isd:` message + exit-1.
 #[tokio::main]
 async fn main() {
     use clap::CommandFactory;
@@ -232,9 +242,12 @@ async fn main() {
     }
 }
 
-/// When the operator runs bare `isd` with no subcommand,
-/// route through `Ps` with the same defaults clap would pick for an
-/// explicit `isd ps`. Spec entry: bare-isd default-and-document.
+/// Default subcommand when the operator runs bare `isd` (no verb).
+///
+/// Builds a [`Command::Ps`] with the same defaults clap would pick for
+/// an explicit `isd ps`, matching docker's `docker ps` convenience.
+/// Pre-0.18 isd errored with the help text here; the bare-isd
+/// default-and-document spec replaced that with a useful default.
 fn default_command() -> Command {
     Command::Ps(ps::PsArgs {
         all: false,
@@ -247,6 +260,11 @@ fn default_command() -> Command {
     })
 }
 
+/// Install a `tracing_subscriber` writing to stderr. Filter precedence:
+/// `ISD_LOG` env var, then the `--log` flag, then `warn` as the floor so
+/// quiet runs stay quiet. Failures to install are swallowed (`try_init`
+/// returning Err means a subscriber was already installed; the next
+/// process gets one).
 fn init_tracing(filter: Option<&str>) {
     let env = std::env::var("ISD_LOG")
         .ok()

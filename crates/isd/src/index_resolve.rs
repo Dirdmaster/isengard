@@ -19,20 +19,40 @@ use anyhow::{Context, Result, anyhow};
 use crate::index_cache::{self, IndexCache, IndexRow};
 use crate::selector;
 
-/// One resolved target. `via_index` is true when the arg was a decimal
-/// selector (used by destructive confirm to decide whether to prompt).
+/// One resolved target. `via_index` flips the destructive-confirm
+/// prompt: index-resolved targets ask before acting; literal IDs
+/// don't.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTarget {
+    /// Full docker container ID. For literal-name args this is the
+    /// raw arg (the daemon does its own lookup).
     pub container_id: String,
+    /// Container name for display in confirm prompts. Equals
+    /// `container_id` when the arg was a literal pass-through.
     pub name: String,
+    /// Context (host) the container lives on. Empty when the arg was
+    /// a literal pass-through (we have no host info without the index
+    /// cache).
     pub context: String,
+    /// True when this target came from an index selector. Drives the
+    /// confirm prompt and the staleness check.
     pub via_index: bool,
 }
 
-/// Resolve every positional arg into one or more targets. A literal
-/// ID/name produces one target with `name = arg.to_string()` (we do not
-/// reverse-lookup the container's name from the daemon to keep this
-/// pure and offline). A selector produces one target per index.
+/// Resolve every positional arg into one or more targets.
+///
+/// A literal ID/name produces one target with `name = arg.to_string()`
+/// (we do not reverse-lookup the container's name from the daemon to
+/// keep this pure and offline). A selector produces one target per
+/// index. Selector args require the index cache; literal-only args
+/// don't.
+///
+/// # Errors
+///
+/// Returns `Err` when any selector arg references an out-of-range
+/// index, when a selector arg is supplied but no cache exists, or
+/// when the cache exists but is unreadable. Stale-but-valid caches
+/// log a warning to stderr and proceed.
 pub fn resolve(args: &[String]) -> Result<Vec<ResolvedTarget>> {
     let cache: Option<IndexCache> = index_cache::read().context("reading index cache")?;
 
@@ -87,6 +107,9 @@ pub fn resolve(args: &[String]) -> Result<Vec<ResolvedTarget>> {
     Ok(out)
 }
 
+/// Find the row with `index == idx` in the cache, or return an error
+/// naming the valid range. Separated out of [`resolve`] so the
+/// out-of-range message stays in one place.
 fn lookup(cache: &IndexCache, idx: usize) -> Result<&IndexRow> {
     cache.rows.iter().find(|r| r.index == idx).ok_or_else(|| {
         let max = cache.rows.iter().map(|r| r.index).max().unwrap_or(0);

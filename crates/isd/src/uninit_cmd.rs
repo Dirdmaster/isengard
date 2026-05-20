@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use bollard::container::RemoveContainerOptions;
 use clap::Args;
 
+/// CLI flags for `isd uninit`.
 #[derive(Debug, Args)]
 pub struct UninitArgs {
     /// Skip the y/N prompt.
@@ -30,9 +31,30 @@ pub struct UninitArgs {
     pub backup_first: bool,
 }
 
+/// Named volumes the cluster's state lives in. Preserved by default;
+/// removed only when `--wipe-state` is set.
 const VOLUMES: &[&str] = &["iso-controller-state", "iso-agent-state", "iso-stacks"];
+
+/// System containers the cluster runs. Removed unconditionally as part
+/// of teardown.
 const CONTAINERS: &[&str] = &["iso-controller", "iso-agent"];
 
+/// Tear down the cluster on the resolved docker context.
+///
+/// Optionally takes an encrypted backup first (`--backup-first`),
+/// prompts the operator (skipped with `--yes`), then removes the
+/// iso-controller and iso-agent containers. Preserves the named state
+/// volumes by default; `--wipe-state` deletes them too.
+///
+/// Calls `remove_container` directly via bollard, bypassing the
+/// lifecycle guard that normally protects `io.isengard.role=controller`
+/// / `=agent` containers. This is the deliberate teardown path.
+///
+/// # Errors
+///
+/// Returns `Err` when the docker context cannot be resolved, the
+/// confirmation prompt cannot read stdin, or (with `--backup-first`)
+/// the pre-teardown backup fails.
 pub async fn run(args: UninitArgs, context: Option<&str>) -> Result<()> {
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
 

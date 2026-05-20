@@ -20,9 +20,16 @@ use crate::backup_credentials;
 use crate::backup_crypto;
 use crate::backup_storage::{self, BackupDestination};
 
+/// One-shot helper image: alpine tar producer that streams the state
+/// volume to stdout. Pinned to the same tag as `init_cmd::BOOTSTRAP_IMAGE`
+/// so cached layers stay shared.
 const HELPER_IMAGE: &str = "alpine:3.21";
+
+/// Named volume holding the controller's SQLite + master.key. Source
+/// for backup, destination for restore.
 const STATE_VOLUME: &str = "iso-controller-state";
 
+/// CLI flags for `isd backup`.
 #[derive(Debug, Args, Default)]
 pub struct BackupArgs {
     /// Output path (filesystem). Defaults to `./iso-<ctx>-<date>.tgz.age`.
@@ -37,13 +44,27 @@ pub struct BackupArgs {
 }
 
 impl BackupArgs {
-    /// Default args for the `isd uninit --backup-first` integration: just
-    /// the fs destination with the default-generated filename in `cwd`.
+    /// Default args for the `isd uninit --backup-first` integration: the
+    /// filesystem destination with the auto-generated filename in cwd.
     pub fn default_for_uninit() -> Self {
         Self::default()
     }
 }
 
+/// Stream the `iso-controller-state` volume to an encrypted backup.
+///
+/// Resolves the destination, gathers the passphrase (CLI flag, env,
+/// stored, or interactive prompt), spawns the tar producer container,
+/// pipes its stdout through `age::encrypt_stream` into the destination
+/// sink. The whole pipeline runs in a `spawn_blocking` task so the
+/// age crate's blocking Read/Write loop can drive bollard's tokio
+/// streams via `SyncIoBridge`.
+///
+/// # Errors
+///
+/// Returns `Err` on any pipeline failure: docker context resolution,
+/// missing passphrase, tar container failure, age encryption error,
+/// or destination IO error.
 pub async fn run(args: BackupArgs, context: Option<&str>) -> Result<()> {
     let context_name = crate::docker_context::resolve_context_name(context)?;
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;

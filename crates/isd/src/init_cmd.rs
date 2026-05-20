@@ -23,6 +23,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
+/// CLI flags for `isd init`.
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Tear down any existing iso-controller / iso-agent containers
@@ -38,6 +39,10 @@ pub struct InitArgs {
     pub no_agent: bool,
 }
 
+/// Embedded compose recipe used by `init`, `join`, and `upgrade`. Single
+/// source of truth for the controller + agent service shapes; bumped
+/// alongside the binary so a `cargo install` from any commit deploys
+/// the matching topology.
 pub(crate) const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose.yaml");
 
 /// Image used for the one-shot bootstrap container that seeds
@@ -46,6 +51,19 @@ pub(crate) const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose
 /// Docker Hub re-tags `alpine:latest`.
 const BOOTSTRAP_IMAGE: &str = "alpine:3.21";
 
+/// Bootstrap a controller (and optionally an agent) on the resolved
+/// docker context.
+///
+/// Runs the 9-step machine described in the module-level comment.
+/// Each step is its own async function with its own error context so
+/// the operator's failure message points at the offending step.
+///
+/// # Errors
+///
+/// Returns `Err` when any step fails. Steps 1-3 can fail before the
+/// containers come up; from step 4 onward a failure leaves a partial
+/// cluster (operator can re-run `isd init --force` or
+/// `isd uninit --wipe-state`).
 pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
     // Resolve docker URI from the docker context.
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
@@ -71,6 +89,8 @@ pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
 
 // === Step 1: no existing controller (or --force tears it down) ===
 
+/// Step 1: refuse when a controller is already running on this host,
+/// or tear it down when `--force` is set.
 async fn step_check_no_existing_controller(docker_uri: &str, force: bool) -> Result<()> {
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use std::collections::HashMap;
@@ -128,6 +148,8 @@ async fn step_check_no_existing_controller(docker_uri: &str, force: bool) -> Res
 
 // === Step 2: create the iso-controller-state docker volume ===
 
+/// Step 2: create the `iso-controller-state` named volume. Idempotent:
+/// docker returns the existing volume on a re-run.
 async fn step_create_state_volume(docker_uri: &str) -> Result<()> {
     use bollard::volume::CreateVolumeOptions;
 
@@ -148,6 +170,10 @@ async fn step_create_state_volume(docker_uri: &str) -> Result<()> {
 
 // === Step 3: generate /state/master.key via a bootstrap container ===
 
+/// Step 3: seed `/state/master.key` with 32 random bytes via a
+/// one-shot alpine container. Idempotent: the inner `test -f` skips
+/// when the key already exists, so re-running preserves the existing
+/// key (and every encrypted secret stays decryptable).
 async fn step_generate_master_key(docker_uri: &str) -> Result<()> {
     use bollard::container::{
         Config, CreateContainerOptions, StartContainerOptions, WaitContainerOptions,
@@ -215,6 +241,9 @@ async fn step_generate_master_key(docker_uri: &str) -> Result<()> {
 
 // === Step 4: docker compose up -d controller against embedded recipe ===
 
+/// Step 4: `docker compose up -d controller` against the embedded
+/// recipe written to a temp file. `DOCKER_HOST` routes the spawn to
+/// the resolved docker context.
 async fn step_compose_up_controller(docker_uri: &str) -> Result<()> {
     use std::io::Write;
 
@@ -246,6 +275,8 @@ async fn step_compose_up_controller(docker_uri: &str) -> Result<()> {
 
 // === Step 5: poll until the controller is discoverable + responsive ===
 
+/// Step 5: poll until `isd_runtime::discover` finds the controller
+/// container AND `GET /api/v1/hosts` answers 2xx. 30 second deadline.
 async fn step_wait_for_controller_ready(docker_uri: &str) -> Result<()> {
     use tokio::time::{Duration, Instant, sleep};
 
@@ -280,6 +311,10 @@ async fn step_wait_for_controller_ready(docker_uri: &str) -> Result<()> {
 
 // === Step 6: mint the first agent join-token via docker exec ===
 
+/// Step 6: docker-exec into the controller to mint the first agent
+/// join-token. Reads stdout only; tolerates stderr noise from the
+/// controller's tracing banner. Defense-in-depth: scans line by line
+/// for a token-shaped payload via [`extract_join_token`].
 async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
     use bollard::container::LogOutput;
     use bollard::exec::{CreateExecOptions, StartExecResults};
@@ -361,6 +396,9 @@ fn extract_join_token(stdout: &str) -> Option<String> {
 
 // === Step 7: docker compose up -d agent with the join token via env ===
 
+/// Step 7: `docker compose up -d agent` with the freshly-minted token
+/// threaded through `ISENGARD_ENROLL_TOKEN`. The embedded compose
+/// recipe interpolates the env into the agent's command line.
 async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
     use std::io::Write;
 
@@ -399,6 +437,8 @@ async fn step_compose_up_agent(docker_uri: &str, token: &str) -> Result<()> {
 
 // === Step 8: poll the controller until the agent has enrolled ===
 
+/// Step 8: poll until the controller reports at least one enrolled
+/// host. 60 second deadline; 2 second cadence.
 async fn step_wait_for_agent_enrolled(docker_uri: &str) -> Result<()> {
     use tokio::time::{Duration, Instant, sleep};
 

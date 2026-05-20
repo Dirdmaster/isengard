@@ -97,9 +97,15 @@ pub struct ServiceSnapshot {
     /// Per-service primary key (rendered as a string in JSON for consistency
     /// with other DTOs). Used as the dedup key in the diff loop.
     pub id: String,
+    /// Operator-facing service name.
     pub name: String,
+    /// Current state string from the controller.
     pub state: String,
+    /// Image reference, displayed in the progress row.
     pub image: String,
+    /// Last heartbeat timestamp. Surfaced in a future "container_id"
+    /// enrichment; kept on the DTO so we don't need a wire change to
+    /// add it.
     #[allow(dead_code)] // surfaced in future "container_id" enrichment
     pub last_seen_at: DateTime<Utc>,
 }
@@ -109,8 +115,11 @@ pub struct ServiceSnapshot {
 /// `Watching deployment of servarr on lausanne` instead of just an id.
 #[derive(Debug, Clone)]
 pub struct StackHeader {
+    /// Stack's surrogate id.
     pub stack_id: String,
+    /// Operator-facing stack name (used in the intro banner).
     pub stack_name: String,
+    /// Host label: hostname when known, ULID prefix otherwise.
     pub host_label: String,
 }
 
@@ -123,11 +132,15 @@ struct ServiceTracker {
     /// outro lines + debug traces; read only by tests today.
     #[allow(dead_code)]
     name: String,
+    /// Service state observed at the previous poll. Used to detect
+    /// transitions.
     last_state: String,
     /// Image string as last observed; kept alongside `name` for the same
     /// future-use reasons.
     #[allow(dead_code)]
     image: String,
+    /// When the watch loop first saw this service. Used as the
+    /// `first_seen` baseline for "took Xs" computation.
     first_seen: Instant,
     /// Cached at the moment the service first reaches a terminal state so
     /// the outro and the rendered transition line agree on the duration
@@ -155,16 +168,27 @@ impl ServiceTracker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchOutcome {
     /// Every service reached `Running`. Outro green.
-    AllRunning { services: usize, elapsed: Duration },
+    AllRunning {
+        /// Count of services that reached Running.
+        services: usize,
+        /// Wall-clock time from watch start to outcome.
+        elapsed: Duration,
+    },
     /// At least one service reached a non-Running terminal state. Outro red.
     SomeFailed {
+        /// Number of services in the Running terminal state.
         running: usize,
+        /// Number in any other terminal state (stopped, failed).
         failed: usize,
+        /// Wall-clock time from watch start to outcome.
         elapsed: Duration,
     },
     /// 10-minute no-transition timer fired. Outro neutral; the agent may
     /// still be working.
-    Timeout { last_progress: Duration },
+    Timeout {
+        /// How long since the last observed state transition.
+        last_progress: Duration,
+    },
     /// SIGINT. Outro neutral.
     Detached,
 }
@@ -174,6 +198,11 @@ impl WatchOutcome {
     /// `Detached` are successes; `SomeFailed` is the only Err. `Timeout`
     /// is treated as success because the deploy may still complete on
     /// the agent (failure here would be misleading).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` only for `SomeFailed` with a message naming the
+    /// failed service count.
     pub fn into_result(self) -> Result<()> {
         match self {
             WatchOutcome::AllRunning { .. }
@@ -267,7 +296,9 @@ pub trait WatchPoller: Send + Sync {
 /// HTTP polling implementation backed by [`Session`]. The default for
 /// production.
 pub struct HttpPoller<'a> {
+    /// Live REST session used for the polled GETs.
     pub session: &'a Session,
+    /// Stack to filter `GET /api/v1/services?stack_id=` by.
     pub stack_id: String,
 }
 
@@ -362,7 +393,10 @@ pub async fn fetch_stack_header(session: &Session, stack_id: &str) -> Result<Sta
 /// defaults from this module.
 #[derive(Debug, Clone)]
 pub struct WatchConfig {
+    /// How often to GET the services endpoint. 1s in production.
     pub poll_interval: Duration,
+    /// Hard-stop when no service transition is observed for this
+    /// long. 10 minutes in production.
     pub no_progress_timeout: Duration,
 }
 
@@ -512,6 +546,10 @@ where
 /// Plus a test renderer ([`CaptureRenderer`]) that collects lines into a
 /// `Vec` without touching the terminal.
 pub trait TransitionRenderer {
+    /// Render one observed state transition for `svc`.
+    /// `took` is `Some` only when the transition is to a terminal
+    /// state; otherwise the renderer should keep displaying the
+    /// in-progress spinner.
     fn transition(&mut self, svc: &ServiceSnapshot, took: Option<Duration>);
 }
 
@@ -520,22 +558,28 @@ pub trait TransitionRenderer {
 /// ASCII (fallback for `LANG=C` / dumb terminals / mojibake).
 #[derive(Debug, Clone, Copy)]
 struct GlyphSet {
+    /// Spinner frames fed to indicatif's `tick_strings`.
     spinner: &'static [&'static str],
-    /// Tick used by [`ProgressStyle::tick_strings`]; final element is the
-    /// "finished" frame indicatif drops in once `finish_*` is called. We
-    /// override per-state via `finish_with_message` so this stays neutral.
+    /// Glyph rendered when a service reaches the `running` terminal
+    /// state. `✔` in fancy, `+` in ASCII.
     finished_running: &'static str,
+    /// Glyph rendered for a failure terminal state. `✗` in fancy,
+    /// `x` in ASCII.
     finished_failed: &'static str,
 }
 
+/// Unicode braille spinner frames.
 const FANCY_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "];
+/// ASCII spinner frames for single-byte locales.
 const ASCII_SPINNER: &[&str] = &["-", "\\", "|", "/", " "];
 
+/// Default glyph set: braille spinner + check/X marks.
 const FANCY_GLYPHS: GlyphSet = GlyphSet {
     spinner: FANCY_SPINNER,
     finished_running: "✔",
     finished_failed: "✗",
 };
+/// ASCII fallback glyph set.
 const ASCII_GLYPHS: GlyphSet = GlyphSet {
     spinner: ASCII_SPINNER,
     finished_running: "+",
@@ -603,12 +647,17 @@ fn error_style(glyphs: GlyphSet) -> ProgressStyle {
 /// terminal states finish it. The MultiProgress instance is held alive
 /// for the lifetime of the renderer; dropping it triggers a final redraw.
 pub struct MultiProgressRenderer {
+    /// Shared MultiProgress instance.
     multi: MultiProgress,
+    /// Per-service ProgressBar, keyed by `ServiceSnapshot.id`.
     bars: HashMap<String, ProgressBar>,
+    /// Glyph set chosen by [`pick_glyphs`].
     glyphs: GlyphSet,
 }
 
 impl MultiProgressRenderer {
+    /// Build a fresh renderer with an empty MultiProgress and the
+    /// glyph set selected by [`pick_glyphs`].
     pub fn new() -> Self {
         Self {
             multi: MultiProgress::new(),
@@ -706,6 +755,8 @@ impl TransitionRenderer for MultiProgressRenderer {
 /// Non-tty fallback renderer: emits a plain stdout line per transition.
 /// Same format as the pre-v0.5.3 cliclack renderer minus the connector
 /// glyphs, so a `tee` / log-capture downstream still gets readable output.
+/// Plain-stdout renderer: appends one line per observed transition.
+/// Selected automatically when stdout isn't a TTY.
 pub struct PlainRenderer;
 
 impl TransitionRenderer for PlainRenderer {
@@ -726,6 +777,7 @@ impl TransitionRenderer for PlainRenderer {
 #[cfg(test)]
 #[derive(Default)]
 pub struct CaptureRenderer {
+    /// Captured transition lines, in order observed.
     pub lines: Vec<String>,
 }
 

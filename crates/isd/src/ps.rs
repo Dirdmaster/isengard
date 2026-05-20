@@ -13,9 +13,11 @@ use isd_runtime::discovery_labels::{ROLE_LABEL, is_protected_label_value};
 use crate::index_cache::{IndexCache, IndexRow};
 use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 
-// Docker uses 12 chars for the short CONTAINER ID; --no-trunc widens to 16.
+/// Width of the truncated CONTAINER ID column. Docker uses 12 chars
+/// for the short id; `--no-trunc` widens to the full hex.
 const ID_DISPLAY_WIDTH: usize = 12;
 
+/// CLI flags for `isd ps`.
 #[derive(Debug, Args, Default)]
 pub struct PsArgs {
     /// Show all containers, not just running.
@@ -49,6 +51,13 @@ pub struct PsArgs {
     pub host: Option<String>,
 }
 
+/// List containers on the resolved docker context. Renders a boxed
+/// table on a TTY, tab-separated plain text when piped, or pretty
+/// JSON with `--format json`.
+///
+/// # Errors
+///
+/// Returns `Err` on docker connection or list failures.
 pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
     // Every context is a docker context with a docker URI. The
     // controller-direct REST path is gone for `ps`: we always go through
@@ -149,6 +158,7 @@ fn build_index_rows(
         .collect()
 }
 
+/// Inner body of [`run`] once the docker URI is resolved.
 async fn run_docker_backend(args: PsArgs, docker_uri: String, context: Option<&str>) -> Result<()> {
     use isd_runtime::DockerBackend;
 
