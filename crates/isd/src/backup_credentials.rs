@@ -23,34 +23,58 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// On-disk shape of `~/.config/isd/backup.toml`. Top-level table maps
+/// context name to its per-context creds entry.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BackupCredentialsFile {
+    /// One entry per context. Empty by default; populated lazily on
+    /// first interactive passphrase prompt.
     #[serde(default)]
     pub contexts: std::collections::BTreeMap<String, ContextBackupCreds>,
 }
 
+/// Per-context backup credentials.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextBackupCreds {
-    /// Stored as-is. File mode 0600 on unix.
+    /// age passphrase. Stored as-is; file mode 0600 on unix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
+    /// S3 endpoint + credentials for the `--to s3://...` destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3Creds>,
 }
 
+/// S3-API credentials. Works against AWS, R2, MinIO, B2, Wasabi via
+/// `endpoint`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Creds {
+    /// API endpoint (`https://s3.amazonaws.com`, `https://<acct>.r2.cloudflarestorage.com`, ...).
     pub endpoint: String,
+    /// Access key id.
     pub access_key_id: String,
+    /// Secret access key.
     pub secret_access_key: String,
+    /// Region; some implementations (R2) want `auto`.
     pub region: String,
 }
 
+/// Canonical path: `~/.config/isd/backup.toml`.
+///
+/// # Errors
+///
+/// Returns `Err` when the home directory cannot be resolved.
 pub fn default_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("home dir not found")?;
     Ok(home.join(".config").join("isd").join("backup.toml"))
 }
 
+/// Read the credentials file at `path`. Returns the default (empty)
+/// value when the file does not exist.
+///
+/// # Errors
+///
+/// Returns `Err` on read or TOML parse errors. A missing file is not
+/// an error.
 pub fn load(path: &Path) -> Result<BackupCredentialsFile> {
     if !path.exists() {
         return Ok(BackupCredentialsFile::default());
@@ -60,6 +84,13 @@ pub fn load(path: &Path) -> Result<BackupCredentialsFile> {
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Write the credentials file, creating the parent directory and
+/// enforcing mode 0600 on unix.
+///
+/// # Errors
+///
+/// Returns `Err` on serialization, directory creation, write, or
+/// permissions-set failure.
 pub fn save(path: &Path, file: &BackupCredentialsFile) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -76,10 +107,17 @@ pub fn save(path: &Path, file: &BackupCredentialsFile) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a backup passphrase for `context_name`, walking the 4-tier chain.
+/// Resolve a backup passphrase for `context_name`, walking the 4-tier
+/// chain (flag, env, stored, interactive). On tier 4 the prompted
+/// value is stored back to [`default_path`] so subsequent invocations
+/// skip the prompt.
 ///
-/// On tier 4 (interactive), the prompted value is stored back to
-/// `default_path()` so subsequent invocations skip the prompt.
+/// # Errors
+///
+/// Returns `Err` when the flag's file is unreadable, the interactive
+/// prompt fails, the operator submits an empty passphrase, or the
+/// confirmation doesn't match. Empty env vars fall through to the
+/// next tier instead of erroring.
 pub fn resolve_passphrase(
     context_name: &str,
     file: &BackupCredentialsFile,

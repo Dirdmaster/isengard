@@ -26,12 +26,15 @@ use crate::compose_cmd::{DeployArgs, DiffArgs, EditArgs};
 use crate::manifest_cmd::ManifestCommand;
 use crate::session::Session;
 
+/// CLI flags for `isd stack`.
 #[derive(Debug, Args)]
 pub struct StackArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: StackCommand,
 }
 
+/// Sub-verbs under `isd stack`.
 #[derive(Debug, Subcommand)]
 pub enum StackCommand {
     /// List stacks.
@@ -49,6 +52,7 @@ pub enum StackCommand {
     Manifest(ManifestCommand),
 }
 
+/// CLI flags for `isd stack ls`.
 #[derive(Debug, Args)]
 pub struct LsArgs {
     /// Output format.
@@ -56,6 +60,7 @@ pub struct LsArgs {
     pub format: crate::output::Format,
 }
 
+/// CLI flags for `isd stack ps <name>`.
 #[derive(Debug, Args)]
 pub struct PsArgs {
     /// Stack name.
@@ -69,37 +74,58 @@ pub struct PsArgs {
 /// (serde default tolerance); we keep only what we render.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StackApiRow {
+    /// Stringified surrogate key.
     pub id: String,
+    /// Owning host ULID.
     pub host_id: String,
+    /// Operator-facing stack name.
     pub name: String,
+    /// Origin tag (`compose`, `imported`, ...).
     pub source: String,
+    /// When the controller first observed this stack.
     pub discovered_at: DateTime<Utc>,
 }
 
 /// Subset of `ServiceDto` used for stack aggregation.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServiceApiRow {
+    /// Service surrogate key.
     pub id: String,
+    /// Owning host ULID.
     pub host_id: String,
+    /// Reported hostname; falls back to host_id in render.
     pub hostname: Option<String>,
+    /// Owning stack id; `None` for unstacked services.
     pub stack_id: Option<String>,
+    /// Service name.
     pub name: String,
+    /// Image reference.
     pub image: String,
+    /// Operational state.
     pub state: String,
+    /// Last heartbeat timestamp.
     pub last_seen_at: DateTime<Utc>,
 }
 
 /// One rendered row in `isd stack ls`.
 #[derive(Debug, Clone, Serialize)]
 pub struct StackLsRow {
+    /// Stack name.
     pub name: String,
+    /// Number of services in the stack.
     pub services: usize,
+    /// Number of distinct hosts the stack runs on.
     pub hosts: usize,
+    /// Aggregate state computed by [`aggregate_state`].
     pub state: StackAggregateState,
+    /// When the controller first observed the stack.
     pub discovered_at: DateTime<Utc>,
+    /// Origin tag (`compose`, `imported`, ...).
     pub source: String,
 }
 
+/// Coarse stack-level aggregate of every service's state. Drives the
+/// STATE column on `isd stack ls`.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StackAggregateState {
@@ -115,6 +141,8 @@ pub enum StackAggregateState {
 }
 
 impl StackAggregateState {
+    /// Lowercase string representation used by the table renderer
+    /// and the JSON output.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -125,6 +153,11 @@ impl StackAggregateState {
     }
 }
 
+/// Dispatch to the matching `stack` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         StackCommand::Ls(a) => run_ls(a, context).await,
@@ -139,6 +172,8 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
+/// `isd stack ls`: list every stack with aggregated service / host
+/// counts and a coarse STATE column.
 async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;
@@ -164,6 +199,7 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `isd stack ps <name>`: list every service inside the named stack.
 async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;
@@ -201,6 +237,7 @@ async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// GET `url` and decode the JSON body as `T`. Bail on any non-2xx.
 async fn fetch_json<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) -> Result<T> {
     let resp = session
         .client
@@ -217,6 +254,8 @@ async fn fetch_json<T: for<'a> Deserialize<'a>>(session: &Session, url: &str) ->
         .with_context(|| format!("decoding response from {url}"))
 }
 
+/// Join services to stacks, compute aggregate state, return one row
+/// per stack sorted alphabetically by name.
 pub fn build_ls_rows(stacks: &[StackApiRow], services: &[ServiceApiRow]) -> Vec<StackLsRow> {
     let mut rows: Vec<StackLsRow> = stacks
         .iter()
@@ -243,6 +282,13 @@ pub fn build_ls_rows(stacks: &[StackApiRow], services: &[ServiceApiRow]) -> Vec<
     rows
 }
 
+/// Compute the coarse stack state from per-service states. Empty
+/// inputs collapse to `Stopped`. Classification rules:
+///
+/// - every service `running` -> `Running`
+/// - every service `stopped`/`exited`/`dead`/`failed` -> `Stopped`
+/// - some running, some stopped, no pending -> `Degraded`
+/// - mid-transition state present -> `Pending`
 pub fn aggregate_state(services: &[&ServiceApiRow]) -> StackAggregateState {
     if services.is_empty() {
         return StackAggregateState::Stopped;
@@ -270,6 +316,7 @@ pub fn aggregate_state(services: &[&ServiceApiRow]) -> StackAggregateState {
     }
 }
 
+/// Render `stack ls` rows as a comfy-table.
 fn render_ls_table(rows: &[StackLsRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
@@ -295,6 +342,7 @@ fn render_ls_table(rows: &[StackLsRow]) -> String {
     t.to_string()
 }
 
+/// Render `stack ps` service rows as a comfy-table.
 fn render_ps_table(services: &[ServiceApiRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)

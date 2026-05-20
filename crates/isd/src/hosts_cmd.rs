@@ -9,18 +9,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
+/// CLI flags for `isd hosts`.
 #[derive(Debug, Args)]
 pub struct HostsArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: HostsCommand,
 }
 
+/// Sub-verbs under `isd hosts`.
 #[derive(Debug, Subcommand)]
 pub enum HostsCommand {
     /// List enrolled hosts.
     List(ListArgs),
 }
 
+/// CLI flags for `isd hosts list`.
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// Output format.
@@ -33,17 +37,33 @@ pub struct ListArgs {
 /// is enforced server-side, so we just decode whatever lands.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HostRow {
+    /// Host ULID (26-char base32).
     pub id: String,
+    /// Reported hostname.
     pub hostname: String,
+    /// When the agent first enrolled.
     pub enrolled_at: DateTime<Utc>,
 }
 
+/// Dispatch to the matching `hosts` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: HostsArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         HostsCommand::List(a) => run_list(a, context).await,
     }
 }
 
+/// Fetch `GET /api/v1/hosts` and render the rows in the requested
+/// format. Empty input still emits the header so a downstream `wc -l`
+/// gets a stable shape.
+///
+/// # Errors
+///
+/// Returns `Err` on HTTP failure, controller-less context, or JSON
+/// decode errors.
 async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;

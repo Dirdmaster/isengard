@@ -25,9 +25,12 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
+/// Controller image repository on GHCR.
 const CONTROLLER_IMAGE: &str = "ghcr.io/weavers-engineering/isengard-controller";
+/// Agent image repository on GHCR.
 const AGENT_IMAGE: &str = "ghcr.io/weavers-engineering/isengard-agent";
 
+/// CLI flags for `isd upgrade`.
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
     /// Pin to a specific image tag. Default: re-pull the current tag
@@ -43,6 +46,13 @@ pub struct UpgradeArgs {
     pub yes: bool,
 }
 
+/// Pull a new controller + agent image tag and recreate the
+/// containers, taking an encrypted backup first by default.
+///
+/// # Errors
+///
+/// Returns `Err` on any step failure. Includes a restore-hint pointing
+/// at `isd restore <path>` when the post-recreate health check fails.
 pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
     let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;
@@ -162,6 +172,8 @@ fn parse_tag(image_ref: &str) -> String {
     parse_tag_no_digest(image_ref)
 }
 
+/// Inner tag parser. `parse_tag` strips the digest pin first, then
+/// hands the registry/name/tag form to this helper.
 fn parse_tag_no_digest(image_ref: &str) -> String {
     // Find the position of the last `/` (separates registry from name).
     let last_slash = image_ref.rfind('/').map(|i| i + 1).unwrap_or(0);
@@ -172,6 +184,8 @@ fn parse_tag_no_digest(image_ref: &str) -> String {
     }
 }
 
+/// `docker pull <image>:<tag>`. Drains the bollard progress stream;
+/// surfaces any item-level error verbatim.
 async fn pull_image(docker: &isd_runtime::DockerBackend, image: &str, tag: &str) -> Result<()> {
     use bollard::image::CreateImageOptions;
     use futures_util::StreamExt;
@@ -235,6 +249,8 @@ fn compose_up(
     Ok(())
 }
 
+/// Poll until the upgraded controller answers `GET /api/v1/hosts`.
+/// 90 second deadline by default; bumps with each successful upgrade.
 async fn wait_for_controller_ready(
     docker: &isd_runtime::DockerBackend,
     timeout: std::time::Duration,

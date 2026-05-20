@@ -23,9 +23,14 @@ use crate::backup_credentials;
 use crate::backup_crypto;
 use crate::backup_storage::{self, BackupDestination};
 
+/// One-shot helper image: alpine tar extractor that reads ciphertext
+/// from stdin and writes plaintext into the state volume.
 const HELPER_IMAGE: &str = "alpine:3.21";
+
+/// Named volume to restore into.
 const STATE_VOLUME: &str = "iso-controller-state";
 
+/// CLI flags for `isd restore`.
 #[derive(Debug, Args)]
 pub struct RestoreArgs {
     /// Backup source: filesystem path, `volume:<name>/<filename>`, or
@@ -40,6 +45,15 @@ pub struct RestoreArgs {
     pub overwrite: bool,
 }
 
+/// Restore the `iso-controller-state` volume from an encrypted
+/// backup. Refuses to clobber a populated volume unless
+/// `--overwrite` is set.
+///
+/// # Errors
+///
+/// Returns `Err` on source-parse failures, missing passphrase, an
+/// already-populated state volume (without `--overwrite`), age decrypt
+/// errors, or tar extract failures.
 pub async fn run(args: RestoreArgs, context: Option<&str>) -> Result<()> {
     let context_name = crate::docker_context::resolve_context_name(context)?;
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
@@ -270,6 +284,7 @@ async fn spawn_tar_extractor(
 /// Thin wrapper so we can hand back `Box<dyn AsyncWrite + Unpin + Send>`
 /// from bollard's `Pin<Box<dyn AsyncWrite + Send>>`.
 struct TarStdinSink {
+    /// Underlying tokio AsyncWrite returned by `attach_container`.
     inner: std::pin::Pin<Box<dyn AsyncWrite + Send>>,
 }
 

@@ -12,6 +12,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
+/// CLI flags for `isd join`.
 #[derive(Debug, Args)]
 pub struct JoinArgs {
     /// Controller URL (e.g. https://controller.local:9417).
@@ -22,8 +23,26 @@ pub struct JoinArgs {
     pub token: String,
 }
 
+/// Bundled compose recipe used to bring the agent up. Embedded at
+/// compile time so the binary stays self-contained and the operator
+/// never has to fetch a YAML file to run `isd join`.
 const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose.yaml");
 
+/// Enrol the target docker context as an agent against an existing
+/// controller.
+///
+/// Validates the join-token format pre-flight, writes the embedded
+/// compose recipe to a temp file, then runs `docker compose up -d
+/// agent` with `ISENGARD_ENROLL_TOKEN` + `ISENGARD_CONTROLLER_URL` in
+/// the subprocess env. Polls the controller's `GET /api/v1/hosts` for
+/// up to 60 seconds; first non-empty response means the agent
+/// fingerprint-verified the controller CA and enrolled.
+///
+/// # Errors
+///
+/// Returns `Err` on invalid token format, docker compose failures,
+/// missing temp file space, or a 60-second enrol timeout (controller
+/// reachable but no host appeared).
 pub async fn run(args: JoinArgs, context: Option<&str>) -> Result<()> {
     use std::io::Write;
 
@@ -67,6 +86,19 @@ pub async fn run(args: JoinArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Poll `GET /<controller>/api/v1/hosts` until the agent shows up.
+///
+/// 60 second deadline, 2 second cadence, 5 second per-request timeout.
+/// A non-empty `hosts` array is the signal: a freshly enrolled agent
+/// emits a heartbeat almost immediately on its first connection, so we
+/// don't need to match on a specific host_id.
+///
+/// # Errors
+///
+/// Returns `Err` when no host is visible inside the 60 second budget.
+/// The message points the operator at `docker logs iso-agent` on the
+/// target host since the failure is almost always agent-side
+/// (fingerprint mismatch, network partition).
 async fn poll_for_enrolment(controller_url: &str) -> Result<()> {
     use tokio::time::{Duration, Instant, sleep};
 

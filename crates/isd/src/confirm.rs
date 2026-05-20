@@ -20,8 +20,15 @@ use anyhow::Result;
 use crate::index_resolve::ResolvedTarget;
 
 /// Decide whether the operator should be prompted, then prompt.
-/// Returns `Ok(true)` to proceed, `Ok(false)` to abort (operator said
-/// no or stdin closed before a `y`).
+///
+/// Returns `Ok(true)` to proceed, `Ok(false)` to abort. Skips the prompt
+/// when `force` is set or when every target was specified as a literal
+/// ID/name (no surprise, no index resolution to second-guess).
+///
+/// # Errors
+///
+/// Returns `Err` only on IO failures writing the summary or reading the
+/// confirm line.
 pub fn confirm_destructive(verb: &str, targets: &[ResolvedTarget], force: bool) -> Result<bool> {
     if force {
         return Ok(true);
@@ -33,6 +40,8 @@ pub fn confirm_destructive(verb: &str, targets: &[ResolvedTarget], force: bool) 
     read_yes_no(&mut std::io::stdin().lock())
 }
 
+/// Print the `about to {verb} N container(s)` summary block for the
+/// confirm prompt. Writes to `w` so tests can capture the output.
 fn print_summary(verb: &str, targets: &[ResolvedTarget], w: &mut impl Write) -> Result<()> {
     writeln!(w, "isd: about to {verb} {} container(s):", targets.len())?;
     for t in targets {
@@ -48,6 +57,9 @@ fn print_summary(verb: &str, targets: &[ResolvedTarget], w: &mut impl Write) -> 
     Ok(())
 }
 
+/// Read one line from `r` and classify it as a yes/no response.
+/// Case-insensitive; `y` / `yes` are the accepted positive replies,
+/// everything else (including empty input or EOF) reads as no.
 fn read_yes_no(r: &mut impl BufRead) -> Result<bool> {
     let mut line = String::new();
     let n = r.read_line(&mut line)?;

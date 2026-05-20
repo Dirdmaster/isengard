@@ -73,6 +73,7 @@ async fn check_protection(
     Ok(())
 }
 
+/// CLI flags for `isd stop`.
 #[derive(Debug, Args)]
 pub struct StopArgs {
     /// One or more container IDs, names, or index selectors (`2`,
@@ -89,6 +90,12 @@ pub struct StopArgs {
     pub force_system: bool,
 }
 
+/// Stop one or more containers. Resolves args, checks the protection
+/// guard, then iterates [`isd_runtime::DockerBackend::stop_container`].
+///
+/// # Errors
+///
+/// Returns `Err` on any resolution, protection, or docker failure.
 pub async fn run_stop(args: StopArgs, context: Option<&str>) -> Result<()> {
     let targets = index_resolve::resolve(&args.targets)?;
     let backend = ps::open_docker_backend(context).await?;
@@ -103,6 +110,7 @@ pub async fn run_stop(args: StopArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// CLI flags for `isd start`.
 #[derive(Debug, Args)]
 pub struct StartArgs {
     /// One or more container IDs, names, or index selectors.
@@ -110,6 +118,13 @@ pub struct StartArgs {
     pub targets: Vec<String>,
 }
 
+/// Start one or more containers. No protection guard: starting an
+/// already-running container is a no-op, and starting an iso-controller
+/// the operator deliberately stopped is intentional.
+///
+/// # Errors
+///
+/// Returns `Err` on any resolution or docker failure.
 pub async fn run_start(args: StartArgs, context: Option<&str>) -> Result<()> {
     let targets = index_resolve::resolve(&args.targets)?;
     let backend = ps::open_docker_backend(context).await?;
@@ -123,6 +138,7 @@ pub async fn run_start(args: StartArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// CLI flags for `isd restart`.
 #[derive(Debug, Args)]
 pub struct RestartArgs {
     /// One or more container IDs, names, or index selectors.
@@ -137,6 +153,11 @@ pub struct RestartArgs {
     pub force_system: bool,
 }
 
+/// Restart one or more containers (stop + start under a guard).
+///
+/// # Errors
+///
+/// Returns `Err` on any resolution, protection, or docker failure.
 pub async fn run_restart(args: RestartArgs, context: Option<&str>) -> Result<()> {
     let targets = index_resolve::resolve(&args.targets)?;
     let backend = ps::open_docker_backend(context).await?;
@@ -151,6 +172,7 @@ pub async fn run_restart(args: RestartArgs, context: Option<&str>) -> Result<()>
     Ok(())
 }
 
+/// CLI flags for `isd rm`.
 #[derive(Debug, Args)]
 pub struct RmArgs {
     /// One or more container IDs, names, or index selectors.
@@ -167,6 +189,13 @@ pub struct RmArgs {
     pub force_system: bool,
 }
 
+/// Remove one or more containers, prompting before any
+/// index-resolved deletion.
+///
+/// # Errors
+///
+/// Returns `Err` on any resolution, protection, or docker failure.
+/// Operator aborting at the confirm prompt returns `Ok` (no-op).
 pub async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
     let targets = index_resolve::resolve(&args.targets)?;
     if !confirm::confirm_destructive("rm", &targets, args.force)? {
@@ -185,6 +214,7 @@ pub async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// CLI flags for `isd kill`.
 #[derive(Debug, Args)]
 pub struct KillArgs {
     /// One or more container IDs, names, or index selectors.
@@ -204,6 +234,13 @@ pub struct KillArgs {
     pub force_system: bool,
 }
 
+/// Send a signal to one or more containers, prompting before any
+/// index-resolved kill.
+///
+/// # Errors
+///
+/// Returns `Err` on any resolution, protection, or docker failure.
+/// Operator aborting at the confirm prompt returns `Ok` (no-op).
 pub async fn run_kill(args: KillArgs, context: Option<&str>) -> Result<()> {
     let targets = index_resolve::resolve(&args.targets)?;
     if !confirm::confirm_destructive("kill", &targets, args.force)? {

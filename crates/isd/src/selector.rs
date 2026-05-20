@@ -20,8 +20,18 @@
 
 use anyhow::{Result, anyhow};
 
-/// Parse one selector token (no spaces, comma-joined items, hyphen
-/// ranges). Returns a sorted, deduped list of indices.
+/// Parse one selector token into a sorted, deduped list of indices.
+///
+/// Accepts a single token (no spaces between top-level items): comma-
+/// joined items, where each item is either a decimal `N` or a range
+/// `lo-hi` (whitespace inside an item is tolerated). Output is sorted
+/// ascending with duplicates removed so `3,1,2,2-3` collapses to
+/// `[1, 2, 3]`.
+///
+/// # Errors
+///
+/// Returns `Err` on empty items, non-decimal characters, or inverted
+/// ranges (`hi < lo`).
 pub fn parse_token(s: &str) -> Result<Vec<usize>> {
     let mut out: Vec<usize> = Vec::new();
     for item in s.split(',') {
@@ -58,10 +68,14 @@ pub fn parse_token(s: &str) -> Result<Vec<usize>> {
     Ok(out)
 }
 
-/// Return true when `s` is purely decimal digits + range/list
-/// punctuation: digits, `-`, `,`, and ASCII whitespace. This is the
-/// signal a positional arg is an index selector rather than a docker
-/// ID or container name. A bare integer matches.
+/// Classify whether `s` looks like a selector token.
+///
+/// Returns true when `s` is non-empty and every char is a decimal
+/// digit, `-`, `,`, or ASCII whitespace. The lifecycle commands use
+/// this to decide between "resolve via the index cache" and "pass
+/// through as a docker ID or name." A bare integer like `2` matches;
+/// a name like `web-proxy` doesn't (hyphen alone is fine, but the
+/// alpha chars disqualify it).
 pub fn looks_like_selector(s: &str) -> bool {
     !s.is_empty()
         && s.chars()

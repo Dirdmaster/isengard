@@ -8,8 +8,7 @@
 use clap::Command;
 use console::Style;
 
-/// Groups in render order. Every top-level subcommand must appear in
-/// exactly one group (enforced by [`coverage`] in tests).
+#[doc = include_str!("../docs/help_groups.md")]
 pub const GROUPS: &[(&str, &[&str])] = &[
     (
         "Containers",
@@ -33,8 +32,13 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ("Editor", &["lsp", "mcp"]),
 ];
 
-/// Build the styled grouped help string from a clap `Command`. Honors
-/// `console::colors_enabled()` for NO_COLOR / non-TTY decay.
+/// Build the styled grouped help string from a clap `Command`.
+///
+/// Honors `console::colors_enabled()` so piped output drops the ANSI
+/// styling without us re-reading `NO_COLOR` or the TTY check. Pulls
+/// the per-subcommand `about` strings from clap so the headlines
+/// stay in one place (the `#[command(about = ...)]` attributes on
+/// `Command` variants in `main.rs`).
 pub fn render(cmd: &Command) -> String {
     let color = console::colors_enabled();
     let header = Style::new().bold();
@@ -96,6 +100,9 @@ pub fn render(cmd: &Command) -> String {
     out
 }
 
+/// Apply `s` to `text` when `color` is true, otherwise return `text`
+/// unchanged. Centralised so each call site doesn't re-check the
+/// `console::colors_enabled()` flag.
 fn style(s: &Style, text: &str, color: bool) -> String {
     if color {
         s.apply_to(text).to_string()

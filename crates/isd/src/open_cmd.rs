@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::session::Session;
 
+/// CLI flags for `isd open`.
 #[derive(Debug, Args)]
 pub struct OpenArgs {
     /// Stack name.
@@ -17,14 +18,19 @@ pub struct OpenArgs {
     pub print: bool,
 }
 
+/// Subset of the dashboard's stack DTO. Stack id is stringified.
 #[derive(Debug, Deserialize)]
 struct StackDto {
+    /// Stringified stack surrogate key.
     id: String,
+    /// Operator-facing stack name.
     name: String,
 }
 
+/// Subset of the dashboard's routing-rule DTO.
 #[derive(Debug, Deserialize, Clone)]
 struct RoutingRuleDto {
+    /// Public hostname the rule matches.
     public_hostname: String,
     /// `id` from the controller's storage row. We only need it as a stable
     /// tiebreak when multiple rules match the same stack.
@@ -37,10 +43,21 @@ struct RoutingRuleDto {
     /// the whole fleet and we filter by string match on the rule path.
     #[serde(default)]
     stack_id: Option<i64>,
+    /// Optional operational state (`active`, `pending`, `failed`,
+    /// `draining`). Pre-0.3a builds didn't always set this; we
+    /// default to None and treat None as openable.
     #[serde(default)]
     state: Option<String>,
 }
 
+/// Resolve a stack's primary public hostname and either print it or
+/// launch the OS browser.
+///
+/// # Errors
+///
+/// Returns `Err` when the stack name isn't found, when the controller
+/// returns no enabled rule for the stack, when the stack id isn't
+/// numeric, or on any HTTP failure.
 pub async fn run(args: OpenArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;
@@ -123,6 +140,8 @@ fn pick_primary_rule(rules: &[RoutingRuleDto], stack_id: i64) -> Option<RoutingR
     candidates.first().map(|r| (*r).clone())
 }
 
+/// Add a scheme to a bare hostname. Pass-through when the input
+/// already starts with `http://` or `https://`.
 fn host_to_url(host: &str) -> String {
     if host.starts_with("http://") || host.starts_with("https://") {
         host.to_string()

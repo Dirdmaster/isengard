@@ -25,7 +25,9 @@ use crate::ssh_tunnel::Tunnel;
 /// earlier `ContextEntry`; carries just enough to drive a session.
 #[derive(Debug, Clone)]
 pub struct ResolvedContext {
+    /// Context name (matches `docker context ls` first column).
     pub name: String,
+    /// Docker host URI (`ssh://...`, `tcp://...`, `unix://...`).
     pub docker_uri: String,
 }
 
@@ -50,6 +52,8 @@ pub struct Session {
     /// messages and (future) richer `isd context show <name>` output.
     #[allow(dead_code)]
     pub context: ResolvedContext,
+    /// HTTP client used for every REST call this session makes.
+    /// Pre-configured with a 30 second timeout.
     pub client: reqwest::Client,
     /// Base URL for REST calls. `None` when the Docker context has no
     /// controller on the host: container verbs still work via the

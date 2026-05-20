@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// fields are ignored by serde's default tolerance.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DockerContextMeta {
+    /// Context name (`docker context ls` first column).
     #[serde(rename = "Name")]
     pub name: String,
     /// Docker's free-form metadata blob (e.g. description / additional
@@ -25,18 +26,25 @@ pub struct DockerContextMeta {
     #[serde(rename = "Metadata", default)]
     #[allow(dead_code)]
     pub metadata: serde_json::Value,
+    /// Endpoint URLs keyed by service name.
     #[serde(rename = "Endpoints")]
     pub endpoints: DockerEndpoints,
 }
 
+/// Container for the `docker` endpoint inside `meta.json`. Docker's
+/// own format key allows other services (kubernetes); we only read the
+/// docker one.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DockerEndpoints {
+    /// The docker daemon endpoint.
     #[serde(rename = "docker")]
     pub docker: DockerEndpoint,
 }
 
+/// One docker endpoint entry (e.g. `ssh://op@host`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct DockerEndpoint {
+    /// Endpoint URI (`ssh://...`, `tcp://...`, `unix://...`).
     #[serde(rename = "Host")]
     pub host: String,
 }
@@ -44,10 +52,16 @@ pub struct DockerEndpoint {
 /// Operator-facing summary used by `isd context list / show`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerContextSummary {
+    /// Context name.
     pub name: String,
-    pub kind: &'static str, // always "docker"
-    pub target: String,     // the Host URI
-    pub current: bool,      // true for the active context
+    /// Endpoint kind. Always `"docker"` today; the field exists so a
+    /// future Kubernetes or Podman variant can land without a wire
+    /// break.
+    pub kind: &'static str,
+    /// Docker host URI (the value of `Endpoints.docker.Host`).
+    pub target: String,
+    /// True when this context is currently active.
+    pub current: bool,
 }
 
 /// Compute the contexts/meta directory entry for a given name. Docker stores

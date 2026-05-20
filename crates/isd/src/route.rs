@@ -14,12 +14,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
+/// CLI flags for `isd route`.
 #[derive(Debug, Args)]
 pub struct RouteArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: RouteCommand,
 }
 
+/// Sub-verbs under `isd route`.
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)] // CreateArgs is large but only one is alive at a time
 pub enum RouteCommand {
@@ -31,6 +34,7 @@ pub enum RouteCommand {
     Rm(RmArgs),
 }
 
+/// CLI flags for `isd route create`.
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Public hostname the rule matches. Prompted when omitted.
@@ -64,21 +68,31 @@ pub struct CreateArgs {
     pub healthcheck_path: Option<String>,
 }
 
+/// CLI flags for `isd route rm`.
 #[derive(Debug, Args)]
 pub struct RmArgs {
     /// Routing rule id.
     pub id: i64,
 }
 
+/// POST body shape for `/api/v1/routing/rules`.
 #[derive(Debug, Serialize)]
 struct CreateBody<'a> {
+    /// Agent ULID serving the upstream.
     host_id: &'a str,
+    /// Upstream container or compose service name.
     service_name: &'a str,
+    /// Upstream port.
     container_port: u16,
+    /// Public hostname the rule matches.
     public_hostname: &'a str,
+    /// Upstream protocol (`http` / `https`).
     protocol: &'a str,
+    /// Networking adapter (`none`, `tailscale`, `cf-tunnel`).
     adapter: &'a str,
+    /// TLS termination mode (`acme`, `edge`, `manual`).
     tls_mode: &'a str,
+    /// Optional healthcheck path on the upstream.
     #[serde(skip_serializing_if = "Option::is_none")]
     healthcheck_path: Option<&'a str>,
     /// "ui" so the rule is operator-tagged in the source column. The
@@ -86,28 +100,46 @@ struct CreateBody<'a> {
     source: &'a str,
 }
 
+/// Subset of the dashboard's routing-rule DTO we decode.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // host_id/protocol/adapter not in default table view, kept for JSON parity
 struct RoutingRuleEntry {
+    /// Surrogate key.
     id: i64,
+    /// Public hostname.
     public_hostname: String,
+    /// Upstream container / service name.
     service_name: String,
+    /// Upstream port.
     container_port: u16,
+    /// Agent ULID.
     host_id: String,
+    /// Upstream protocol.
     protocol: String,
+    /// Networking adapter.
     adapter: String,
+    /// TLS mode.
     tls_mode: String,
+    /// Operational state.
     state: String,
+    /// Origin tag (`compose`, `ui`, ...).
     source: String,
 }
 
 /// Subset of `HostDto` we care about for host_id resolution.
 #[derive(Debug, Clone, Deserialize)]
 struct HostEntry {
+    /// Agent ULID.
     id: String,
+    /// Reported hostname.
     hostname: String,
 }
 
+/// Dispatch to the matching `route` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         RouteCommand::List => run_list(context).await,
@@ -116,6 +148,7 @@ pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
+/// Fetch the controller's routing rules and print them as a table.
 async fn run_list(context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let entries = list_rules(&session).await?;
@@ -145,6 +178,8 @@ async fn run_list(context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Create a routing rule. Runs the wizard when any required field is
+/// missing, then POSTs the resolved body to the controller.
 async fn run_create(args: CreateArgs, context: Option<&str>) -> Result<()> {
     let args = if args.service.is_none() || args.port.is_none() || args.public_hostname.is_none() {
         run_wizard(args, context).await?
@@ -298,8 +333,11 @@ fn auto_detect_port(ports: &[u16]) -> Option<u16> {
 /// picks a row.
 #[derive(Clone)]
 struct ContainerRow {
+    /// Compose service name (preferred) or container name fallback.
     service_name: String,
+    /// Container image string for the right-hand label.
     image: String,
+    /// Ports the container exposes; fed to [`auto_detect_port`].
     private_ports: Vec<u16>,
 }
 
@@ -379,6 +417,9 @@ async fn resolve_host_id(
     }
 }
 
+/// Render the enrolled-hosts list as a compact `id  hostname` block.
+/// Used in the multi-match / no-match error messages from
+/// [`resolve_host_id`].
 fn hosts_table(hosts: &[HostEntry]) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
@@ -388,6 +429,7 @@ fn hosts_table(hosts: &[HostEntry]) -> String {
     s
 }
 
+/// Fetch the controller's enrolled-hosts list.
 async fn list_hosts(session: &Session) -> Result<Vec<HostEntry>> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/hosts");
@@ -401,6 +443,7 @@ async fn list_hosts(session: &Session) -> Result<Vec<HostEntry>> {
     Ok(entries)
 }
 
+/// Delete a routing rule by id.
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     delete_rule(&session, args.id).await?;
@@ -408,6 +451,7 @@ async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `GET /api/v1/routing/rules`.
 async fn list_rules(session: &Session) -> Result<Vec<RoutingRuleEntry>> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/routing/rules");
@@ -421,6 +465,7 @@ async fn list_rules(session: &Session) -> Result<Vec<RoutingRuleEntry>> {
     Ok(entries)
 }
 
+/// `POST /api/v1/routing/rules` and return the created row's id.
 async fn create_rule(session: &Session, body: &CreateBody<'_>) -> Result<i64> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/routing/rules");
@@ -440,6 +485,8 @@ async fn create_rule(session: &Session, body: &CreateBody<'_>) -> Result<i64> {
     Ok(entry.id)
 }
 
+/// `DELETE /api/v1/routing/rules/<id>` with 404 surfaced as an
+/// actionable "not found" error.
 async fn delete_rule(session: &Session, id: i64) -> Result<()> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/routing/rules/{id}");

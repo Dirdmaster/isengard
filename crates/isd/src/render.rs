@@ -10,9 +10,13 @@
 /// Color bucket for a STATUS cell, derived from its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusColor {
+    /// Up and healthy.
     Green,
+    /// Mid-transition (`Restarting`, `health: starting`).
     Yellow,
+    /// Failed (`unhealthy`, non-zero `Exited`, `Dead`).
     Red,
+    /// Neutral (`Exited (0)`, `Created`, `Paused`).
     Grey,
 }
 
@@ -54,7 +58,9 @@ pub fn classify_status(status: &str) -> StatusColor {
 /// Horizontal alignment of a column's cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
+    /// Left-align (text columns).
     Left,
+    /// Right-align (numeric columns like `#`).
     Right,
 }
 
@@ -76,14 +82,22 @@ pub enum CellStyle {
 /// this column will not shrink below before truncation begins.
 #[derive(Debug, Clone)]
 pub struct Column {
+    /// ALL-CAPS header label.
     pub header: &'static str,
+    /// Alignment within the cell.
     pub align: Align,
+    /// Visual treatment for cell text.
     pub style: CellStyle,
+    /// Lower values shrink first when the table doesn't fit.
     pub shrink_priority: u8,
+    /// Floor below which the column resists shrinking. Pass-2 shrink
+    /// past this still happens when the terminal is genuinely tiny.
     pub min_width: usize,
 }
 
 impl Column {
+    /// Build a column. Convenience over struct-literal-init to keep
+    /// the column tables in `ps.rs` etc readable.
     pub fn new(
         header: &'static str,
         align: Align,
@@ -105,21 +119,33 @@ impl Column {
 /// `rows[i].len()` must equal `columns.len()`.
 #[derive(Debug, Clone)]
 pub struct Table {
+    /// Column definitions in render order.
     pub columns: Vec<Column>,
+    /// Row data; each inner Vec has `columns.len()` cells.
     pub rows: Vec<Vec<String>>,
 }
 
-/// Box-drawing glyphs for the nushell `rounded` style.
+/// Top-left corner.
 const TL: char = '╭';
+/// Top-right corner.
 const TR: char = '╮';
+/// Bottom-left corner.
 const BL: char = '╰';
+/// Bottom-right corner.
 const BR: char = '╯';
+/// Horizontal line.
 const H: char = '─';
+/// Vertical line.
 const V: char = '│';
+/// Top join (column separator on the top border).
 const T_DOWN: char = '┬';
+/// Bottom join (column separator on the bottom border).
 const T_UP: char = '┴';
+/// Left tee (header rule's left edge).
 const T_RIGHT: char = '├';
+/// Right tee (header rule's right edge).
 const T_LEFT: char = '┤';
+/// Header rule join (column separator on the header rule).
 const CROSS: char = '┼';
 
 /// Natural display width of each column: the max of the header and

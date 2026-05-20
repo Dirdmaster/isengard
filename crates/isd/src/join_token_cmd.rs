@@ -10,6 +10,7 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 use clap::Args;
 use futures_util::StreamExt;
 
+/// CLI flags for `isd join-token`.
 #[derive(Debug, Args)]
 pub struct JoinTokenArgs {
     /// TTL for the minted token (e.g. `15m`, `1h`).
@@ -17,6 +18,20 @@ pub struct JoinTokenArgs {
     pub ttl: humantime::Duration,
 }
 
+/// Mint a join-token via the controller and print the operator-visible
+/// `isd join ...` invocation on stdout.
+///
+/// Resolves the operator's docker context, attaches to iso-controller,
+/// and runs `isengard controller token mint --format joincmd`. The
+/// stream is validated (`isd join`-prefixed, contains `--token`) before
+/// printing so a broken controller binary can't poison the operator's
+/// copy-paste.
+///
+/// # Errors
+///
+/// Returns `Err` when no controller is running on the current context,
+/// when docker exec fails, or when the controller emits an output that
+/// doesn't parse as a `isd join` command.
 pub async fn run(args: JoinTokenArgs, context: Option<&str>) -> Result<()> {
     let docker_uri = crate::docker_context::resolve_docker_uri(context)?;
     let docker = isd_runtime::DockerBackend::from_uri(&docker_uri).await?;

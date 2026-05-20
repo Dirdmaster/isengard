@@ -27,12 +27,15 @@ use similar::TextDiff;
 
 use crate::session::Session;
 
+/// CLI flags for `isd stack manifest`.
 #[derive(Debug, Args)]
 pub struct ManifestArgs {
+    /// Resolved sub-verb.
     #[command(subcommand)]
     pub command: ManifestCommand,
 }
 
+/// Sub-verbs under `isd stack manifest`.
 #[derive(Debug, Subcommand)]
 pub enum ManifestCommand {
     /// Print the stack's stack.toml.
@@ -43,12 +46,14 @@ pub enum ManifestCommand {
     Edit(EditArgs),
 }
 
+/// CLI flags for `isd stack manifest cat`.
 #[derive(Debug, Args)]
 pub struct CatArgs {
     /// Stack name.
     pub stack: String,
 }
 
+/// CLI flags for `isd stack manifest export`.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
     /// Stack name.
@@ -58,6 +63,7 @@ pub struct ExportArgs {
     pub output: Option<PathBuf>,
 }
 
+/// CLI flags for `isd stack manifest edit`.
 #[derive(Debug, Args)]
 pub struct EditArgs {
     /// Stack name.
@@ -72,7 +78,10 @@ pub struct EditArgs {
 /// client; the operator's edit cycle is centered on the TOML body.
 #[derive(Debug, Deserialize)]
 struct ManifestResponse {
+    /// The stack's `stack.toml` body, verbatim.
     manifest_toml: String,
+    /// SHA-256 of `manifest_toml`. Used as the `If-Match` ETag on
+    /// subsequent PUTs for optimistic concurrency.
     manifest_sha256: Option<String>,
 }
 
@@ -82,6 +91,7 @@ struct ManifestResponse {
 /// preserves existing bindings when the optional fields are absent.
 #[derive(Debug, Serialize)]
 struct PutManifestBody<'a> {
+    /// The full new manifest body.
     manifest_toml: &'a str,
 }
 
@@ -89,10 +99,17 @@ struct PutManifestBody<'a> {
 /// used by `compose_cmd::resolve_stack_id_opt`.
 #[derive(Debug, Deserialize)]
 struct StackDto {
+    /// Stringified stack surrogate key.
     id: String,
+    /// Operator-facing stack name.
     name: String,
 }
 
+/// Dispatch to the matching `stack manifest` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
 pub async fn run(args: ManifestArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         ManifestCommand::Cat(a) => run_cat(a, context).await,
@@ -101,6 +118,8 @@ pub async fn run(args: ManifestArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
+/// Print the named stack's `stack.toml` to stdout, adding a trailing
+/// newline when the body doesn't carry one.
 async fn run_cat(args: CatArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let stack_id = resolve_stack_id(&session, &args.stack).await?;
@@ -112,6 +131,8 @@ async fn run_cat(args: CatArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Write the named stack's `stack.toml` to `args.output` (default:
+/// `<stack>.stack.toml` in cwd). `-` routes the body to stdout.
 async fn run_export(args: ExportArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let stack_id = resolve_stack_id(&session, &args.stack).await?;
@@ -130,6 +151,9 @@ async fn run_export(args: ExportArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Fetch the manifest, drop the operator into `$EDITOR`, diff the
+/// result, and PUT on confirm. Handles the 409 conflict path by
+/// printing the remote diff and pointing the operator at a re-edit.
 async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let stack_id = resolve_stack_id(&session, &args.stack).await?;
@@ -197,6 +221,7 @@ async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
+/// Map a stack name to its surrogate id via `GET /api/v1/stacks`.
 async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/stacks");
@@ -214,6 +239,8 @@ async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("stack {name:?} not found on controller"))
 }
 
+/// `GET /api/v1/stacks/{id}/manifest` with the legacy-stack (204) and
+/// not-found (404) paths surfaced as actionable errors.
 async fn fetch_manifest(session: &Session, stack_id: &str) -> Result<ManifestResponse> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/stacks/{stack_id}/manifest");
@@ -244,10 +271,15 @@ async fn fetch_manifest(session: &Session, stack_id: &str) -> Result<ManifestRes
 /// Internal error: PUT returned a 409 with the controller's current
 /// manifest in the body. The caller surfaces a diff and re-prompts.
 enum PutError {
+    /// Concurrent edit detected. Carries the controller's current
+    /// state so the caller can render the remote diff.
     Conflict {
+        /// SHA-256 the controller currently sees.
         current_sha256: String,
+        /// The full body the controller currently holds.
         current_toml: String,
     },
+    /// Any other failure (transport, decode, non-409 HTTP).
     Other(anyhow::Error),
 }
 
@@ -257,17 +289,29 @@ impl From<anyhow::Error> for PutError {
     }
 }
 
+/// 200 body for a successful PUT. The new sha is logged so the
+/// operator can use it as the `If-Match` on a subsequent edit.
 #[derive(Debug, Deserialize)]
 struct PutOk {
+    /// SHA-256 of the manifest the controller has stored.
     manifest_sha256: String,
 }
 
+/// 409 body for a stale PUT. Carries the controller's current state
+/// so the client can render the remote diff.
 #[derive(Debug, Deserialize)]
 struct PutConflictBody {
+    /// SHA-256 the controller currently sees.
     current_sha256: String,
+    /// The body the controller currently holds.
     current_toml: String,
 }
 
+/// PUT a new manifest body with optimistic concurrency.
+///
+/// Sends `If-Match: <expected_sha256>` when non-empty so the
+/// controller can return 409 on a stale base. Maps the controller's
+/// status codes into [`PutError`] variants.
 async fn put_manifest(
     session: &Session,
     stack_id: &str,
@@ -311,6 +355,8 @@ async fn put_manifest(
     Ok(ok.manifest_sha256)
 }
 
+/// Print a compact unified diff of `current` -> `proposed` to stdout.
+/// Equal lines are skipped so the operator focuses on what changed.
 fn print_unified_diff(current: &str, proposed: &str) {
     let diff = TextDiff::from_lines(current, proposed);
     let mut wrote_anything = false;
@@ -331,6 +377,9 @@ fn print_unified_diff(current: &str, proposed: &str) {
     }
 }
 
+/// Y/N prompt for the edit confirmation. Refuses to prompt when
+/// stdin isn't a TTY (the operator should pass `--yes` instead of
+/// piping `y`).
 fn confirm(prompt: &str) -> Result<bool> {
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!(

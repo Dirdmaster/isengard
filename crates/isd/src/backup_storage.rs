@@ -26,17 +26,32 @@ use crate::backup_credentials::S3Creds;
 /// Same tag as `init_cmd::BOOTSTRAP_IMAGE` so cached layers stay shared.
 const HELPER_IMAGE: &str = "alpine:3.21";
 
+/// Where a backup goes (or where a restore reads from). Three sink
+/// kinds; each maps to its own reader / writer pair below.
 #[derive(Debug, Clone)]
 pub enum BackupDestination {
+    /// Local filesystem path. The simplest sink: encrypted bytes
+    /// write to a file the operator can scp / cp elsewhere.
     Fs(PathBuf),
+    /// A docker named volume on the controller's host. Spawns a
+    /// one-shot alpine container with the volume mounted and pipes
+    /// bytes through its stdin/stdout.
     Volume {
+        /// Docker URI to spawn the helper container against.
         docker_uri: String,
+        /// Target volume name.
         volume: String,
+        /// File name written inside the volume.
         filename: String,
     },
+    /// An S3-API bucket. Uses multipart upload (5 MiB parts) so a
+    /// large backup can stream without buffering the whole file.
     S3 {
+        /// S3 endpoint + credentials.
         creds: S3Creds,
+        /// Bucket name.
         bucket: String,
+        /// Object key (full path inside the bucket).
         key: String,
     },
 }
@@ -179,6 +194,7 @@ pub async fn open_reader(dest: &BackupDestination) -> Result<Box<dyn AsyncRead +
 /// expects. The inner `Pin<Box<...>>` is already `Unpin` at the outer
 /// pointer level (a pinned box is itself unpin-able).
 struct VolumeSink {
+    /// Underlying bollard attach-stdin pin.
     inner: Pin<Box<dyn AsyncWrite + Send>>,
 }
 
@@ -201,6 +217,9 @@ impl AsyncWrite for VolumeSink {
     }
 }
 
+/// Spawn the alpine writer container with the volume mounted at
+/// `/dst` and attach to its stdin. Caller writes encrypted bytes;
+/// container `cat`s them into `/dst/<filename>`.
 async fn open_volume_writer(
     docker_uri: &str,
     volume: &str,
@@ -257,6 +276,9 @@ async fn open_volume_writer(
     }))
 }
 
+/// Spawn the alpine reader container with the volume mounted at
+/// `/dst` and read its stdout. Container `cat`s `/dst/<filename>` to
+/// stdout; we wrap the bollard log stream as an `AsyncRead`.
 async fn open_volume_reader(
     docker_uri: &str,
     volume: &str,
@@ -335,8 +357,13 @@ async fn open_volume_reader(
 // `aws_smithy_types::byte_stream::ByteStream` that exposes an
 // `into_async_read()` returning `impl AsyncRead`.
 
+/// Multipart upload part size. S3 requires every non-final part to be
+/// at least 5 MiB; we use the minimum so the local buffer stays small.
 const S3_PART_SIZE: usize = 5 * 1024 * 1024;
 
+/// Build an S3 client from operator-supplied creds. Forces
+/// path-style addressing so MinIO-style endpoints work without
+/// requiring bucket names to be valid subdomains.
 fn s3_client(creds: &S3Creds) -> aws_sdk_s3::Client {
     use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 
@@ -360,6 +387,10 @@ fn s3_client(creds: &S3Creds) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(config)
 }
 
+/// Tokio AsyncWrite that buffers locally and ships chunks to a
+/// background S3 uploader task. Spec: 5 MiB parts, last part can be
+/// any size; abort the multipart upload on error to avoid leaking
+/// partial state.
 struct S3MultipartSink {
     /// Channel to the background uploader task. `None` means the sink has
     /// been shut down and the task was joined.
@@ -475,6 +506,8 @@ impl AsyncWrite for S3MultipartSink {
     }
 }
 
+/// Initiate an S3 multipart upload and spawn the background uploader.
+/// Returns an [`S3MultipartSink`] callers can `write_all` into.
 async fn open_s3_writer(
     creds: &S3Creds,
     bucket: &str,
@@ -568,6 +601,7 @@ async fn open_s3_writer(
     }))
 }
 
+/// `get_object` and return its body as an `AsyncRead`.
 async fn open_s3_reader(
     creds: &S3Creds,
     bucket: &str,
@@ -606,9 +640,14 @@ fn try_send_part(
     }
 }
 
+/// Outcome of [`try_send_part`]. `Full` returns the un-sent bytes so
+/// the caller can preserve them; `Closed` means the uploader task has
+/// disappeared (an error already aborted the upload).
 #[derive(Debug)]
 enum TrySendPartError {
+    /// Channel was full; the un-sent payload is returned intact.
     Full(tokio_util::bytes::Bytes),
+    /// Channel was closed; the receiver task has exited.
     Closed,
 }
 

@@ -25,6 +25,7 @@ use similar::TextDiff;
 use crate::session::Session;
 use crate::watch;
 
+/// CLI flags for `isd deploy`.
 #[derive(Debug, Args)]
 pub struct DeployArgs {
     /// Path to compose file or directory with stack.toml.
@@ -72,6 +73,7 @@ impl DeployArgs {
     }
 }
 
+/// CLI flags for `isd diff`.
 #[derive(Debug, Args)]
 pub struct DiffArgs {
     /// Stack name.
@@ -80,6 +82,7 @@ pub struct DiffArgs {
     pub path: Option<PathBuf>,
 }
 
+/// CLI flags for `isd edit`.
 #[derive(Debug, Args)]
 pub struct EditArgs {
     /// Stack name.
@@ -89,9 +92,12 @@ pub struct EditArgs {
     pub yes: bool,
 }
 
+/// Subset of the dashboard's stack DTO used for name -> id lookup.
 #[derive(Debug, Deserialize)]
 struct StackDto {
+    /// Stringified surrogate key.
     id: String,
+    /// Operator-facing stack name.
     name: String,
 }
 
@@ -100,39 +106,61 @@ struct StackDto {
 // serializes differently in the two paths). Skip stack_id entirely here:
 // the caller already knows the ID it requested. Same story for stack_name +
 // imported_at; we just need the YAML and the sha for optimistic concurrency.
+/// Response shape of `GET /api/v1/stacks/<id>/compose`.
 #[derive(Debug, Deserialize)]
 struct ComposeResponse {
+    /// The stack's compose YAML, verbatim.
     compose_yaml: String,
+    /// SHA-256 of the YAML. Used as the `If-Match` ETag.
     sha256: String,
 }
 
+/// Reconcile plan returned by `POST /api/v1/stacks/<id>/diff`.
 #[derive(Debug, Deserialize, Serialize)]
 struct ReconcilePlan {
+    /// Stack name.
     stack: String,
+    /// Per-service operations the controller will execute.
     ops: Vec<ServiceOp>,
 }
 
+/// One operation in a reconcile plan.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ServiceOp {
+    /// Bring up a service that wasn't previously running.
     Start {
+        /// Service name.
         service: String,
+        /// Image to pull/run.
         image: String,
     },
+    /// Replace the existing container with a new one (image / env /
+    /// labels changed).
     Recreate {
+        /// Service name.
         service: String,
+        /// Target image.
         image: String,
+        /// Operator-readable reasons the service needs to be
+        /// recreated.
         reasons: Vec<String>,
     },
+    /// Tear down a service that was removed from the compose.
     Stop {
+        /// Service name.
         service: String,
     },
+    /// Service is converged; nothing to do.
     NoChange {
+        /// Service name.
         service: String,
     },
 }
 
 impl ServiceOp {
+    /// Pull the service name out of any variant. Used by render
+    /// helpers and tests.
     #[allow(dead_code)] // used by render helpers + tests
     fn service(&self) -> &str {
         match self {
@@ -144,19 +172,32 @@ impl ServiceOp {
     }
 }
 
+/// 2xx body from `PUT /compose`.
 #[derive(Debug, Deserialize)]
 struct PutOk {
+    /// SHA-256 of the YAML the controller has stored.
     written_sha256: String,
 }
 
+/// 409 body: concurrent edit detected.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // surfaced verbatim in user-facing error messages
 struct PutConflict {
+    /// Operator-readable error message.
     error: String,
+    /// SHA-256 the controller currently sees.
     current_sha256: String,
+    /// YAML body the controller currently holds.
     current_yaml: String,
 }
 
+/// Entry point for `isd deploy`. Classifies the args into one of three
+/// modes (manifest, single compose, `--all`) and dispatches.
+///
+/// # Errors
+///
+/// Returns `Err` on classification failure, file IO, controller HTTP
+/// failure, or operator abort.
 pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     // Dispatch. `--all` walks subdirs; otherwise we may
     // have a manifest (`stack.toml` in cwd or the supplied dir) or a
@@ -177,12 +218,22 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
 /// Classify what `isd deploy` is being asked to do.
 #[derive(Debug)]
 pub enum DeployPlan {
-    /// `--all`: walk immediate subdirs of `root`.
-    All { root: PathBuf },
+    /// `--all`: walk immediate subdirs of `root` and deploy each
+    /// stack found.
+    All {
+        /// Root to enumerate from (cwd by default).
+        root: PathBuf,
+    },
     /// A `stack.toml` was located; deploy from it.
-    Manifest { manifest_path: PathBuf },
+    Manifest {
+        /// Path to the located `stack.toml`.
+        manifest_path: PathBuf,
+    },
     /// A bare compose file was supplied; legacy single-file path.
-    Single { compose_path: PathBuf },
+    Single {
+        /// Path to the compose YAML (or `-` for stdin).
+        compose_path: PathBuf,
+    },
 }
 
 /// Classify the args. Precedence:
@@ -238,6 +289,12 @@ pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
 /// Wave 5.A: resolve a positional `<path>` arg with explicit error
 /// messages for the bare-name + non-existent cases. Splits out of
 /// [`resolve_deploy_plan`] to keep the table-of-precedence readable.
+/// Resolve a positional path arg to a [`DeployPlan`].
+///
+/// Probe order: stack.toml -> compose.toml -> compose.yml ->
+/// compose.yaml. Bare names that match no on-disk artifact return a
+/// `did you mean ./<name>` error; explicit paths (with `./`, `/`, or
+/// a separator) return a generic "does not exist" error.
 fn resolve_positional_arg(p: &std::path::Path) -> Result<DeployPlan> {
     // Directory case: probe for stack.toml, then compose.{toml,yml,yaml}.
     if p.is_dir() {
@@ -298,6 +355,8 @@ fn resolve_positional_arg(p: &std::path::Path) -> Result<DeployPlan> {
 /// Wave 5.A: a path "looks like an explicit path" when it has any
 /// component separator or starts with `.` / `..` / `/`. Used to pick
 /// between the two non-existent-path error messages.
+/// Classify whether `p` reads as an explicit path. Used to pick
+/// between the two non-existent-path error messages.
 fn looks_like_explicit_path(p: &std::path::Path) -> bool {
     let s = match p.to_str() {
         Some(s) => s,
@@ -312,6 +371,9 @@ fn looks_like_explicit_path(p: &std::path::Path) -> bool {
 /// Deploy from a `stack.toml`. Merges overlays, builds the
 /// JSON body with the manifest fields, and POSTs (or PUTs) via the
 /// existing dashboard endpoint.
+/// Deploy from a `stack.toml` manifest. Loads the manifest, merges
+/// overlay compose files, then either PUTs (existing stack) or POSTs
+/// (fresh stack) the full bundle.
 async fn run_manifest_deploy(
     args: DeployArgs,
     manifest_path: PathBuf,
@@ -423,9 +485,11 @@ async fn run_manifest_deploy(
     Ok(())
 }
 
-/// `--all` walks immediate subdirs of `root` (lexical
-/// order, sequential). Per-stack failures are collected; final report
-/// + exit status reflect the aggregate.
+/// Walk the immediate subdirs of `root` (lexical order) and deploy
+/// each `stack.toml` manifest in turn.
+///
+/// Per-stack failures are collected and summarised after the loop.
+/// `--fail-fast` stops at the first failure.
 async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) -> Result<()> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&root)
         .with_context(|| format!("reading {}", root.display()))?
@@ -498,6 +562,8 @@ async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) 
 }
 
 /// Legacy single-file compose deploy. Existing v0.3d shape.
+/// Legacy path: a single compose file, no manifest. Either POSTs a
+/// fresh stack or PUTs a diff against the controller's current YAML.
 async fn run_single_compose(
     args: DeployArgs,
     compose_path: PathBuf,
@@ -575,6 +641,12 @@ async fn run_single_compose(
     Ok(())
 }
 
+/// Entry point for `isd diff`. Fetches current YAML, runs the
+/// preview-diff endpoint, prints both.
+///
+/// # Errors
+///
+/// Returns `Err` on controller HTTP failure or local file IO.
 pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let stack_id = resolve_stack_id(&session, &args.stack).await?;
@@ -595,6 +667,13 @@ pub async fn run_diff(args: DiffArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Entry point for `isd edit`. Drops the operator into `$EDITOR` on
+/// the controller's current YAML; diff + plan + confirm + PUT on save.
+///
+/// # Errors
+///
+/// Returns `Err` on editor failure, controller HTTP failure, or
+/// operator abort.
 pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let stack_id = resolve_stack_id(&session, &args.stack).await?;
@@ -655,6 +734,8 @@ pub async fn run_edit(args: EditArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Read a compose file from disk or stdin. TOML compose is converted
+/// to YAML so the wire and the controller never see TOML.
 fn read_compose_path(path: &std::path::Path) -> Result<String> {
     if path == std::path::Path::new("-") {
         let mut buf = String::new();
@@ -677,6 +758,9 @@ fn read_compose_path(path: &std::path::Path) -> Result<String> {
     }
 }
 
+/// Translate a TOML compose body into YAML. The TOML shape mirrors
+/// YAML exactly so a straight structural translation is enough; the
+/// agent's parser does the real decode.
 fn toml_compose_to_yaml(toml_content: &str) -> Result<String> {
     let value: toml::Value = toml::from_str(toml_content).context("parsing toml")?;
     if !matches!(value, toml::Value::Table(_)) {
@@ -691,6 +775,9 @@ fn toml_compose_to_yaml(toml_content: &str) -> Result<String> {
     serde_yaml::to_string(&json).context("serializing yaml")
 }
 
+/// Convert a `toml::Value` into a `serde_json::Value` for the
+/// TOML -> JSON -> YAML pipeline. Datetimes get rendered as strings;
+/// floats outside JSON's representable range collapse to `Null`.
 fn toml_value_to_json(v: toml::Value) -> serde_json::Value {
     use serde_json::Value;
     match v {
@@ -710,6 +797,9 @@ fn toml_value_to_json(v: toml::Value) -> serde_json::Value {
     }
 }
 
+/// Derive a stack name from the parent directory of a compose file
+/// (e.g. `~/stacks/blog/compose.yaml` -> `blog`). Stdin (`-`) has no
+/// inferable name; the operator must pass `--stack`.
 fn stack_from_path(path: &std::path::Path) -> Result<String> {
     if path == std::path::Path::new("-") {
         return Err(anyhow!(
@@ -728,6 +818,7 @@ fn stack_from_path(path: &std::path::Path) -> Result<String> {
     })
 }
 
+/// Resolve a stack name to its id, erroring when not found.
 async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
     resolve_stack_id_opt(session, name)
         .await?
@@ -751,22 +842,33 @@ async fn resolve_stack_id_opt(session: &Session, name: &str) -> Result<Option<St
     Ok(stacks.into_iter().find(|s| s.name == name).map(|s| s.id))
 }
 
+/// POST body for the legacy single-compose create path.
 #[derive(Debug, Serialize)]
 struct CreateStackBody<'a> {
+    /// Stack name.
     name: &'a str,
+    /// Compose YAML body.
     compose_yaml: &'a str,
+    /// Optional host pin for first-time placement.
     #[serde(skip_serializing_if = "Option::is_none")]
     host_id: Option<&'a str>,
 }
 
+/// 200 body from `POST /api/v1/stacks`.
 #[derive(Debug, Deserialize)]
 struct CreateStackOk {
+    /// New stack's surrogate id.
     id: String,
+    /// Stack name (echoed back).
     name: String,
+    /// Host the controller placed the stack on.
     host_id: String,
+    /// SHA-256 of the YAML the controller stored.
     written_sha256: String,
 }
 
+/// POST a new stack with only a compose body (legacy single-file
+/// deploy).
 async fn create_stack(
     session: &Session,
     name: &str,
@@ -801,23 +903,33 @@ async fn create_stack(
 /// Hook shape on the create-stack POST body.
 #[derive(Debug, Serialize, Clone)]
 pub struct JsonHook {
+    /// Event the hook fires on (`pre_deploy`, `post_deploy`, ...).
     pub on: String,
+    /// Command + args.
     pub cmd: Vec<String>,
+    /// Timeout in milliseconds.
     pub timeout_ms: u64,
+    /// Behaviour when the hook errors (`fail`, `ignore`).
     pub on_error: String,
 }
 
 /// Extended POST /stacks body with manifest fields.
 #[derive(Debug, Serialize)]
 pub struct CreateStackManifestBody {
+    /// Stack name.
     pub name: String,
+    /// Compose YAML body.
     pub compose_yaml: String,
+    /// Optional host pin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
+    /// Full `stack.toml` body.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_toml: Option<String>,
+    /// Secret names the stack needs bound at deploy time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<Vec<String>>,
+    /// Lifecycle hooks declared in the manifest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<Vec<JsonHook>>,
 }
@@ -825,6 +937,9 @@ pub struct CreateStackManifestBody {
 /// POST a stack with manifest body. Surfaces controller's
 /// 422 (unknown secrets) verbatim so the operator sees the missing
 /// names without an extra round-trip.
+/// POST a stack with the full manifest bundle (compose, TOML, secrets,
+/// hooks). Replaces the manifest-less `create_stack` path when
+/// `isd deploy` runs against a `stack.toml`.
 async fn create_stack_with_manifest(
     session: &Session,
     body: &CreateStackManifestBody,
@@ -857,17 +972,26 @@ async fn create_stack_with_manifest(
 /// dropping the new bindings.
 #[derive(Debug, Serialize)]
 pub struct PutComposeJsonBody {
+    /// Compose YAML body.
     pub compose: String,
+    /// Updated manifest TOML (when the operator edited a manifest).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_toml: Option<String>,
+    /// Secrets the manifest declares (replaces existing bindings).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<Vec<String>>,
+    /// Hooks the manifest declares (replaces existing bindings).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<Vec<JsonHook>>,
+    /// Bypass optimistic concurrency. Sent only when `--force` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force: Option<bool>,
+    /// Expected compose SHA-256. When set, the controller returns 409
+    /// on mismatch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compose_sha256: Option<String>,
+    /// Expected manifest SHA-256. Same optimistic concurrency
+    /// behaviour as `compose_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
 }
@@ -876,6 +1000,10 @@ pub struct PutComposeJsonBody {
 /// the JSON variant. Surfaces the controller's 409 / 422 / 400 bodies
 /// verbatim so the operator sees the underlying error (e.g. the missing
 /// secret name) without an extra round-trip.
+/// PUT the JSON variant of `compose`: lets manifest changes, secrets,
+/// and hooks ride along with the compose body. The legacy
+/// `application/yaml` PUT silently drops these fields, so any deploy
+/// from a `stack.toml` must go through this path.
 async fn put_compose_json(
     session: &Session,
     stack_id: &str,
@@ -907,6 +1035,9 @@ async fn put_compose_json(
     Ok(ok)
 }
 
+/// `GET /api/v1/stacks/<id>/compose`. 204 means the stack has no
+/// compose yet (legacy or freshly created); `Ok(None)` lets the caller
+/// drive an empty-base diff.
 async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<ComposeResponse>> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
@@ -923,6 +1054,8 @@ async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<Compo
     Ok(Some(cr))
 }
 
+/// `POST /api/v1/stacks/<id>/diff` with `proposed` as the body.
+/// Returns the controller's per-service reconcile plan.
 async fn preview_diff(session: &Session, stack_id: &str, proposed: &str) -> Result<ReconcilePlan> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/stacks/{stack_id}/diff");
@@ -938,6 +1071,9 @@ async fn preview_diff(session: &Session, stack_id: &str, proposed: &str) -> Resu
     Ok(plan)
 }
 
+/// `PUT /api/v1/stacks/<id>/compose` with optimistic concurrency.
+/// 409 surfaces the controller's current sha so the caller can show
+/// the operator a `--force` retry hint.
 async fn put_compose(
     session: &Session,
     stack_id: &str,
@@ -972,6 +1108,10 @@ async fn put_compose(
     Ok(ok)
 }
 
+/// Print a compact unified diff: skip equal lines, prefix
+/// inserts with `+` and deletes with `-`. Same shape as
+/// the sibling helper in `manifest_cmd`, duplicated here to
+/// avoid leaking compose internals through the manifest module.
 fn print_unified_diff(current: &str, proposed: &str) {
     let diff = TextDiff::from_lines(current, proposed);
     let mut wrote_anything = false;
@@ -995,6 +1135,8 @@ fn print_unified_diff(current: &str, proposed: &str) {
     }
 }
 
+/// Print the reconcile plan to stdout with one line per op.
+/// `+` for Start, `!` for Recreate, `-` for Stop, `~` for NoChange.
 fn print_plan(plan: &ReconcilePlan) {
     println!("Reconcile plan ({} ops):", plan.ops.len());
     for op in &plan.ops {
@@ -1022,6 +1164,8 @@ fn print_plan(plan: &ReconcilePlan) {
     }
 }
 
+/// Y/N prompt. Refuses to prompt when stdin isn't a TTY: the operator
+/// should pass `--yes` instead of piping `y`.
 fn confirm(prompt: &str) -> Result<bool> {
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!(
