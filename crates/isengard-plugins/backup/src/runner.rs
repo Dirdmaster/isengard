@@ -1,8 +1,9 @@
-//! Backup runner. Orchestrates snapshot -> encrypt -> upload ->
-//! retention prune, recording each step in `backup_runs`.
+//! Backup runner.
 //!
-//! The runner is exposed both to the scheduler (interval timer) and to the
-//! REST `run-now` endpoint, so they share the exact same code path.
+//! Orchestrates snapshot, encrypt, upload, retention prune; records
+//! each step in `backup_runs`. The runner is the shared code path
+//! between the scheduler (interval timer) and the REST `run-now`
+//! endpoint.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,46 +19,59 @@ use crate::encrypt::encrypt_with_passphrase;
 use crate::restore::{RestoreError, RestoreOutcome, restore_from_destination};
 use crate::snapshot::create_snapshot;
 
-/// Env var the operator must set so the controller can encrypt snapshots.
-/// Leaving this unset is a hard failure for any scheduled or manual run.
+/// Env var the operator must set so the controller can encrypt
+/// snapshots. Leaving this unset is a hard failure for any
+/// scheduled or manual run.
 pub const PASSPHRASE_ENV: &str = "ISENGARD_BACKUP_PASSPHRASE";
 
 /// Errors that can happen during a single run.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    /// Plugin is disabled in config.
     #[error("backup is disabled in config")]
     Disabled,
 
+    /// No destination configured.
     #[error("no destination configured")]
     NoDestination,
 
+    /// Passphrase env var not set.
     #[error("passphrase not set: export {0}=<value>")]
     NoPassphrase(&'static str),
 
+    /// Snapshot stage failed.
     #[error("snapshot: {0}")]
     Snapshot(#[from] crate::snapshot::SnapshotError),
 
+    /// Encryption stage failed.
     #[error("encrypt: {0}")]
     Encrypt(#[from] crate::encrypt::EncryptError),
 
+    /// Destination upload or list failed.
     #[error("destination: {0}")]
     Destination(#[from] crate::destination::DestinationError),
 
+    /// Storage DAO failed (e.g. inserting the run row).
     #[error("storage: {0}")]
     Storage(#[from] isengard_storage::Error),
 
+    /// Filesystem IO failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// Bundle of references the runner needs to exist.
+/// Bundle of references the runner needs.
 pub struct BackupRunner {
+    /// Inventory the runner reads from and records history into.
     pub inventory: Arc<Inventory>,
+    /// Dedicated SQLite pool used to take the snapshot.
     pub pool: SqlitePool,
+    /// On-disk path of the live DB file.
     pub db_path: PathBuf,
 }
 
 impl BackupRunner {
+    /// Builds a runner from the controller's handles.
     pub fn new(inventory: Arc<Inventory>, pool: SqlitePool, db_path: PathBuf) -> Self {
         Self {
             inventory,
@@ -66,8 +80,16 @@ impl BackupRunner {
         }
     }
 
-    /// Resolve the configured destination into a Box<dyn BackupDestination>.
-    /// Visible for tests + the dashboard's "test connection" handler later.
+    /// Resolves a [`DestinationConfig`] into a boxed
+    /// [`BackupDestination`].
+    ///
+    /// Visible for tests and for the dashboard's "test connection"
+    /// handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::NoDestination`] when the config is
+    /// [`DestinationConfig::None`].
     pub fn build_destination(
         &self,
         cfg: &DestinationConfig,
@@ -96,19 +118,25 @@ impl BackupRunner {
         }
     }
 
-    /// Pick a name for a new snapshot object, embedding the timestamp so
-    /// retention can sort lexicographically.
+    /// Picks an object name for a new snapshot.
+    ///
+    /// Embeds the timestamp in ISO 8601 basic format so retention
+    /// can sort lexicographically.
     pub fn snapshot_name(now: chrono::DateTime<Utc>) -> String {
         format!("snapshot-{}.db.age", now.format("%Y%m%dT%H%M%SZ"))
     }
 
-    /// Run one full backup cycle. Returns the resulting BackupRunId on success
-    /// (and a RunError on failure; the row is finished as `failed` before
-    /// returning).
+    /// Runs one full backup cycle.
     ///
-    /// Disabled config returns `RunError::Disabled` without inserting a run
-    /// row (no run was attempted). All other failure paths insert a row and
-    /// transition it to `failed` so the operator sees the attempt in history.
+    /// Disabled config returns [`RunError::Disabled`] without
+    /// inserting a `backup_runs` row (no run was attempted). All
+    /// other failure paths insert a row and transition it to
+    /// `failed` so the operator sees the attempt in history.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`RunError`] that caused the run to fail. The
+    /// row state is written before returning.
     pub async fn run_once(&self) -> Result<BackupRunId, RunError> {
         let cfg = BackupConfig::load(&self.inventory).await?;
         if !cfg.enabled {
@@ -143,8 +171,10 @@ impl BackupRunner {
         }
     }
 
-    /// Inner work: validate the destination + passphrase, then take and ship
-    /// the snapshot. Errors here surface as `failed` rows in `backup_runs`.
+    /// Inner work: validates the destination and passphrase, then
+    /// takes and ships the snapshot.
+    ///
+    /// Errors here surface as `failed` rows in `backup_runs`.
     async fn do_run_inner(&self, cfg: &BackupConfig) -> Result<(String, usize), RunError> {
         let dest = self.build_destination(&cfg.destination)?;
         let passphrase =
@@ -152,6 +182,11 @@ impl BackupRunner {
         self.do_run(cfg, dest.as_ref(), &passphrase).await
     }
 
+    /// Snapshot, encrypt, upload, prune.
+    ///
+    /// Retention prune failures log a warn and don't fail the run:
+    /// the upload already succeeded; stale objects hanging around
+    /// are harmless.
     async fn do_run(
         &self,
         cfg: &BackupConfig,
@@ -165,8 +200,6 @@ impl BackupRunner {
         dest.upload(&name, &cipher).await?;
         let size = cipher.len();
 
-        // Best-effort retention prune. A failure here doesn't fail the
-        // run (the upload succeeded; old objects sticking around is harmless).
         if let Err(e) = self.prune_retention(dest, cfg.retention_keep).await {
             warn!(error = %e, "retention prune failed (upload succeeded)");
         }
@@ -174,6 +207,11 @@ impl BackupRunner {
         Ok((name, size))
     }
 
+    /// Deletes everything past the `keep` most recent objects on
+    /// `dest`.
+    ///
+    /// Sorts newest-first by name; names embed UTC timestamps, so
+    /// lexical sort is chronological.
     async fn prune_retention(
         &self,
         dest: &dyn BackupDestination,
@@ -183,8 +221,6 @@ impl BackupRunner {
         if (listed.len() as u32) <= keep {
             return Ok(());
         }
-        // Sort newest-first by name; names embed UTC timestamps, so lexical
-        // sort is chronological.
         listed.sort_by(|a, b| b.name.cmp(&a.name));
         for obj in listed.into_iter().skip(keep as usize) {
             dest.delete(&obj.name).await?;
@@ -192,10 +228,18 @@ impl BackupRunner {
         Ok(())
     }
 
-    /// Run a restore from the configured destination. Used by the dashboard's
-    /// REST handler. Wraps `restore::restore_from_destination` after looking
-    /// up the source backup-run id (when the object name matches a known row)
-    /// and resolving the destination from the persisted config.
+    /// Runs a restore from the configured destination.
+    ///
+    /// Used by the dashboard's REST handler. Wraps
+    /// [`restore_from_destination`] after looking up the source
+    /// backup-run id (when the object name matches a known row) and
+    /// resolving the destination from the persisted config.
+    ///
+    /// # Errors
+    ///
+    /// Bubbles any [`RestoreError`] from the underlying restore.
+    /// Returns [`RestoreError::Swap`] when no destination is
+    /// configured or when destination resolution fails.
     pub async fn restore_now(
         &self,
         object_name: &str,
@@ -219,9 +263,6 @@ impl BackupRunner {
             }
         };
 
-        // Best-effort match against an existing backup_runs row. If found we
-        // record the source run id; if not (operator restoring from a
-        // foreign object) we still proceed.
         let runs = self.inventory.list_backup_runs(200).await.ok();
         let source_id = runs.and_then(|rs| {
             rs.into_iter()
@@ -242,8 +283,11 @@ impl BackupRunner {
     }
 }
 
-/// Compute the time the next scheduled run should fire, given the most recent
-/// successful run and the configured interval. `None` means "fire immediately".
+/// Computes the time the next scheduled run should fire.
+///
+/// `last_run_at = None` returns `now + interval` (treats startup as
+/// "wait one full interval"). The interval clamps up to
+/// [`crate::config::MIN_INTERVAL_SECS`].
 pub fn next_run_at(
     now: chrono::DateTime<Utc>,
     last_run_at: Option<chrono::DateTime<Utc>>,

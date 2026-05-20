@@ -1,8 +1,32 @@
-//! Cloudflare Tunnel NetworkingAdapter.
+//! Cloudflare Tunnel `NetworkingAdapter`.
 //!
-//! Data plane: a supervised `cloudflared tunnel run` subprocess holds the
-//! persistent connection to CF edge.
-//! Control plane: CF v4 REST API for tunnel CRUD, ingress rules, DNS.
+//! Two planes work together:
+//!
+//! - **Data plane:** a supervised `cloudflared tunnel run` subprocess
+//!   holds the persistent edge connection. See [`cloudflared::supervise`]
+//!   for the restart loop.
+//! - **Control plane:** Cloudflare's v4 REST API drives tunnel CRUD,
+//!   ingress configuration, and DNS records. See [`api::CfApi`].
+//!
+//! # Flow
+//!
+//! `join`: shells out to `cloudflared` to confirm it's installed,
+//! either uses a persisted `tunnel_token` from settings or creates a new
+//! tunnel via the API, then spawns the supervised subprocess.
+//!
+//! `expose`: replaces the tunnel's entire ingress with one rule for the
+//! requested hostname plus a 404 catch-all, then upserts a CNAME from
+//! the hostname to `<tunnel_id>.cfargotunnel.com`.
+//!
+//! `unexpose`: deletes the matching DNS records and resets the ingress
+//! to the catch-all. Failures are logged, not propagated: leaving the
+//! adapter half-open is better than blocking shutdown.
+//!
+//! TLS strategy is [`TlsStrategy::EdgeTermination`]: Cloudflare terminates
+//! TLS at the edge, the controller does no ACME work.
+
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
 use isengard_core::context::PluginContext;
@@ -16,16 +40,36 @@ use serde::Deserialize;
 pub mod api;
 pub mod cloudflared;
 
+/// Parsed shape of the `[networking]` settings block for this adapter.
+///
+/// Required: `api_token`, `account_id`, `zone_id`. Optional:
+/// `tunnel_id`, `tunnel_name`, `tunnel_token`. When `tunnel_token` is
+/// missing the adapter creates a fresh tunnel on `join` and logs the
+/// new id and token for the operator to persist.
 #[derive(Deserialize)]
 struct CfTunnelConfig {
+    /// Cloudflare API token. Needs `Account:Cloudflare Tunnel:Edit` and
+    /// `Zone:DNS:Edit` scopes for the configured account and zone.
     api_token: String,
+    /// Cloudflare account UUID owning the tunnel.
     account_id: String,
+    /// Cloudflare zone UUID the hostnames live in.
     zone_id: String,
+    /// Persisted tunnel UUID. Skips tunnel creation when set.
     tunnel_id: Option<String>,
+    /// Tunnel display name used when creating a new tunnel. Defaults to
+    /// `isengard`.
     tunnel_name: Option<String>,
+    /// Persisted `cloudflared` connection token. Skips tunnel creation
+    /// when set.
     tunnel_token: Option<String>,
 }
 
+/// Cloudflare Tunnel adapter. Stateless; constructed via `Default`.
+///
+/// Registered as `networking-cf-tunnel` (plugin name) and `cf-tunnel`
+/// (adapter id). The agent selects it via `[networking] adapter =
+/// "cf-tunnel"`.
 #[derive(Default)]
 pub struct CfTunnelAdapter;
 
@@ -54,6 +98,19 @@ impl NetworkingAdapter for CfTunnelAdapter {
         "cf-tunnel"
     }
 
+    /// Brings the adapter up. Resolves the tunnel and spawns the
+    /// supervised subprocess.
+    ///
+    /// On first call (no `tunnel_token` in settings), creates a fresh
+    /// tunnel via the API and logs the new `tunnel_id` and
+    /// `tunnel_token` so the operator can persist them. Subsequent
+    /// calls reuse the existing values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Other`] when `cloudflared` isn't on `PATH`,
+    /// when the settings JSON fails to decode, or when the tunnel
+    /// creation API call fails.
     async fn join(&self, ctx: &AdapterContext) -> Result<()> {
         cloudflared::ensure_present()?;
 
@@ -65,10 +122,6 @@ impl NetworkingAdapter for CfTunnelAdapter {
         let tunnel_token = if let Some(t) = cfg.tunnel_token.clone() {
             t
         } else {
-            // First-time setup: create the tunnel via API and surface the new
-            // tunnel_id + tunnel_token back to the caller via journal/log.
-            // (Persisting them back to adapter_config is a Plan C / settings-UI
-            // concern; for v1 the operator copy-pastes them into settings.)
             let created = api
                 .create_tunnel(
                     &cfg.account_id,
@@ -87,7 +140,7 @@ impl NetworkingAdapter for CfTunnelAdapter {
             cloudflared::supervise(token_for_supervisor).await;
         });
 
-        let _ = ctx; // silence if unused
+        let _ = ctx;
         Ok(())
     }
 
@@ -95,6 +148,18 @@ impl NetworkingAdapter for CfTunnelAdapter {
         Ok(())
     }
 
+    /// Wires `public_hostname` to `local_listener_port` through the tunnel.
+    ///
+    /// Replaces the tunnel's ingress with a single rule for this hostname
+    /// plus a 404 catch-all. Multi-rule per-tunnel support lands later.
+    /// Upserts the public DNS CNAME so requests for the hostname route
+    /// through Cloudflare's edge into the tunnel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Other`] when settings can't be decoded, when
+    /// `tunnel_id` is missing (operator must run `join` first or
+    /// configure it explicitly), or when either API call fails.
     async fn expose(&self, ctx: &AdapterContext, spec: &ExposeSpec) -> Result<ExposedEndpoint> {
         let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
             .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
@@ -107,8 +172,6 @@ impl NetworkingAdapter for CfTunnelAdapter {
             )
         })?;
 
-        // Replace the entire ingress with our single hostname rule + a 404
-        // catch-all. Multi-rule per-tunnel support is a v1.x follow-up.
         let ingress = vec![
             api::IngressRule {
                 hostname: Some(spec.public_hostname.clone()),
@@ -140,6 +203,13 @@ impl NetworkingAdapter for CfTunnelAdapter {
         })
     }
 
+    /// Tears down the DNS records and ingress for `endpoint_id`.
+    ///
+    /// Best-effort by design. A failed DNS list, delete, or ingress
+    /// reset is logged at warn but doesn't fail the call: blocking
+    /// shutdown on Cloudflare flakiness would leave the agent stuck.
+    /// The operator's recovery path is to retry the unexpose later or
+    /// fix the leaked records manually.
     async fn unexpose(&self, ctx: &AdapterContext, endpoint_id: &str) -> Result<()> {
         let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
             .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
@@ -147,9 +217,6 @@ impl NetworkingAdapter for CfTunnelAdapter {
 
         let hostname = endpoint_id.trim_start_matches("cf-tunnel:");
 
-        // DNS cleanup: list + delete records pointing at this hostname.
-        // We log on failure rather than swallow — a leaked DNS record points
-        // at an offline tunnel target and produces user-visible errors.
         match api.list_dns_records(&cfg.zone_id, hostname).await {
             Ok(records) => {
                 for r in records {
@@ -172,8 +239,6 @@ impl NetworkingAdapter for CfTunnelAdapter {
             }
         }
 
-        // Reset ingress to the catch-all 404. Same warn-on-failure: a stale
-        // ingress rule points cloudflared at a port that may now be reused.
         if let Some(tunnel_id) = cfg.tunnel_id.as_ref() {
             if let Err(e) = api
                 .set_ingress(

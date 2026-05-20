@@ -39,20 +39,29 @@ pub const HOST_OFFLINE_THRESHOLD_SECS: i64 = 60;
 /// non-NULL `removed_at` (defaults to false).
 #[derive(Debug, Deserialize, Default)]
 pub struct ListContainersQuery {
+    /// `host` field.
     pub host: Option<String>,
+    /// `stack` field.
     pub stack: Option<String>,
+    /// `service` field.
     pub service: Option<String>,
+    /// `state` field.
     pub state: Option<String>,
     #[serde(default)]
+    /// `all` field.
     pub all: bool,
+    /// `limit` field.
     pub limit: Option<i64>,
+    /// `offset` field.
     pub offset: Option<i64>,
 }
 
+/// `json_err`.
 fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({ "error": msg.into() }))).into_response()
 }
 
+/// `parse_host_id`.
 fn parse_host_id(s: &str) -> Result<HostId, String> {
     let ulid = ulid::Ulid::from_string(s).map_err(|e| format!("invalid host id: {e}"))?;
     Ok(HostId::from(ulid))
@@ -409,7 +418,7 @@ mod tests {
         let handles = test_handles().await;
         let stale = enroll(&handles, "stale-host", "fp-stale").await;
         let fresh = enroll(&handles, "fresh-host", "fp-fresh").await;
-        // Heartbeat stale host an hour ago, fresh host just now.
+        // Heartbeat stale host an hour ago, fresh host at `now`.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

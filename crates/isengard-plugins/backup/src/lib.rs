@@ -1,11 +1,6 @@
-//! Isengard `backup` plugin (controller-side).
-//!
-//! Scope: SQLite WAL snapshot, age passphrase encryption, pluggable
-//! S3-compatible + local destinations, interval scheduler, LRU retention.
-//!
-//! Restore lives in 11b. The plugin only reads from the controller's storage;
-//! it never writes to it (other than the `backup_runs` history rows).
-
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(clippy::result_large_err)]
 
 use std::str::FromStr;
@@ -32,27 +27,38 @@ pub mod snapshot;
 use crate::config::BackupConfig;
 use crate::runner::BackupRunner;
 
+/// Stable plugin name surfaced to the controller and host registry.
 const PLUGIN_NAME: &str = "backup";
 
-/// Process-wide handle to the runner. Set by `Plugin::start` after the
-/// controller hands us a `ControllerHandles` bundle. The dashboard plugin's
-/// REST handlers consult this via `BackupPlugin::runner()` so they can
-/// trigger run-now without holding their own pool.
+/// Process-wide handle to the runner.
+///
+/// Set by [`Plugin::start`] after the controller hands a
+/// [`ControllerHandles`] to the plugin. The dashboard plugin's REST
+/// handlers consult this via [`runner_handle`] so they can trigger
+/// run-now without holding their own pool.
 static RUNNER_CELL: OnceCell<Arc<BackupRunner>> = OnceCell::const_new();
 
-/// Public accessor used by the dashboard plugin's REST handlers. Returns
-/// None if the backup plugin has not started yet.
+/// Returns the process-wide [`BackupRunner`] handle.
+///
+/// Returns `None` until the plugin has been started.
 pub fn runner_handle() -> Option<Arc<BackupRunner>> {
     RUNNER_CELL.get().cloned()
 }
 
-/// Backup plugin entry point.
+/// Controller-side backup plugin instance.
+///
+/// Holds the initialization flag and the join handle for the spawned
+/// scheduler task.
 pub struct BackupPlugin {
+    /// `true` once [`Plugin::init`] has run.
     initialized: bool,
+    /// Join handle for the scheduler task.
     scheduler_task: Option<JoinHandle<()>>,
 }
 
 impl BackupPlugin {
+    /// Builds an empty plugin. The scheduler is spawned in
+    /// [`Plugin::start`].
     pub fn new() -> Self {
         Self {
             initialized: false,
@@ -67,6 +73,8 @@ impl Default for BackupPlugin {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::InitFailed`] for the
+/// backup plugin.
 fn init_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::InitFailed {
         name: PLUGIN_NAME.into(),
@@ -74,6 +82,8 @@ fn init_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::StartFailed`] for the
+/// backup plugin.
 fn start_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::StartFailed {
         name: PLUGIN_NAME.into(),
@@ -81,6 +91,12 @@ fn start_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Opens a dedicated SQLite pool against the same DB file the
+/// controller is using.
+///
+/// The plugin opens its own pool so it can hold an IMMEDIATE-tx lock
+/// during a snapshot without contending with the live inventory
+/// pool's writers.
 async fn open_pool(db_path: &std::path::Path) -> Result<SqlitePool, sqlx::Error> {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))?
         .create_if_missing(false)
@@ -104,6 +120,15 @@ impl Plugin for BackupPlugin {
         Ok(())
     }
 
+    /// Opens the plugin's dedicated pool, builds the runner, stores
+    /// it in [`RUNNER_CELL`], and spawns the scheduler loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InitFailed`] if start runs before init.
+    /// Returns [`CoreError::StartFailed`] when the plugin context
+    /// lacks a [`ControllerHandles`] or when the dedicated pool fails
+    /// to open.
     async fn start(&mut self, ctx: &PluginContext) -> CoreResult<()> {
         if !self.initialized {
             return Err(init_err("start called before init"));
@@ -115,9 +140,6 @@ impl Plugin for BackupPlugin {
             .downcast::<ControllerHandles>()
             .map_err(|_| start_err("bus on PluginContext was not ControllerHandles"))?;
 
-        // The backup plugin opens its own pool against the same DB file so it
-        // can hold an IMMEDIATE-tx lock during a snapshot without contending
-        // with the live inventory pool's writers.
         let pool = open_pool(&handles.db_path)
             .await
             .map_err(|e| start_err(format!("backup pool: {e}")))?;
@@ -145,16 +167,20 @@ impl Plugin for BackupPlugin {
     }
 }
 
-/// Spawn the scheduler loop. The loop:
+/// Spawns the scheduler loop.
+///
+/// The loop:
+///
 /// 1. Reads the current config.
-/// 2. Computes the next run time from `last_successful_backup_run` + interval.
-/// 3. Sleeps until then; on wake-up, fires `runner.run_once()`.
+/// 2. Computes the next run time from
+///    `last_successful_backup_run + interval`.
+/// 3. Sleeps until then; on wake-up fires [`BackupRunner::run_once`].
 /// 4. Loops.
 ///
-/// If the plugin is disabled or no destination is configured, the loop sleeps
-/// for `MIN_INTERVAL_SECS` and re-checks. This lets the operator flip the
-/// switch in the UI and have the next cycle pick it up without restarting
-/// the controller.
+/// When the plugin is disabled or no destination is configured the
+/// loop sleeps for 60s and re-checks: the operator can flip the
+/// toggle and have the next cycle pick it up without a controller
+/// restart.
 fn spawn_scheduler(runner: Arc<BackupRunner>) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -173,11 +199,9 @@ fn spawn_scheduler(runner: Arc<BackupRunner>) -> JoinHandle<()> {
             }
 
             let last = match runner.inventory.last_successful_backup_run().await {
-                Ok(o) => o.and_then(|r| r.finished_at).or_else(|| {
-                    // No successful run yet; treat as "now" so we wait one
-                    // full interval before the first attempt.
-                    Some(chrono::Utc::now())
-                }),
+                Ok(o) => o
+                    .and_then(|r| r.finished_at)
+                    .or_else(|| Some(chrono::Utc::now())),
                 Err(e) => {
                     warn!(error = %e, "scheduler: failed to read last run; retrying in 60s");
                     tokio::time::sleep(Duration::from_secs(60)).await;

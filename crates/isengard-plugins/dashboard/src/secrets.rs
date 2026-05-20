@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/secrets", post(create_secret).get(list_secrets))
@@ -49,13 +50,16 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 /// dropped right after encryption.
 #[derive(Debug, Deserialize)]
 pub struct CreateBody {
+    /// `name` field.
     pub name: String,
+    /// `value` field.
     pub value: String,
 }
 
 /// PUT /api/v1/secrets/{name} body shape. Name comes from the URL.
 #[derive(Debug, Deserialize)]
 pub struct PutBody {
+    /// `value` field.
     pub value: String,
 }
 
@@ -64,9 +68,13 @@ pub struct PutBody {
 /// is small + stable for the dashboard.
 #[derive(Debug, Serialize)]
 pub struct SecretListEntry {
+    /// `name` field.
     pub name: String,
+    /// `created_at` field.
     pub created_at: String,
+    /// `updated_at` field.
     pub updated_at: String,
+    /// `created_by` field.
     pub created_by: Option<String>,
 }
 
@@ -81,6 +89,7 @@ impl From<SecretMeta> for SecretListEntry {
     }
 }
 
+/// `json_err`.
 fn json_err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, JsonResp(json!({ "error": msg.into() }))).into_response()
 }
@@ -137,6 +146,7 @@ fn map_secrets_err(e: SecretsError) -> Response {
     }
 }
 
+/// `POST` handler for secret.
 async fn create_secret(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<CreateBody>,
@@ -155,6 +165,7 @@ async fn create_secret(
     }
 }
 
+/// `PUT` handler for secret.
 async fn put_secret(
     State(handles): State<Arc<ControllerHandles>>,
     Path(name): Path<String>,
@@ -170,6 +181,7 @@ async fn put_secret(
     }
 }
 
+/// `GET` handler for secrets.
 async fn list_secrets(State(handles): State<Arc<ControllerHandles>>) -> Response {
     match handles.secrets.list().await {
         Ok(metas) => {
@@ -180,6 +192,7 @@ async fn list_secrets(State(handles): State<Arc<ControllerHandles>>) -> Response
     }
 }
 
+/// `DELETE` handler for secret.
 async fn delete_secret(
     State(handles): State<Arc<ControllerHandles>>,
     Path(name): Path<String>,

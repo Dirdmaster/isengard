@@ -35,7 +35,7 @@ async fn updater_lifecycle_against_real_docker() {
     plugin.start(&ctx).await.expect("start should succeed");
 
     // Cycle interval is 30s. Test would be too slow waiting for the natural
-    // tick. Instead, just verify the plugin lifecycles cleanly across
+    // tick. Instead, verify the plugin lifecycles cleanly across
     // start/stop without waiting for a tick.
     tokio::time::sleep(Duration::from_millis(200)).await;
 

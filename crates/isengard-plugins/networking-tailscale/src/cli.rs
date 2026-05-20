@@ -1,11 +1,20 @@
-//! Wrappers around `tokio::process::Command::new("tailscale")`.
-//! Plan B 8f-1 covers `ensure_present` and `status`. `expose`-side wrappers
-//! (`serve_https`, `funnel_on/off`, `fetch_cert`) land in PB-T16.
+//! Thin async wrappers around `tailscale` subprocess invocations.
+//!
+//! Every function shells out via `tokio::process::Command` and turns
+//! non-zero exits into [`CoreError::Other`] with stderr appended. The
+//! adapter never parses tailscale's human-readable output: it asks for
+//! `--json` (status) or trusts the exit code (serve, funnel, cert).
 
 use isengard_core::error::{CoreError, Result};
 use serde::Deserialize;
 use tokio::process::Command;
 
+/// Verifies the `tailscale` binary is on `PATH`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] with an install link when `tailscale`
+/// isn't found.
 pub fn ensure_present() -> Result<()> {
     if which::which("tailscale").is_err() {
         return Err(CoreError::Other(
@@ -15,14 +24,31 @@ pub fn ensure_present() -> Result<()> {
     Ok(())
 }
 
+/// Decoded subset of `tailscale status --json`.
+///
+/// Only the fields the adapter needs to decide "is the tailnet up?".
 #[derive(Debug, Deserialize)]
 pub struct TailscaleStatus {
+    /// Tailscale's backend state machine label. `Running` means the
+    /// daemon is fully up and routing.
     #[serde(rename = "BackendState")]
     pub backend_state: String,
+    /// Convenience flag set by [`status`] when `backend_state ==
+    /// "Running"`. Not present in the JSON itself.
     #[serde(default)]
     pub online: bool,
 }
 
+/// Runs `tailscale status --json` and parses the result.
+///
+/// Post-processes the parsed struct: sets `online = true` when
+/// `backend_state == "Running"`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] when the subprocess fails to launch,
+/// exits non-zero, or returns JSON the [`TailscaleStatus`] decoder
+/// rejects.
 pub async fn status() -> Result<TailscaleStatus> {
     let out = Command::new("tailscale")
         .args(["status", "--json"])
@@ -41,13 +67,20 @@ pub async fn status() -> Result<TailscaleStatus> {
     let mut status: TailscaleStatus = serde_json::from_slice(&out.stdout)
         .map_err(|e| CoreError::Other(format!("parsing tailscale status JSON: {e}")))?;
 
-    // BackendState is "Running" when the tailnet is up.
     status.online = status.backend_state == "Running";
 
     Ok(status)
 }
 
-/// Run `tailscale serve --bg --https=443 --set-path=/ http://localhost:<local_port>`.
+/// Runs `tailscale serve --bg --https=443 --set-path=/ http://localhost:<local_port>`.
+///
+/// Wires the tailnet's port 443 to the local listener. The adapter calls
+/// this once per `expose`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] when the subprocess fails to launch or
+/// exits non-zero.
 pub async fn serve_https(local_port: u16) -> Result<()> {
     let out = Command::new("tailscale")
         .args([
@@ -70,6 +103,16 @@ pub async fn serve_https(local_port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Tears down the serve config on port 443 (path `/`).
+///
+/// See the limitation note on
+/// [`TailscaleAdapter::unexpose`](crate::TailscaleAdapter::unexpose) for
+/// why this is global per port.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] when the subprocess fails or exits
+/// non-zero.
 pub async fn serve_off() -> Result<()> {
     let out = Command::new("tailscale")
         .args(["serve", "--https=443", "--set-path=/", "off"])
@@ -86,6 +129,16 @@ pub async fn serve_off() -> Result<()> {
     Ok(())
 }
 
+/// Flips `tailscale funnel` on for port 443.
+///
+/// Makes the hostname reachable from the public internet rather than
+/// only from the tailnet. The adapter calls this when
+/// `adapter_specific.funnel == true`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] when the subprocess fails or exits
+/// non-zero (e.g. the tailnet's ACL forbids funnel).
 pub async fn funnel_on() -> Result<()> {
     let out = Command::new("tailscale")
         .args(["funnel", "--bg", "--https=443", "on"])
@@ -102,8 +155,12 @@ pub async fn funnel_on() -> Result<()> {
     Ok(())
 }
 
+/// Flips `tailscale funnel` off for port 443. Best-effort.
+///
+/// Idempotent: turning funnel off when it was never on is allowed and
+/// any error is swallowed. The caller (typically `unexpose`) never
+/// needs to know whether funnel was active.
 pub async fn funnel_off() -> Result<()> {
-    // Best-effort; ignore failure (idempotent off-call).
     let _ = Command::new("tailscale")
         .args(["funnel", "--https=443", "off"])
         .output()
@@ -111,9 +168,22 @@ pub async fn funnel_off() -> Result<()> {
     Ok(())
 }
 
-/// Run `tailscale cert <hostname>` from a temp dir; returns (cert_pem, key_pem).
-/// Validates `hostname` against a path-traversal-safe charset before
-/// interpolating into the temp path.
+/// Runs `tailscale cert <hostname>` and returns the issued PEM material.
+///
+/// Returns `(cert_pem, key_pem)` read from `<tmpdir>/<hostname>.crt` and
+/// `<tmpdir>/<hostname>.key`. `hostname` is validated against a DNS-label
+/// charset before being interpolated into the temp path.
+///
+/// File reads use `tokio::fs` so the call doesn't block the agent's
+/// runtime. The cert is small (a few KB) but the runtime is shared with
+/// the proxy's request hot path.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] when `hostname` contains
+/// path-traversal characters or non-DNS-label bytes, when the
+/// subprocess fails or exits non-zero, or when the resulting PEM files
+/// can't be read.
 pub async fn fetch_cert(hostname: &str) -> Result<(String, String)> {
     validate_hostname(hostname)?;
     let tmp = tempfile::tempdir().map_err(|e| CoreError::Other(format!("tempdir: {e}")))?;
@@ -132,9 +202,6 @@ pub async fn fetch_cert(hostname: &str) -> Result<(String, String)> {
         )));
     }
 
-    // Async fs reads — never block the executor on disk IO. The cert is
-    // small (a few KB) but we're inside the agent's tokio runtime alongside
-    // the proxy's request hot path.
     let cert = tokio::fs::read_to_string(tmp.path().join(format!("{hostname}.crt")))
         .await
         .map_err(|e| CoreError::Other(format!("reading cert: {e}")))?;
@@ -144,8 +211,17 @@ pub async fn fetch_cert(hostname: &str) -> Result<(String, String)> {
     Ok((cert, key))
 }
 
-/// Reject hostnames that would escape the temp dir or break the
-/// `tailscale cert` invocation. Allows DNS labels (alnum, dot, hyphen).
+/// Rejects hostnames that would escape the temp dir or break the
+/// `tailscale cert` invocation.
+///
+/// Allows DNS labels: ASCII alphanumerics, `.`, and `-`. Refuses
+/// empty input, slashes, backslashes, and `..`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Other`] when the hostname is empty, contains a
+/// path-traversal character, or contains any byte outside the DNS-label
+/// alphabet.
 fn validate_hostname(hostname: &str) -> Result<()> {
     if hostname.is_empty() {
         return Err(CoreError::Other("hostname is empty".into()));

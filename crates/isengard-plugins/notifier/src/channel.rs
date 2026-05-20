@@ -1,7 +1,11 @@
-//! Channel abstraction for the notifier. Each channel decides which event
-//! kinds it wants and how to send them. Shared `format_event` produces the
-//! plain-text message body all channels send. `RateLimited<C>` wraps any
-//! channel with a token-bucket limiter + overflow batching.
+//! Channel abstraction and shared rendering for the notifier.
+//!
+//! Each channel declares which event kinds it wants and how to send a
+//! formatted event. [`format_event`] produces the plain-text body every
+//! channel reuses. [`RateLimited`] wraps any channel with a token-bucket
+//! limiter plus overflow batching: when the bucket runs dry, events
+//! queue locally and flush as one `notifier.batch` event on the next
+//! allowed send.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -10,27 +14,41 @@ use async_trait::async_trait;
 use isengard_core::Event;
 use tracing::warn;
 
+/// One sink the notifier can fan events into.
+///
+/// Implementations decide their filter (`matches_kind`) and their send
+/// path. Errors bubbled out of `send` are logged at warn by the
+/// dispatch loop and never break the loop.
 #[async_trait]
 pub trait NotifyChannel: Send + Sync {
+    /// Stable channel name surfaced in logs.
     fn name(&self) -> &'static str;
+    /// Returns true when this channel wants `kind`.
     fn matches_kind(&self, kind: &str) -> bool;
+    /// Renders and sends `event`. May log internally; the caller still
+    /// expects a `Result`.
     async fn send(&self, event: &Event) -> anyhow::Result<()>;
 }
 
-/// One button on an interactive message (Telegram inline keyboard, Discord
-/// component button in 9g). The exact wire serialization is per-channel; this
-/// is the channel-agnostic shape consumers build.
+/// One button on an interactive message.
 ///
-/// `text` is what the user sees; `callback_data` is opaque payload echoed
-/// back when the button is clicked. Telegram caps `callback_data` at 64
-/// bytes; keep it short.
+/// Channel-agnostic shape: Telegram serializes this as an inline
+/// keyboard cell, Discord as a `Button` component in an action row.
+/// `text` is what the user sees; `callback_data` is opaque payload
+/// echoed back when the button is clicked. Telegram caps
+/// `callback_data` at 64 bytes; Discord caps `custom_id` at 100.
+/// Neither limit is enforced here, so keep payloads short at the
+/// call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineButton {
+    /// User-visible button label.
     pub text: String,
+    /// Opaque payload the channel echoes back on click.
     pub callback_data: String,
 }
 
 impl InlineButton {
+    /// Builds a button from any `Into<String>` pair.
     pub fn new(text: impl Into<String>, callback_data: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -39,10 +57,12 @@ impl InlineButton {
     }
 }
 
-/// Blanket: an `Arc`-shared channel is itself a `NotifyChannel`. Lets the
-/// notifier hold the same instance both directly (for typed methods, e.g.
-/// `TelegramChannel::send_inline_keyboard`) and inside a `RateLimited<...>`
-/// wrapper for the existing one-way fan-out path.
+/// Blanket impl: an `Arc`-shared channel is itself a [`NotifyChannel`].
+///
+/// Lets the notifier hold the same Telegram or Discord instance both
+/// directly (for typed methods like
+/// [`crate::telegram::TelegramChannel::send_inline_keyboard`]) and
+/// behind a [`RateLimited`] wrapper for the fan-out loop.
 #[async_trait]
 impl<C: NotifyChannel + ?Sized> NotifyChannel for Arc<C> {
     fn name(&self) -> &'static str {
@@ -56,7 +76,11 @@ impl<C: NotifyChannel + ?Sized> NotifyChannel for Arc<C> {
     }
 }
 
-/// Plain-text format used by every channel. Multi-line, blank-line free.
+/// Renders an [`Event`] to multi-line plain text shared across channels.
+///
+/// Output begins with `[isengard] <kind>` then appends a line per
+/// populated field (container, image, digest delta, error, summary).
+/// Blank lines are dropped.
 pub fn format_event(event: &Event) -> String {
     let mut lines = vec![format!("[isengard] {}", event.kind)];
     if let Some(c) = &event.container_name {
@@ -80,16 +104,27 @@ pub fn format_event(event: &Event) -> String {
     lines.join("\n")
 }
 
+/// Default token refill rate when the operator doesn't configure one.
 const DEFAULT_TOKENS_PER_MINUTE: f64 = 10.0;
 
+/// Token bucket backing [`RateLimited`].
+///
+/// Refill rate is `tokens_per_minute / 60` per second. Capacity equals
+/// the configured `tokens_per_minute`. [`try_acquire`] returns true and
+/// debits a token when one is available, false otherwise.
 struct Bucket {
+    /// Tokens currently available.
     tokens: f64,
+    /// Maximum tokens this bucket holds.
     capacity: f64,
+    /// Tokens added per real-time second.
     refill_per_sec: f64,
+    /// Wall-clock instant of the last refill pass.
     last_refill: Instant,
 }
 
 impl Bucket {
+    /// Creates a full bucket sized by `tokens_per_minute`.
     fn new(tokens_per_minute: f64) -> Self {
         Self {
             tokens: tokens_per_minute,
@@ -99,6 +134,8 @@ impl Bucket {
         }
     }
 
+    /// Tops the bucket up based on elapsed real time, capped at
+    /// [`Self::capacity`].
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
@@ -106,7 +143,9 @@ impl Bucket {
         self.last_refill = now;
     }
 
-    /// Returns true if a token was available + consumed.
+    /// Returns true and consumes a token when one is available.
+    ///
+    /// Refills first, then checks.
     fn try_acquire(&mut self) -> bool {
         self.refill();
         if self.tokens >= 1.0 {
@@ -118,16 +157,28 @@ impl Bucket {
     }
 }
 
-/// Wraps any NotifyChannel with a token-bucket limiter. Overflow events
-/// queue locally; on the next send attempt where tokens are available, the
-/// queue drains as one batched message.
+/// Wraps a [`NotifyChannel`] with a token-bucket limiter and overflow
+/// batching.
+///
+/// When tokens are available, `send` passes through. When the bucket
+/// runs dry the event queues locally; the next allowed send flushes
+/// the queue as one `notifier.batch` summary then delivers the new
+/// event. Operators see one batched message instead of N missed
+/// notifications.
 pub struct RateLimited<C: NotifyChannel> {
+    /// Underlying channel.
     inner: C,
+    /// Token bucket guarding the channel.
     bucket: Mutex<Bucket>,
+    /// Events held over until tokens free up.
     overflow: Mutex<Vec<Event>>,
 }
 
 impl<C: NotifyChannel> RateLimited<C> {
+    /// Builds a limiter around `inner` with the supplied refill rate.
+    ///
+    /// `tokens_per_minute <= 0.0` falls back to
+    /// [`DEFAULT_TOKENS_PER_MINUTE`].
     pub fn new(inner: C, tokens_per_minute: f64) -> Self {
         let tpm = if tokens_per_minute > 0.0 {
             tokens_per_minute
@@ -141,14 +192,17 @@ impl<C: NotifyChannel> RateLimited<C> {
         }
     }
 
+    /// Attempts to debit one token from the bucket.
     fn try_acquire(&self) -> bool {
         self.bucket.lock().unwrap().try_acquire()
     }
 
+    /// Pushes one event onto the overflow queue.
     fn queue(&self, event: Event) {
         self.overflow.lock().unwrap().push(event);
     }
 
+    /// Drains the overflow queue and returns its contents.
     fn take_queue(&self) -> Vec<Event> {
         std::mem::take(&mut *self.overflow.lock().unwrap())
     }
@@ -166,7 +220,6 @@ impl<C: NotifyChannel> NotifyChannel for RateLimited<C> {
 
     async fn send(&self, event: &Event) -> anyhow::Result<()> {
         if self.try_acquire() {
-            // Token available: send this event AND flush any queued overflow as a batched message.
             let queue = self.take_queue();
             if !queue.is_empty() {
                 let batched = batch_event(&queue);
@@ -176,13 +229,17 @@ impl<C: NotifyChannel> NotifyChannel for RateLimited<C> {
             }
             self.inner.send(event).await
         } else {
-            // No token: queue this event, return Ok (caller doesn't need to know it was deferred).
             self.queue(event.clone());
             Ok(())
         }
     }
 }
 
+/// Collapses a queued batch of events into one synthetic
+/// `notifier.batch` event.
+///
+/// The summary leads with the count, then one `- <kind> (<container>)`
+/// line per event.
 fn batch_event(events: &[Event]) -> Event {
     let mut summary_lines = vec![format!("{} events in last minute:", events.len())];
     for e in events {
@@ -235,18 +292,17 @@ mod tests {
 
     #[test]
     fn bucket_refills_over_time() {
-        let mut b = Bucket::new(60.0); // 1 token / sec
+        let mut b = Bucket::new(60.0);
         for _ in 0..60 {
             assert!(b.try_acquire());
         }
         assert!(!b.try_acquire());
-        // Force time forward by mutating last_refill
         b.last_refill = Instant::now() - std::time::Duration::from_secs(2);
         assert!(b.try_acquire());
         assert!(b.try_acquire());
     }
 
-    /// Test channel that records calls.
+    /// Test channel that records every event it sees.
     struct Recorder {
         sent: Mutex<Vec<Event>>,
     }
@@ -287,27 +343,18 @@ mod tests {
     #[tokio::test]
     async fn rate_limited_queues_then_batches() {
         let rec = Recorder::new();
-        let limiter = RateLimited::new(rec.clone(), 2.0); // 2/min — basically nothing left after 2
-        // First 2 go through, next 5 queue.
+        let limiter = RateLimited::new(rec.clone(), 2.0);
         for i in 0..7 {
             limiter.send(&ev(&format!("k{i}"))).await.unwrap();
         }
-        // After 7 sends with capacity 2, only the 2 initial + nothing else (queue grew, no token to flush).
         let snap = rec.snapshot();
         assert_eq!(snap.len(), 2);
-        // Force a refill burst by sleeping (1 second at 2/min = ~0.033 token, not enough).
-        // Instead: poke the bucket directly via a fresh acquire after manipulating time.
-        // Simpler assertion: queue length is now 5.
-        // Internal state is private; assert behaviour via another send after refill.
-        // Mutate: set last_refill backward to allow 1 token + flush.
         {
             let mut b = limiter.bucket.lock().unwrap();
             b.last_refill = Instant::now() - std::time::Duration::from_secs(60);
         }
-        // One more send should trigger the flush of overflow queue + this event.
         limiter.send(&ev("trigger")).await.unwrap();
         let snap = rec.snapshot();
-        // Expect: 2 initial + 1 batched + 1 "trigger" = 4 entries on recorder.
         assert_eq!(snap.len(), 4);
         let batched = &snap[2];
         assert_eq!(batched.kind, "notifier.batch");

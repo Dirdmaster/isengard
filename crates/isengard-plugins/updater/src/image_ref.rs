@@ -17,10 +17,18 @@
 
 use std::fmt;
 
+/// Parsed Docker image reference.
+///
+/// Three pieces: registry host, repository (org/name), tag.
+/// Digest-pinned references aren't represented here: those never
+/// need updates and the parser returns `None` for them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRef {
+    /// Registry host (e.g. `docker.io`, `ghcr.io`, `localhost:5000`).
     pub registry: String,
+    /// Repository path (e.g. `library/nginx`, `foo/bar`).
     pub repository: String,
+    /// Tag (`latest` when unspecified).
     pub tag: String,
 }
 

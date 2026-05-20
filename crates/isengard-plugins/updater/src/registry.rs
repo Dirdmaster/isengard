@@ -34,6 +34,7 @@ const MAX_TAGS_LIST_PAGES: usize = 5;
 /// Hard cap on the number of tags returned across all pages.
 const MAX_TAGS_LIST_ENTRIES: usize = 5000;
 
+/// `Accept` header value the client sends on every manifest request.
 const ACCEPT_MANIFESTS: &str = concat!(
     "application/vnd.oci.image.index.v1+json,",
     "application/vnd.oci.image.manifest.v1+json,",
@@ -41,12 +42,24 @@ const ACCEPT_MANIFESTS: &str = concat!(
     "application/vnd.docker.distribution.manifest.v2+json"
 );
 
+/// Live registry client.
+///
+/// Holds the reqwest client and the loaded [`DockerConfig`] for
+/// per-host auth lookups.
 pub struct RegistryClient {
+    /// HTTP client tagged with the agent user agent.
     http: Client,
+    /// Per-host credential cache.
     config: DockerConfig,
 }
 
 impl RegistryClient {
+    /// Builds a client. Adopts the supplied [`DockerConfig`] for
+    /// every subsequent auth challenge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reqwest builder fails.
     pub fn new(config: DockerConfig) -> anyhow::Result<Self> {
         let http = Client::builder()
             .user_agent(concat!("isengard/", env!("CARGO_PKG_VERSION")))
@@ -55,7 +68,15 @@ impl RegistryClient {
         Ok(Self { http, config })
     }
 
-    /// Returns the remote manifest digest, or `None` if the tag doesn't exist.
+    /// Returns the remote manifest digest, or `None` if the tag
+    /// doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HEAD or token-fetch HTTP calls
+    /// fail, when the registry returns an unexpected status, when
+    /// `WWW-Authenticate` is missing on a 401, or when the auth
+    /// scheme is unsupported.
     pub async fn head_digest(&self, image: &ImageRef) -> anyhow::Result<Option<String>> {
         self.head_digest_with_scheme(image, "https").await
     }
@@ -312,6 +333,17 @@ impl RegistryClient {
         }
     }
 
+    /// Exchanges a `Bearer` challenge for a token.
+    ///
+    /// GETs `realm` with `service` and `scope` query params (when
+    /// supplied), basic-auths with `creds` (when supplied), and
+    /// returns the response's `token` (or `access_token`) field.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the GET fails, the response is
+    /// non-2xx, the body fails to decode, or neither field is
+    /// present.
     async fn fetch_bearer_token(
         &self,
         challenge: &BearerChallenge,
@@ -355,9 +387,11 @@ impl RegistryClient {
 /// Registry response shape for `/v2/<repo>/tags/list`.
 #[derive(Debug, Deserialize)]
 struct TagsListResponse {
+    /// Repository name echoed in the response.
     #[serde(default)]
     #[allow(dead_code)]
     name: Option<String>,
+    /// Tag list returned in this page.
     #[serde(default)]
     tags: Vec<String>,
 }
@@ -405,21 +439,35 @@ fn absolute_link_url(initial: &str, link: &str) -> String {
     }
 }
 
+/// Decoded shape of a bearer token endpoint response.
+///
+/// Some registries return `token`, some `access_token`. The
+/// fetcher accepts either.
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
+    /// Token field used by Docker Hub and most v2 registries.
     #[serde(default)]
     token: Option<String>,
+    /// Token field used by OAuth-style registries.
     #[serde(default)]
     access_token: Option<String>,
 }
 
+/// Parsed `WWW-Authenticate: Bearer ...` challenge.
 #[derive(Debug, PartialEq, Eq)]
 struct BearerChallenge {
+    /// Token endpoint URL.
     realm: String,
+    /// Optional service hint passed back as a query param.
     service: Option<String>,
+    /// Optional scope hint passed back as a query param.
     scope: Option<String>,
 }
 
+/// Parses a `WWW-Authenticate: Bearer ...` header.
+///
+/// Returns `None` when the scheme isn't `Bearer` or when no
+/// `realm` field is present.
 fn parse_bearer(www_auth: &str) -> Option<BearerChallenge> {
     let trimmed = www_auth.trim();
     if !trimmed.to_ascii_lowercase().starts_with("bearer ") {
@@ -497,6 +545,7 @@ fn split_kv(input: &str) -> Vec<(&str, &str)> {
     out
 }
 
+/// Pulls the `Docker-Content-Digest` value out of a header map.
 fn extract_digest(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("docker-content-digest")

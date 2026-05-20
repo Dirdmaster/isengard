@@ -166,7 +166,7 @@ async fn snapshot_truncates_wal() {
     if wal_path.exists() {
         let len = std::fs::metadata(&wal_path).unwrap().len();
         assert!(
-            len <= 32, // a fully-truncated WAL has just a tiny header at most
+            len <= 32, // a fully-truncated WAL has only a tiny header at most
             "WAL should be truncated after snapshot, got {len} bytes"
         );
     }

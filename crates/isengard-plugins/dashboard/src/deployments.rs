@@ -17,10 +17,13 @@ use isengard_storage::stack::StackId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
+/// ListQuery.
 pub struct ListQuery {
+    /// `stack_id` field.
     pub stack_id: Option<i64>,
     /// `"active"` (default) or `"history"`.
     pub state: Option<String>,
+    /// `limit` field.
     pub limit: Option<u32>,
     /// When set, returns deployments belonging to
     /// the given group. Mutually exclusive with `stack_id` (group filter
@@ -29,24 +32,43 @@ pub struct ListQuery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// DeploymentDto.
 pub struct DeploymentDto {
+    /// `id` field.
     pub id: String,
+    /// `host_id` field.
     pub host_id: String,
+    /// `stack_id` field.
     pub stack_id: i64,
+    /// `service_name` field.
     pub service_name: String,
+    /// `strategy` field.
     pub strategy: String,
+    /// `state` field.
     pub state: String,
+    /// `blue_container` field.
     pub blue_container: Option<String>,
+    /// `green_container` field.
     pub green_container: Option<String>,
+    /// `blue_digest` field.
     pub blue_digest: String,
+    /// `green_digest` field.
     pub green_digest: String,
+    /// `public_hostname` field.
     pub public_hostname: Option<String>,
+    /// `healthcheck_passed_at` field.
     pub healthcheck_passed_at: Option<String>,
+    /// `switched_at` field.
     pub switched_at: Option<String>,
+    /// `drained_at` field.
     pub drained_at: Option<String>,
+    /// `finished_at` field.
     pub finished_at: Option<String>,
+    /// `error` field.
     pub error: Option<String>,
+    /// `created_at` field.
     pub created_at: String,
+    /// `updated_at` field.
     pub updated_at: String,
     /// Set when this deployment is part of a multi-host
     /// rolling group. `None` for single-host (orchestrator-bypass) deploys.
@@ -100,7 +122,9 @@ impl From<Deployment> for DeploymentDto {
 /// `AbortDeployment` message was successfully delivered to the host.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AbortResponse {
+    /// `noop` field.
     pub noop: bool,
+    /// `reason` field.
     pub reason: Option<String>,
 }
 
@@ -110,21 +134,29 @@ pub struct AbortResponse {
 /// HTTP-routed, otherwise in-place).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServiceDeployStrategyDto {
+    /// `service_id` field.
     pub service_id: i64,
+    /// `host_id` field.
     pub host_id: String,
+    /// `stack_id` field.
     pub stack_id: Option<i64>,
+    /// `stack_name` field.
     pub stack_name: Option<String>,
+    /// `service_name` field.
     pub service_name: String,
+    /// `override_value` field.
     pub override_value: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+/// PutOverrideBody.
 pub struct PutOverrideBody {
     /// One of `"auto"`, `"blue-green"`, `"in-place"`. `"auto"` (or `null`)
     /// clears the override.
     pub override_value: Option<String>,
 }
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/deployments", get(list_deployments))
@@ -134,6 +166,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         .with_state(handles)
 }
 
+/// `GET` handler for deployments.
 async fn list_deployments(
     State(handles): State<Arc<ControllerHandles>>,
     Query(q): Query<ListQuery>,

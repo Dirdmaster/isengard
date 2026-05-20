@@ -42,13 +42,17 @@ const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 /// by persisting an approval row + emitting `update.pending_approval`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
+    /// Skip this candidate and emit `update.policy_skipped`.
     Skip(SkipReason),
     /// Outside the resolved policy's maintenance window.
     /// `next_window` is when the next firing is expected, in UTC. Used by
     /// the cycle to populate the `update.deferred` event payload.
     Deferred {
+        /// Next maintenance-window firing time. `None` when the cron
+        /// has no future occurrence.
         next_window: Option<DateTime<Utc>>,
     },
+    /// Fall through to the existing recreate / dispatch path.
     Proceed,
     /// `gate=Approval` resolved. The cycle persists this body via the
     /// `ApprovalStore` (idempotently) and emits `update.pending_approval`.
@@ -59,12 +63,16 @@ pub enum PolicyDecision {
 /// `update.policy_skipped` event payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
+    /// `strategy = Pinned`.
     Pinned,
+    /// `paused_until` is in the future.
     Paused {
+        /// Wall-clock time when the pause expires.
         until: DateTime<Utc>,
     },
     /// The configured `external_gate` returned `reject`.
     GateRejected {
+        /// Reason text supplied by the gate, when any.
         reason: Option<String>,
     },
 }
@@ -86,10 +94,15 @@ impl SkipReason {
 /// Convert to a borrowed `PolicyContext<'_>` via [`OwnedPolicyContext::as_ref`].
 #[derive(Debug, Clone, Default)]
 pub struct OwnedPolicyContext {
+    /// Fleet name for the host.
     pub fleet: Option<String>,
+    /// Compose project / stack name.
     pub stack: Option<String>,
+    /// Compose service name.
     pub service: Option<String>,
+    /// Host id rendered as hex.
     pub host_id_hex: Option<String>,
+    /// Container name (final fallback for the resolver).
     pub container_name: Option<String>,
 }
 
@@ -163,8 +176,11 @@ pub fn project_for_resolver(
 /// the registry probe runs); `Some` once the cycle has both digests in hand.
 #[derive(Debug, Clone, Copy)]
 pub struct ApprovalContext<'a> {
+    /// Image reference (with tag) the candidate is running.
     pub image: &'a str,
+    /// Local digest already running on the host.
     pub current_digest: &'a str,
+    /// Remote digest the registry returned.
     pub proposed_digest: &'a str,
 }
 

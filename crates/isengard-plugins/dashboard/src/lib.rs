@@ -1,8 +1,6 @@
-//! Isengard `dashboard` plugin (controller-side).
-//!
-//! Embeds a Nuxt 3 SPA bundle and serves it on a configurable HTTP port via
-//! axum. v1 ships scaffold + bundle pipeline; API + WebSocket land in 5b.
-
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(clippy::result_large_err)]
 
 pub mod api;
@@ -38,25 +36,42 @@ use serde::Deserialize;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// Stable plugin name surfaced to the controller and host registry.
 const PLUGIN_NAME: &str = "dashboard";
+
+/// Default bind address.
+///
+/// The controller's mTLS proxy fronts this listener; binding `0.0.0.0`
+/// works because external traffic terminates upstream.
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:9418";
 
+/// `rust_embed`-backed handle to the compiled Nuxt SPA bundle.
+///
+/// The Nuxt build runs at compile time and the resulting files are
+/// embedded into the controller binary.
 #[derive(RustEmbed)]
 #[folder = "web/.output/public/"]
 struct WebAssets;
 
+/// Parsed `[plugins.dashboard]` config block.
 #[derive(Debug, Deserialize, Default)]
 struct DashboardConfig {
+    /// Override bind address. Defaults to [`DEFAULT_BIND_ADDR`].
     #[serde(default)]
     bind_addr: Option<String>,
 }
 
+/// Controller-side dashboard plugin instance.
 pub struct Dashboard {
+    /// Resolved bind address.
     bind_addr: SocketAddr,
+    /// Join handle for the axum server task.
     server_task: Option<JoinHandle<()>>,
 }
 
 impl Dashboard {
+    /// Builds an empty plugin. The server starts in
+    /// [`Plugin::start`].
     pub fn new() -> Self {
         Self {
             bind_addr: DEFAULT_BIND_ADDR.parse().unwrap(),
@@ -71,6 +86,8 @@ impl Default for Dashboard {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::InitFailed`] for the
+/// dashboard plugin.
 fn init_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::InitFailed {
         name: PLUGIN_NAME.into(),
@@ -78,6 +95,8 @@ fn init_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::StartFailed`] for the
+/// dashboard plugin.
 fn start_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::StartFailed {
         name: PLUGIN_NAME.into(),
@@ -85,6 +104,11 @@ fn start_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Builds the axum router that serves the SPA, REST API, and
+/// WebSocket endpoints.
+///
+/// `handles = None` mounts only the SPA routes; the API and WS
+/// routes need [`ControllerHandles`].
 fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
     let mut router = Router::new()
         .route("/_nuxt/{*path}", get(serve_asset_nuxt))
@@ -121,26 +145,34 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
     router.fallback(get(fallback_handler))
 }
 
+/// Serves the SPA entry point.
 async fn serve_index() -> Response {
     serve_embedded("index.html").await
 }
 
+/// Serves a `_nuxt/<path>` asset from the embedded bundle.
 async fn serve_asset_nuxt(Path(path): Path<String>) -> Response {
-    // Nuxt assets live under _nuxt/ in the bundle. Reconstruct path.
     let asset_path = format!("_nuxt/{path}");
     serve_embedded(&asset_path).await
 }
 
+/// Fallback handler for unmatched routes.
+///
+/// Tries the literal path first (favicon, robots.txt, etc.) then
+/// falls back to `index.html` so Vue Router handles client-side
+/// navigation.
 async fn fallback_handler(uri: Uri) -> Response {
-    // Try literal path first (favicon, robots.txt, etc), then SPA fallback.
     let path = uri.path().trim_start_matches('/');
     if !path.is_empty() && WebAssets::get(path).is_some() {
         return serve_embedded(path).await;
     }
-    // SPA fallback: any unknown route serves index.html so client-side routing handles it.
     serve_embedded("index.html").await
 }
 
+/// Serves one file from the embedded bundle.
+///
+/// Sets `Content-Type` from the extension and a `Cache-Control`
+/// header chosen by [`cache_control_for`].
 async fn serve_embedded(path: &str) -> Response {
     match WebAssets::get(path) {
         Some(content) => {
@@ -159,6 +191,11 @@ async fn serve_embedded(path: &str) -> Response {
     }
 }
 
+/// Picks a `Cache-Control` header value for an embedded asset.
+///
+/// `_nuxt/*` files carry content hashes in their names, so they
+/// can be cached forever. Everything else (index.html, favicon)
+/// uses `no-cache` so SPA upgrades land immediately.
 fn cache_control_for(path: &str) -> &'static str {
     if path.starts_with("_nuxt/") {
         "public, max-age=31536000, immutable"

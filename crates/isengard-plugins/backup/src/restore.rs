@@ -1,24 +1,4 @@
-//! Restore-from-destination flow.
-//!
-//! Pipeline: download encrypted blob -> decrypt with passphrase -> validate
-//! the bytes are a real SQLite database -> rename current DB to a `.bak.<ts>`
-//! sibling -> move the restored bytes into the original path -> open a fresh
-//! `Inventory` against the new file (which re-runs migrations forward over
-//! the snapshot's schema). Each step is a recorded transition on the
-//! `restore_runs` row created at entry; failures land the row in `failed`
-//! state and (best-effort) revert the swap so the controller is never left
-//! pointing at a half-replaced file.
-//!
-//! Two ordered renames give us atomicity:
-//!
-//! ```text
-//! mv  isengard.db       isengard.db.bak.<utc>
-//! mv  restored-tmp.db   isengard.db
-//! ```
-//!
-//! Either both succeed or we revert by `mv isengard.db.bak.<utc> isengard.db`.
-//! We NEVER delete the previous DB silently; the `.bak.<ts>` stays on disk so
-//! an operator can manually undo even after a successful restore.
+#![doc = include_str!("../docs/restore.md")]
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -37,59 +17,70 @@ use crate::encrypt::decrypt_with_passphrase;
 /// Result of a successful restore attempt.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RestoreOutcome {
+    /// `restore_runs` row id.
     pub run_id: i64,
+    /// Object name on the destination that was restored.
     pub source_object: String,
+    /// Wall-clock instant the swap completed (or the dry-run
+    /// finished validating).
     pub restored_at: DateTime<Utc>,
-    /// Path the previous DB was renamed to before the new file moved into
-    /// place. Empty for `dry_run` (no swap was performed).
+    /// Path the previous DB was renamed to before the new file
+    /// moved into place. Empty for `dry_run` (no swap was
+    /// performed).
     pub previous_db_backup_path: String,
-    /// Bytes written to the live `db_path`. 0 for `dry_run`.
+    /// Bytes written to the live `db_path`. `0` for `dry_run`.
     pub bytes_restored: u64,
-    /// True when the caller passed `dry_run = true`; no on-disk side effects.
+    /// `true` when the caller passed `dry_run = true`; no on-disk
+    /// side effects.
     pub dry_run: bool,
 }
 
 /// Errors raised during a restore.
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreError {
+    /// Destination download or list failed.
     #[error("destination: {0}")]
     Destination(#[from] crate::destination::DestinationError),
 
+    /// Decryption failed (wrong passphrase or corrupted blob).
     #[error("decrypt failed: invalid passphrase or corrupted blob ({0})")]
     Decrypt(crate::encrypt::EncryptError),
 
+    /// Decrypted bytes don't parse as a valid SQLite database.
     #[error("decrypted bytes do not parse as a valid SQLite database: {0}")]
     InvalidSnapshot(String),
 
+    /// Atomic swap failed at the rename step.
     #[error("atomic swap failed: {0}")]
     Swap(String),
 
+    /// Post-restore migrations failed against the new DB file.
     #[error("post-restore migrations failed: {0}")]
     Migrate(String),
 
+    /// Storage DAO failed (e.g. inserting the run row).
     #[error("storage: {0}")]
     Storage(#[from] isengard_storage::Error),
 
+    /// Filesystem IO failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Empty passphrase rejected up front.
     #[error("passphrase is empty")]
     EmptyPassphrase,
 }
 
-/// Run a full restore. See module docs for the pipeline.
+/// Runs a full restore from `dest`.
 ///
-/// On dry-run, the function performs the download / decrypt / validate steps
-/// but skips the on-disk swap, `.bak.<ts>` rename, and migrations. The
-/// `restore_runs` row still records the dry-run outcome so the UI can report
-/// verification success.
+/// See the module-level docs for the pipeline and atomic-swap
+/// guarantees. On dry-run, performs download / decrypt / validate
+/// then returns without touching the on-disk DB.
 ///
-/// Recording a successful restore is subtle: a successful swap replaces the
-/// live DB file with the snapshot bytes, which means the `running` row we
-/// inserted on entry now lives in the renamed `.bak.<ts>` file. After the
-/// swap we open a fresh `Inventory` against the new file (this also runs
-/// `sqlx::migrate!` forward) and insert a final `success` row there. The
-/// `.bak.<ts>` file keeps its `running` row as a forensic trail.
+/// # Errors
+///
+/// Returns the [`RestoreError`] that caused the restore to fail.
+/// `restore_runs` state is written before returning.
 pub async fn restore_from_destination(
     inv: &Arc<Inventory>,
     db_path: &Path,
@@ -112,10 +103,6 @@ pub async fn restore_from_destination(
 
     match outcome {
         Ok(o) => {
-            // For dry-runs, we wrote nothing to disk: finalise the row in-place.
-            // For real restores, the live DB is now the snapshot bytes, so the
-            // `running` row is gone. Open a fresh Inventory against the new
-            // file and insert a `success` row there.
             if o.dry_run {
                 inv.finish_restore_run_success(
                     run_id,
@@ -150,14 +137,6 @@ pub async fn restore_from_destination(
         }
         Err(e) => {
             let msg = e.to_string();
-            // Best-effort: write the failure into whichever Inventory still
-            // points at the live DB. If the failure was pre-swap (most
-            // common: download / decrypt / validate / dry-run), the original
-            // DB and its `running` row are still in place, and this update
-            // simply transitions the row to `failed`. If the failure was
-            // post-swap and the rollback also failed (extremely rare), the
-            // update may apply to the snapshot's stale state; we accept that
-            // as a forensic edge case.
             if let Err(e2) = inv
                 .finish_restore_run_failed(run_id, Utc::now(), &msg)
                 .await
@@ -170,6 +149,15 @@ pub async fn restore_from_destination(
     }
 }
 
+/// Inner pipeline: download, decrypt, validate, swap.
+///
+/// Split from [`restore_from_destination`] so the outer function
+/// owns the `restore_runs` row state machine and this function owns
+/// the on-disk side effects.
+///
+/// # Errors
+///
+/// Bubbles every stage-specific [`RestoreError`].
 async fn run_inner(
     db_path: &Path,
     dest: &dyn BackupDestination,
@@ -178,14 +166,10 @@ async fn run_inner(
     dry_run: bool,
     run_id: RestoreRunId,
 ) -> Result<RestoreOutcome, RestoreError> {
-    // 1. Download the encrypted blob.
     let cipher = dest.download(object_name).await?;
 
-    // 2. Decrypt.
     let plain = decrypt_with_passphrase(&cipher, passphrase).map_err(RestoreError::Decrypt)?;
 
-    // 3. Validate: write the bytes into a temp file and try to open them as a
-    //    SQLite DB. Reject anything that fails.
     let staged = NamedTempFile::new()?;
     std::fs::write(staged.path(), &plain)?;
     validate_sqlite(staged.path()).await?;
@@ -201,38 +185,26 @@ async fn run_inner(
         });
     }
 
-    // 4. Atomic swap. Pick a unique `.bak.<ts>[-N]` path next to the original.
     let backup_path = pick_backup_path(db_path, Utc::now());
 
-    // The WAL + SHM siblings of the live path belong to the file we are
-    // about to displace. After the swap they would be applied on top of the
-    // snapshot bytes by SQLite's recovery logic, undoing the restore. We
-    // move them aside next to the .bak.<ts> so the operator still has the
-    // forensic trail, then delete the live-side siblings outright.
     let live_wal = wal_sibling(db_path);
     let live_shm = shm_sibling(db_path);
 
     if !db_path.exists() {
-        // Nothing to back up; just move the staged file into place.
         std::fs::rename(staged.path(), db_path).map_err(|e| {
             RestoreError::Swap(format!("rename staged -> live (no prior file): {e}"))
         })?;
         let _ = std::fs::remove_file(&live_wal);
         let _ = std::fs::remove_file(&live_shm);
     } else {
-        // Step 4a: rename live -> .bak.<ts>.
         std::fs::rename(db_path, &backup_path).map_err(|e| {
             RestoreError::Swap(format!("rename live -> {}: {e}", backup_path.display()))
         })?;
 
-        // Move WAL/SHM siblings to the backup path so they are not picked
-        // up by SQLite when it next opens the live path.
         let _ = std::fs::rename(&live_wal, wal_sibling(&backup_path));
         let _ = std::fs::rename(&live_shm, shm_sibling(&backup_path));
 
-        // Step 4b: rename staged -> live. If this fails, revert.
         if let Err(e) = std::fs::rename(staged.path(), db_path) {
-            // Revert: rename the backup back to its original name.
             if let Err(rev) = std::fs::rename(&backup_path, db_path) {
                 return Err(RestoreError::Swap(format!(
                     "rename staged -> live failed ({e}); revert also failed ({rev}). \
@@ -240,7 +212,6 @@ async fn run_inner(
                     backup_path.display()
                 )));
             }
-            // Best-effort: move the WAL/SHM back too.
             let _ = std::fs::rename(wal_sibling(&backup_path), &live_wal);
             let _ = std::fs::rename(shm_sibling(&backup_path), &live_shm);
             return Err(RestoreError::Swap(format!(
@@ -251,8 +222,6 @@ async fn run_inner(
 
     let bytes_restored = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
-    // 5. Migrate forward. Opening a fresh Inventory runs sqlx::migrate! which
-    //    is idempotent and forward-only.
     Inventory::open(db_path)
         .await
         .map_err(|e| RestoreError::Migrate(e.to_string()))?;
@@ -267,8 +236,13 @@ async fn run_inner(
     })
 }
 
-/// Open a temporary SQLite pool against `path` and run a trivial query to
-/// verify the bytes parse as a real database.
+/// Opens a temporary SQLite pool against `path` and runs a trivial
+/// query to verify the bytes parse as a real database.
+///
+/// # Errors
+///
+/// Returns [`RestoreError::InvalidSnapshot`] when the open, the
+/// trivial query, or the result check fails.
 async fn validate_sqlite(path: &Path) -> Result<(), RestoreError> {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .map_err(|e| RestoreError::InvalidSnapshot(e.to_string()))?
@@ -290,8 +264,11 @@ async fn validate_sqlite(path: &Path) -> Result<(), RestoreError> {
     Ok(())
 }
 
-/// Pick a unique backup path next to `db_path`. If `<db>.bak.<ts>` already
-/// exists (rare; manual operator action or rapid restores), append `-N`.
+/// Picks a unique backup path next to `db_path`.
+///
+/// Names the path `<db>.bak.<ts>`. When that collides (rare; manual
+/// operator action or rapid restores) appends `-N`, with a hard
+/// ceiling at 1000 attempts.
 fn pick_backup_path(db_path: &Path, when: DateTime<Utc>) -> PathBuf {
     let ts = when.format("%Y%m%dT%H%M%SZ").to_string();
     let base = format!("{}.bak.{}", db_path.display(), ts);
@@ -307,18 +284,19 @@ fn pick_backup_path(db_path: &Path, when: DateTime<Utc>) -> PathBuf {
         }
         n += 1;
         if n > 1000 {
-            // Hard ceiling; vanishingly unlikely to be reached.
             return PathBuf::from(format!("{base}-{n}"));
         }
     }
 }
 
+/// Returns the WAL sibling path for `db_path`.
 fn wal_sibling(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_owned();
     s.push("-wal");
     PathBuf::from(s)
 }
 
+/// Returns the SHM sibling path for `db_path`.
 fn shm_sibling(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_owned();
     s.push("-shm");
@@ -346,7 +324,6 @@ mod tests {
         let live = dir.path().join("isengard.db");
         std::fs::write(&live, b"x").unwrap();
         let when = chrono::Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
-        // Pre-create a colliding bak file.
         let bak = dir.path().join("isengard.db.bak.20260506T120000Z");
         std::fs::write(&bak, b"old").unwrap();
         let p = pick_backup_path(&live, when);

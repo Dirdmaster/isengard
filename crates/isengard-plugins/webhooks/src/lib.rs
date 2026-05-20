@@ -1,12 +1,6 @@
-//! Isengard `webhooks` plugin (controller-side).
-//!
-//! Subscribes to the controller EventBus, persists a delivery row
-//! per matching webhook, and runs a worker that POSTs queued deliveries with
-//! an HMAC-SHA256 signature. Retries with exponential backoff
-//! (30s, 1m, 5m, 30m, 2h) up to 5 attempts.
-//!
-//! See `docs/superpowers/specs/2026-05-06-phase-12a-outbound-webhooks-design.md`.
-
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(clippy::result_large_err)]
 
 use std::time::Duration;
@@ -28,32 +22,50 @@ pub mod sign;
 pub mod subscriber;
 pub mod worker;
 
+/// Stable plugin name surfaced to the controller and host registry.
 const PLUGIN_NAME: &str = "webhooks";
+
+/// Per-request HTTP timeout for outbound POSTs.
 const HTTP_TIMEOUT_SECS: u64 = 10;
+
+/// Default worker tick interval.
 const WORKER_TICK: Duration = Duration::from_secs(5);
+
+/// Default per-tick claim batch size.
 const WORKER_BATCH: i64 = 100;
 
-/// Plugin config (from controller's `plugins.<name>` JSON). All fields
-/// optional: tick + batch size are knobs operators rarely touch.
+/// Parsed `[plugins.webhooks]` config block.
+///
+/// Both knobs are optional; operators rarely override them. The
+/// defaults match [`WORKER_TICK`] and [`WORKER_BATCH`].
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WebhooksConfig {
-    /// Override the worker tick interval (seconds). Default 5.
+    /// Override the worker tick interval, in seconds.
     #[serde(default)]
     pub tick_secs: Option<u64>,
-    /// Override the per-tick claim batch size. Default 100.
+    /// Override the per-tick claim batch size.
     #[serde(default)]
     pub batch: Option<i64>,
 }
 
+/// Controller-side webhooks plugin instance.
+///
+/// Holds the resolved config and the join handles for the three
+/// spawned tasks: the general subscriber, the lifecycle subscriber,
+/// and the worker.
 pub struct Webhooks {
+    /// Resolved config from `init`.
     config: WebhooksConfig,
+    /// Join handle for [`subscriber::run`].
     subscriber_task: Option<JoinHandle<()>>,
-    /// Lifecycle-event subscriber for `deployment.*` events.
+    /// Join handle for [`lifecycle::run`].
     lifecycle_task: Option<JoinHandle<()>>,
+    /// Join handle for [`worker::run`].
     worker_task: Option<JoinHandle<()>>,
 }
 
 impl Webhooks {
+    /// Builds an empty plugin. Tasks are spawned in [`Plugin::start`].
     pub fn new() -> Self {
         Self {
             config: WebhooksConfig::default(),
@@ -70,6 +82,8 @@ impl Default for Webhooks {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::InitFailed`] for the
+/// webhooks plugin.
 fn init_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::InitFailed {
         name: PLUGIN_NAME.into(),
@@ -77,6 +91,8 @@ fn init_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::StartFailed`] for the
+/// webhooks plugin.
 fn start_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::StartFailed {
         name: PLUGIN_NAME.into(),
@@ -94,6 +110,12 @@ impl Plugin for Webhooks {
         env!("CARGO_PKG_VERSION")
     }
 
+    /// Decodes config and stores it on the plugin instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InitFailed`] when the config JSON is
+    /// malformed.
     async fn init(&mut self, ctx: &PluginContext) -> Result<()> {
         let cfg: WebhooksConfig = serde_json::from_value(ctx.config.clone())
             .map_err(|e| init_err(format!("parsing webhooks config: {e}")))?;
@@ -102,6 +124,17 @@ impl Plugin for Webhooks {
         Ok(())
     }
 
+    /// Spawns the subscriber, lifecycle, and worker tasks.
+    ///
+    /// Each subscriber gets its own `bus.subscribe()` receiver so a
+    /// lag on one tap doesn't drop the other's events. The worker
+    /// owns the `reqwest::Client`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::StartFailed`] when the plugin context lacks
+    /// a downcast-compatible [`ControllerHandles`] or when the HTTP
+    /// client builder fails.
     async fn start(&mut self, ctx: &PluginContext) -> Result<()> {
         let handles = ctx
             .bus
@@ -113,18 +146,14 @@ impl Plugin for Webhooks {
         let inventory = handles.inventory.clone();
         let bus_rx = handles.bus.subscribe();
 
-        // Subscriber: persist a delivery row per matching webhook on each event.
         self.subscriber_task = Some(tokio::spawn(subscriber::run(inventory.clone(), bus_rx)));
 
-        // Lifecycle subscriber. Distinct broadcast subscription
-        // so a lag on one tap doesn't drop the other's events.
         let lifecycle_rx = handles.bus.subscribe();
         self.lifecycle_task = Some(tokio::spawn(lifecycle::run(
             inventory.clone(),
             lifecycle_rx,
         )));
 
-        // Worker: drain pending deliveries with retry + signing.
         let http = Client::builder()
             .user_agent(concat!("isengard-webhooks/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -160,12 +189,15 @@ impl Plugin for Webhooks {
 
 #[async_trait]
 impl EventSubscriber for Webhooks {
+    /// Returns an empty slice. The plugin owns its own subscribers
+    /// spawned in [`Plugin::start`]; this impl exists for trait
+    /// conformance only.
     fn event_kinds(&self) -> &[&'static str] {
-        // The actual subscriber task is spawned in `start()`; the
-        // EventSubscriber trait is implemented for shape-compliance only.
         &[]
     }
 
+    /// Always returns `Ok(())`. The plugin's actual handling lives in
+    /// the spawned tasks.
     async fn handle(&self, _event: &Event, _ctx: &PluginContext) -> Result<()> {
         Ok(())
     }

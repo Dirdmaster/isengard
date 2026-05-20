@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+/// Opt-in label key. Set this to `true` on any container the
+/// updater should manage.
 pub const ENABLE_LABEL: &str = "isengard.enable";
 
 /// Returns true if the labels indicate the container opted in.

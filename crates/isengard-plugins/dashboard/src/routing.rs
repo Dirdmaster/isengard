@@ -22,6 +22,7 @@ use isengard_storage::{
     UpsertAdapterConfig,
 };
 
+/// Builds the axum router for this resource.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     Router::new()
         .route("/routing/rules", get(list_rules).post(create_rule))
@@ -46,28 +47,44 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 }
 
 #[derive(serde::Deserialize)]
+/// CreateRuleBody.
 struct CreateRuleBody {
     /// ULID string; parsed into `HostId` before inserting.
     host_id: String,
+    /// `stack_id` field.
     stack_id: Option<i64>,
+    /// `service_name` field.
     service_name: String,
+    /// `container_port` field.
     container_port: u16,
+    /// `public_hostname` field.
     public_hostname: String,
+    /// `protocol` field.
     protocol: String,
+    /// `adapter` field.
     adapter: String,
+    /// `tls_mode` field.
     tls_mode: TlsMode,
+    /// `healthcheck_path` field.
     healthcheck_path: Option<String>,
+    /// `healthcheck_interval_secs` field.
     healthcheck_interval_secs: Option<u32>,
+    /// `auth` field.
     auth: Option<String>,
+    /// `state` field.
     state: Option<RoutingRuleState>,
+    /// `source` field.
     source: Option<RoutingRuleSource>,
 }
 
 #[derive(serde::Deserialize)]
+/// UpdateRuleBody.
 struct UpdateRuleBody {
+    /// `state` field.
     state: Option<RoutingRuleState>,
 }
 
+/// `GET` handler for rules.
 async fn list_rules(State(handles): State<Arc<ControllerHandles>>) -> Response {
     // Single cluster-wide query.
     match handles.inventory.list_all_routing_rules().await {
@@ -80,6 +97,7 @@ async fn list_rules(State(handles): State<Arc<ControllerHandles>>) -> Response {
     }
 }
 
+/// `POST` handler for rule.
 async fn create_rule(
     State(handles): State<Arc<ControllerHandles>>,
     Json(body): Json<CreateRuleBody>,
@@ -139,6 +157,7 @@ async fn create_rule(
     }
 }
 
+/// `PUT` handler for rule.
 async fn update_rule(
     Path(id): Path<i64>,
     State(handles): State<Arc<ControllerHandles>>,
@@ -171,6 +190,7 @@ async fn update_rule(
     }
 }
 
+/// `DELETE` handler for rule.
 async fn delete_rule(
     Path(id): Path<i64>,
     State(handles): State<Arc<ControllerHandles>>,
@@ -205,6 +225,7 @@ async fn delete_rule(
     }
 }
 
+/// `GET` handler for overrides.
 async fn list_overrides(
     Path(id): Path<i64>,
     State(handles): State<Arc<ControllerHandles>>,
@@ -224,10 +245,13 @@ async fn list_overrides(
 }
 
 #[derive(serde::Deserialize)]
+/// UpsertOverrideBody.
 struct UpsertOverrideBody {
+    /// `value_json` field.
     value_json: serde_json::Value,
 }
 
+/// `upsert_override`.
 async fn upsert_override(
     Path((id, field)): Path<(i64, String)>,
     State(handles): State<Arc<ControllerHandles>>,
@@ -252,6 +276,7 @@ async fn upsert_override(
     }
 }
 
+/// `GET` handler for adapter config.
 async fn get_adapter_config(
     Path((host_id_str, adapter)): Path<(String, String)>,
     State(handles): State<Arc<ControllerHandles>>,
@@ -276,11 +301,15 @@ async fn get_adapter_config(
 }
 
 #[derive(serde::Deserialize)]
+/// UpsertAdapterBody.
 struct UpsertAdapterBody {
+    /// `config_json` field.
     config_json: serde_json::Value,
+    /// `enabled` field.
     enabled: bool,
 }
 
+/// `upsert_adapter_config`.
 async fn upsert_adapter_config(
     Path((host_id_str, adapter)): Path<(String, String)>,
     State(handles): State<Arc<ControllerHandles>>,
@@ -322,6 +351,7 @@ async fn upsert_adapter_config(
     }
 }
 
+/// `test_adapter_config`.
 async fn test_adapter_config(
     Path((host_id_str, adapter)): Path<(String, String)>,
     State(handles): State<Arc<ControllerHandles>>,

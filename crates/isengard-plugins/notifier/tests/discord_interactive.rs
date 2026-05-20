@@ -23,7 +23,7 @@ const BOT_TOKEN: &str = "TEST_DISCORD_BOT_TOKEN_9C";
 const CHANNEL_ID: i64 = 9_876_543_210;
 
 fn mk_interactive(api_base: String) -> DiscordInteractive {
-    // SAFETY: tests run in parallel by default; we set the env var here just
+    // SAFETY: tests run in parallel by default; we set the env var here
     // before constructing so the from_env() picks it up. The ENV race is
     // tolerable for this isolated test crate because no other test reads
     // ISENGARD_DISCORD_BOT_TOKEN at the time the channel is built.

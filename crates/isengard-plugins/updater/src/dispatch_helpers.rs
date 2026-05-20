@@ -8,7 +8,11 @@
 use bollard::models::{ContainerInspectResponse, ContainerSummary};
 use std::collections::HashMap;
 
+/// Compose's service-name label. Set on every compose-managed
+/// container.
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+
+/// Isengard label that selects the deploy strategy.
 const ISENGARD_STRATEGY_LABEL: &str = "isengard.deploy.strategy";
 
 /// Resolve a service name. Compose label wins; otherwise strip the leading
@@ -136,6 +140,7 @@ pub fn label_strategy(inspect: &ContainerInspectResponse) -> Option<String> {
     inspect_label(inspect, ISENGARD_STRATEGY_LABEL).map(str::to_string)
 }
 
+/// Reads a label off the container's `Config.Labels` map.
 fn inspect_label<'a>(inspect: &'a ContainerInspectResponse, key: &str) -> Option<&'a str> {
     inspect
         .config

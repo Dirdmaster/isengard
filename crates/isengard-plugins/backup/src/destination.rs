@@ -1,14 +1,15 @@
-//! Backup destination trait + implementations.
+//! Backup destination trait and implementations.
 //!
 //! Two backends ship in 11a:
 //!
-//! - `LocalDestination`: writes encrypted snapshots to a directory on the
-//!   controller host. Useful for self-hosters with a NAS mount or external
-//!   disk; also the integration-test substrate.
-//! - `S3Destination`: PUTs / GETs / LISTs / DELETEs against any S3-compatible
-//!   endpoint (Cloudflare R2 is the documented default; AWS S3, Wasabi, B2,
-//!   MinIO all work via the same trait). SigV4 signing is hand-rolled with
-//!   `hmac` + `sha2` so the dependency tree stays small (no aws-sdk-s3).
+//! - [`LocalDestination`] writes encrypted snapshots to a directory
+//!   on the controller host. Useful for self-hosters with a NAS
+//!   mount or external disk; also the integration-test substrate.
+//! - [`S3Destination`] PUTs / GETs / LISTs / DELETEs against any
+//!   S3-compatible endpoint (Cloudflare R2 is the documented default;
+//!   AWS S3, Wasabi, B2, MinIO work through the same trait). SigV4
+//!   signing is hand-rolled with `hmac` + `sha2` so the dependency
+//!   tree stays small (no `aws-sdk-s3`).
 
 use std::path::PathBuf;
 
@@ -17,65 +18,94 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
-/// A snapshot object we know about on the destination, used for retention.
+/// One snapshot object we know about on the destination.
+///
+/// Used by retention to enumerate candidates for deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteObject {
+    /// Object key (without any configured prefix).
     pub name: String,
+    /// Object size in bytes.
     pub size: i64,
 }
 
 /// Errors raised while talking to a backup destination.
 #[derive(Debug, thiserror::Error)]
 pub enum DestinationError {
+    /// Filesystem IO failure (local destination, tempfile, etc.).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// HTTP transport failure.
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// Failed to parse a URL.
     #[error("invalid url: {0}")]
     Url(#[from] url::ParseError),
 
+    /// XML parse failure (currently only the S3 list response).
     #[error("xml parse: {0}")]
     Xml(String),
 
+    /// Destination returned a non-success HTTP status.
     #[error("destination returned status {status}: {body}")]
-    Status { status: u16, body: String },
+    Status {
+        /// Numeric HTTP status code.
+        status: u16,
+        /// Response body, included verbatim for diagnostics.
+        body: String,
+    },
 
+    /// Object name contains path-traversal characters.
     #[error("invalid object name: {0}")]
     InvalidName(String),
 }
 
-/// What an upload + retention runner uses to talk to remote storage.
+/// What the runner uses to talk to remote storage.
+///
+/// One implementation per supported backend. The trait is
+/// intentionally small: upload, list, delete, download.
 #[async_trait]
 pub trait BackupDestination: Send + Sync {
-    /// Stable name shown in the UI (e.g. "local", "s3").
+    /// Stable name shown in the UI (e.g. `"local"`, `"s3"`).
     fn kind(&self) -> &'static str;
 
-    /// Upload bytes under `name`. The runner picks the name (timestamp-based).
+    /// Uploads `bytes` under `name`. The runner picks the name
+    /// (timestamp-based).
     async fn upload(&self, name: &str, bytes: &[u8]) -> Result<(), DestinationError>;
 
-    /// List every object the destination is responsible for, regardless of
-    /// when it was uploaded. Used by retention pruning.
+    /// Lists every object the destination is responsible for.
+    ///
+    /// Used by retention pruning. Returns objects with the prefix
+    /// stripped (so retention sees names that match what
+    /// [`Self::upload`] wrote).
     async fn list(&self) -> Result<Vec<RemoteObject>, DestinationError>;
 
-    /// Delete an object by name. No-op if missing (returns Ok).
+    /// Deletes an object by name. No-op when the object is missing.
     async fn delete(&self, name: &str) -> Result<(), DestinationError>;
 
-    /// Download an object's bytes by name. Used by tests + the future restore
-    /// flow.
+    /// Downloads an object's bytes by name.
+    ///
+    /// Used by tests and by the restore flow.
     async fn download(&self, name: &str) -> Result<Vec<u8>, DestinationError>;
 }
 
 // =================== LocalDestination ===================
 
-/// Filesystem-backed destination. Writes under `root/prefix/<name>`.
+/// Filesystem-backed destination.
+///
+/// Writes under `root/prefix/<name>`. Used by self-hosters with a
+/// NAS mount or external disk, and by integration tests.
 pub struct LocalDestination {
+    /// Filesystem root the plugin writes under.
     pub root: PathBuf,
+    /// Optional sub-prefix inside `root`.
     pub prefix: String,
 }
 
 impl LocalDestination {
+    /// Builds a destination from a root path and prefix.
     pub fn new(root: impl Into<PathBuf>, prefix: impl Into<String>) -> Self {
         Self {
             root: root.into(),
@@ -83,6 +113,8 @@ impl LocalDestination {
         }
     }
 
+    /// Returns the effective directory: `root` when `prefix` is
+    /// empty, `root/prefix` otherwise.
     fn dir(&self) -> PathBuf {
         if self.prefix.is_empty() {
             self.root.clone()
@@ -91,6 +123,7 @@ impl LocalDestination {
         }
     }
 
+    /// Rejects names that would escape [`Self::dir`].
     fn validate_name(name: &str) -> Result<(), DestinationError> {
         if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
             return Err(DestinationError::InvalidName(name.into()));
@@ -156,25 +189,38 @@ impl BackupDestination for LocalDestination {
 /// Configuration for an S3-compatible destination.
 ///
 /// `endpoint` is the bucket-relative endpoint (e.g.
-/// `https://<accountid>.r2.cloudflarestorage.com`). For path-style endpoints
-/// like MinIO, use the host URL and rely on `bucket` to be appended in the
-/// request path.
+/// `https://<accountid>.r2.cloudflarestorage.com`). For path-style
+/// endpoints like MinIO, use the host URL and rely on `bucket` being
+/// appended in the request path.
 #[derive(Debug, Clone)]
 pub struct S3Config {
+    /// Bucket-relative endpoint URL.
     pub endpoint: String,
+    /// AWS-style region string.
     pub region: String,
+    /// Bucket name.
     pub bucket: String,
+    /// Optional key prefix inside the bucket.
     pub prefix: String,
+    /// IAM-style access key id.
     pub access_key_id: String,
+    /// IAM-style secret. Never logged.
     pub secret_access_key: String,
 }
 
+/// S3-compatible destination.
+///
+/// Uses a hand-rolled SigV4-S3 signer: payload SHA-256 in header,
+/// no chunked encoding.
 pub struct S3Destination {
+    /// Resolved config block.
     pub cfg: S3Config,
+    /// HTTP client used for every API call.
     client: reqwest::Client,
 }
 
 impl S3Destination {
+    /// Builds a destination with a fresh reqwest client.
     pub fn new(cfg: S3Config) -> Self {
         Self {
             cfg,
@@ -182,7 +228,10 @@ impl S3Destination {
         }
     }
 
-    /// Path-style URL. R2, AWS S3, MinIO all accept `<endpoint>/<bucket>/<key>`.
+    /// Builds the path-style URL for `key`.
+    ///
+    /// R2, AWS S3, and MinIO all accept
+    /// `<endpoint>/<bucket>/<prefix>/<key>`.
     fn url_for_key(&self, key: &str) -> Result<reqwest::Url, DestinationError> {
         let base = self.cfg.endpoint.trim_end_matches('/').to_string();
         let prefix = self.cfg.prefix.trim_matches('/');
@@ -195,8 +244,11 @@ impl S3Destination {
         Ok(reqwest::Url::parse(&url_str)?)
     }
 
-    /// Build a SigV4 Authorization header for the given request.
-    /// Pure SigV4-S3 signing: payload sha256 in header, no chunked encoding.
+    /// Builds the SigV4 Authorization header and `x-amz-date` value
+    /// for a request.
+    ///
+    /// Pure SigV4-S3 signing: payload SHA-256 in header, no chunked
+    /// encoding. Returns `(authorization, x-amz-date)`.
     fn sign(
         &self,
         method: &str,
@@ -210,8 +262,6 @@ impl S3Destination {
         let canonical_uri = url.path().to_string();
         let canonical_query = url.query().unwrap_or("").to_string();
 
-        // Canonical headers (sorted, lowercase). We always include host,
-        // x-amz-content-sha256, x-amz-date.
         let canonical_headers = format!(
             "host:{host}\n\
              x-amz-content-sha256:{payload_sha256}\n\
@@ -236,6 +286,8 @@ impl S3Destination {
         (auth, amz_date)
     }
 
+    /// Performs the SigV4 four-step HMAC chain to derive a signing
+    /// key, then signs `string_to_sign`.
     fn derive_signature(&self, date_stamp: &str, string_to_sign: &str) -> String {
         type HmacSha256 = Hmac<Sha256>;
         let k_secret = format!("AWS4{}", self.cfg.secret_access_key);
@@ -375,9 +427,11 @@ impl BackupDestination for S3Destination {
     }
 }
 
-/// Minimal URL-encoding for the prefix-list query. We only handle the chars
-/// likely to appear in user-set prefixes (slash, alnum, dash, underscore,
-/// dot, percent). Anything else is hex-encoded.
+/// Minimal URL-encoding for the prefix-list query.
+///
+/// Handles the chars likely to appear in operator-set prefixes
+/// (slash, alnum, dash, underscore, dot, tilde). Everything else is
+/// hex-encoded.
 fn urlencoding(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -391,9 +445,11 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
-/// Hand-rolled parser for the bits of the ListObjectsV2 response we need.
-/// We only extract `<Contents><Key>` and `<Size>` pairs; pagination is not
-/// handled in 11a (retention prunes a small list).
+/// Hand-rolled parser for the bits of the S3 ListObjectsV2 response
+/// the plugin needs.
+///
+/// Extracts `<Contents><Key>` and `<Contents><Size>` pairs;
+/// pagination is not handled (retention prunes a small list).
 fn parse_list_v2(xml: &str, prefix: &str) -> Vec<RemoteObject> {
     let mut out = Vec::new();
     let mut current_key: Option<String> = None;
@@ -451,6 +507,7 @@ fn parse_list_v2(xml: &str, prefix: &str) -> Vec<RemoteObject> {
     out
 }
 
+/// Reads the text content of the current XML element.
 fn read_text<R: std::io::BufRead>(reader: &mut quick_xml::Reader<R>) -> String {
     let mut buf = Vec::new();
     if let Ok(quick_xml::events::Event::Text(t)) = reader.read_event_into(&mut buf) {

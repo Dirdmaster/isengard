@@ -1,8 +1,27 @@
-//! Tailscale NetworkingAdapter for Isengard.
+//! Tailscale `NetworkingAdapter` for Isengard.
 //!
-//! Drives the user's installed `tailscale` CLI via tokio subprocess. No Go
-//! FFI; users install tailscale separately (which they almost certainly
-//! already have if they're using this adapter).
+//! Drives the operator's installed `tailscale` CLI via tokio subprocesses.
+//! No Go FFI: the user installs tailscale once, this adapter shells out.
+//!
+//! # Flow
+//!
+//! `join`: checks `tailscale` is on PATH and the backend is `Running`.
+//! Refuses to come up if the operator hasn't run `tailscale up` yet.
+//!
+//! `expose`: runs `tailscale serve --bg --https=443` pointed at the local
+//! listener port. Optionally flips `tailscale funnel` on if the spec
+//! requests public reachability. Fetches the leaf cert + key via
+//! `tailscale cert` and returns them inside `adapter_data` so the agent's
+//! `CertStore` can install them.
+//!
+//! `unexpose`: tears down the serve and funnel state. See the note on
+//! [`TailscaleAdapter::unexpose`] for the global-port limitation.
+//!
+//! TLS strategy is [`TlsStrategy::AdapterProvided`]: tailscale issues the
+//! leaf cert and the controller does no ACME work for these hostnames.
+
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
 use isengard_core::context::PluginContext;
@@ -15,6 +34,11 @@ use serde_json::json;
 
 pub mod cli;
 
+/// Tailscale adapter. Stateless; constructed via `Default`.
+///
+/// Registered as `networking-tailscale` (plugin name) and `tailscale`
+/// (adapter id). The agent selects it via `[networking] adapter =
+/// "tailscale"`.
 #[derive(Default)]
 pub struct TailscaleAdapter;
 
@@ -43,6 +67,13 @@ impl NetworkingAdapter for TailscaleAdapter {
         "tailscale"
     }
 
+    /// Verifies the `tailscale` CLI is installed and the backend is up.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Other`] when `tailscale` is missing from `PATH`
+    /// or when `tailscale status --json` reports the backend isn't
+    /// `Running` (operator hasn't run `tailscale up` yet).
     async fn join(&self, _ctx: &AdapterContext) -> Result<()> {
         cli::ensure_present()?;
         let status = cli::status().await?;
@@ -59,6 +90,17 @@ impl NetworkingAdapter for TailscaleAdapter {
         Ok(())
     }
 
+    /// Wires `public_hostname` to `local_listener_port` over HTTPS.
+    ///
+    /// Runs `tailscale serve --bg --https=443` then optionally
+    /// `tailscale funnel on` when `adapter_specific.funnel` is true. Pulls
+    /// the issued cert via `tailscale cert <hostname>` and surfaces it
+    /// in `adapter_data` for the agent to install into its `CertStore`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Other`] when any of the subprocess invocations
+    /// fail or when the cert files can't be read from the temp dir.
     async fn expose(&self, _ctx: &AdapterContext, spec: &ExposeSpec) -> Result<ExposedEndpoint> {
         cli::serve_https(spec.local_listener_port).await?;
 
@@ -71,12 +113,6 @@ impl NetworkingAdapter for TailscaleAdapter {
             cli::funnel_on().await?;
         }
 
-        // Cert flow: fetch via `tailscale cert` so the first request to the
-        // hostname doesn't 503. Caller (controller's RoutingPusher or agent
-        // equivalent) reads the cert from adapter_data and writes it to the
-        // agent's CertStore via the existing install API. The cert pump
-        // hookup is a separate follow-up; for now the adapter just
-        // surfaces the cert.
         let (cert_pem, key_pem) = cli::fetch_cert(&spec.public_hostname).await?;
 
         Ok(ExposedEndpoint {
@@ -90,16 +126,20 @@ impl NetworkingAdapter for TailscaleAdapter {
         })
     }
 
-    /// **v1 limitation:** `tailscale serve --https=443 off` is GLOBAL per
-    /// port — it tears down ALL serve config on 443, not just the one for
-    /// `endpoint_id`. For multi-hostname-per-host setups this is wrong.
-    /// Per-hostname unexpose would need `--set-path=/<unique>` or different
-    /// ports; deferred until we actually have a multi-hostname tailscale user.
+    /// Tears down the serve and funnel state on port 443.
+    ///
+    /// **v1 limitation:** `tailscale serve --https=443 off` is global per
+    /// port: it tears down every serve config on 443, not only the one
+    /// for `endpoint_id`. Multi-hostname-per-host setups need
+    /// per-path serve config (`--set-path=/<unique>`) before this
+    /// becomes safe. Deferred until a multi-hostname tailscale user
+    /// surfaces.
+    ///
+    /// Funnel teardown is best-effort: idempotent off-calls swallow
+    /// failures because `funnel off` is allowed to run when funnel was
+    /// never on.
     async fn unexpose(&self, _ctx: &AdapterContext, _endpoint_id: &str) -> Result<()> {
         if let Err(e) = cli::serve_off().await {
-            // Worth logging — if serve_off fails, the tailscale config still
-            // routes 443 to a port that may now be reused. Funnel teardown
-            // is best-effort (idempotent).
             tracing::warn!(error = %e, "tailscale: serve_off failed during unexpose");
         }
         let _ = cli::funnel_off().await;

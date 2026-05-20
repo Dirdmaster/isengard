@@ -21,31 +21,47 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::Deserialize;
 
+/// Resolved per-host credential cache.
+///
+/// Loaded once at plugin init. Look up via [`Self::credentials_for`].
 #[derive(Debug, Clone, Default)]
 pub struct DockerConfig {
-    /// Map of registry-host → (username, password).
+    /// Map of registry host to `(username, password)`.
     by_host: HashMap<String, (String, String)>,
 }
 
+/// Top-level JSON shape from `~/.docker/config.json`.
 #[derive(Debug, Deserialize)]
 struct RawConfig {
+    /// `auths` map keyed by registry URL.
     #[serde(default)]
     auths: HashMap<String, RawAuth>,
 }
 
+/// One entry inside the `auths` map.
 #[derive(Debug, Deserialize)]
 struct RawAuth {
+    /// Base64-encoded `user:pass`.
     #[serde(default)]
     auth: Option<String>,
+    /// Plain username when `auth` is absent.
     #[serde(default)]
     username: Option<String>,
+    /// Plain password when `auth` is absent.
     #[serde(default)]
     password: Option<String>,
 }
 
 impl DockerConfig {
-    /// Attempt to load `~/.docker/config.json`. Missing file → empty config.
-    /// Malformed file → empty config + warning logged by the caller.
+    /// Loads `~/.docker/config.json`.
+    ///
+    /// Missing file returns the empty config. Malformed file
+    /// surfaces as an error; the caller logs and falls back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but fails to read or
+    /// parse, or when an `auth` blob is not valid base64.
     pub fn load_default() -> anyhow::Result<Self> {
         let path = match dirs::home_dir() {
             Some(h) => h.join(".docker").join("config.json"),
@@ -54,6 +70,12 @@ impl DockerConfig {
         Self::load_from(&path)
     }
 
+    /// Loads from an arbitrary path. See [`Self::load_default`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file exists but fails to read or
+    /// parse, or when an `auth` blob is not valid base64.
     pub fn load_from(path: &PathBuf) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -90,6 +112,9 @@ impl DockerConfig {
     }
 }
 
+/// Strips scheme and path from a registry URL.
+///
+/// `https://index.docker.io/v1/` reduces to `index.docker.io`.
 fn normalise_host(registry_url: &str) -> String {
     // Strip scheme.
     let without_scheme = registry_url
@@ -101,6 +126,17 @@ fn normalise_host(registry_url: &str) -> String {
     host.to_string()
 }
 
+/// Pulls a `(user, pass)` pair out of a [`RawAuth`].
+///
+/// Prefers explicit `username` + `password` when both are present.
+/// Falls back to base64-decoding `auth`. Returns `Ok(None)` when no
+/// credentials are encoded.
+///
+/// # Errors
+///
+/// Returns an error when `auth` isn't valid base64, when the
+/// decoded bytes aren't UTF-8, or when the decoded string is
+/// missing the `:` separator.
 fn decode_auth(raw: &RawAuth) -> anyhow::Result<Option<(String, String)>> {
     // Prefer explicit username/password if provided.
     if let (Some(u), Some(p)) = (raw.username.as_ref(), raw.password.as_ref()) {

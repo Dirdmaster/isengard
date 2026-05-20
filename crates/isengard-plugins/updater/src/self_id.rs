@@ -18,6 +18,7 @@ pub fn current_container_id() -> Option<String> {
     parse_cgroup(text)
 }
 
+/// Scans `/proc/self/cgroup` lines for the first 64-hex container id.
 fn parse_cgroup(text: &str) -> Option<String> {
     // Lines look like: "12:devices:/docker/<64-hex>" or
     //                  "0::/system.slice/docker-<64-hex>.scope"
@@ -30,6 +31,8 @@ fn parse_cgroup(text: &str) -> Option<String> {
     None
 }
 
+/// Pulls the first 64-character hex run out of `line`, with boundaries
+/// on either side so 65-byte runs don't match.
 fn extract_64_hex(line: &str) -> Option<String> {
     let bytes = line.as_bytes();
     let mut start = 0;

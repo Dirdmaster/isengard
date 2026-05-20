@@ -16,39 +16,58 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// DesiredService.
 pub struct DesiredService {
+    /// `name` field.
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// `image` field.
     pub image: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// `environment` field.
     pub environment: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// `labels` field.
     pub labels: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// `ports` field.
     pub ports: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+/// ServiceOp.
 pub enum ServiceOp {
+    /// `Start` variant.
     Start {
+        /// `service` field.
         service: String,
+        /// `image` field.
         image: String,
     },
+    /// `Recreate` variant.
     Recreate {
+        /// `service` field.
         service: String,
+        /// `image` field.
         image: String,
+        /// `reasons` field.
         reasons: Vec<String>,
     },
+    /// `Stop` variant.
     Stop {
+        /// `service` field.
         service: String,
     },
+    /// `NoChange` variant.
     NoChange {
+        /// `service` field.
         service: String,
     },
 }
 
 impl ServiceOp {
+    /// `service`.
     pub fn service(&self) -> &str {
         match self {
             ServiceOp::Start { service, .. }
@@ -60,8 +79,11 @@ impl ServiceOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// ReconcilePlan.
 pub struct ReconcilePlan {
+    /// `stack` field.
     pub stack: String,
+    /// `ops` field.
     pub ops: Vec<ServiceOp>,
 }
 
@@ -90,6 +112,7 @@ pub fn parse(yaml: &str) -> Result<BTreeMap<String, DesiredService>, String> {
     Ok(out)
 }
 
+/// `parse_service`.
 fn parse_service(name: &str, m: &Mapping) -> DesiredService {
     let mut svc = DesiredService {
         name: name.to_string(),
@@ -149,6 +172,7 @@ pub fn diff_yamls(stack: &str, current: &str, desired: &str) -> Result<Reconcile
     Ok(diff_parsed(stack, &current, &desired))
 }
 
+/// `diff_parsed`.
 fn diff_parsed(
     stack: &str,
     current: &BTreeMap<String, DesiredService>,
@@ -196,6 +220,7 @@ fn diff_parsed(
     }
 }
 
+/// `service_drift`.
 fn service_drift(want: &DesiredService, have: &DesiredService) -> Vec<String> {
     let mut reasons = Vec::new();
     match (want.image.as_ref(), have.image.as_ref()) {

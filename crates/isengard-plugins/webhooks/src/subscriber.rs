@@ -1,5 +1,8 @@
-//! Event subscriber: tail the controller EventBus, persist a delivery row
-//! per matching enabled webhook.
+//! General webhook subscriber.
+//!
+//! Tails the controller event bus and, for each event, inserts a
+//! `webhook_deliveries` row per enabled webhook that opted in to the
+//! event's kind via its wildcard string.
 
 use std::sync::Arc;
 
@@ -9,7 +12,11 @@ use isengard_storage::webhook::{InsertDelivery, kind_matches};
 use tokio::sync::broadcast::Receiver;
 use tracing::{debug, warn};
 
-/// Run the subscriber loop until the bus is closed.
+/// Runs the subscriber loop until the bus closes.
+///
+/// Each iteration: receive an event, fan it out via [`on_event`]. A
+/// lag from the broadcast channel logs at warn and resumes; closing
+/// the channel ends the task.
 pub async fn run(inventory: Arc<Inventory>, mut rx: Receiver<Event>) {
     loop {
         match rx.recv().await {
@@ -32,9 +39,16 @@ pub async fn run(inventory: Arc<Inventory>, mut rx: Receiver<Event>) {
     }
 }
 
-/// For one event: list enabled webhooks, filter by `event_kinds`, insert a
-/// `webhook_deliveries` row per match. The serialized payload is whatever
-/// `serde_json` produces for the canonical `Event` struct.
+/// Enqueues one event for every matching enabled webhook.
+///
+/// Serializes `event` to JSON once, then iterates enabled webhooks
+/// and inserts a delivery row per kind match. Per-row failures log
+/// at warn and don't stop the iteration.
+///
+/// # Errors
+///
+/// Returns an error when the initial enabled-webhooks list query
+/// fails or when JSON serialization fails.
 pub async fn on_event(inventory: &Inventory, event: &Event) -> anyhow::Result<()> {
     let webhooks = inventory.list_enabled_webhooks().await?;
     if webhooks.is_empty() {

@@ -1,10 +1,6 @@
-//! Isengard `updater` plugin.
-//!
-//! Watches running Docker containers and (in later sub-phases) keeps their
-//! images up to date. Filters containers by `isengard.enable=true`,
-//! compares each one's local digest against its remote registry digest, and
-//! classifies as `up_to_date | needs_update | unknown`.
-
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 #![allow(clippy::result_large_err)]
 
 pub mod auth;
@@ -41,50 +37,83 @@ use crate::labels::isengard_enabled;
 use crate::registry::RegistryClient;
 use crate::tag_cache::TagCache;
 
+/// Stable plugin name surfaced to the controller and host registry.
 const PLUGIN_NAME: &str = "updater";
+
+/// Default cycle interval when the config doesn't override it.
 const DEFAULT_CYCLE_INTERVAL_SECS: u64 = 30;
+
+/// Floor on the cycle interval; smaller values clamp up.
 const MIN_CYCLE_INTERVAL_SECS: u64 = 5;
-/// How long an approval row stays `pending_open` before the controller's
-/// auto-expire task transitions it to `pending_expired`. Default.
+
+/// How long an approval row stays `pending_open` before the
+/// controller's auto-expire task transitions it to
+/// `pending_expired`.
 const APPROVAL_DEFAULT_TTL_HOURS: i64 = 24;
 
+/// Agent-side updater plugin instance.
+///
+/// Owns the docker handle, the registry client, the per-image tag
+/// cache, and the wired-in host services (event emitter, dispatcher,
+/// policy loader, approval store). The cycle task spawned from
+/// [`Plugin::start`] reads everything via shared references.
 pub struct Updater {
-    /// Lazily set in `init`. Wrapped in Option so the struct can be constructed
-    /// by the inventory factory before init runs.
+    /// Lazily set in `init`. Wrapped in `Option` so the struct can be
+    /// constructed by the inventory factory before init runs.
     docker: Option<Docker>,
+    /// Registry client (HEAD digest, tag list). Set in `init`.
     registry: Option<Arc<RegistryClient>>,
-    /// Per-image tag cache for the `Minor` strategy. Built at
-    /// plugin init with the default 1h TTL; shared across cycles so the
-    /// per-cycle cost stays at one cache lookup per Minor candidate.
+    /// Per-image tag cache for the `Minor` strategy.
+    ///
+    /// Built at plugin init with the default 1h TTL; shared across
+    /// cycles so the per-cycle cost stays at one cache lookup per
+    /// Minor candidate.
     tag_cache: Arc<TagCache>,
+    /// Resolved cycle interval. Clamped up to
+    /// [`MIN_CYCLE_INTERVAL_SECS`].
     cycle_interval: Duration,
+    /// Optional event emitter wired from the agent.
     emitter: Option<Arc<dyn EventEmitter>>,
-    /// Set in `init` from `PluginContext::update_dispatcher`. When `Some`,
-    /// the cycle consults it before recreating any non-self container —
-    /// the dispatcher may take ownership and spawn a blue-green driver.
+    /// Optional blue-green dispatcher.
+    ///
+    /// Set in `init` from `PluginContext::update_dispatcher`. When
+    /// `Some`, the cycle consults it before recreating any non-self
+    /// container: the dispatcher may take ownership and spawn a
+    /// blue-green driver.
     dispatcher: Option<Arc<dyn UpdateDispatcher>>,
-    /// Set in `init` from `PluginContext::host_id`. Forwarded into every
-    /// `UpdateTriggerInfo` so the dispatcher's downstream lookups
-    /// (routing rules, deployment dedupe) target the right host.
+    /// Host id from `PluginContext::host_id`.
+    ///
+    /// Forwarded into every `UpdateTriggerInfo` so the dispatcher's
+    /// downstream lookups (routing rules, deployment dedupe) target
+    /// the right host.
     host_id: Option<HostId>,
-    /// Set in `init` from `PluginContext::policy_loader`. When `Some`, the
-    /// cycle pulls the full policy snapshot at the start and resolves
-    /// per-candidate (respects Pinned + paused_until).
+    /// Policy loader from `PluginContext::policy_loader`.
+    ///
+    /// When `Some`, the cycle pulls the full policy snapshot at the
+    /// start and resolves per-candidate (respects Pinned and
+    /// `paused_until`).
     policy_loader: Option<Arc<dyn PolicyLoader>>,
-    /// Set in `init` from `PluginContext::approval_store`. When `Some`, the
-    /// cycle persists a pending-approval row whenever a candidate's resolved
-    /// policy gates on `Approval`. `None` outside the agent or in
-    /// test harnesses that don't exercise the approval path.
+    /// Approval store from `PluginContext::approval_store`.
+    ///
+    /// When `Some`, the cycle persists a pending-approval row
+    /// whenever a candidate's resolved policy gates on `Approval`.
+    /// `None` outside the agent or in test harnesses that don't
+    /// exercise the approval path.
     approval_store: Option<Arc<dyn ApprovalStore>>,
-    /// Cached fleet name for this host. Looked up once during `init` (when
-    /// both a policy_loader and a host_id are wired) so the per-cycle path
-    /// has zero extra DB hits. `None` means "no fleet-scoped rows match".
+    /// Cached fleet name for this host.
+    ///
+    /// Looked up once during `init` (when both a `policy_loader`
+    /// and a `host_id` are wired) so the per-cycle path has zero
+    /// extra DB hits. `None` means "no fleet-scoped rows match".
     fleet: Option<String>,
+    /// Cancellation signal that ends the cycle task on `stop`.
     cancel: Arc<Notify>,
+    /// Join handle for the spawned cycle task.
     task: Option<JoinHandle<()>>,
 }
 
 impl Updater {
+    /// Builds an empty plugin. Wiring happens in [`Plugin::init`].
     pub fn new() -> Self {
         Self {
             docker: None,
@@ -115,6 +144,8 @@ impl Default for Updater {
 // wrap them per-lifecycle-stage. Can refactor if a `From` impl lands
 // in isengard-core.
 
+/// Wraps any displayable error into [`CoreError::InitFailed`] for the
+/// updater plugin.
 fn init_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::InitFailed {
         name: PLUGIN_NAME.into(),
@@ -122,6 +153,8 @@ fn init_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Wraps any displayable error into [`CoreError::StartFailed`] for the
+/// updater plugin.
 fn start_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::StartFailed {
         name: PLUGIN_NAME.into(),
@@ -129,6 +162,7 @@ fn start_err(e: impl std::fmt::Display) -> CoreError {
     }
 }
 
+/// Forwards `event` to the wired emitter, if any.
 async fn emit(emitter: Option<&Arc<dyn EventEmitter>>, event: Event) {
     if let Some(e) = emitter {
         e.emit(event).await;
@@ -1000,7 +1034,7 @@ impl Plugin for Updater {
                             fleet.as_deref(),
                             &tag_cache,
                         ).await {
-                            // Don't crash the task on a single bad cycle; just log
+                            // Don't crash the task on a single bad cycle; log
                             // and try again next tick. Adds retry policy.
                             warn!(error = %e, "updater cycle failed");
                         }
@@ -1066,10 +1100,12 @@ inventory::submit! {
     }
 }
 
-// Compile-time assertion: Updater must remain Send + Sync because the
-// inventory factory hands it across threads.
+/// Compile-time assertion that [`Updater`] stays `Send + Sync`.
+///
+/// The inventory factory hands the plugin across threads.
 #[allow(dead_code)]
 fn _assert_send_sync() {
+    /// Helper that fails to compile when `T` isn't `Send + Sync + 'static`.
     fn assert<T: Send + Sync + 'static>() {}
     assert::<Updater>();
 }
