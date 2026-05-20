@@ -147,7 +147,7 @@ async fn cancel_twice_errors() {
     assert!(inv.cancel_enrollment_token(&h).await.is_err());
 }
 
-/// list_active_tokens must not surface cancelled tokens — they're as gone
+/// list_active_tokens must not surface cancelled tokens: they're as gone
 /// as consumed/expired ones for the purposes of the dashboard's "pending
 /// invitations" list.
 #[tokio::test]

@@ -1,8 +1,9 @@
 //! `backup_runs` DAO.
 //!
-//! Lifecycle: a row is inserted with status=`running` when a snapshot starts,
-//! then transitioned to `success` (with object_name + size_bytes) or `failed`
-//! (with an error string) when finished. The dashboard's runs listing reads
+//! Migration `0019` lands `backup_runs`. A row is inserted with
+//! status `running` when a snapshot starts, then transitioned to
+//! `success` (with `object_name` + `size_bytes`) or `failed` (with an
+//! error string) when finished. The dashboard's runs listing reads
 //! this table, ordered newest-first.
 
 use chrono::{DateTime, Utc};
@@ -15,12 +16,16 @@ use crate::inventory::Inventory;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackupRunStatus {
+    /// Snapshot in progress.
     Running,
+    /// Snapshot completed cleanly; object exists at the recorded name.
     Success,
+    /// Snapshot aborted; error string holds the reason.
     Failed,
 }
 
 impl BackupRunStatus {
+    /// Canonical lowercase spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             BackupRunStatus::Running => "running",
@@ -29,6 +34,7 @@ impl BackupRunStatus {
         }
     }
 
+    /// Parse a status TEXT column. Returns `None` for unknown strings.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "running" => Some(BackupRunStatus::Running),
@@ -46,12 +52,19 @@ pub struct BackupRunId(pub i64);
 /// A row from `backup_runs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupRun {
+    /// Surrogate key.
     pub id: BackupRunId,
+    /// When the snapshot started.
     pub started_at: DateTime<Utc>,
+    /// When the snapshot finished (success or failure).
     pub finished_at: Option<DateTime<Utc>>,
+    /// Status of the run.
     pub status: BackupRunStatus,
+    /// Object name in the remote store. Set on success only.
     pub object_name: Option<String>,
+    /// Size of the uploaded object in bytes.
     pub size_bytes: Option<i64>,
+    /// Failure reason string. Set on failure only.
     pub error: Option<String>,
 }
 
@@ -65,7 +78,8 @@ impl Inventory {
         Ok(BackupRunId(r.last_insert_rowid()))
     }
 
-    /// Mark a run as `success`, setting finished_at + object_name + size_bytes.
+    /// Mark a run as `success`, setting `finished_at`, `object_name`,
+    /// `size_bytes`.
     pub async fn finish_backup_run_success(
         &self,
         id: BackupRunId,
@@ -86,7 +100,7 @@ impl Inventory {
         Ok(())
     }
 
-    /// Mark a run as `failed`, setting finished_at + error.
+    /// Mark a run as `failed`, setting `finished_at` and `error`.
     pub async fn finish_backup_run_failed(
         &self,
         id: BackupRunId,
@@ -104,7 +118,7 @@ impl Inventory {
         Ok(())
     }
 
-    /// List the most recent runs, newest-first. `limit` is clamped to 1..200.
+    /// List the most recent runs, newest-first. `limit` clamps to `1..200`.
     pub async fn list_backup_runs(&self, limit: u32) -> Result<Vec<BackupRun>> {
         let limit = limit.clamp(1, 200);
         use sqlx::Row;
@@ -143,7 +157,8 @@ impl Inventory {
             .collect()
     }
 
-    /// Get the most recent successful run, or None.
+    /// The most recent successful run, or `None` when no run has
+    /// succeeded yet. Walks at most 50 rows.
     pub async fn last_successful_backup_run(&self) -> Result<Option<BackupRun>> {
         let runs = self.list_backup_runs(50).await?;
         Ok(runs
@@ -152,6 +167,7 @@ impl Inventory {
     }
 }
 
+/// Parse an RFC3339 string into `DateTime<Utc>`.
 fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))

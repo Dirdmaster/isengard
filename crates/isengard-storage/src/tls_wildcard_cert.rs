@@ -1,11 +1,13 @@
-//! Wildcard TLS cert PEM material. The existing `tls_cert` table is
-//! metadata only (validity dates, serial) and FK-constrained to
-//! `hosts(id)`, which doesn't fit the wildcard model where the cert
-//! covers a domain not a single host.
+//! Wildcard TLS cert PEM material.
 //!
-//! This is the source of truth for wildcard cert MATERIAL. The
-//! controller hydrates its in-memory `WildcardCertStore` from this
-//! table at boot; the ACME scheduler upserts a row after every
+//! Migration `0026` lands `tls_wildcard_certs`. The existing
+//! `tls_certs` table is metadata only (validity dates, serial) and
+//! FK-constrained to `hosts(id)`, which doesn't fit the wildcard
+//! model where the cert covers a domain not a single host.
+//!
+//! This table is the source of truth for wildcard cert MATERIAL.
+//! The controller hydrates its in-memory `WildcardCertStore` from
+//! this table at boot; the ACME scheduler upserts a row after every
 //! issuance / renewal.
 
 use chrono::{DateTime, Utc};
@@ -14,35 +16,53 @@ use sqlx::Row;
 
 use crate::{Inventory, Result};
 
+/// One row from `tls_wildcard_certs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WildcardCertRow {
-    /// Canonical key, typically the wildcard form when the order covered both
-    /// the wildcard and the apex (`*.foo.com`).
+    /// Canonical key, typically the wildcard form when the order
+    /// covered both the wildcard and the apex (`*.foo.com`).
     pub primary_identifier: String,
-    /// All SANs in the issued cert, in original order. JSON-encoded in SQLite.
+    /// All SANs in the issued cert, in original order. JSON-encoded
+    /// in SQLite.
     pub identifiers: Vec<String>,
+    /// Certificate PEM.
     pub cert_pem: String,
+    /// Private key PEM. Never logged.
     pub key_pem: String,
+    /// Validity start.
     pub not_before: DateTime<Utc>,
+    /// Validity end.
     pub not_after: DateTime<Utc>,
+    /// X.509 serial (hex).
     pub serial: String,
+    /// Issuer CN.
     pub issuer: String,
 }
 
+/// Upsert payload for a wildcard cert.
 #[derive(Debug, Clone)]
 pub struct UpsertWildcardCert {
+    /// Canonical lookup key.
     pub primary_identifier: String,
+    /// All SANs.
     pub identifiers: Vec<String>,
+    /// Cert PEM.
     pub cert_pem: String,
+    /// Key PEM.
     pub key_pem: String,
+    /// Validity start.
     pub not_before: DateTime<Utc>,
+    /// Validity end.
     pub not_after: DateTime<Utc>,
+    /// X.509 serial.
     pub serial: String,
+    /// Issuer CN.
     pub issuer: String,
 }
 
 impl Inventory {
     /// Insert or replace the wildcard cert keyed by `primary_identifier`.
+    ///
     /// The `identifiers` list is JSON-encoded in the row.
     pub async fn upsert_wildcard_cert(&self, cert: UpsertWildcardCert) -> Result<()> {
         let identifiers_json =
@@ -80,8 +100,10 @@ impl Inventory {
         Ok(())
     }
 
-    /// Snapshot every wildcard cert in storage. Called at controller boot to
-    /// hydrate the in-memory `WildcardCertStore`.
+    /// Snapshot every wildcard cert in storage.
+    ///
+    /// Called at controller boot to hydrate the in-memory
+    /// `WildcardCertStore`.
     pub async fn list_wildcard_certs(&self) -> Result<Vec<WildcardCertRow>> {
         let rows = sqlx::query(
             r#"
@@ -129,8 +151,10 @@ impl Inventory {
         Ok(out)
     }
 
-    /// Delete a wildcard cert by primary identifier. Used by tests and
-    /// future operator-driven revocation; not on the production hot path.
+    /// Delete a wildcard cert by primary identifier.
+    ///
+    /// Used by tests and future operator-driven revocation; not on the
+    /// production hot path.
     pub async fn delete_wildcard_cert(&self, primary_identifier: &str) -> Result<bool> {
         let res = sqlx::query("DELETE FROM tls_wildcard_certs WHERE primary_identifier = ?")
             .bind(primary_identifier)

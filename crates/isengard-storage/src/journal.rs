@@ -1,4 +1,16 @@
-//! Append-only journal of events emitted by agents (or the controller itself).
+//! Append-only journal of events emitted by agents or the controller.
+//!
+//! Migration `0002` creates `events`. Rows land via [`Journal::insert`]
+//! and are read newest-first via [`Journal::list_recent`]. The journal
+//! can share the same SQLite file as [`crate::Inventory`]: both call
+//! into the same migration set, and in production the controller
+//! opens both against the same path.
+//!
+//! Event shapes are intentionally loose. `kind` is a dotted string
+//! (`update.success`, `deployment.failed`, ...) and the remaining
+//! columns are present-or-absent depending on the kind. The dashboard
+//! and the webhook dispatcher both consume the journal; the
+//! controller never reads from it.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -11,47 +23,73 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool};
 use crate::error::{Error, Result};
 use crate::host::HostId;
 
+/// One row read back from `events`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRow {
+    /// Autoincrement id assigned at insert.
     pub id: i64,
+    /// Host the event originated on, when known.
     pub host_id: Option<HostId>,
+    /// Dotted event kind string.
     pub kind: String,
+    /// Container name the event refers to.
     pub container_name: Option<String>,
+    /// Image reference the event refers to.
     pub image: Option<String>,
+    /// Image digest before a successful update.
     pub old_digest: Option<String>,
+    /// Image digest after a successful update.
     pub new_digest: Option<String>,
+    /// Free-form error string for failure-kind events.
     pub error: Option<String>,
+    /// Operator-readable one-line summary.
     pub summary: String,
+    /// Auxiliary JSON payload, when the event carries structured fields.
     pub metadata_json: Option<String>,
+    /// When the event actually happened, per the originating system.
     pub occurred_at: DateTime<Utc>,
+    /// When the journal accepted the row.
     pub received_at: DateTime<Utc>,
 }
 
+/// Insert payload. Mirrors [`EventRow`] minus the auto-assigned fields.
 #[derive(Debug, Clone)]
 pub struct InsertEvent {
+    /// Origin host, when known.
     pub host_id: Option<HostId>,
+    /// Dotted event kind.
     pub kind: String,
+    /// Container name.
     pub container_name: Option<String>,
+    /// Image reference.
     pub image: Option<String>,
+    /// Digest before the change.
     pub old_digest: Option<String>,
+    /// Digest after the change.
     pub new_digest: Option<String>,
+    /// Failure reason string.
     pub error: Option<String>,
+    /// Operator summary.
     pub summary: String,
+    /// JSON payload.
     pub metadata_json: Option<String>,
+    /// When the event happened.
     pub occurred_at: DateTime<Utc>,
 }
 
 /// Append-only event journal backed by SQLite.
 ///
-/// The journal can share the same SQLite file as the [`crate::Inventory`] —
-/// both call into the same pool of migrations.
+/// The journal can share the same SQLite file as [`crate::Inventory`]:
+/// both call into the same migration set.
 #[derive(Debug, Clone)]
 pub struct Journal {
+    /// Underlying sqlx pool. Cloning the [`Journal`] is cheap.
     pool: SqlitePool,
 }
 
 impl Journal {
     /// Open (or create) the database at `path` and run all pending migrations.
+    ///
     /// The parent directory must exist; the file is created if missing.
     pub async fn open(path: &Path) -> Result<Self> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
@@ -64,8 +102,8 @@ impl Journal {
         Ok(Self { pool })
     }
 
-    /// Open an in-memory database. Useful for tests; the data is wiped when
-    /// the `Journal` is dropped.
+    /// Open an in-memory database. Useful for tests; the data is wiped
+    /// when the [`Journal`] is dropped.
     pub async fn open_in_memory() -> Result<Self> {
         let pool = SqlitePool::connect("sqlite::memory:").await?;
         sqlx::migrate!().run(&pool).await?;
@@ -112,6 +150,7 @@ impl Journal {
     }
 }
 
+/// Decode one `events` row into an [`EventRow`].
 fn row_to_event(row: sqlx::sqlite::SqliteRow) -> Result<EventRow> {
     let host_id_bytes: Option<Vec<u8>> = row.get(1);
     let host_id = match host_id_bytes {

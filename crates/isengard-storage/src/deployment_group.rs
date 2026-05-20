@@ -1,8 +1,9 @@
-//! `DeploymentGroup` entity: tracks a multi-host rolling deploy as one logical unit.
+//! `DeploymentGroup` entity: a multi-host rolling deploy as one logical unit.
 //!
-//! Groups exist only when a stack-wide update fans out to more than one host.
-//! Single-host deploys bypass the orchestrator entirely and never produce a row here.
-//! See spec §Storage.
+//! Migration `0018` lands `deployment_groups`. Groups exist only when
+//! a stack-wide update fans out to more than one host. Single-host
+//! deploys bypass the orchestrator entirely and never produce a row
+//! here.
 
 use crate::error::{Error, Result};
 use crate::host::HostId;
@@ -17,14 +18,22 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentGroupState {
+    /// Group row was written; the orchestrator has not yet started
+    /// dispatching waves.
     Pending,
+    /// Orchestrator is dispatching waves and waiting on per-host
+    /// deployments.
     Rolling,
+    /// Every host's deployment finished cleanly.
     Done,
+    /// Operator stopped the roll mid-flight.
     Aborted,
+    /// One or more hosts failed past the per-group failure budget.
     Failed,
 }
 
 impl DeploymentGroupState {
+    /// Canonical snake_case spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -35,6 +44,7 @@ impl DeploymentGroupState {
         }
     }
 
+    /// Whether the state is terminal (`Done`, `Aborted`, `Failed`).
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Aborted | Self::Failed)
     }
@@ -61,26 +71,41 @@ impl FromStr for DeploymentGroupState {
 /// One row from `deployment_groups`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentGroup {
+    /// ULID id rendered as a string.
     pub id: String,
+    /// Stack the group rolls.
     pub stack_id: StackId,
+    /// Service the group targets within the stack.
     pub service_name: String,
-    /// Snapshot of stack parallelism at group-start. Either `"1"`..`"N"` or `"all"`.
+    /// Snapshot of stack parallelism at group-start.
+    /// Either `"1"`..`"N"` or `"all"`.
     pub parallelism: String,
+    /// Lifecycle state.
     pub state: DeploymentGroupState,
-    /// Host ids that the orchestrator plans to roll over the course of the group.
+    /// Host ids the orchestrator plans to roll over the group.
     pub target_hosts: Vec<HostId>,
+    /// When the orchestrator wrote the row.
     pub started_at: DateTime<Utc>,
+    /// When the group reached a terminal state.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Failure reason string, when terminal-failed.
     pub error: Option<String>,
 }
 
+/// Insert payload for a deployment group.
 #[derive(Debug, Clone)]
 pub struct InsertDeploymentGroup {
+    /// ULID id (caller mints it).
     pub id: String,
+    /// Stack the group rolls.
     pub stack_id: StackId,
+    /// Service the group targets.
     pub service_name: String,
+    /// Parallelism snapshot (`"1"`..`"N"` or `"all"`).
     pub parallelism: String,
+    /// Initial state (typically `Pending`).
     pub state: DeploymentGroupState,
+    /// Hosts the group plans to roll.
     pub target_hosts: Vec<HostId>,
 }
 
@@ -131,7 +156,8 @@ impl crate::inventory::Inventory {
         Ok(Some(row_to_group(&r)?))
     }
 
-    /// List groups for a stack ordered by `started_at DESC`. `limit` caps the result set.
+    /// List groups for a stack ordered by `started_at DESC`.
+    /// `limit` caps the result set.
     pub async fn list_deployment_groups(
         &self,
         stack_id: StackId,
@@ -154,9 +180,11 @@ impl crate::inventory::Inventory {
         rows.iter().map(row_to_group).collect()
     }
 
-    /// Update the lifecycle state of a group. When the new state is terminal,
-    /// `finished_at` is set to the current timestamp. The optional `error` is
-    /// stored verbatim (typically populated when transitioning to `Failed` or
+    /// Update the lifecycle state of a group.
+    ///
+    /// When the new state is terminal, `finished_at` is set to
+    /// `CURRENT_TIMESTAMP`. The optional `error` is stored verbatim
+    /// (typically populated when transitioning to `Failed` or
     /// `Aborted`).
     pub async fn update_deployment_group_state(
         &self,
@@ -194,8 +222,10 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Set the per-stack `deployment_parallelism` value. `None` clears the
-    /// override (default behavior: rolling, one host at a time).
+    /// Set the per-stack `deployment_parallelism` value.
+    ///
+    /// `None` clears the override (default behavior: rolling, one host
+    /// at a time).
     pub async fn set_stack_parallelism(
         &self,
         stack_id: StackId,
@@ -209,8 +239,10 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
-    /// Read back the stored stack parallelism. `None` means "unset" (callers
-    /// should treat this as the default value `"1"`).
+    /// Read back the stored stack parallelism.
+    ///
+    /// `None` means "unset" (callers should treat this as the default
+    /// value `"1"`).
     pub async fn get_stack_parallelism(&self, stack_id: StackId) -> Result<Option<String>> {
         use sqlx::Row;
         let row = sqlx::query("SELECT deployment_parallelism FROM stacks WHERE id = ?")
@@ -224,6 +256,7 @@ impl crate::inventory::Inventory {
     }
 }
 
+/// Encode a host-id slice into the JSON shape stored on the row.
 fn serialize_target_hosts(hosts: &[HostId]) -> Result<String> {
     let hex: Vec<String> = hosts.iter().map(|h| hex_encode_host_id(*h)).collect();
     serde_json::to_string(&hex).map_err(|e| Error::Decode {
@@ -231,6 +264,7 @@ fn serialize_target_hosts(hosts: &[HostId]) -> Result<String> {
     })
 }
 
+/// Decode the JSON shape stored on the row back into host ids.
 fn deserialize_target_hosts(json: &str) -> Result<Vec<HostId>> {
     let raw: Vec<String> = serde_json::from_str(json).map_err(|e| Error::Decode {
         reason: format!("decoding target_hosts: {e}"),
@@ -238,6 +272,7 @@ fn deserialize_target_hosts(json: &str) -> Result<Vec<HostId>> {
     raw.into_iter().map(|s| hex_decode_host_id(&s)).collect()
 }
 
+/// Render a [`HostId`] as the 32-char hex string used in JSON.
 fn hex_encode_host_id(id: HostId) -> String {
     let bytes = id.to_bytes();
     let mut out = String::with_capacity(32);
@@ -247,6 +282,7 @@ fn hex_encode_host_id(id: HostId) -> String {
     out
 }
 
+/// Parse a 32-char hex string back into a [`HostId`].
 fn hex_decode_host_id(s: &str) -> Result<HostId> {
     if s.len() != 32 {
         return Err(Error::Decode {
@@ -263,6 +299,7 @@ fn hex_decode_host_id(s: &str) -> Result<HostId> {
     Ok(HostId::from_bytes(bytes))
 }
 
+/// Decode one `deployment_groups` row into a [`DeploymentGroup`].
 fn row_to_group(r: &sqlx::sqlite::SqliteRow) -> Result<DeploymentGroup> {
     use sqlx::Row;
     let state_s: String = r.try_get("state")?;

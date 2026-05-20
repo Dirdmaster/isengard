@@ -1,20 +1,23 @@
-//! Production [`isengard_core::ApprovalStore`] implementation backed by an
-//! `Arc<Inventory>`. Mirrors the [`crate::policy::InventoryPolicyLoader`]
-//! pattern: the agent runtime constructs one of these and threads it through
-//! `PluginContext` so the updater plugin can persist + lookup approval rows
+//! Production [`isengard_core::ApprovalStore`] backed by an `Arc<Inventory>`.
+//!
+//! Mirrors the [`crate::policy::InventoryPolicyLoader`] pattern: the
+//! agent runtime constructs one and threads it through `PluginContext`
+//! so the updater plugin can persist and look up approval rows
 //! without a hard storage dep.
 //!
-//! Type-shape note: the core trait deals in `isengard_core::PendingApprovalBody`
-//! / `InsertPendingApproval` / `PendingApprovalRecord`. The storage DAO uses
-//! its own fully-typed [`crate::host_action::UpdateApprovalBody`] +
-//! [`crate::host_action::InsertPendingApproval`]. This module is the
-//! conversion seam: each method maps core types -> storage types, calls the
-//! existing DAO, then projects the storage row back to a slim
-//! `PendingApprovalRecord` (just the `action_id`).
+//! The core trait deals in `isengard_core::PendingApprovalBody` /
+//! `InsertPendingApproval` / `PendingApprovalRecord`. The storage DAO
+//! uses its own fully-typed [`crate::host_action::UpdateApprovalBody`]
+//! plus [`crate::host_action::InsertPendingApproval`]. This module is
+//! the conversion seam: each method maps core types to storage types,
+//! calls the existing DAO, then projects the storage row back to a
+//! slim `PendingApprovalRecord` (only the `action_id`).
 //!
-//! The storage-side body's `host_id` field is the storage `HostId` newtype
-//! over `ulid::Ulid`. Core's body uses `isengard_core::HostId` (a re-export of
-//! `ulid::Ulid`), so the conversion is a single `From` hop.
+//! The storage-side body's `host_id` field is the storage [`HostId`]
+//! newtype over `ulid::Ulid`. Core's body uses `isengard_core::HostId`
+//! (a re-export of `ulid::Ulid`), so the conversion is one `From` hop.
+//!
+//! [`HostId`]: crate::HostId
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -30,18 +33,22 @@ use crate::host_action::{
 };
 use crate::inventory::Inventory;
 
-/// Production [`ApprovalStore`] backed by an `Arc<Inventory>`. Constructed
-/// once by the agent runtime and shared across plugins.
+/// Production [`ApprovalStore`] backed by an `Arc<Inventory>`.
+///
+/// Constructed once by the agent runtime and shared across plugins.
 pub struct InventoryApprovalStore {
+    /// Backing inventory handle (cheap to clone internally).
     inv: Arc<Inventory>,
 }
 
 impl InventoryApprovalStore {
+    /// Wrap an existing inventory for use as the core approval store.
     pub fn new(inv: Arc<Inventory>) -> Self {
         Self { inv }
     }
 }
 
+/// Convert a core `PendingApprovalBody` into its storage twin.
 fn body_core_to_storage(body: CorePendingApprovalBody) -> StorageUpdateApprovalBody {
     StorageUpdateApprovalBody {
         host_id: crate::host::HostId(body.host_id),

@@ -1,16 +1,21 @@
-//! Routing rule row + insert request + CRUD helpers on `Inventory`.
+//! Routing rule row, insert request, and CRUD helpers.
 //!
-//! See spec §6 — `routing_rules` table is the source of truth for which
-//! `(public_hostname → host:container:port)` mappings the proxy should serve.
+//! Migration `0009` lands the original `routing_rules` table; later
+//! migrations add columns (`adapter`, `auth`, `state`, `source`,
+//! `healthcheck_*`). The table is the source of truth for which
+//! `(public_hostname -> host:container:port)` mappings the proxy
+//! should serve.
 
 use crate::error::{Error, Result};
 use crate::host::HostId;
 use crate::stack::StackId;
 use serde::{Deserialize, Serialize};
 
-/// Surrogate primary key for routing rules. The `routing_rules` table uses
-/// an autoincrementing integer because there is no natural identifier — the
-/// `(public_hostname, host_id)` pair is unique but heavy to use as a key.
+/// Surrogate primary key for routing rules.
+///
+/// The `routing_rules` table uses an autoincrementing integer because
+/// there is no natural identifier: the `(public_hostname, host_id)`
+/// pair is unique but heavy to use as a foreign key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RoutingRuleId(pub i64);
@@ -21,10 +26,12 @@ impl std::fmt::Display for RoutingRuleId {
     }
 }
 
+/// How TLS is terminated for a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
-    /// TLS terminates at an upstream edge (e.g. Cloudflare); proxy serves HTTP.
+    /// TLS terminates at an upstream edge (e.g. Cloudflare); proxy
+    /// serves HTTP.
     Edge,
     /// Proxy obtains and renews a Let's Encrypt cert for the hostname.
     Acme,
@@ -33,6 +40,7 @@ pub enum TlsMode {
 }
 
 impl TlsMode {
+    /// Canonical lowercase spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             TlsMode::Edge => "edge",
@@ -42,6 +50,7 @@ impl TlsMode {
     }
 }
 
+/// Activation state for a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RoutingRuleState {
@@ -51,11 +60,12 @@ pub enum RoutingRuleState {
     Active,
     /// Rule is being torn down; proxy stops accepting new connections.
     Draining,
-    /// Activation failed — see logs/journal for details.
+    /// Activation failed: see logs/journal for details.
     Failed,
 }
 
 impl RoutingRuleState {
+    /// Canonical lowercase spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             RoutingRuleState::Pending => "pending",
@@ -66,6 +76,7 @@ impl RoutingRuleState {
     }
 }
 
+/// What produced a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RoutingRuleSource {
@@ -78,6 +89,7 @@ pub enum RoutingRuleSource {
 }
 
 impl RoutingRuleSource {
+    /// Canonical lowercase spelling for the SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             RoutingRuleSource::Ui => "ui",
@@ -87,46 +99,81 @@ impl RoutingRuleSource {
     }
 }
 
+/// One row from `routing_rules`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingRule {
+    /// Surrogate key.
     pub id: RoutingRuleId,
+    /// Host the upstream container runs on.
     pub host_id: HostId,
+    /// Owning stack, when the rule belongs to one.
     pub stack_id: Option<StackId>,
+    /// Compose service name the rule targets.
     pub service_name: String,
+    /// Upstream container port.
     pub container_port: u16,
+    /// Operator-visible hostname (the SNI value).
     pub public_hostname: String,
+    /// Protocol the rule serves (`http`, `https`, `tcp`).
     pub protocol: String,
+    /// Adapter that owns this rule (`caddy`, `traefik`, ...).
     pub adapter: String,
+    /// TLS termination mode.
     pub tls_mode: TlsMode,
+    /// Optional healthcheck path the proxy probes.
     pub healthcheck_path: Option<String>,
+    /// Healthcheck interval in seconds.
     pub healthcheck_interval_secs: u32,
+    /// Optional auth handler reference (e.g. `basic:realm`).
     pub auth: Option<String>,
+    /// Activation state.
     pub state: RoutingRuleState,
+    /// How the rule was produced.
     pub source: RoutingRuleSource,
+    /// Source container id when `source == Label`.
     pub source_container_id: Option<String>,
+    /// Where an imported rule came from when `source == Imported`.
     pub source_imported_from: Option<String>,
 }
 
+/// Insert payload for a routing rule.
 #[derive(Debug, Clone)]
 pub struct InsertRoutingRule {
+    /// Host the upstream runs on.
     pub host_id: HostId,
+    /// Owning stack.
     pub stack_id: Option<StackId>,
+    /// Service name.
     pub service_name: String,
+    /// Upstream port.
     pub container_port: u16,
+    /// Public hostname.
     pub public_hostname: String,
+    /// Protocol.
     pub protocol: String,
+    /// Adapter.
     pub adapter: String,
+    /// TLS mode.
     pub tls_mode: TlsMode,
+    /// Optional healthcheck path.
     pub healthcheck_path: Option<String>,
+    /// Healthcheck interval.
     pub healthcheck_interval_secs: u32,
+    /// Optional auth handler ref.
     pub auth: Option<String>,
+    /// Initial state.
     pub state: RoutingRuleState,
+    /// Source attribution.
     pub source: RoutingRuleSource,
+    /// Source container id (label sources).
     pub source_container_id: Option<String>,
+    /// Import origin (imported sources).
     pub source_imported_from: Option<String>,
 }
 
 impl crate::inventory::Inventory {
+    /// Insert a routing rule and return the populated row, including
+    /// the assigned id.
     pub async fn insert_routing_rule(&self, ins: InsertRoutingRule) -> Result<RoutingRule> {
         use sqlx::Row;
         let host_bytes = ins.host_id.to_bytes().to_vec();
@@ -182,6 +229,7 @@ impl crate::inventory::Inventory {
         })
     }
 
+    /// Every rule for a given host, ordered by id.
     pub async fn list_routing_rules_for_host(&self, host_id: HostId) -> Result<Vec<RoutingRule>> {
         let host_bytes = host_id.to_bytes().to_vec();
         let rows = sqlx::query(
@@ -202,9 +250,10 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(routing_rule_from_row).collect()
     }
 
-    /// Listing across all hosts, ordered by host then id. Replaces the
-    /// per-host fan-out the dashboard's `list_rules` endpoint did before:
-    /// one query instead of N+1.
+    /// Every rule across all hosts.
+    ///
+    /// Replaces the per-host fan-out the dashboard's `list_rules`
+    /// endpoint did before: one query instead of N+1.
     pub async fn list_all_routing_rules(&self) -> Result<Vec<RoutingRule>> {
         let rows = sqlx::query(
             r#"
@@ -221,8 +270,10 @@ impl crate::inventory::Inventory {
         rows.into_iter().map(routing_rule_from_row).collect()
     }
 
-    /// Look up a single rule by its primary key. Replaces the dashboard's
-    /// "fan out by host then filter" find-pattern in update/delete handlers.
+    /// Look up a single rule by its primary key.
+    ///
+    /// Replaces the dashboard's "fan out by host then filter"
+    /// find-pattern in update/delete handlers.
     pub async fn get_routing_rule(&self, id: RoutingRuleId) -> Result<Option<RoutingRule>> {
         let row = sqlx::query(
             r#"
@@ -240,6 +291,7 @@ impl crate::inventory::Inventory {
         row.map(routing_rule_from_row).transpose()
     }
 
+    /// Delete a rule by id. Silent if the row doesn't exist.
     pub async fn delete_routing_rule(&self, id: RoutingRuleId) -> Result<()> {
         sqlx::query("DELETE FROM routing_rules WHERE id = ?")
             .bind(id.0)
@@ -248,6 +300,8 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Transition a rule between activation states.
+    /// Bumps `updated_at`.
     pub async fn update_routing_rule_state(
         &self,
         id: RoutingRuleId,
@@ -264,6 +318,7 @@ impl crate::inventory::Inventory {
     }
 }
 
+/// Decode one `routing_rules` row into a [`RoutingRule`].
 fn routing_rule_from_row(row: sqlx::sqlite::SqliteRow) -> Result<RoutingRule> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = row.try_get("host_id")?;
@@ -299,6 +354,7 @@ fn routing_rule_from_row(row: sqlx::sqlite::SqliteRow) -> Result<RoutingRule> {
     })
 }
 
+/// Parse the `tls_mode` TEXT column into a [`TlsMode`].
 fn parse_tls_mode(s: &str) -> Result<TlsMode> {
     match s {
         "edge" => Ok(TlsMode::Edge),
@@ -310,6 +366,7 @@ fn parse_tls_mode(s: &str) -> Result<TlsMode> {
     }
 }
 
+/// Parse the `state` TEXT column into a [`RoutingRuleState`].
 fn parse_state(s: &str) -> Result<RoutingRuleState> {
     match s {
         "pending" => Ok(RoutingRuleState::Pending),
@@ -322,6 +379,7 @@ fn parse_state(s: &str) -> Result<RoutingRuleState> {
     }
 }
 
+/// Parse the `source` TEXT column into a [`RoutingRuleSource`].
 fn parse_source(s: &str) -> Result<RoutingRuleSource> {
     match s {
         "ui" => Ok(RoutingRuleSource::Ui),

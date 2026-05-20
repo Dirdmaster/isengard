@@ -1,10 +1,15 @@
 //! Service entity: one container belonging to a host (and optionally a stack).
+//!
+//! Migration `0005` lands `services`. Each row is one container the
+//! agent has reported. The unique key is `(host_id, name)` so a stack
+//! re-bound to a different host keeps a separate row.
 
 use crate::host::HostId;
 use crate::stack::StackId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Surrogate key for service rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ServiceId(pub i64);
@@ -15,22 +20,7 @@ impl std::fmt::Display for ServiceId {
     }
 }
 
-/// Lifecycle state for a service as observed by an agent's heartbeat.
-///
-/// v0.5.3: extended beyond `Running`/`Stopped`/`Restarting`/`Unknown` so
-/// mid-startup states surface correctly in `isd ps` and `isd deploy --watch`
-/// instead of collapsing to `Unknown`. Specifically, wisp's
-/// `ContainerState::Created` (bundle staged + cgroup ready, process not
-/// yet forked) used to map to `Unknown`; now it lands on `Creating`.
-///
-/// ## Wire format + back-compat
-///
-/// The on-disk representation is the lowercase variant name (`as_str`).
-/// Old binaries reading new strings fall through `from_str`'s default arm
-/// and decode as `Unknown` (forward-compatible by construction). New
-/// binaries reading old `"unknown"` rows preserve them as `Unknown`.
-///
-/// SQLite column type is TEXT, so no schema migration is needed.
+#[doc = include_str!("../docs/service-state.md")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceState {
@@ -61,6 +51,7 @@ pub enum ServiceState {
 }
 
 impl ServiceState {
+    /// Canonical lowercase spelling. Used for the SQLite TEXT column.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pulling => "pulling",
@@ -73,6 +64,13 @@ impl ServiceState {
         }
     }
 
+    /// Parse a SQLite TEXT state column into the enum.
+    ///
+    /// Accepts the canonical lowercase strings plus the
+    /// docker-compatible aliases pre-extension agents still emit
+    /// (`created`, `exited`, `dead`). Anything unknown falls through
+    /// to `Unknown` so a new agent variant cannot crash an older
+    /// controller.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
@@ -90,24 +88,40 @@ impl ServiceState {
     }
 }
 
+/// One row from the `services` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Service {
+    /// Surrogate key.
     pub id: ServiceId,
+    /// Host the service runs on.
     pub host_id: HostId,
+    /// Owning stack, or `None` when the container is unstacked.
     pub stack_id: Option<StackId>,
+    /// Service name (compose service or container name).
     pub name: String,
+    /// Image reference reported by the runtime.
     pub image: String,
+    /// Last observed lifecycle state.
     pub state: ServiceState,
+    /// Timestamp of the last heartbeat that included this service.
     pub last_seen_at: DateTime<Utc>,
+    /// Operator-set strategy override that wins over the stack-level
+    /// strategy when set.
     pub deploy_strategy_override: Option<String>,
 }
 
+/// Insert / upsert payload for a service row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertService {
+    /// Host the service runs on.
     pub host_id: HostId,
+    /// Owning stack, when known.
     pub stack_id: Option<StackId>,
+    /// Service name.
     pub name: String,
+    /// Image reference.
     pub image: String,
+    /// Initial state.
     pub state: ServiceState,
 }
 

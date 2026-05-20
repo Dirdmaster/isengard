@@ -1,17 +1,30 @@
-//! Per-field UI overrides for label-source rules. See spec §5/§6.
+//! Per-field UI overrides for label-source routing rules.
+//!
+//! When a routing rule originates from a container label
+//! ([`crate::RoutingRuleSource::Label`]), the dashboard lets an
+//! operator nudge individual fields without losing the binding to
+//! the label. Each tweak lands as a row in `routing_rule_overrides`
+//! keyed by `(routing_rule_id, field)` with the JSON value the
+//! operator picked.
 
 use crate::error::Result;
 use crate::routing_rule::RoutingRuleId;
 use serde::{Deserialize, Serialize};
 
+/// One row from `routing_rule_overrides`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingRuleOverride {
+    /// Parent routing rule.
     pub routing_rule_id: RoutingRuleId,
+    /// Field name the override applies to (e.g. `auth`, `protocol`).
     pub field: String,
+    /// Override value. Schema is field-dependent.
     pub value_json: serde_json::Value,
 }
 
 impl crate::inventory::Inventory {
+    /// Upsert one override for `(rule_id, field)`. Bumps `created_at`
+    /// on conflict; the column doubles as a "last-changed" timestamp.
     pub async fn upsert_routing_rule_override(
         &self,
         rule_id: RoutingRuleId,
@@ -36,6 +49,7 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Every override row for a given rule.
     pub async fn list_routing_rule_overrides(
         &self,
         rule_id: RoutingRuleId,

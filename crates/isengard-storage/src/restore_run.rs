@@ -1,9 +1,10 @@
 //! `restore_runs` DAO.
 //!
-//! A row is inserted with status=`running` when a restore starts, then
-//! transitioned to `success` (with `previous_db_backup_path` + `bytes_restored`)
-//! or `failed` (with an error string). The dashboard's restore-runs listing
-//! reads this table newest-first.
+//! Migration `0023` lands `restore_runs`. A row is inserted with
+//! status `running` when a restore starts, then transitioned to
+//! `success` (with `previous_db_backup_path` and `bytes_restored`)
+//! or `failed` (with an error string). The dashboard's restore-runs
+//! listing reads this table newest-first.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,12 +16,16 @@ use crate::inventory::Inventory;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RestoreRunStatus {
+    /// Restore in progress.
     Running,
+    /// Restore completed cleanly; previous DB stashed at the recorded path.
     Success,
+    /// Restore aborted; error string holds the reason.
     Failed,
 }
 
 impl RestoreRunStatus {
+    /// Canonical lowercase spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             RestoreRunStatus::Running => "running",
@@ -29,6 +34,7 @@ impl RestoreRunStatus {
         }
     }
 
+    /// Parse a status TEXT column. Returns `None` for unknown strings.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "running" => Some(RestoreRunStatus::Running),
@@ -46,14 +52,25 @@ pub struct RestoreRunId(pub i64);
 /// A row from `restore_runs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreRun {
+    /// Surrogate key.
     pub id: RestoreRunId,
+    /// Source object name (the backup we're restoring from).
     pub source_object: String,
+    /// Pointer back to the `backup_runs` row this object came from,
+    /// when known.
     pub source_backup_run_id: Option<i64>,
+    /// When the restore started.
     pub started_at: DateTime<Utc>,
+    /// When the restore finished.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Status of the run.
     pub status: RestoreRunStatus,
+    /// Path the controller stashed the previous DB at before
+    /// overwriting it. Set on success only.
     pub previous_db_backup_path: Option<String>,
+    /// Number of bytes written out of the restored object.
     pub bytes_restored: Option<i64>,
+    /// Failure reason string.
     pub error: Option<String>,
 }
 
@@ -77,8 +94,8 @@ impl Inventory {
         Ok(RestoreRunId(r.last_insert_rowid()))
     }
 
-    /// Mark a restore run as `success`, recording the previous-db backup path
-    /// and the byte count of the restored file.
+    /// Mark a restore run as `success`. Records the previous-db backup
+    /// path and the byte count of the restored file.
     pub async fn finish_restore_run_success(
         &self,
         id: RestoreRunId,
@@ -99,7 +116,7 @@ impl Inventory {
         Ok(())
     }
 
-    /// Mark a restore run as `failed`, setting the error string.
+    /// Mark a restore run as `failed` with the given error string.
     pub async fn finish_restore_run_failed(
         &self,
         id: RestoreRunId,
@@ -117,7 +134,7 @@ impl Inventory {
         Ok(())
     }
 
-    /// List the most recent restore runs, newest-first. `limit` is clamped to 1..200.
+    /// List the most recent restore runs, newest-first. `limit` clamps to `1..200`.
     pub async fn list_restore_runs(&self, limit: u32) -> Result<Vec<RestoreRun>> {
         let limit = limit.clamp(1, 200);
         use sqlx::Row;
@@ -160,6 +177,7 @@ impl Inventory {
     }
 }
 
+/// Parse an RFC3339 string into `DateTime<Utc>`.
 fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))

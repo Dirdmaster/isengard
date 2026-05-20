@@ -1,30 +1,55 @@
-//! ACME account singleton. Stores the account key + directory URL + kid for
-//! the controller's ACME client. There is at most one row (`CHECK (id = 1)`).
-//! See spec §7 — `acme_account` table.
+//! ACME account singleton.
+//!
+//! One controller has one account. Migration `0010` creates the
+//! `acme_account` table with `CHECK (id = 1)`, mirroring the [`ca`]
+//! pattern. Holds the account key, the directory URL the key was
+//! registered against, and the issuer-assigned `kid` (key
+//! identifier) used on subsequent ACME requests.
+//!
+//! [`ca`]: crate::ca
 
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// One row from `acme_account`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcmeAccount {
+    /// Contact email registered with the ACME directory.
     pub contact_email: String,
+    /// Directory URL the account is registered against
+    /// (e.g. `https://acme-v02.api.letsencrypt.org/directory`).
     pub directory_url: String,
+    /// Account key PEM. Never logged.
     pub account_key_pem: String,
+    /// Server-assigned key identifier. `None` before the first
+    /// successful `newAccount` round-trip.
     pub kid: Option<String>,
+    /// When the row was first written.
     pub created_at: DateTime<Utc>,
+    /// When the row was last replaced.
     pub updated_at: DateTime<Utc>,
 }
 
+/// Insert / replace payload for the ACME account row.
 #[derive(Debug, Clone)]
 pub struct UpsertAcmeAccount {
+    /// Contact email to register.
     pub contact_email: String,
+    /// Directory URL the key is registered against.
     pub directory_url: String,
+    /// Account key PEM (caller mints it).
     pub account_key_pem: String,
+    /// Server-assigned key id if known.
     pub kid: Option<String>,
 }
 
 impl crate::inventory::Inventory {
+    /// Insert or replace the singleton ACME account row.
+    ///
+    /// `updated_at` bumps to `CURRENT_TIMESTAMP` on every call. The
+    /// `CHECK (id = 1)` constraint guarantees there is exactly one
+    /// row; the upsert keys on the constraint conflict.
     pub async fn upsert_acme_account(&self, ins: UpsertAcmeAccount) -> Result<()> {
         sqlx::query(
             r#"
@@ -47,6 +72,8 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Fetch the singleton ACME account, or `None` when no account
+    /// has been registered yet.
     pub async fn get_acme_account(&self) -> Result<Option<AcmeAccount>> {
         use sqlx::Row;
         let row = sqlx::query(

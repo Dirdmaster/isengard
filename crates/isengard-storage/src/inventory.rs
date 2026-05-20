@@ -1,4 +1,12 @@
-//! `Inventory`: the public CRUD surface over the `hosts` table.
+//! [`Inventory`]: the wide CRUD facade over every non-journal table.
+//!
+//! The struct holds a `sqlx::SqlitePool` opened against one `.db` file.
+//! Most DAOs live alongside their entity type (`host`, `stack`,
+//! `policy`, `routing_rule`, ...) and hang their methods off
+//! [`Inventory`] via `impl crate::inventory::Inventory`. This file
+//! owns the open/connect plumbing plus the small bundle of DAO
+//! methods that haven't migrated into a dedicated module yet
+//! (hosts, stacks, services, queued host actions, settings).
 
 use std::path::Path;
 use std::str::FromStr;
@@ -19,6 +27,7 @@ use crate::stack::{
 /// Cheap to clone (the pool is `Arc`-backed inside).
 #[derive(Debug, Clone)]
 pub struct Inventory {
+    /// Underlying sqlx pool. Cloning [`Inventory`] is cheap.
     pool: SqlitePool,
 }
 
@@ -279,6 +288,12 @@ impl Inventory {
         &self.pool
     }
 
+    /// Insert a stack row, or return the existing id when
+    /// `(host_id, name)` already maps to one.
+    ///
+    /// `INSERT OR IGNORE` is followed by a `SELECT id` so the call
+    /// returns a usable id in both branches; SQLite's UPSERT
+    /// `RETURNING` doesn't run for the conflict branch.
     pub async fn insert_stack(&self, req: InsertStack) -> Result<StackId> {
         // Upsert: SQLite's INSERT ... ON CONFLICT DO UPDATE doesn't return the
         // existing id, so we INSERT OR IGNORE then SELECT to fetch the id.
@@ -299,6 +314,7 @@ impl Inventory {
         Ok(StackId(id))
     }
 
+    /// List stacks, optionally filtered to one host. Sorted by name.
     pub async fn list_stacks(&self, host_id: Option<HostId>) -> Result<Vec<Stack>> {
         let rows = match host_id {
             Some(h) => {
@@ -317,6 +333,7 @@ impl Inventory {
         rows.into_iter().map(stack_from_row).collect()
     }
 
+    /// Fetch one stack by id.
     pub async fn get_stack(&self, id: StackId) -> Result<Option<Stack>> {
         let row =
             sqlx::query("SELECT id, host_id, name, source, discovered_at, manifest_toml, manifest_sha256, manifest_imported_at, deploy_strategy FROM stacks WHERE id = ?")
@@ -326,6 +343,9 @@ impl Inventory {
         row.map(stack_from_row).transpose()
     }
 
+    /// Delete a stack by id. Cascades to services and deployments
+    /// via the schema's foreign-key actions. Returns `true` iff a row
+    /// was removed.
     pub async fn delete_stack(&self, id: StackId) -> Result<bool> {
         let result = sqlx::query("DELETE FROM stacks WHERE id = ?")
             .bind(id.0)
@@ -567,6 +587,11 @@ impl Inventory {
         })
     }
 
+    /// Insert or refresh a service row.
+    ///
+    /// Keys on `(host_id, name)`: on conflict, the image, state, and
+    /// `last_seen_at` are updated. Returns the existing id when the
+    /// row already existed.
     pub async fn insert_service(&self, req: InsertService) -> Result<ServiceId> {
         use sqlx::Row;
         sqlx::query(
@@ -594,6 +619,7 @@ impl Inventory {
         Ok(ServiceId(row.try_get("id")?))
     }
 
+    /// List services, optionally restricted to one stack. Sorted by name.
     pub async fn list_services(&self, stack_id: Option<StackId>) -> Result<Vec<Service>> {
         let rows = match stack_id {
             Some(s) => {
@@ -617,6 +643,7 @@ impl Inventory {
         rows.into_iter().map(service_from_row).collect()
     }
 
+    /// Fetch one service by id.
     pub async fn get_service(&self, id: ServiceId) -> Result<Option<Service>> {
         let row = sqlx::query(
             "SELECT id, host_id, stack_id, name, image, state, last_seen_at, deploy_strategy_override \
@@ -628,6 +655,10 @@ impl Inventory {
         row.map(service_from_row).transpose()
     }
 
+    /// Look up a service by `(host_id, stack_id, name)`.
+    ///
+    /// `stack_id = None` matches services with no stack binding
+    /// (`stack_id IS NULL` in SQLite).
     pub async fn get_service_by_name(
         &self,
         host_id: HostId,
@@ -662,6 +693,10 @@ impl Inventory {
         row.map(service_from_row).transpose()
     }
 
+    /// Set or clear the per-service deploy strategy override.
+    ///
+    /// `None` clears the override; the stack-level strategy applies
+    /// again on the next deploy.
     pub async fn set_service_deploy_strategy_override(
         &self,
         service_id: ServiceId,
@@ -675,6 +710,7 @@ impl Inventory {
         Ok(())
     }
 
+    /// Delete a service row. Returns `true` iff a row was removed.
     pub async fn delete_service(&self, id: ServiceId) -> Result<bool> {
         let r = sqlx::query("DELETE FROM services WHERE id = ?")
             .bind(id.0)
@@ -683,6 +719,14 @@ impl Inventory {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Queue an action for the next agent heartbeat.
+    ///
+    /// The agent picks the row up via [`Self::pending_actions`] and
+    /// the controller marks delivery via
+    /// [`Self::mark_action_delivered`]. See the [`host_action`] module
+    /// for the typed payload shapes.
+    ///
+    /// [`host_action`]: crate::host_action
     pub async fn queue_action(
         &self,
         host_id: HostId,
@@ -700,6 +744,10 @@ impl Inventory {
         Ok(HostActionId(r.last_insert_rowid()))
     }
 
+    /// Every undelivered action for `host_id`, oldest first.
+    ///
+    /// Filters on `delivered_at IS NULL` so approval rows (which set
+    /// `delivered_at` at insert) are excluded.
     pub async fn pending_actions(&self, host_id: HostId) -> Result<Vec<HostAction>> {
         let rows = sqlx::query(
             "SELECT id, host_id, kind, payload_json, created_at, delivered_at, result \
@@ -712,6 +760,8 @@ impl Inventory {
         rows.into_iter().map(host_action_from_row).collect()
     }
 
+    /// Stamp `delivered_at` and record the agent's result string for
+    /// a queued action.
     pub async fn mark_action_delivered(&self, id: HostActionId, result: &str) -> Result<()> {
         sqlx::query(
             "UPDATE host_actions SET delivered_at = CURRENT_TIMESTAMP, result = ? WHERE id = ?",
@@ -723,6 +773,10 @@ impl Inventory {
         Ok(())
     }
 
+    /// Upsert one setting key.
+    ///
+    /// The JSON value is stored verbatim; the DAO does not interpret
+    /// the shape.
     pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         let json = serde_json::to_string(value).map_err(|e| Error::Decode {
             reason: e.to_string(),
@@ -738,6 +792,7 @@ impl Inventory {
         Ok(())
     }
 
+    /// Fetch one setting by key. Returns `None` if no row matches.
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
         use sqlx::Row;
         let row = sqlx::query("SELECT value_json FROM settings WHERE key = ?")
@@ -757,6 +812,7 @@ impl Inventory {
         }
     }
 
+    /// Every setting row, sorted by key.
     pub async fn list_settings(&self) -> Result<Vec<Setting>> {
         use sqlx::Row;
         let rows = sqlx::query("SELECT key, value_json, updated_at FROM settings ORDER BY key")
@@ -778,6 +834,7 @@ impl Inventory {
     }
 }
 
+/// Decode one `stacks` row into a [`Stack`].
 fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = row.try_get("host_id")?;
@@ -811,6 +868,7 @@ fn stack_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Stack> {
     })
 }
 
+/// Decode one `services` row into a [`Service`].
 fn service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Service> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = row.try_get("host_id")?;
@@ -833,6 +891,7 @@ fn service_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Service> {
     })
 }
 
+/// Decode one agent-pull `host_actions` row into a [`HostAction`].
 fn host_action_from_row(row: sqlx::sqlite::SqliteRow) -> Result<HostAction> {
     use sqlx::Row;
     let host_bytes: Vec<u8> = row.try_get("host_id")?;
@@ -855,6 +914,8 @@ fn host_action_from_row(row: sqlx::sqlite::SqliteRow) -> Result<HostAction> {
     })
 }
 
+/// sqlx `query_as` row tuple for `hosts`. Kept as a type alias so the
+/// `decode_host` signature stays readable.
 type HostRow = (
     Vec<u8>,     // id
     String,      // fingerprint
@@ -868,6 +929,7 @@ type HostRow = (
     String,      // metadata (json text)
 );
 
+/// Decode one [`HostRow`] tuple into a [`Host`].
 fn decode_host(row: HostRow) -> Result<Host> {
     let id_bytes: [u8; 16] = row
         .0
@@ -905,7 +967,7 @@ mod tests {
         let inv = Inventory::open(&path).await.expect("open");
         assert!(path.exists(), "db file should be created");
 
-        // Migration should have created the hosts table — check by querying
+        // Migration should have created the hosts table: check by querying
         // sqlite_master (sqlite's catalog).
         let row: (i64,) = sqlx::query_as(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='hosts'",
@@ -934,7 +996,7 @@ mod tests {
         let path = dir.path().join("isengard.db");
 
         let _inv1 = Inventory::open(&path).await.expect("open 1");
-        // Reopen the same file — migrations should be a no-op the second time.
+        // Reopen the same file: migrations should be a no-op the second time.
         let _inv2 = Inventory::open(&path).await.expect("open 2");
     }
 

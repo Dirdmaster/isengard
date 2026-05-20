@@ -1,31 +1,50 @@
-//! Per-host networking adapter configuration. See spec §6 — `adapter_config`
-//! holds the JSON config + enabled flag for each adapter (e.g. `none`,
-//! `caddy`, `traefik`) on a given host. Primary key is `(host_id, adapter)`.
+//! Per-host networking adapter configuration.
+//!
+//! Migration `0009` creates `adapter_config` holding one row per
+//! `(host_id, adapter)` pair. The adapter string names a known
+//! integration (`none`, `caddy`, `traefik`, ...); the controller
+//! writes the JSON shape the integration consumes plus a boolean
+//! `enabled` flag. The agent's router driver reads its row at
+//! startup and on every change-notification.
 
 use crate::error::{Error, Result};
 use crate::host::HostId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// One row from `adapter_config`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterConfig {
+    /// Host this config belongs to.
     pub host_id: HostId,
+    /// Adapter name (e.g. `caddy`, `traefik`).
     pub adapter: String,
+    /// Adapter-specific JSON config. The DAO does not interpret it.
     pub config_json: serde_json::Value,
+    /// Whether the agent should bring this adapter up.
     pub enabled: bool,
+    /// When the row was first inserted.
     pub created_at: DateTime<Utc>,
+    /// When the row was last updated.
     pub updated_at: DateTime<Utc>,
 }
 
+/// Upsert payload. `(host_id, adapter)` is the conflict target.
 #[derive(Debug, Clone)]
 pub struct UpsertAdapterConfig {
+    /// Host this config belongs to.
     pub host_id: HostId,
+    /// Adapter name.
     pub adapter: String,
+    /// Adapter-specific JSON config.
     pub config_json: serde_json::Value,
+    /// Enabled flag.
     pub enabled: bool,
 }
 
 impl crate::inventory::Inventory {
+    /// Upsert the adapter config for `(host_id, adapter)`. Replaces
+    /// the JSON body and enabled flag; bumps `updated_at`.
     pub async fn upsert_adapter_config(&self, ins: UpsertAdapterConfig) -> Result<()> {
         let host_bytes = ins.host_id.to_bytes().to_vec();
         let cfg_str = ins.config_json.to_string();
@@ -48,6 +67,9 @@ impl crate::inventory::Inventory {
         Ok(())
     }
 
+    /// Read the adapter config for `(host_id, adapter)`. Returns
+    /// `None` when no row exists yet (adapter never enabled on this
+    /// host).
     pub async fn get_adapter_config(
         &self,
         host_id: HostId,
