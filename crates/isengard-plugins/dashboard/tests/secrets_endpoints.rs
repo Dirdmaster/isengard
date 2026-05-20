@@ -57,6 +57,7 @@ async fn setup_app(unlocked: bool) -> (axum::Router, Arc<ControllerHandles>) {
         compose_broker: Arc::new(isengard_controller::compose_broker::ComposeBroker::new()),
         secrets: secrets_store,
         ca,
+        ssh_ca: Arc::new(isengard_controller::ssh_ca::SshAuthority::for_tests().unwrap()),
     });
 
     let app = secrets::router(handles.clone());

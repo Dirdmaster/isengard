@@ -21,6 +21,7 @@ pub mod revocation;
 pub mod routing;
 pub mod scheduler;
 pub mod secrets;
+pub mod ssh_ca;
 pub mod stack_deploy_orchestrator;
 pub mod sync_containers;
 pub mod sync_services;
@@ -45,6 +46,7 @@ use crate::bus::EventBus;
 use crate::ca::Authority;
 use crate::enrollment::EnrollmentService;
 use crate::revocation::RevocationSet;
+use crate::ssh_ca::SshAuthority;
 
 /// Bundle of references controller-side plugins need to access controller state.
 /// Passed via `PluginContext.bus` (downcast from `Arc<dyn Any>`).
@@ -89,6 +91,13 @@ pub struct ControllerHandles {
     /// fingerprint verification). Surfaced here so plugins can read
     /// the root cert if they need to.
     pub ca: Arc<Authority>,
+    /// SSH user-certificate authority. Sibling primitive to `ca`: the
+    /// controller mints short-lived OpenSSH user certs through this
+    /// surface, and every fleet host trusts the corresponding public
+    /// key via a `TrustedUserCAKeys` directive installed by the agent
+    /// at enroll time. The cert-issuance RPC and operator CLI land in
+    /// later phases; this handle is the shared signing primitive.
+    pub ssh_ca: Arc<SshAuthority>,
 }
 
 /// Journal an event then broadcast it on the bus. Used by both the Sync
@@ -259,6 +268,17 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     );
     let enrollment = Arc::new(EnrollmentService::new(inventory.clone(), ca.clone()));
 
+    // SSH user-certificate authority. Sibling primitive to the TLS CA.
+    // Loaded-or-initialized from the encrypted secrets store under the
+    // row name `ssh_ca_private_key`. Same envelope as `master.key`: a
+    // fresh install mints an ed25519 keypair, subsequent boots reuse it.
+    let ssh_ca = Arc::new(
+        SshAuthority::load_or_init(&secrets_store)
+            .await
+            .context("loading or initializing SSH CA")?,
+    );
+    info!("ssh ca loaded");
+
     // Hydrate the in-memory revocation set from the `agent_certs`
     // table so the very first RPC after boot already sees revoked certs.
     let revocation = RevocationSet::load_from_inventory(&inventory)
@@ -282,6 +302,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         compose_broker: compose_broker.clone(),
         secrets: secrets_store.clone(),
         ca: ca.clone(),
+        ssh_ca: ssh_ca.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
