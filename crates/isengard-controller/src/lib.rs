@@ -557,6 +557,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         compose_broker.clone(),
         secrets_store.clone(),
         Some(placement_scheduler.clone()),
+        ssh_ca.clone(),
     ));
 
     // Periodic reaper for orphaned container-scope policy rows.

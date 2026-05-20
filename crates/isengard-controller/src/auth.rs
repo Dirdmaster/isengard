@@ -42,9 +42,13 @@ use crate::revocation::RevocationSet;
 ///   itself is public data.
 /// - `Enroll`: redeems a one-time join token for a freshly minted mTLS
 ///   cert. The token gates access; subsequent RPCs use the cert.
+/// - `GetSshCa`: returns the controller's SSH user-cert authority
+///   public key. Agents install it as a `TrustedUserCAKeys` drop-in
+///   right after enrollment. Response is public data (a pubkey).
 const PUBLIC_METHODS: &[&str] = &[
     "/isengard.v1.Controller/GetCaPem",
     "/isengard.v1.Controller/Enroll",
+    "/isengard.v1.Controller/GetSshCa",
 ];
 
 /// Tower layer producing a [`CertAuth`] middleware around a service.
