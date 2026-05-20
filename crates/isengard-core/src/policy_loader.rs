@@ -8,20 +8,24 @@
 //!
 //! The loaded snapshot is owned (not borrowed) so the resolver caller can
 //! move it across `.await` boundaries. The resolver itself takes a borrowed
-//! slice; the cycle simply re-borrows the snapshot per candidate.
+//! slice; the cycle re-borrows the snapshot per candidate.
 
 use async_trait::async_trait;
 
 use crate::HostId;
 use crate::policy::{Policy, PolicyScopeType};
 
-/// One row's worth of policy data, owned. Mirrors
-/// `isengard_storage::PolicyRow` but excludes id + timestamps; the resolver
-/// only needs `(scope_type, scope_key, body)`.
+/// One row's worth of policy data, owned.
+///
+/// Mirrors `isengard_storage::PolicyRow` but excludes id + timestamps; the
+/// resolver only needs `(scope_type, scope_key, body)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedPolicy {
+    /// Scope this row applies at.
     pub scope_type: PolicyScopeType,
+    /// Key disambiguating rows of the same `scope_type` (e.g. fleet name).
     pub scope_key: String,
+    /// The policy body itself.
     pub body: Policy,
 }
 
@@ -32,28 +36,43 @@ pub struct LoadedPolicy {
 /// fixture loader to seed deterministic policy state.
 #[async_trait]
 pub trait PolicyLoader: Send + Sync + 'static {
-    /// Load every policy row in scope-rank order (the order the resolver
-    /// expects). Implementations may return rows in any order; the resolver
-    /// re-sorts internally.
+    /// Load every policy row in scope-rank order.
+    ///
+    /// Implementations may return rows in any order; the resolver re-sorts
+    /// internally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyLoaderError`] when the underlying storage fails. The
+    /// updater treats every error as "behave as if no policies exist."
     async fn list(&self) -> Result<Vec<LoadedPolicy>, PolicyLoaderError>;
 
-    /// Look up the fleet name for a host, if known. Used by the updater
-    /// plugin to seed `PolicyContext::fleet` once at init (cached for the
-    /// life of the plugin). Returns `Ok(None)` when no host row matches
-    /// (mirrors `Inventory::get_host` returning `None`).
+    /// Look up the fleet name for a host, if known.
     ///
-    /// Default impl returns `Ok(None)` so test fixtures don't have to
-    /// stub it.
+    /// Used by the updater plugin to seed `PolicyContext::fleet` once at
+    /// init (cached for the life of the plugin). Returns `Ok(None)` when no
+    /// host row matches (mirrors `Inventory::get_host` returning `None`).
+    ///
+    /// Default impl returns `Ok(None)` so test fixtures don't have to stub
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyLoaderError`] when the underlying lookup fails.
     async fn fleet_for(&self, _host_id: HostId) -> Result<Option<String>, PolicyLoaderError> {
         Ok(None)
     }
 }
 
-/// Opaque error wrapper. The updater treats every loader error the same:
-/// log and skip the policy step for this cycle (fail-safe: behave as if
-/// no policies exist).
+/// Opaque error wrapper.
+///
+/// The updater treats every loader error the same: log and skip the policy
+/// step for this cycle (fail-safe: behave as if no policies exist).
 #[derive(Debug)]
-pub struct PolicyLoaderError(pub String);
+pub struct PolicyLoaderError(
+    /// Free-form error message captured from the underlying loader.
+    pub String,
+);
 
 impl std::fmt::Display for PolicyLoaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

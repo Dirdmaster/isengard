@@ -1,17 +1,10 @@
-//! Join-token format: `TK<base32(32-bytes)>.<base32(sha256(ca_pem))>`
-//!
-//! Used end-to-end:
-//!   - `isengard controller token mint` packs (bytes, ca_fingerprint) into
-//!     a single string for the operator.
-//!   - `isd join-token` prints `isd join --token <packed>` so operators
-//!     paste one line.
-//!   - `isengard-agent::enroll` parses the packed token: extracts the
-//!     fingerprint for pre-enroll CA verify, sends the bytes portion to
-//!     the controller's Enroll RPC for token validation.
+#![doc = include_str!("../docs/join-token.md")]
 
 use sha2::{Digest, Sha256};
 
-/// Token prefix. Makes leaked tokens greppable (same role as `sk_`, `ghp_`).
+/// Token prefix.
+///
+/// Makes leaked tokens greppable (same role as `sk_`, `ghp_`).
 pub const PREFIX: &str = "TK";
 
 /// Separator between the random bytes portion and the CA fingerprint.
@@ -21,8 +14,22 @@ pub const SEP: char = '.';
 const ALPHABET: data_encoding::Encoding = data_encoding::BASE32_NOPAD;
 
 /// Pack a 32-byte token and a CA PEM into the operator-visible string.
-/// The fingerprint is `sha256(ca_pem)` so the agent can independently
-/// verify the CA it fetches matches what the controller minted against.
+///
+/// The fingerprint is `sha256(ca_pem)` so the agent can independently verify
+/// the CA it fetches matches what the controller minted against.
+///
+/// # Examples
+///
+/// ```
+/// use isengard_core::join_token::{pack, parse};
+///
+/// let bytes = [0xABu8; 32];
+/// let ca_pem = b"-----BEGIN CERTIFICATE-----\nFIXTURE\n-----END CERTIFICATE-----\n";
+/// let packed = pack(&bytes, ca_pem);
+/// assert!(packed.starts_with("TK"));
+/// let parsed = parse(&packed).unwrap();
+/// assert_eq!(parsed.bytes, bytes);
+/// ```
 pub fn pack(token_bytes: &[u8; 32], ca_pem: &[u8]) -> String {
     let fingerprint = Sha256::digest(ca_pem);
     let bytes_b32 = ALPHABET.encode(token_bytes);
@@ -30,30 +37,49 @@ pub fn pack(token_bytes: &[u8; 32], ca_pem: &[u8]) -> String {
     format!("{PREFIX}{bytes_b32}{SEP}{fp_b32}")
 }
 
-/// Parsed parts of a join token. The agent uses both halves; the controller
-/// only uses `bytes` for token validation (fingerprint stays opaque to it).
+/// Parsed parts of a join token.
+///
+/// The agent uses both halves; the controller only uses `bytes` for token
+/// validation (the fingerprint stays opaque to it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedToken {
+    /// The 32-byte shared secret half.
     pub bytes: [u8; 32],
+    /// `sha256(ca_pem)` the controller minted the token against.
     pub fingerprint: [u8; 32],
 }
 
+/// Errors returned by [`parse`].
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
+    /// The token did not start with the required `TK` prefix.
     #[error("token missing required `TK` prefix")]
     MissingPrefix,
+    /// The token did not contain the `.` separator between the bytes and
+    /// fingerprint halves.
     #[error("token missing required `.` separator between bytes and fingerprint")]
     MissingSeparator,
+    /// The bytes half failed base32 decoding.
     #[error("token bytes portion failed base32 decode: {0}")]
     BadBytesEncoding(data_encoding::DecodeError),
+    /// The bytes half decoded to a slice of the wrong length (expected 32).
     #[error("token bytes portion is {0} bytes, expected 32")]
     WrongBytesLength(usize),
+    /// The fingerprint half failed base32 decoding.
     #[error("token fingerprint portion failed base32 decode: {0}")]
     BadFingerprintEncoding(data_encoding::DecodeError),
+    /// The fingerprint half decoded to a slice of the wrong length
+    /// (expected 32).
     #[error("token fingerprint portion is {0} bytes, expected 32")]
     WrongFingerprintLength(usize),
 }
 
+/// Parse a packed join-token string into its `(bytes, fingerprint)` parts.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] when the prefix, separator, base32 alphabet, or
+/// either half's length is wrong.
 pub fn parse(s: &str) -> Result<ParsedToken, ParseError> {
     let body = s.strip_prefix(PREFIX).ok_or(ParseError::MissingPrefix)?;
     let (bytes_part, fp_part) = body.split_once(SEP).ok_or(ParseError::MissingSeparator)?;
@@ -77,17 +103,20 @@ pub fn parse(s: &str) -> Result<ParsedToken, ParseError> {
     Ok(ParsedToken { bytes, fingerprint })
 }
 
-/// Compute the SHA-256 of an arbitrary PEM blob, returning the raw 32-byte
-/// digest. Used on the agent side to compare against `ParsedToken.fingerprint`.
+/// Compute the SHA-256 of an arbitrary PEM blob.
+///
+/// Returns the raw 32-byte digest. Used on the agent side to compare
+/// against [`ParsedToken::fingerprint`].
 pub fn fingerprint(ca_pem: &[u8]) -> [u8; 32] {
     Sha256::digest(ca_pem).into()
 }
 
 /// Re-encode a 32-byte token back to the bare base32 string used by the
-/// controller's storage hash. Only useful inside the controller's
-/// `EnrollmentService::redeem` to keep storage hash format unchanged
-/// across the format bump. Not for general use; if you need a
-/// base32 encoder, use `data-encoding` directly.
+/// controller's storage hash.
+///
+/// Only useful inside the controller's `EnrollmentService::redeem` to keep
+/// storage hash format unchanged across the format bump. Not for general
+/// use; if you need a base32 encoder, use `data-encoding` directly.
 pub fn encode_bytes(token_bytes: &[u8; 32]) -> String {
     ALPHABET.encode(token_bytes)
 }

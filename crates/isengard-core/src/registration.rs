@@ -6,28 +6,41 @@
 use crate::context::HostMode;
 use crate::plugin::Plugin;
 
-/// Capabilities a plugin advertises. Used by the host to skip plugins that
-/// don't apply to its current mode.
+/// Capabilities a plugin advertises.
+///
+/// Used by the host to skip plugins that don't apply to its current mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
+    /// The plugin can run on agents.
     Agent,
+    /// The plugin can run on the controller.
     Controller,
 }
 
-/// Compile-time plugin registration entry. Plugin crates submit one of these
-/// per plugin via [`inventory::submit!`].
+/// Compile-time plugin registration entry.
+///
+/// Plugin crates submit one of these per plugin via [`inventory::submit!`].
+/// The host enumerates the registry at startup and constructs the boxed
+/// plugins it needs for the current mode via [`registrations_for`].
 pub struct PluginRegistration {
+    /// Stable plugin name, matches [`Plugin::name`].
     pub name: &'static str,
+    /// Capabilities the plugin advertises. The host filters by mode.
     pub capabilities: &'static [Capability],
-    /// Boxed-ed factory. Returns `Plugin` so callers don't need to know the
-    /// concrete type. The host downcasts when calling capability sub-traits.
+    /// Factory returning a fresh boxed plugin.
+    ///
+    /// Returns `Plugin` so callers don't need to know the concrete type. The
+    /// host downcasts when calling capability sub-traits.
     pub constructor: fn() -> Box<dyn Plugin>,
 }
 
 inventory::collect!(PluginRegistration);
 
-/// Enumerate every registered plugin that advertises a capability matching the
-/// given mode.
+/// Enumerate every registered plugin that advertises a capability matching
+/// `mode`.
+///
+/// Returned slice order is implementation-defined; callers that need a
+/// stable order should sort by `name`.
 pub fn registrations_for(mode: HostMode) -> Vec<&'static PluginRegistration> {
     let want = match mode {
         HostMode::Agent => Capability::Agent,

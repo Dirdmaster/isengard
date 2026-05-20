@@ -4,15 +4,15 @@
 //! `docs/superpowers/specs/2026-05-06-phase-9d-maintenance-windows-design.md`.
 //!
 //! The evaluator is a thin wrapper over [`croner::Cron`] + [`chrono_tz::Tz`]:
-//! we parse the cron expression once per call, resolve the timezone, and
+//! parse the cron expression once per call, resolve the timezone, and
 //! consult the previous firing relative to `now`. If `now` falls inside
 //! `prev .. prev + WINDOW_DURATION` we are "in window".
 //!
 //! The evaluator is fail-closed for malformed input: an unparseable cron
-//! returns `false` for `is_in_window`, which keeps the cycle from rolling
-//! out updates the operator did not authorise. REST validation rejects
-//! malformed expressions at write time, so this branch should never fire
-//! in production; it is the safety net for hand-edited rows.
+//! returns `false` for [`is_in_window`], which keeps the cycle from
+//! rolling out updates the operator did not authorise. REST validation
+//! rejects malformed expressions at write time, so this branch should
+//! never fire in production; it is the safety net for hand-edited rows.
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
@@ -22,24 +22,33 @@ use std::str::FromStr;
 use super::MaintenanceWindow;
 
 /// How long after a cron firing the cycle still considers itself
-/// in-window. Hard-coded to 1h for v1; configurable via a future
-/// `MaintenanceWindow.duration` field without a migration since the type is
-/// JSON-encoded.
+/// in-window.
+///
+/// Hard-coded to 1h for v1; configurable via a future
+/// `MaintenanceWindow.duration` field without a migration since the type
+/// is JSON-encoded.
 pub const WINDOW_DURATION: Duration = Duration::hours(1);
 
-/// Parse a cron expression. Returns `Err` with a human-readable message on
-/// failure. Used by both the runtime evaluator and REST validation.
+/// Parse a cron expression. Used by both the runtime evaluator and REST
+/// validation.
 ///
-/// Accepts the standard 5-field syntax `minute hour day-of-month month
-/// day-of-week`. `croner` also accepts the 6-field form (with seconds);
-/// we do not advertise it but do not reject it either.
+/// Accepts the standard 5-field syntax
+/// `minute hour day-of-month month day-of-week`. `croner` also accepts
+/// the 6-field form (with seconds); we do not advertise it but do not
+/// reject it either.
+///
+/// # Errors
+///
+/// Returns a human-readable error message string when the expression
+/// fails to parse.
 pub fn parse_cron(expr: &str) -> Result<Cron, String> {
     Cron::from_str(expr).map_err(|e| format!("{e}"))
 }
 
 /// Resolve a `MaintenanceWindow.timezone` into a [`chrono_tz::Tz`]. `None`
-/// or unparseable values fall back to UTC. Lenient on purpose: a stale row
-/// must never block the cycle.
+/// or unparseable values fall back to UTC.
+///
+/// Lenient on purpose: a stale row must never block the cycle.
 fn resolve_tz(window: &MaintenanceWindow) -> Tz {
     match window.timezone.as_deref() {
         None => Tz::UTC,
@@ -55,9 +64,9 @@ fn resolve_tz(window: &MaintenanceWindow) -> Tz {
 /// 3. Find the previous firing relative to `now` in that timezone.
 /// 4. Return `true` if `now - prev < WINDOW_DURATION`.
 ///
-/// The `inclusive` flag on `find_previous_occurrence` is `true` so a `now`
-/// that lands exactly on a firing counts as in-window (operator-friendly:
-/// 02:00:00 sharp belongs to the 02:00 window).
+/// The `inclusive` flag on `find_previous_occurrence` is `true` so a
+/// `now` that lands exactly on a firing counts as in-window
+/// (operator-friendly: 02:00:00 sharp belongs to the 02:00 window).
 pub fn is_in_window(window: &MaintenanceWindow, now: DateTime<Utc>) -> bool {
     let cron = match parse_cron(&window.cron_expr) {
         Ok(c) => c,
@@ -73,9 +82,10 @@ pub fn is_in_window(window: &MaintenanceWindow, now: DateTime<Utc>) -> bool {
     elapsed >= Duration::zero() && elapsed < WINDOW_DURATION
 }
 
-/// Compute the next firing time after `now`, expressed in UTC. Returns
-/// `None` if the cron has no future occurrences (rare; effectively
-/// "never") or if the expression is malformed.
+/// Compute the next firing time after `now`, expressed in UTC.
+///
+/// Returns `None` if the cron has no future occurrences (rare;
+/// effectively "never") or if the expression is malformed.
 ///
 /// Used by the updater to populate the `next_window` field on the
 /// `update.deferred` event so notifier consumers can quote a concrete

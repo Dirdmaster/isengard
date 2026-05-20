@@ -1,69 +1,92 @@
 //! `UpdateDispatcher`: cross-crate seam between the updater plugin and the
 //! agent's blue-green deployment supervisor.
 //!
-//! The updater (a `isengard-plugin-updater` crate) detects that a container's
-//! image has drifted from the registry and wants to react. By default it falls
-//! through to in-place recreate. When the agent runtime installs a dispatcher
-//! into [`crate::PluginContext`], the updater hands it the trigger first; the
-//! dispatcher decides whether to short-circuit (because it has spawned a
-//! blue-green driver of its own) or let the in-place path proceed.
+//! The updater (an `isengard-plugin-updater` crate) detects that a
+//! container's image has drifted from the registry and wants to react. By
+//! default it falls through to in-place recreate. When the agent runtime
+//! installs a dispatcher into [`crate::PluginContext`], the updater hands it
+//! the trigger first; the dispatcher decides whether to short-circuit
+//! (because it has spawned a blue-green driver of its own) or let the
+//! in-place path proceed.
 //!
-//! Only one direction of information crosses the boundary today: the updater
-//! → dispatcher call. The dispatcher does not call back into the updater; it
-//! owns its own driver task lifecycle once it returns [`DispatchOutcome::Handled`].
+//! Only one direction of information crosses the boundary today: the
+//! updater to dispatcher call. The dispatcher does not call back into the
+//! updater; it owns its own driver task lifecycle once it returns
+//! [`DispatchOutcome::Handled`].
 
 use crate::HostId;
 
-/// Everything the dispatcher needs to decide between blue-green and in-place,
-/// and (in the blue-green case) to seed an [`UpdateTrigger`] for the
-/// agent-side supervisor without re-inspecting the container.
+/// Everything the dispatcher needs to decide between blue-green and
+/// in-place, and (in the blue-green case) to seed an `UpdateTrigger` for
+/// the agent-side supervisor without re-inspecting the container.
 ///
 /// Built by the updater from its existing bollard inspect data. `stack_id`
 /// may be `0` when the updater can't resolve the compose project to a
 /// `Stack` row; the dispatcher is expected to handle that gracefully.
 #[derive(Debug, Clone)]
 pub struct UpdateTriggerInfo {
+    /// Docker container id.
     pub container_id: String,
+    /// Service name (from the compose project).
     pub service_name: String,
     /// Best-effort stack ID; `0` if the updater could not resolve the
     /// `com.docker.compose.project` label to a `Stack` row.
     pub stack_id: i64,
+    /// Host the container is running on.
     pub host_id: HostId,
+    /// Digest currently running (the "blue" version).
     pub blue_digest: String,
+    /// Digest the updater wants to roll forward to (the "green" version).
     pub green_digest: String,
+    /// Image reference (with tag) the container was created from.
     pub image_ref: String,
     /// First (lowest-numbered) container port exposed by the inspect data.
+    ///
     /// `None` when the container exposes no ports.
     pub container_port: Option<u16>,
     /// True when the container has a Docker healthcheck configured (or is
     /// reporting a health state).
     pub has_healthcheck: bool,
-    /// Read-write bind mounts and named volumes. Used by the eligibility
-    /// classifier to disqualify stateful workloads from blue-green.
+    /// Read-write bind mounts and named volumes.
+    ///
+    /// Used by the eligibility classifier to disqualify stateful workloads
+    /// from blue-green.
     pub rw_volume_mounts: Vec<String>,
-    /// Value of the `isengard.deploy.strategy` label, if set. Allows the
-    /// classifier to honour an explicit user override.
+    /// Value of the `isengard.deploy.strategy` label, if set.
+    ///
+    /// Allows the classifier to honour an explicit user override.
     pub label_strategy: Option<String>,
 }
 
 /// What the dispatcher told the updater to do with this trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
-    /// Run the existing in-place recreate path. The dispatcher either
-    /// classified the container as ineligible for blue-green or could not
-    /// gather enough context (e.g. routing-rule lookup failed).
+    /// Run the existing in-place recreate path.
+    ///
+    /// The dispatcher either classified the container as ineligible for
+    /// blue-green or could not gather enough context (e.g. routing-rule
+    /// lookup failed).
     PerformInPlace,
-    /// The dispatcher has taken ownership: a blue-green driver is now
-    /// running (or one was already in flight). The updater MUST NOT
-    /// recreate.
+    /// The dispatcher has taken ownership.
+    ///
+    /// A blue-green driver is now running (or one was already in flight).
+    /// The updater MUST NOT recreate.
     Handled,
 }
 
 /// Async sink the updater calls per `needs_update` container before
-/// recreating. Implementations live in higher crates (e.g. the agent's
+/// recreating.
+///
+/// Implementations live in higher crates (e.g. the agent's
 /// `SupervisorDispatcher`).
 #[async_trait::async_trait]
 pub trait UpdateDispatcher: Send + Sync + 'static {
+    /// Hand the trigger to the dispatcher.
+    ///
+    /// Returns the verdict the updater must obey: either
+    /// [`DispatchOutcome::PerformInPlace`] (fall through to the original
+    /// recreate path) or [`DispatchOutcome::Handled`] (the dispatcher has
+    /// taken ownership; do nothing else).
     async fn dispatch(&self, info: UpdateTriggerInfo) -> DispatchOutcome;
 }
 

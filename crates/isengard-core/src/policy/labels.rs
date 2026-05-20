@@ -1,24 +1,4 @@
-//! Parse `isengard.policy.*` Docker labels into a `Policy` struct.
-//!
-//! See spec §"Label parser" of
-//! `docs/superpowers/specs/2026-05-06-phase-9b1-container-label-discovery-design.md`.
-//!
-//! Pure module: `HashMap<String, String>` in, `Policy` out (or
-//! `ParseLabelError` on a malformed value). The ingest caller decides what
-//! to do with errors (logs at warn and skips the upsert).
-//!
-//! The five recognized labels match the `Policy` struct fields one-to-one:
-//!
-//! | Label                              | Field             | Values                                |
-//! |------------------------------------|-------------------|---------------------------------------|
-//! | `isengard.policy.strategy`         | strategy          | `pinned` / `tag-only` / `minor` / `any` |
-//! | `isengard.policy.gate`             | gate              | `auto` / `approval` / `never`         |
-//! | `isengard.policy.paused_until`     | paused_until      | RFC 3339 timestamp                    |
-//! | `isengard.policy.on_failure`       | on_failure        | `rollback` / `keep` / `notify`        |
-//! | `isengard.policy.approver_channel` | approver_channel  | free-form string (notifier channel id) |
-//!
-//! Enum values accept both kebab-case and snake_case for ergonomics; the
-//! canonical form is kebab-case (matches `Policy` serde).
+#![doc = include_str!("../../docs/policy-labels.md")]
 
 use std::collections::HashMap;
 
@@ -26,24 +6,35 @@ use chrono::{DateTime, Utc};
 
 use super::{FailureHandling, Policy, UpdateGate, UpdateStrategy};
 
-/// Common prefix for all policy labels. Useful for cheap "does this container
-/// carry any policy labels" checks at the agent watcher.
+/// Common prefix for all policy labels.
+///
+/// Useful for cheap "does this container carry any policy labels" checks
+/// at the agent watcher.
 pub const LABEL_PREFIX: &str = "isengard.policy.";
 
+/// Label key for [`super::Policy::strategy`].
 pub const LABEL_STRATEGY: &str = "isengard.policy.strategy";
+/// Label key for [`super::Policy::gate`].
 pub const LABEL_GATE: &str = "isengard.policy.gate";
+/// Label key for [`super::Policy::paused_until`].
 pub const LABEL_PAUSED_UNTIL: &str = "isengard.policy.paused_until";
+/// Label key for [`super::Policy::on_failure`].
 pub const LABEL_ON_FAILURE: &str = "isengard.policy.on_failure";
+/// Label key for [`super::Policy::approver_channel`].
 pub const LABEL_APPROVER_CHANNEL: &str = "isengard.policy.approver_channel";
 
 /// Returned when a label value cannot be coerced into the typed field.
 ///
 /// Carries the offending label key + value so the ingest caller can log
-/// something operators can act on. The `reason` is short and human-readable.
+/// something operators can act on. The `reason` is short and
+/// human-readable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseLabelError {
+    /// The label key that failed.
     pub label: String,
+    /// The offending value as it appeared on the container.
     pub value: String,
+    /// Short, human-readable reason the value was rejected.
     pub reason: String,
 }
 
@@ -61,12 +52,15 @@ impl std::error::Error for ParseLabelError {}
 
 /// Parse the `isengard.policy.*` subset of a Docker label map.
 ///
-/// Returns `Ok(Policy::default())` when no policy labels are present (so the
-/// caller can use that as the "delete the row" signal). Returns `Err` on the
-/// first malformed value, with the offending label name attached.
+/// Returns `Ok(Policy::default())` when no policy labels are present (so
+/// the caller can use that as the "delete the row" signal). Unknown
+/// `isengard.policy.<future_field>` keys are ignored so adding new fields
+/// in later phases stays backward-compatible.
 ///
-/// Unknown `isengard.policy.<future_field>` keys are ignored so adding new
-/// fields in later phases stays backward-compatible.
+/// # Errors
+///
+/// Returns [`ParseLabelError`] on the first malformed value, with the
+/// offending label name attached.
 pub fn parse_policy_labels(labels: &HashMap<String, String>) -> Result<Policy, ParseLabelError> {
     let mut p = Policy::default();
 
@@ -92,8 +86,10 @@ pub fn parse_policy_labels(labels: &HashMap<String, String>) -> Result<Policy, P
     Ok(p)
 }
 
-/// Convenience predicate: does this label map carry any `isengard.policy.*`
-/// key? Used by the agent watcher to decide whether a container without
+/// Convenience predicate: does this label map carry any
+/// `isengard.policy.*` key?
+///
+/// Used by the agent watcher to decide whether a container without
 /// `isengard.expose*` is still worth reporting.
 pub fn has_any_policy_label(labels: &HashMap<String, String>) -> bool {
     labels.keys().any(|k| k.starts_with(LABEL_PREFIX))
@@ -105,6 +101,7 @@ fn normalize_enum(v: &str) -> String {
     v.trim().to_ascii_lowercase().replace('_', "-")
 }
 
+/// Parse the `strategy` label value into [`UpdateStrategy`].
 fn parse_strategy(label: &str, v: &str) -> Result<UpdateStrategy, ParseLabelError> {
     match normalize_enum(v).as_str() {
         "pinned" => Ok(UpdateStrategy::Pinned),
@@ -119,6 +116,7 @@ fn parse_strategy(label: &str, v: &str) -> Result<UpdateStrategy, ParseLabelErro
     }
 }
 
+/// Parse the `gate` label value into [`UpdateGate`].
 fn parse_gate(label: &str, v: &str) -> Result<UpdateGate, ParseLabelError> {
     match normalize_enum(v).as_str() {
         "auto" => Ok(UpdateGate::Auto),
@@ -132,6 +130,7 @@ fn parse_gate(label: &str, v: &str) -> Result<UpdateGate, ParseLabelError> {
     }
 }
 
+/// Parse the `on_failure` label value into [`FailureHandling`].
 fn parse_on_failure(label: &str, v: &str) -> Result<FailureHandling, ParseLabelError> {
     match normalize_enum(v).as_str() {
         "rollback" => Ok(FailureHandling::Rollback),
@@ -145,6 +144,7 @@ fn parse_on_failure(label: &str, v: &str) -> Result<FailureHandling, ParseLabelE
     }
 }
 
+/// Parse the `paused_until` label value into [`DateTime<Utc>`].
 fn parse_paused_until(label: &str, v: &str) -> Result<DateTime<Utc>, ParseLabelError> {
     DateTime::parse_from_rfc3339(v.trim())
         .map(|dt| dt.with_timezone(&Utc))

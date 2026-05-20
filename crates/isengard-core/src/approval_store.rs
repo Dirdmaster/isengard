@@ -8,8 +8,8 @@
 //! plugin via `with_approval_store`.
 //!
 //! The trait is deliberately narrow: only the two methods the updater needs
-//! at the resolved-gate=Approval branch (`find_open_approval_for_proposed_digest`
-//! for idempotence, `insert_pending_approval` for first-time persistence). The
+//! at the resolved-gate=Approval branch: `find_open_approval_for_proposed_digest`
+//! for idempotence, `insert_pending_approval` for first-time persistence. The
 //! dashboard's full `decide_pending_approval` / `list_pending_approvals` /
 //! `expire_pending_approvals` surface stays on `Inventory` directly because
 //! the dashboard already has a hard storage dependency.
@@ -20,37 +20,56 @@ use serde::{Deserialize, Serialize};
 
 use crate::HostId;
 
-/// Owned mirror of the storage-side `UpdateApprovalBody`. Lives in core so the
-/// updater can construct the body without taking a direct storage dep.
+/// Owned mirror of the storage-side `UpdateApprovalBody`.
 ///
-/// Field order + names match `isengard_storage::host_action::UpdateApprovalBody`
-/// exactly so the storage impl can `From`-convert in one shot.
+/// Lives in core so the updater can construct the body without taking a
+/// direct storage dep. Field order + names match
+/// `isengard_storage::host_action::UpdateApprovalBody` exactly so the storage
+/// impl can `From`-convert in one shot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PendingApprovalBody {
+    /// Host the candidate container lives on.
     pub host_id: HostId,
+    /// Compose project / stack name.
     pub stack: String,
+    /// Service name within the stack.
     pub service: String,
+    /// Docker container name.
     pub container_name: String,
+    /// Image reference (with tag).
     pub image: String,
+    /// Digest currently running.
     pub current_digest: String,
+    /// Digest the updater wants to roll forward to.
     pub proposed_digest: String,
+    /// Optional URL to a diff view of the change (e.g. GitHub compare URL).
     pub diff_url: Option<String>,
+    /// Notifier channel id to route the approval prompt to.
     pub approver_channel: Option<String>,
 }
 
 /// Insert payload accepted by [`ApprovalStore::insert_pending_approval`].
 #[derive(Debug, Clone)]
 pub struct InsertPendingApproval {
+    /// The body of the new row.
     pub body: PendingApprovalBody,
+    /// When the row should auto-transition to `pending_expired` if no
+    /// decision arrives.
     pub expires_at: DateTime<Utc>,
+    /// Notifier channel id; redundant with `body.approver_channel` but kept
+    /// at the insert level so the storage impl can index it without
+    /// re-decoding the body.
     pub approver_channel: Option<String>,
 }
 
-/// Slim record returned by the trait. Only the `action_id` is needed at the
-/// updater seam (it goes into the emitted `update.pending_approval` event).
+/// Slim record returned by the trait.
+///
+/// Only `action_id` is needed at the updater seam (it goes into the emitted
+/// `update.pending_approval` event).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingApprovalRecord {
+    /// Stable id of the persisted approval row (ULID).
     pub action_id: String,
 }
 
@@ -62,8 +81,15 @@ pub struct PendingApprovalRecord {
 #[async_trait]
 pub trait ApprovalStore: Send + Sync + 'static {
     /// Idempotence helper: is there already an open approval row for this
-    /// `(host_id, stack, service, proposed_digest)` tuple? Returns the most
-    /// recent open row's record if any.
+    /// `(host_id, stack, service, proposed_digest)` tuple?
+    ///
+    /// Returns the most recent open row's record if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalStoreError`] wrapping whatever the underlying
+    /// storage failed with. The updater treats every error the same:
+    /// log and skip.
     async fn find_open_approval_for_proposed_digest(
         &self,
         host_id: HostId,
@@ -73,18 +99,29 @@ pub trait ApprovalStore: Send + Sync + 'static {
     ) -> Result<Option<PendingApprovalRecord>, ApprovalStoreError>;
 
     /// Insert a brand-new pending-approval row in state `pending_open`.
+    ///
     /// Returns the record so the caller can emit `update.pending_approval`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalStoreError`] when the insert fails (uniqueness
+    /// violation, DB unreachable, ...).
     async fn insert_pending_approval(
         &self,
         ins: InsertPendingApproval,
     ) -> Result<PendingApprovalRecord, ApprovalStoreError>;
 }
 
-/// Opaque error wrapper. The updater treats every store error the same: log
-/// and skip the persist step for this candidate (fail-safe: notifier won't
-/// fire, but the cycle continues).
+/// Opaque error wrapper.
+///
+/// The updater treats every store error the same: log and skip the persist
+/// step for this candidate (fail-safe: notifier won't fire, but the cycle
+/// continues).
 #[derive(Debug)]
-pub struct ApprovalStoreError(pub String);
+pub struct ApprovalStoreError(
+    /// Free-form error message captured from the underlying store.
+    pub String,
+);
 
 impl std::fmt::Display for ApprovalStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
