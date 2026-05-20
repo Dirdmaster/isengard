@@ -56,6 +56,9 @@ tempfile.workspace = true
 # `isd deploy --watch` (intro / outro chrome). Same renderer the
 # `isengard init` wizard uses for visual consistency.
 cliclack.workspace = true
+# `isd route create` wizard: fuzzy-substring picker over the running
+# containers + Text/CustomType prompts for hostname/port.
+inquire.workspace = true
 # v0.5.3: `isd deploy --watch` renders one in-place progress line per
 # service (docker-compose-up style) via indicatif MultiProgress. console
 # is the underlying terminal abstraction (cursor / size / NO_COLOR).

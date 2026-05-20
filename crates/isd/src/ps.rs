@@ -231,6 +231,7 @@ mod tests {
                 image: "nginx:1.27".into(),
                 status: "Up 2 hours".into(),
                 ports: "0.0.0.0:80->80/tcp".into(),
+                private_ports: vec![80],
                 names: "web-proxy".into(),
                 labels: HashMap::new(),
             },
@@ -239,6 +240,7 @@ mod tests {
                 image: "postgres:16".into(),
                 status: "Exited (0) 12 minutes ago".into(),
                 ports: String::new(),
+                private_ports: Vec::new(),
                 names: "app-db".into(),
                 labels: HashMap::new(),
             },
@@ -257,6 +259,7 @@ mod tests {
             image: "test:latest".into(),
             status: "Up 1m".into(),
             ports: String::new(),
+            private_ports: Vec::new(),
             names: name.into(),
             labels,
         }
