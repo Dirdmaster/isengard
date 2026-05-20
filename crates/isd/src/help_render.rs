@@ -30,7 +30,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Setup", &["init", "uninit", "upgrade", "context", "update"]),
     ("Backup", &["backup", "restore"]),
-    ("Editor", &["lsp"]),
+    ("Editor", &["lsp", "mcp"]),
 ];
 
 /// Build the styled grouped help string from a clap `Command`. Honors

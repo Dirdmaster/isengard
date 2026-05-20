@@ -139,6 +139,11 @@ enum Command {
     /// by the editor plugin (`isengard.nvim` for Neovim, VSCode extension
     /// for VSCode).
     Lsp,
+    /// Run the Model Context Protocol server over stdio. AI hosts
+    /// (Claude Code, any MCP-capable LLM) invoke this via `isd mcp`
+    /// and consume the embedded operator docs, per-crate API reference,
+    /// and AI playbooks under `skills/`.
+    Mcp,
 }
 
 #[tokio::main]
@@ -218,6 +223,7 @@ async fn main() {
         Command::Restore(args) => restore_cmd::run(args, cli.context.as_deref()).await,
         Command::Upgrade(args) => upgrade_cmd::run(args, cli.context.as_deref()).await,
         Command::Lsp => isengard_lsp::run_stdio().await,
+        Command::Mcp => isengard_mcp::run_stdio().await,
     };
 
     if let Err(e) = result {

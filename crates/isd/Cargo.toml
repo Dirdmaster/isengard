@@ -17,6 +17,10 @@ isengard-manifest.workspace = true
 # `isd lsp` runs the Isengard language server bundled with the binary.
 # Editors point at `isd lsp` over stdio; no separate LSP install.
 isengard-lsp.workspace = true
+# `isd mcp` runs the Model Context Protocol server bundled with the
+# binary. AI hosts (Claude Code, any MCP-capable LLM) spawn it over
+# stdio to consume the embedded docs + skills tree.
+isengard-mcp.workspace = true
 # Track F Phase 5: `isd join` pre-flight validates packed tokens via
 # `isengard_core::join_token::parse` before touching docker.
 isengard-core.workspace = true
