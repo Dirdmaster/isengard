@@ -70,6 +70,11 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
             "/placements/by-stack/{stack_id}",
             get(list_placements_by_stack),
         )
+        // SSH user-certificate issuance. `isd ssh <host>` POSTs an
+        // operator pubkey + principals; controller signs with its
+        // SshAuthority and journals the issuance. TTL is capped server-
+        // side so a leaked client can't ask for a year-long cert.
+        .route("/ssh/cert", post(crate::ssh::post_ssh_cert))
         .with_state(handles)
 }
 

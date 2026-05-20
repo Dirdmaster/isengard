@@ -3717,6 +3717,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "ssh-key",
  "subtle",
  "tokio",
  "tokio-tungstenite 0.24.0",
