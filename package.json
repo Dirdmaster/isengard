@@ -1,0 +1,8 @@
+{
+  "name": "isengard-repo",
+  "private": true,
+  "scripts": {
+    "docs:dev": "cd website && bun run dev",
+    "docs:build": "cd website && bun run build"
+  }
+}
