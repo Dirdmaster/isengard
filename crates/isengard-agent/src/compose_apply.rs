@@ -34,7 +34,9 @@ use crate::secret_fetch;
 /// the whole sweep.
 #[derive(Debug, Clone)]
 pub struct ApplyOutcome {
+    /// The plan op this outcome covers.
     pub op: ServiceOp,
+    /// Error string when the op failed, `None` on success.
     pub error: Option<String>,
 }
 
@@ -567,6 +569,7 @@ fn parse_bind_string(bind: &str) -> Option<MountSpec> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Internal helper: ensure container started.
 async fn ensure_container_started(
     backend: &dyn RuntimeBackend,
     stack_name: &str,
@@ -696,6 +699,7 @@ fn parse_port_mapping(spec: &str) -> Option<(String, String)> {
     Some((host.to_string(), container.to_string()))
 }
 
+/// Internal helper: stop named.
 async fn stop_named(backend: &dyn RuntimeBackend, name: &str) -> anyhow::Result<()> {
     // Inspect by name; if the runtime knows about it, stop + remove.
     // The trait's inspect_container accepts both the runtime ID and
@@ -708,6 +712,7 @@ async fn stop_named(backend: &dyn RuntimeBackend, name: &str) -> anyhow::Result<
     }
 }
 
+/// Internal helper: stop and remove.
 async fn stop_and_remove(backend: &dyn RuntimeBackend, container_id: &str) -> anyhow::Result<()> {
     // Best-effort stop with the legacy 10s timeout: matches the
     // earlier bollard invocation. remove with force=true matches

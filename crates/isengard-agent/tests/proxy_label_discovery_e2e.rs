@@ -116,7 +116,7 @@ async fn label_on_real_container_creates_routing_rule() {
         .await
         .expect("start container");
 
-    // 6. Drain reports until we see the one we just created. The watcher's
+    // 6. Drain reports until we see the one created above. The watcher's
     //    initial scan may surface other isengard-labelled containers first;
     //    we filter by hostname to be robust.
     let report = loop {

@@ -4,20 +4,25 @@
 //! health flips immediately after a blue/green switch, without waiting
 //! for the controller round-trip via the journal.
 //!
-//! Semantics: tokio `broadcast` channel — late subscribers miss any
+//! Semantics: tokio `broadcast` channel: late subscribers miss any
 //! events published before they called `subscribe`. That's deliberate;
 //! the driver subscribes during deploy planning, before the switch.
 
 use tokio::sync::broadcast;
 
 /// Lifecycle events the proxy emits to in-process subscribers. Currently
-/// just `UpstreamHealthChanged`; more variants land as other subsystems
+/// only `UpstreamHealthChanged`; more variants land as other subsystems
 /// (cert renewal, eviction, config apply) need real-time fan-out.
 #[derive(Debug, Clone)]
 pub enum ProxyEvent {
+    /// One upstream's healthcheck transitioned. Emitted exactly once
+    /// per state change (not per probe tick).
     UpstreamHealthChanged {
+        /// Hostname the upstream is registered under.
         public_hostname: String,
+        /// Backing container id.
         container_id: String,
+        /// New health state.
         healthy: bool,
     },
 }
@@ -28,13 +33,15 @@ pub enum ProxyEvent {
 const CHANNEL_CAPACITY: usize = 64;
 
 /// Thin wrapper around a `broadcast::Sender<ProxyEvent>`. Cheap to
-/// clone — the inner sender is `Clone` and shared between all holders.
+/// clone: the inner sender is `Clone` and shared between all holders.
 #[derive(Debug, Clone)]
 pub struct ProxyEventBus {
+    /// Sender half of the broadcast channel. Clones share state.
     tx: broadcast::Sender<ProxyEvent>,
 }
 
 impl ProxyEventBus {
+    /// Construct a fresh bus with [`CHANNEL_CAPACITY`] slots.
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
         Self { tx }
@@ -42,7 +49,7 @@ impl ProxyEventBus {
 
     /// Best-effort publish. Returns `Err` only if there are zero live
     /// receivers; we ignore that because lifecycle events with no
-    /// subscriber are simply uninteresting.
+    /// subscriber are uninteresting.
     pub fn publish(&self, ev: ProxyEvent) {
         let _ = self.tx.send(ev);
     }
@@ -94,7 +101,7 @@ mod tests {
     }
 
     /// A late subscriber misses events published before it subscribed
-    /// (broadcast semantics — confirms we're not accidentally a replay
+    /// (broadcast semantics: confirms we're not accidentally a replay
     /// channel). The second publish, after subscription, is delivered.
     #[tokio::test]
     async fn publish_then_subscribe_misses() {

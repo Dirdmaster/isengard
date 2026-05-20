@@ -81,8 +81,11 @@ pub const AGENT_ENV_WHITELIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_A
 /// same way so the proto can grow without an executor rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPhase {
+    /// Runs before the agent writes the new compose.
     PreDeploy,
+    /// Runs after the new compose lands and reconcile succeeds.
     PostDeploy,
+    /// Runs when the deploy itself errors out.
     Failure,
     /// Reserved: not yet emitted by [`crate::sync`]. Wired for symmetry.
     PreStop,
@@ -205,8 +208,11 @@ fn shell_quote(s: &str) -> String {
 /// [`HookContext::env_for_phase`] helper.
 #[derive(Debug, Clone)]
 pub struct HookContext {
+    /// Stack name. Exposed to hooks as `ISENGARD_STACK`.
     pub stack: String,
+    /// This agent's host id. Exposed as `ISENGARD_HOST_ID`.
     pub host_id: String,
+    /// Deployment id from the controller. Exposed as `ISENGARD_DEPLOYMENT_ID`.
     pub deployment_id: String,
     /// Directory the child process should `cd` into before exec. Usually
     /// `/etc/isengard/stacks/<stack>/`.
@@ -214,6 +220,7 @@ pub struct HookContext {
     /// Optional failure-detail string. Set only when running
     /// [`HookPhase::Failure`] hooks.
     pub failure_reason: Option<String>,
+    /// Optional secondary failure detail. Exposed as `ISENGARD_FAILURE_DETAIL`.
     pub failure_detail: Option<String>,
 }
 
@@ -252,12 +259,17 @@ impl HookContext {
 /// Outcome of one hook execution.
 #[derive(Debug, Clone)]
 pub struct HookRunReport {
+    /// Final command line passed to `sh -c`.
     pub command: String,
     /// `Some(code)` on clean exit, `None` on signal / timeout.
     pub exit_code: Option<i32>,
+    /// Captured stdout, truncated to the per-hook cap.
     pub stdout: String,
+    /// Captured stderr, truncated to the per-hook cap.
     pub stderr: String,
+    /// Wall-clock duration from spawn to reap.
     pub duration: Duration,
+    /// `true` when the hook hit its timeout and was SIGKILL'd.
     pub timed_out: bool,
 }
 
@@ -266,22 +278,30 @@ pub struct HookRunReport {
 pub enum HookOutcome {
     /// Every hook either succeeded or its `on_failure` policy let us
     /// continue.
-    AllOk { reports: Vec<HookRunReport> },
+    AllOk {
+        /// Per-hook reports in run order.
+        reports: Vec<HookRunReport>,
+    },
     /// A hook with `on_failure = Abort` failed; further hooks were
     /// skipped. `index` is the position of the failing hook in the
     /// sweep (0-based); `reason` is the short audit-friendly string
     /// also emitted as the event's `error` field.
     Aborted {
+        /// Index of the failing hook (0-based).
         index: usize,
+        /// Short audit-friendly reason.
         reason: String,
+        /// Reports for every hook that ran before the abort.
         reports: Vec<HookRunReport>,
     },
 }
 
 impl HookOutcome {
+    /// `true` when the outcome is `Aborted`.
     pub fn is_aborted(&self) -> bool {
         matches!(self, HookOutcome::Aborted { .. })
     }
+    /// Per-hook reports, regardless of which variant.
     pub fn reports(&self) -> &[HookRunReport] {
         match self {
             HookOutcome::AllOk { reports } => reports,
@@ -384,6 +404,7 @@ pub async fn run_hooks(
     HookOutcome::AllOk { reports }
 }
 
+/// Internal helper: run single hook.
 async fn run_single_hook(hook: &HookSpec, phase: HookPhase, ctx: &HookContext) -> HookRunReport {
     let started = std::time::Instant::now();
     let mut env = ctx.env_for_phase(phase);
@@ -505,6 +526,7 @@ fn send_sigterm(pid: i32) {
     let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
 }
 
+/// Internal helper: emit started.
 async fn emit_started(
     emitter: &dyn EventEmitter,
     phase: HookPhase,
@@ -536,6 +558,7 @@ async fn emit_started(
     emitter.emit(ev).await;
 }
 
+/// Internal helper: emit completed.
 async fn emit_completed(
     emitter: &dyn EventEmitter,
     phase: HookPhase,
@@ -569,6 +592,7 @@ async fn emit_completed(
     emitter.emit(ev).await;
 }
 
+/// Internal helper: emit failed.
 async fn emit_failed(
     emitter: &dyn EventEmitter,
     phase: HookPhase,

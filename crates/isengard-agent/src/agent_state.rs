@@ -9,8 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+/// Internal constant: STATE FILENAME.
 const STATE_FILENAME: &str = "agent.json";
 
+/// Persisted state on the agent host. One file: `<state_dir>/agent.json`.
+/// Survives restarts so the agent re-attaches to the controller without
+/// re-enrolling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentState {
     /// Stable host identifier returned by the controller at enrollment.

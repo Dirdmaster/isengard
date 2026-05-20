@@ -120,6 +120,7 @@ fn collect_chain(err: &anyhow::Error) -> String {
     buf.to_lowercase()
 }
 
+/// Internal helper: has token rejected.
 fn has_token_rejected(h: &str) -> bool {
     // Tonic surfaces gRPC status codes as "status: Unauthenticated" /
     // "status: PermissionDenied" in both Display and Debug. Lowercase here.
@@ -128,6 +129,7 @@ fn has_token_rejected(h: &str) -> bool {
         || (h.contains("token") && (h.contains("invalid") || h.contains("expired")))
 }
 
+/// Internal helper: has http scheme mismatch.
 fn has_http_scheme_mismatch(h: &str) -> bool {
     // h2's "frame with invalid size" reason fires when the transport reads a
     // TLS handshake byte stream as if it were h2 frames. The "h2 protocol
@@ -136,6 +138,7 @@ fn has_http_scheme_mismatch(h: &str) -> bool {
         && (h.contains("frame with invalid size") || h.contains("frame_size_error"))
 }
 
+/// Internal helper: has connection refused.
 fn has_connection_refused(h: &str) -> bool {
     // Linux: "Connection refused (os error 111)". macOS: "(os error 61)".
     // Some layers also stringify as "ECONNREFUSED". All forms appear in the
@@ -143,6 +146,7 @@ fn has_connection_refused(h: &str) -> bool {
     h.contains("connection refused") || h.contains("econnrefused")
 }
 
+/// Internal helper: has certificate untrusted.
 fn has_certificate_untrusted(h: &str) -> bool {
     // rustls surfaces verification failures as "InvalidCertificate(UnknownIssuer)"
     // or similar. tonic wraps that in "tls handshake error". We require the

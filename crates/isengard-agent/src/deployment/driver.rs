@@ -43,7 +43,7 @@ pub trait DriverDeps: Send + Sync + 'static {
     /// healthcheck against the returned addr.
     async fn start_green(&self, deployment: &Deployment) -> Result<(String, SocketAddr)>;
 
-    /// Stop and remove `container_id`. Idempotent — a "not found" error from
+    /// Stop and remove `container_id`. Idempotent: a "not found" error from
     /// Docker is treated as success. Used for both green-cleanup-on-abort
     /// and blue-destruction-on-success.
     async fn stop_and_remove(&self, container_id: &str) -> Result<()>;
@@ -97,7 +97,9 @@ pub trait DriverDeps: Send + Sync + 'static {
 /// [`Driver::with_healthcheck_overrides`] (used by tests with sub-second
 /// deadlines).
 const DEFAULT_HC_INTERVAL: Duration = Duration::from_secs(5);
+/// Internal constant: DEFAULT HC SUCCESS THRESHOLD.
 const DEFAULT_HC_SUCCESS_THRESHOLD: u32 = 2;
+/// Internal constant: DEFAULT HC DEADLINE.
 const DEFAULT_HC_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Grace period passed to [`swap_upstream`]: in-flight requests on blue have
@@ -125,14 +127,23 @@ enum DrainOutcome {
 /// Per-deployment state-machine driver. One instance per [`Deployment`] row;
 /// `run` consumes self and walks the machine to a terminal state.
 pub struct Driver<D: DriverDeps> {
+    /// Deployment row this driver is advancing.
     pub deployment: Deployment,
+    /// Injected dependencies for docker / proxy operations.
     pub deps: Arc<D>,
+    /// Agent inventory the driver mutates as state changes.
     pub inventory: Inventory,
+    /// Event sink for `deployment.*` events fired during the walk.
     pub emitter: Arc<dyn EventEmitter>,
+    /// Poll interval for green's healthcheck.
     pub hc_interval: Duration,
+    /// Consecutive passes required before declaring green healthy.
     pub hc_success_threshold: u32,
+    /// Overall deadline to wait for green to go healthy.
     pub hc_deadline: Duration,
+    /// Grace period passed to the upstream swap.
     pub swap_grace: Duration,
+    /// Extra buffer added to the swap grace before destroying blue.
     pub drain_buffer: Duration,
     /// Cooperative cancel signal: when fired, the driver short-circuits to
     /// `Aborted`, cleans up green if it was started, and rolls back any
@@ -144,14 +155,14 @@ pub struct Driver<D: DriverDeps> {
     /// and triggers `recover_to_blue` if green flips unhealthy. `None`
     /// keeps the drain a plain sleep (pre-Plan-B behaviour).
     pub proxy_events_rx: Option<broadcast::Receiver<ProxyEvent>>,
-    /// Snapshotted blue upstream taken just before `swap_upstream_to_green`,
+    /// Snapshotted blue upstream taken right before `swap_upstream_to_green`,
     /// used by `recover_to_blue` to roll back. `None` until the snapshot is
     /// taken (i.e. before reaching `Switching`).
     pub blue_upstream_snapshot: Option<Upstream>,
     /// Which `on_failure` branch to take when the deployment
     /// breaks. Defaults to `Notify` (existing behaviour). When set to
     /// `Rollback`, failure paths consult `deployment.previous_digest`
-    /// and call `pull_and_recreate_at_digest` instead of just
+    /// and call `pull_and_recreate_at_digest` instead of only
     /// transitioning to `Aborted`. When set to `Keep`, failure paths
     /// behave like Notify but ALSO upsert `paused_until = now + 24h`
     /// onto a service-scope policy row so future scans skip the
@@ -160,6 +171,8 @@ pub struct Driver<D: DriverDeps> {
 }
 
 impl<D: DriverDeps> Driver<D> {
+    /// Construct a driver with default cadence + thresholds + a fresh
+    /// (non-cancelled) abort token.
     pub fn new(
         deployment: Deployment,
         deps: Arc<D>,
@@ -232,7 +245,7 @@ impl<D: DriverDeps> Driver<D> {
     /// Walk the state machine to a terminal state. On any error the driver
     /// transitions to `Aborted` (or `Failed` if the storage call itself
     /// breaks), records the error on the row, and emits
-    /// `deployment.aborted`. Always runs to completion — this method does
+    /// `deployment.aborted`. Always runs to completion: this method does
     /// not propagate errors.
     pub async fn run(mut self) {
         match self.run_inner().await {
@@ -255,6 +268,7 @@ impl<D: DriverDeps> Driver<D> {
         }
     }
 
+    /// Internal helper: run inner.
     async fn run_inner(&mut self) -> Result<()> {
         // Top-level abort: if the user cancelled before we started, mark the
         // row Aborted without ever touching Docker.
@@ -344,7 +358,7 @@ impl<D: DriverDeps> Driver<D> {
             .set_deployment_switched(&self.deployment.id, switched_at)
             .await;
 
-        // Draining: let in-flight requests on blue complete. 3-way race —
+        // Draining: let in-flight requests on blue complete. 3-way race :
         // either the grace+buffer sleep finishes (happy path), the user
         // aborts, or the proxy event bus tells us green flipped unhealthy
         // (post-switch collapse).
@@ -352,7 +366,7 @@ impl<D: DriverDeps> Driver<D> {
         let drain_outcome = self.race_drain(&green_id).await;
         match drain_outcome {
             DrainOutcome::Completed => {
-                // Happy path — no abort, no green collapse — proceed to
+                // Happy path: no abort, no green collapse: proceed to
                 // destroying_blue → done as before.
                 let drained_at = Utc::now();
                 self.deployment.drained_at = Some(drained_at);
@@ -426,7 +440,7 @@ impl<D: DriverDeps> Driver<D> {
     /// first: the grace+buffer sleep elapsing, the abort token firing, or a
     /// proxy event reporting our green container as unhealthy. Spurious
     /// events (different hostname, different container, blue going
-    /// unhealthy) are ignored — the loop continues. If the proxy event
+    /// unhealthy) are ignored: the loop continues. If the proxy event
     /// channel closes (sender dropped), the listener is dropped and the
     /// race degrades to abort + sleep only.
     async fn race_drain(&mut self, green_id: &str) -> DrainOutcome {
@@ -506,7 +520,7 @@ impl<D: DriverDeps> Driver<D> {
                 .await;
             return;
         }
-        // Successful swap-back — record the reason as the row's error so
+        // Successful swap-back: record the reason as the row's error so
         // the dashboard can explain the rollback.
         self.deployment.error = Some(reason.to_string());
         let _ = self
@@ -696,7 +710,7 @@ impl<D: DriverDeps> Driver<D> {
     ///
     /// Storage failures are logged but never block the abort path. The
     /// row is already Aborted by the time we get here; failing to apply
-    /// the pause just means a subsequent scan may re-attempt the
+    /// the pause means a subsequent scan may re-attempt the
     /// deployment, which is recoverable.
     async fn apply_keep_pause(&self) {
         let until = Utc::now() + chrono::Duration::hours(24);
@@ -745,7 +759,9 @@ impl<D: DriverDeps> Driver<D> {
 /// [`HealthChecker`] primitive for probes, and [`swap_upstream`] for the
 /// traffic shift.
 pub struct RealDriverDeps {
+    /// Shared bollard handle for container ops.
     pub docker: Arc<bollard::Docker>,
+    /// Proxy state used to swap upstreams during the cutover.
     pub proxy_state: ProxyState,
 }
 
@@ -784,8 +800,8 @@ impl DriverDeps for RealDriverDeps {
         }
 
         // Build green Config from blue (mirror updater's recreate.rs::capture_config
-        // pattern, but DON'T set image to a new tag — we're keeping the tag, just
-        // running the new digest).
+        // pattern, but DON'T set image to a new tag: keep the tag,
+        // run the new digest).
         let cfg_in = blue.config.clone().unwrap_or_default();
         let host_cfg = blue.host_config.clone().unwrap_or_default();
         let cfg: Config<String> = Config {
@@ -876,7 +892,7 @@ impl DriverDeps for RealDriverDeps {
     async fn stop_and_remove(&self, container_id: &str) -> Result<()> {
         use bollard::container::{RemoveContainerOptions, StopContainerOptions};
         // Best-effort stop: a missing-or-already-stopped container should
-        // not fail the cleanup — the subsequent remove_container handles
+        // not fail the cleanup: the subsequent remove_container handles
         // both cases idempotently below.
         let _ = self
             .docker
@@ -947,7 +963,7 @@ impl DriverDeps for RealDriverDeps {
 
     async fn swap_back_to_blue(&self, hostname: &str, blue: &Upstream) -> Result<()> {
         // Zero grace: the green upstream is failing, there's nothing in
-        // flight on it worth preserving — switch back instantly.
+        // flight on it worth preserving: switch back instantly.
         swap_upstream(
             &self.proxy_state,
             hostname,
@@ -1335,7 +1351,7 @@ mod tests {
         });
         // Sub-second deadline so the test completes fast. Real-time clock
         // here (no start_paused) because the healthcheck loop polls a
-        // refused TCP addr — that's a real syscall, not a sleep.
+        // refused TCP addr: that's a real syscall, not a sleep.
         let driver = Driver::new(d, deps, inv.clone(), Arc::new(NoopEmitter))
             .with_healthcheck_overrides(Duration::from_millis(20), 3, Duration::from_millis(200));
         driver.run().await;
@@ -1487,7 +1503,7 @@ mod tests {
 
         let driver = Driver::new(d.clone(), Arc::new(NoopDeps), inv, emitter);
         driver.emit("deployment.spinning_up", None);
-        // emit() spawns the actual delivery — give the runtime a tick to flush.
+        // emit() spawns the actual delivery: give the runtime a tick to flush.
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let events = captured.lock().unwrap();

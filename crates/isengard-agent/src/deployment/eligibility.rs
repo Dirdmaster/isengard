@@ -3,20 +3,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Why the classifier chose in-place over blue-green.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InPlaceReason {
+    /// No routing rule means no upstream to swap.
     NoRoutingRule,
+    /// Has a rw bind / named volume; can't run two copies simultaneously.
     StatefulVolume,
+    /// No healthcheck; can't tell green from broken.
     NoHealthcheck,
+    /// Operator forced in-place via the `isengard.deploy.strategy` label.
     LabelForced,
 }
 
+/// Verdict the classifier returns for a service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
+    /// Run a blue/green swap.
     BlueGreen,
-    InPlace { reason: InPlaceReason },
+    /// Stop the old container, start the new one in place.
+    InPlace {
+        /// Why blue/green was ruled out.
+        reason: InPlaceReason,
+    },
 }
 
+/// Container shape the classifier reasons over.
 #[derive(Debug, Clone)]
 pub struct ContainerSpec<'a> {
     /// True if a routing rule exists pointing at this service:port.
@@ -29,6 +41,8 @@ pub struct ContainerSpec<'a> {
     pub label_strategy: Option<&'a str>,
 }
 
+/// Classify a container into blue/green vs in-place using the autodetect
+/// cascade. Operator labels short-circuit the cascade.
 pub fn classify(spec: &ContainerSpec) -> Decision {
     // Label override: explicit user choice wins. "auto" or unknown values
     // fall through to the autodetect cascade.

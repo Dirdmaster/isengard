@@ -35,8 +35,11 @@ pub struct BootstrapTrust {
 /// Resolved host metadata included in the EnrollRequest.
 #[derive(Debug, Clone)]
 pub struct HostInfo {
+    /// Hostname the OS reports. Falls back to `"unknown"` when detection fails.
     pub hostname: String,
+    /// Compile-time target OS (`linux`, `macos`, ...).
     pub os: String,
+    /// Agent binary semver string.
     pub version: String,
 }
 
@@ -60,8 +63,11 @@ impl HostInfo {
 /// [`crate::agent_state::save`] before any subsequent RPC.
 #[derive(Debug)]
 pub struct EnrollOutcome {
+    /// Controller-assigned stable host id (Ulid in db-bytes form).
     pub host_id: HostId,
+    /// Signed cert bundle the agent dials mTLS with from now on.
     pub bundle: CertBundle,
+    /// Heartbeat cadence the controller wants. Persisted to `agent.json`.
     pub heartbeat_interval_secs: u32,
 }
 
@@ -69,6 +75,12 @@ pub struct EnrollOutcome {
 /// the fingerprint-verified CA PEM from [`BootstrapTrust::verified_ca_pem`].
 /// All subsequent RPCs run over an mTLS channel rooted at the CA returned
 /// in `EnrollResponse`.
+///
+/// # Errors
+///
+/// Returns `Err` when the bootstrap trust is missing (missing fingerprint
+/// verify), when the bootstrap channel can't dial the controller, or when
+/// the `Enroll` RPC rejects the token.
 pub async fn enroll(
     controller_url: &str,
     enroll_token: &str,
@@ -230,6 +242,7 @@ mod skip_verify {
     use tonic::transport::Uri;
 
     #[derive(Debug)]
+    /// Internal struct: NoVerify.
     struct NoVerify;
 
     impl ServerCertVerifier for NoVerify {
@@ -270,14 +283,20 @@ mod skip_verify {
     }
 
     #[derive(Clone)]
+    /// Internal struct: Connector.
     pub(super) struct Connector {
+        /// `host` field.
         host: String,
+        /// `port` field.
         port: u16,
+        /// `tls` field.
         tls: TlsConnector,
+        /// `server_name` field.
         server_name: ServerName<'static>,
     }
 
     impl Connector {
+        /// Internal associated function: new.
         pub(super) fn new(host: String, port: u16) -> Result<Self> {
             let mut tls = rustls::ClientConfig::builder()
                 .dangerous()
@@ -323,6 +342,7 @@ mod skip_verify {
     }
 }
 
+/// Internal helper: hex full.
 fn hex_full(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

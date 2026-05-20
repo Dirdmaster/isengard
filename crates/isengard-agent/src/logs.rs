@@ -53,6 +53,7 @@ pub trait LogSource: Send + Sync + 'static {
 
 /// Production [`LogSource`]: wraps a `bollard::Docker` handle.
 pub struct BollardLogSource {
+    /// Shared bollard handle the agent already holds.
     pub docker: Arc<bollard::Docker>,
 }
 
@@ -192,6 +193,7 @@ pub async fn run_tail<S: LogSource>(
     }
 }
 
+/// Internal helper: drop chunk.
 fn drop_chunk(sub: &str, count: u32) -> LogChunk {
     LogChunk {
         subscription_id: sub.to_string(),
@@ -220,6 +222,7 @@ fn try_send_chunk(out: &mpsc::Sender<AgentMessage>, chunk: LogChunk) -> bool {
     }
 }
 
+/// Internal helper: send unavailable.
 async fn send_unavailable(out: &mpsc::Sender<AgentMessage>, sub: &str, reason: &str) {
     let chunk = LogChunk {
         subscription_id: sub.to_string(),

@@ -17,7 +17,7 @@
 //! Logs reference secrets by name only; the value bytes are NEVER logged.
 
 // `tonic::Status` is ~176 bytes, so the FetchError enum is unavoidably
-// "large" by clippy's heuristic. Boxing every variant just to satisfy the
+// "large" by clippy's heuristic. Boxing every variant to satisfy the
 // lint would obscure the local-only error paths (validation, IO) that
 // dominate the call sites; allow the lint at module level. Same pattern
 // the dashboard plugin uses.
@@ -42,20 +42,26 @@ pub const SECRETS_ROOT: &str = "/run/isengard-secrets";
 /// Docker / Kubernetes: workloads can portably read from `/run/secrets/<name>`.
 pub const CONTAINER_SECRETS_ROOT: &str = "/run/secrets";
 
+/// Errors returned by [`fetch_and_materialise`] and its sub-steps.
 #[derive(Debug, Error)]
 pub enum FetchError {
+    /// mTLS dial to the controller failed.
     #[error("dial controller: {0}")]
     Dial(#[from] tonic::transport::Error),
 
+    /// The `FetchSecret` RPC returned a non-OK status (NotFound, etc).
     #[error("FetchSecret RPC: {0}")]
     Rpc(#[from] tonic::Status),
 
+    /// Local filesystem write or directory create failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Secret name failed the validation pass (empty, too long, illegal char).
     #[error("invalid secret name {0:?}")]
     InvalidName(String),
 
+    /// Container name failed the validation pass.
     #[error("invalid container name {0:?}")]
     InvalidContainer(String),
 }
@@ -103,6 +109,7 @@ pub fn default_container_path(name: &str) -> Result<String, FetchError> {
     Ok(format!("{CONTAINER_SECRETS_ROOT}/{name}"))
 }
 
+/// Internal helper: validate secret name.
 fn validate_secret_name(name: &str) -> Result<(), FetchError> {
     if name.is_empty() || name.len() > 64 {
         return Err(FetchError::InvalidName(name.to_string()));
@@ -116,6 +123,7 @@ fn validate_secret_name(name: &str) -> Result<(), FetchError> {
     Ok(())
 }
 
+/// Internal helper: validate container name.
 fn validate_container_name(name: &str) -> Result<(), FetchError> {
     if name.is_empty() || name.len() > 128 {
         return Err(FetchError::InvalidContainer(name.to_string()));
@@ -210,6 +218,7 @@ pub fn cleanup_for_container(container: &str) -> Result<(), FetchError> {
 }
 
 #[cfg(unix)]
+/// Internal helper: ensure dir with mode.
 fn ensure_dir_with_mode(dir: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     if !dir.exists() {
@@ -229,6 +238,7 @@ fn ensure_dir_with_mode(dir: &Path, _mode: u32) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
+/// Internal helper: write secret file.
 fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;

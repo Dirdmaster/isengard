@@ -1,4 +1,4 @@
-//! Upstream registry — tracks the docker container endpoints the proxy can
+//! Upstream registry: tracks the docker container endpoints the proxy can
 //! forward to. Populated by the docker watcher (Task 10) and consulted by the
 //! `ProxyHttp` router on each request.
 
@@ -8,14 +8,16 @@ use std::time::Duration;
 
 /// Lifecycle state for an upstream entry.
 ///
-/// `Active` is the default — the router forwards traffic normally.
+/// `Active` is the default: the router forwards traffic normally.
 /// `Draining` marks an upstream that's being swapped out (e.g. blue/green or
 /// healthcheck-driven eviction): existing in-flight requests should still
 /// complete, but the next reconcile pass calls `remove_if_draining` to drop
 /// the entry once it's safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamState {
+    /// Router forwards traffic normally.
     Active,
+    /// Swap is in progress; in-flight requests drain, no new dispatch.
     Draining,
 }
 
@@ -55,14 +57,16 @@ impl Eq for Upstream {}
 ///
 /// Wrapped in `Arc<RwLock<_>>` at the `ProxyState` level so the docker watcher
 /// can mutate while the proxy hot-path reads. The router looks up entries by
-/// the request's `Host` header (Task 9) — a later task adds SNI-based lookup
+/// the request's `Host` header (Task 9): a later task adds SNI-based lookup
 /// for the HTTPS listener.
 #[derive(Debug, Default)]
 pub struct UpstreamRegistry {
+    /// `map` field.
     map: HashMap<String, Upstream>,
 }
 
 impl UpstreamRegistry {
+    /// Construct an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -83,14 +87,17 @@ impl UpstreamRegistry {
         }
     }
 
+    /// Look up the upstream registered for `host`.
     pub fn get(&self, host: &str) -> Option<&Upstream> {
         self.map.get(host)
     }
 
+    /// Mutable lookup. Used by the healthcheck loop to flip `healthy`.
     pub fn get_mut(&mut self, hostname: &str) -> Option<&mut Upstream> {
         self.map.get_mut(hostname)
     }
 
+    /// Drop the entry for `host` and return it.
     pub fn remove(&mut self, host: &str) -> Option<Upstream> {
         self.map.remove(host)
     }
@@ -104,7 +111,7 @@ impl UpstreamRegistry {
     }
 
     /// Drop an upstream only if it's currently in the `Draining` state.
-    /// Active entries are left alone — used by the swap reconcile pass to
+    /// Active entries are left alone: used by the swap reconcile pass to
     /// finalise an in-progress drain.
     pub fn remove_if_draining(&mut self, hostname: &str) {
         if let Some(u) = self.map.get(hostname) {
@@ -114,6 +121,7 @@ impl UpstreamRegistry {
         }
     }
 
+    /// Iterate `(hostname, upstream)` pairs in arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Upstream)> {
         self.map.iter()
     }

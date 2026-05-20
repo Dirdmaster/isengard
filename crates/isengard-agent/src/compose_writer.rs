@@ -34,8 +34,11 @@ pub enum WriteOutcome {
 /// The caller decides whether to retry with `force = true`.
 #[derive(Debug)]
 pub struct ManualEditDetected {
+    /// Path that was about to be overwritten.
     pub path: PathBuf,
+    /// sha256 of the bytes currently on disk.
     pub on_disk_sha256: String,
+    /// sha256 the agent had recorded for the last write.
     pub expected_sha256: String,
 }
 
@@ -82,6 +85,7 @@ pub fn sha256_hex(s: &str) -> String {
     hex_encode(&hasher.finalize())
 }
 
+/// Internal helper: hex encode.
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -233,12 +237,17 @@ pub fn read_compose(dir: &Path) -> Result<Option<(String, String)>, anyhow::Erro
 #[derive(Debug, Clone)]
 pub enum ApplyWriteOutcome {
     /// Wrote the YAML; carries the sha256 of the new file.
-    Ok { written_sha256: String },
+    Ok {
+        /// sha256 of the bytes the agent wrote.
+        written_sha256: String,
+    },
     /// On-disk hash didn't match `expected_sha256` and `force` was
     /// false. The dashboard renders a diff using the included current
     /// state.
     Conflict {
+        /// sha256 of the bytes currently on disk.
         current_sha256: String,
+        /// Verbatim bytes currently on disk.
         current_yaml: String,
     },
     /// I/O error, parse failure, etc.
@@ -322,6 +331,7 @@ fn write_manifest_atomic(dir: &Path, manifest_toml: &str) -> Result<(), anyhow::
     Ok(())
 }
 
+/// Internal helper: write meta.
 fn write_meta(path: &Path, meta: &ComposeMeta) -> Result<(), anyhow::Error> {
     let body =
         toml::to_string_pretty(meta).map_err(|e| anyhow::anyhow!("serialize meta.toml: {e}"))?;
@@ -343,6 +353,7 @@ fn write_meta(path: &Path, meta: &ComposeMeta) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Internal helper: read meta.
 fn read_meta(path: &Path) -> Result<Option<ComposeMeta>, anyhow::Error> {
     if !path.exists() {
         return Ok(None);

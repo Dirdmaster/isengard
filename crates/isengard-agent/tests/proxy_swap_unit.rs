@@ -1,10 +1,10 @@
-//! Unit tests for `proxy::swap` — drain semantics for hot-swapping upstreams.
+//! Unit tests for `proxy::swap`: drain semantics for hot-swapping upstreams.
 //!
 //! These exercise the swap behavior end-to-end against `ProxyState`:
 //! - `swap_upstream` flips the old entry to `Draining`, schedules cleanup, then
 //!   installs the new entry as `Active`.
 //! - `spawn_drain_cleanup` removes the entry only if it's still `Draining` after
-//!   the grace period — an entry that's been re-set to `Active` is left alone.
+//!   the grace period: an entry that's been re-set to `Active` is left alone.
 
 use isengard_agent::proxy::{ProxyState, Upstream, UpstreamState, swap_upstream};
 use std::net::SocketAddr;

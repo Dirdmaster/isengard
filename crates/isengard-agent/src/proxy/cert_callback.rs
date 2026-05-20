@@ -8,11 +8,15 @@ use pingora_core::listeners::TlsAccept;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+/// Pingora `TlsAccept` callback that resolves SNI to a cert from the
+/// agent's in-memory store and installs it on the SSL context.
 pub struct IsengardCertCallback {
+    /// Shared cert store the callback reads on every handshake.
     store: Arc<CertStore>,
 }
 
 impl IsengardCertCallback {
+    /// Wrap `store` in the callback shape Pingora expects.
     pub fn new(store: Arc<CertStore>) -> Self {
         Self { store }
     }
@@ -37,7 +41,7 @@ impl TlsAccept for IsengardCertCallback {
             return;
         };
 
-        // Bail on the first failure rather than continuing — a half-installed
+        // Bail on the first failure rather than continuing: a half-installed
         // ssl context (cert set but chain incomplete or key missing) yields a
         // more confusing handshake failure than declining the cert outright.
         if let Err(e) = ssl.set_certificate(&entry.leaf) {

@@ -12,12 +12,17 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, sleep};
 
+/// Let's Encrypt production ACME directory URL.
 pub const LE_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
+/// Let's Encrypt staging ACME directory URL. Use during dev to avoid the
+/// production rate limits.
 pub const LE_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
 /// Wall-clock budgets for the order lifecycle.
 const ORDER_FINALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Internal constant: CERT DOWNLOAD TIMEOUT.
 const CERT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Internal constant: POLL INTERVAL.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Thin wrapper around `instant-acme`. The `Account` is initialised lazily on
@@ -26,26 +31,36 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// in `acme_account`).
 ///
 /// **Caller contract:** the function returns `Err` on rate-limit and other
-/// transient ACME errors. The caller MUST apply backoff before retrying —
+/// transient ACME errors. The caller MUST apply backoff before retrying :
 /// the renewal scheduler in `tls/renewal.rs` is the production caller and
 /// implements this. Calling `order()` in a tight loop on failure will burn
 /// LE's per-domain order quota.
 pub struct AcmeClient {
+    /// `inventory` field.
     inventory: Arc<Inventory>,
+    /// `challenges` field.
     challenges: Arc<ChallengeState>,
+    /// `contact_email` field.
     contact_email: String,
+    /// `directory_url` field.
     directory_url: String,
     /// Cached `Account` so we don't hit the storage layer (and possibly LE
     /// for kid validation) on every `order()` call. Initialised on first use.
     account_cache: OnceCell<Account>,
 }
 
+/// Successful `order()` result: leaf cert + key PEM bytes ready for the
+/// cert store.
 pub struct IssuedCert {
+    /// Leaf certificate PEM, including the chain returned by the ACME server.
     pub cert_pem: String,
+    /// Private key PEM (PKCS#8).
     pub key_pem: String,
 }
 
 impl AcmeClient {
+    /// Construct a fresh client. The LE account is initialised lazily on
+    /// the first `order()` call.
     pub fn new(
         inventory: Arc<Inventory>,
         challenges: Arc<ChallengeState>,
@@ -70,10 +85,11 @@ impl AcmeClient {
             .await
     }
 
+    /// Internal helper: load or register account.
     async fn load_or_register_account(&self) -> Result<Account> {
         if let Some(saved) = self.inventory.get_acme_account().await? {
             // We stored the AccountCredentials JSON in the account_key_pem
-            // column (slight name mismatch — kept the column name from
+            // column (slight name mismatch: kept the column name from
             // Plan A's spec; the contents are JSON not PEM).
             let creds: AccountCredentials =
                 serde_json::from_str(&saved.account_key_pem).context("decode acme creds JSON")?;
@@ -182,7 +198,7 @@ impl AcmeClient {
             }
         }
 
-        // Cleanup challenge tokens — order is past the validation gate, so
+        // Cleanup challenge tokens: order is past the validation gate, so
         // the in-memory entries are no longer needed.
         cleanup_tokens(&self.challenges, &installed_tokens).await;
 

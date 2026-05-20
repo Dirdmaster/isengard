@@ -3,7 +3,7 @@
 //! In-process variant of the planned real-Docker test (see
 //! `docs/superpowers/plans/2026-05-05-phase-14-auth-and-identity.md` Task 15
 //! for the container-based version). This test exercises the same code paths
-//! a real Docker e2e would — without the container build/pull cost — by
+//! a real Docker e2e would: without the container build/pull cost: by
 //! booting a real tonic Controller server in-process with mTLS + the
 //! production [`CertAuthInterceptor`], then driving the agent's actual
 //! [`isengard_agent::enroll::enroll`] + cert-store + mTLS endpoint code.
@@ -199,7 +199,7 @@ async fn full_auth_lifecycle_in_process() {
             renew.agent_cert_pem.contains("BEGIN CERTIFICATE"),
             "renewed cert is valid PEM"
         );
-        // `client` (and its channel) is dropped at end of scope — h2 may keep
+        // `client` (and its channel) is dropped at end of scope: h2 may keep
         // the underlying connection alive briefly; step 6 forces a fresh dial.
     }
 
@@ -251,8 +251,8 @@ async fn full_auth_lifecycle_in_process() {
 /// (specifically so the revocation check fires on the new connection).
 ///
 /// This mirrors the channel construction in `isengard_agent::run_agent`
-/// (`build_mtls_endpoint`) — same `ClientTlsConfig` shape, same identity
-/// pieces — but reaches in directly so the test owns the lifetime.
+/// (`build_mtls_endpoint`): same `ClientTlsConfig` shape, same identity
+/// pieces: but reaches in directly so the test owns the lifetime.
 async fn mtls_client(
     harness: &ControllerHarness,
     bundle: &cert_store::CertBundle,

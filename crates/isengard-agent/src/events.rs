@@ -10,9 +10,15 @@ use isengard_core::{Event, EventEmitter};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// Bounded queue depth for outbound events. Backpressure drops the
+/// newest event on overflow.
 const OUTBOUND_CAPACITY: usize = 256;
 
+/// Agent-side [`EventEmitter`] implementation. Queues events onto an
+/// internal mpsc that the sync loop drains and multiplexes onto the
+/// outbound Sync stream as `AgentMessage::Event` frames.
 pub struct OutboundEmitter {
+    /// Sender half of the bounded queue. Receiver lives on the sync loop.
     tx: mpsc::Sender<Event>,
 }
 
@@ -84,7 +90,7 @@ mod tests {
         for i in 0..OUTBOUND_CAPACITY {
             emitter.emit(ev(&format!("k{i}"))).await;
         }
-        // One more — should drop, not block.
+        // One more: should drop, not block.
         let extra = ev("overflow");
         let started = std::time::Instant::now();
         emitter.emit(extra).await;

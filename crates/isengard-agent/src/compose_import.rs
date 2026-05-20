@@ -117,6 +117,7 @@ pub async fn run_once(
     Ok(())
 }
 
+/// Internal helper: import stack.
 async fn import_stack(
     docker: &Docker,
     out: &mpsc::Sender<AgentMessage>,

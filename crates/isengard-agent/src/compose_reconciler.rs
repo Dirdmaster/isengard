@@ -43,14 +43,23 @@ use crate::runtime::ContainerSnapshot;
 /// surface are modelled explicitly.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DesiredService {
+    /// Service key from the `services:` map.
     pub name: String,
+    /// `image:` value, when set.
     pub image: Option<String>,
+    /// `container_name:` override.
     pub container_name: Option<String>,
+    /// `command:` argv, when overridden.
     pub command: Option<Vec<String>>,
+    /// `entrypoint:` argv, when overridden.
     pub entrypoint: Option<Vec<String>>,
+    /// `environment:` block flattened to `KEY -> VALUE`.
     pub environment: BTreeMap<String, String>,
+    /// Container `labels:`.
     pub labels: BTreeMap<String, String>,
+    /// `ports:` strings (`"8080:80"`, `"127.0.0.1:80:80"`, ...).
     pub ports: Vec<String>,
+    /// `restart:` value (`"always"`, `"on-failure"`, ...).
     pub restart: Option<String>,
     /// v0.3.6: per-service secret references. Each entry names a
     /// top-level `secrets:` key. The value's source (`external: true`)
@@ -95,13 +104,16 @@ pub struct DesiredService {
 /// Docker Swarm's default semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSecretRef {
+    /// Top-level secret name being referenced.
     pub source: String,
+    /// Optional in-container target path override.
     pub target: Option<String>,
 }
 
 /// Parsed `compose.yaml`. Only the bits the reconciler needs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DesiredCompose {
+    /// Parsed `services:` map.
     pub services: BTreeMap<String, DesiredService>,
     /// v0.3.6: top-level `secrets:` map. Keys are secret names; the
     /// declared source determines how the agent resolves them.
@@ -131,24 +143,38 @@ pub enum TopLevelSecret {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServiceOp {
     /// Service is in compose, no container running. Pull + create + start.
-    Start { service: String, image: String },
+    Start {
+        /// Service name to start.
+        service: String,
+        /// Image to pull + run.
+        image: String,
+    },
     /// Service running but image / env / ports / labels drifted.
     /// `reasons` is human-readable so `isd diff` can show why.
     Recreate {
+        /// Service name to recreate.
         service: String,
+        /// Image to run after recreate.
         image: String,
+        /// Human-readable drift reasons.
         reasons: Vec<String>,
     },
     /// Container running, service is no longer in compose. Stop + remove.
     Stop {
+        /// Service name to stop.
         service: String,
+        /// Container id to remove.
         container_id: String,
     },
     /// Identical: no work.
-    NoChange { service: String },
+    NoChange {
+        /// Service name that didn't change.
+        service: String,
+    },
 }
 
 impl ServiceOp {
+    /// Service name this op applies to.
     pub fn service(&self) -> &str {
         match self {
             ServiceOp::Start { service, .. }
@@ -163,11 +189,14 @@ impl ServiceOp {
 /// service name for stable output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcilePlan {
+    /// Stack the plan applies to.
     pub stack: String,
+    /// Ordered ops (alphabetical by service name).
     pub ops: Vec<ServiceOp>,
 }
 
 impl ReconcilePlan {
+    /// `true` when every op is `NoChange`.
     pub fn is_noop(&self) -> bool {
         self.ops
             .iter()
@@ -408,6 +437,7 @@ pub fn parse_compose(yaml: &str) -> anyhow::Result<DesiredCompose> {
     Ok(out)
 }
 
+/// Internal helper: parse top level secret.
 fn parse_top_level_secret(name: &str, m: &Mapping) -> anyhow::Result<TopLevelSecret> {
     // file-source secrets are explicitly rejected: v0.3.6 only ships the
     // managed (`external: true`) path. Operators get a clear pointer at
@@ -438,6 +468,7 @@ fn parse_top_level_secret(name: &str, m: &Mapping) -> anyhow::Result<TopLevelSec
     Ok(TopLevelSecret::External)
 }
 
+/// Internal helper: parse service.
 fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
     let mut svc = DesiredService {
         name: name.to_string(),
@@ -502,7 +533,7 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
     // Real-world compose files in the wild (and the homelab's
     // pre-Isengard Swarm/Traefik shape) lean on the list form. Silently
     // dropping it was the bug behind 'isd route list shows nothing
-    // after deploy' — the labels never made it onto the running
+    // after deploy': the labels never made it onto the running
     // containers, so label-ingest had nothing to discover.
     if let Some(value) = m.get(Value::String("labels".into())) {
         match value {
@@ -733,6 +764,7 @@ fn compose_placement_for_service(name: &str, m: &Mapping) -> anyhow::Result<Opti
     Ok(None)
 }
 
+/// Internal helper: translate deploy block.
 fn translate_deploy_block(name: &str, deploy: &Mapping) -> anyhow::Result<Placement> {
     // 1. Mode (replicated default; global supported).
     let mode = match deploy.get(Value::String("mode".into())) {
@@ -818,7 +850,9 @@ fn translate_deploy_block(name: &str, deploy: &Mapping) -> anyhow::Result<Placem
     Ok(Placement::Singleton { selector })
 }
 
+/// Internal enum: DeployConstraint.
 enum DeployConstraint {
+    /// `Hostname` variant.
     Hostname(String),
     /// A selector-shaped clause, e.g. `role==worker`.
     Selector(String),
@@ -890,6 +924,7 @@ fn split_swarm_constraint(s: &str) -> Option<(&str, &'static str, &str)> {
     None
 }
 
+/// Internal helper: parse unsigned.
 fn parse_unsigned(name: &str, field: &str, v: &Value) -> anyhow::Result<u32> {
     match v {
         Value::Number(n) => n
@@ -904,6 +939,7 @@ fn parse_unsigned(name: &str, field: &str, v: &Value) -> anyhow::Result<u32> {
     }
 }
 
+/// Internal helper: parse bool.
 fn parse_bool(name: &str, field: &str, v: &Value) -> anyhow::Result<bool> {
     match v {
         Value::Bool(b) => Ok(*b),
@@ -913,6 +949,7 @@ fn parse_bool(name: &str, field: &str, v: &Value) -> anyhow::Result<bool> {
     }
 }
 
+/// Internal helper: parse string.
 fn parse_string(name: &str, field: &str, v: &Value) -> anyhow::Result<String> {
     match v {
         Value::String(s) => Ok(s.clone()),
@@ -943,12 +980,19 @@ fn string_seq_or_split(v: &Value) -> Vec<String> {
 /// in the apply path; tests build it directly.
 #[derive(Debug, Clone, Default)]
 pub struct RunningService {
+    /// Compose service name as recorded on the container.
     pub service_name: String,
+    /// Container id from the runtime.
     pub container_id: String,
+    /// Image reference the container is running.
     pub image: String,
+    /// Env visible to the container (operator-set keys only).
     pub environment: BTreeMap<String, String>,
+    /// Container labels.
     pub labels: BTreeMap<String, String>,
+    /// Published ports as compose-style strings.
     pub port_bindings: Vec<String>,
+    /// Effective restart policy string.
     pub restart: Option<String>,
 }
 
@@ -1138,6 +1182,7 @@ pub fn build_plan(
     }
 }
 
+/// Internal helper: service drift.
 fn service_drift(want: &DesiredService, have: &RunningService) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
     if let Some(image) = want.image.as_ref() {
@@ -1414,7 +1459,7 @@ services:
     fn parse_compose_with_networks_map_form() {
         // Map form is standard compose for per-network options
         // (aliases, ipv4_address). We don't apply those yet; the test
-        // just locks in that the network names round-trip.
+        // locks in that the network names round-trip.
         let yaml = r#"services:
   web:
     image: nginx

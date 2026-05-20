@@ -1,4 +1,4 @@
-//! `ProxyHttp` implementation — the per-request routing logic.
+//! `ProxyHttp` implementation: the per-request routing logic.
 //!
 //! Single-rule host-header routing. The router reads the
 //! incoming `Host` header, looks it up in `ProxyState.upstreams`, and returns
@@ -14,10 +14,12 @@ use super::ProxyState;
 
 /// The Isengard reverse-proxy implementation.
 pub struct IsengardProxy {
+    /// Shared proxy state (upstreams, cert store, routing generation).
     pub state: ProxyState,
 }
 
 impl IsengardProxy {
+    /// Wrap `state` in the Pingora-compatible router.
     pub fn new(state: ProxyState) -> Self {
         Self { state }
     }
@@ -32,7 +34,7 @@ impl ProxyHttp for IsengardProxy {
     /// Short-circuit `/.well-known/acme-challenge/<token>` requests on the
     /// :8080 HTTP listener. Returns `Ok(true)` when we've fully written the
     /// response (so Pingora skips upstream lookup). Unknown tokens get a 404
-    /// — the ACME server treats both as failures, but distinguishing in logs
+    ///: the ACME server treats both as failures, but distinguishing in logs
     /// is useful when triaging an order.
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
         let path = session.req_header().uri.path();

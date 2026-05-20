@@ -67,9 +67,13 @@ impl Record {
 /// registered on this agent. `apply` diffs the desired set vs the live set
 /// and registers / unregisters the delta.
 pub struct MdnsResponder {
+    /// `daemon` field.
     daemon: ServiceDaemon,
+    /// `iface_addr` field.
     iface_addr: Ipv4Addr,
+    /// `port` field.
     port: u16,
+    /// `current` field.
     current: BTreeSet<Record>,
 }
 
@@ -159,7 +163,7 @@ fn desired_from_rules(
 pub(crate) fn strip_local_suffix(host: &str) -> Option<String> {
     let normalized = normalize_hostname(host);
     // After normalization, a `.local.` trailing dot is already gone, so the
-    // suffix to strip is just `.local`. Multi-label names like
+    // suffix to strip is `.local`. Multi-label names like
     // `api.web.local` keep `api.web` so mdns-sd advertises the full label
     // path; the resulting fullname is `api.web._http._tcp.local.`.
     let stripped = normalized.strip_suffix(".local")?;

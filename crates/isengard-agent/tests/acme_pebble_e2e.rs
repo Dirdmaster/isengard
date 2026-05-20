@@ -28,7 +28,7 @@ async fn order_cert_against_pebble_account_creation() {
         .await;
 
     if probe.is_err() {
-        eprintln!("[acme_pebble_e2e] Pebble not reachable at {PEBBLE_DIR} — skipping");
+        eprintln!("[acme_pebble_e2e] Pebble not reachable at {PEBBLE_DIR}: skipping");
         return;
     }
 
@@ -42,12 +42,12 @@ async fn order_cert_against_pebble_account_creation() {
 
     // NB: Pebble validates by hitting our HTTP-01 endpoint
     // (defaults to https://localhost:5002, configurable). Full end-to-end
-    // requires a Pingora :8080 listener reachable from Pebble — too much
+    // requires a Pingora :8080 listener reachable from Pebble: too much
     // fixture for this scaffold. This test only exercises the
     // AcmeClient::new constructor + verifies imports compile.
     //
     // Account creation (which would actually hit Pebble) needs the
-    // HTTP-01 server up to complete a real order — manual smoke.
+    // HTTP-01 server up to complete a real order: manual smoke.
 
     let _client = AcmeClient::new(
         inv,

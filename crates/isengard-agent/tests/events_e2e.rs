@@ -5,7 +5,7 @@
 //! Approach: spin up the controller in-process, run the real agent long
 //! enough for it to enroll, then read `agent.json` for the agent_id. With
 //! that id, open a *second* raw `ControllerClient` Sync stream from the test
-//! itself — performing the SyncHello + an `AgentMessage::Event` directly.
+//! itself: performing the SyncHello + an `AgentMessage::Event` directly.
 //! Wait up to 2s, then open the controller's SQLite file via `Journal::open`
 //! and assert a row with `kind == "test.synthetic"` is present.
 //!

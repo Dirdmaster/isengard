@@ -14,8 +14,12 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
+/// Internal constant: TICK INTERVAL.
 const TICK_INTERVAL: Duration = Duration::from_secs(3600);
 
+/// Spawn the long-running cert renewal loop. Wakes every hour, polls the
+/// `tls_certs` table for entries past their renewal threshold, and drives
+/// each through an ACME order.
 pub fn spawn(
     inv: Arc<Inventory>,
     cert_store: Arc<CertStore>,
@@ -32,6 +36,7 @@ pub fn spawn(
     });
 }
 
+/// Internal helper: tick.
 async fn tick(
     inv: &Inventory,
     cert_store: &Arc<CertStore>,

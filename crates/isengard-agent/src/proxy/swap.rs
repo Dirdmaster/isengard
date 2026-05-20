@@ -4,7 +4,7 @@
 //! background cleanup that runs after the grace period, then installs the new
 //! upstream as `Active` under the same hostname. The router's
 //! [`super::router::IsengardProxy::upstream_peer`] short-circuits requests
-//! routed to a `Draining` entry with a 503 — but in the swap path the new
+//! routed to a `Draining` entry with a 503: but in the swap path the new
 //! entry replaces the old immediately, so traffic continues uninterrupted.
 //!
 //! The cleanup uses [`UpstreamRegistry::remove_if_draining`], which is a no-op
@@ -24,7 +24,7 @@ use std::time::Duration;
 /// install happen under a single write lock, so the router never observes a
 /// transient `Draining` state for the swapped hostname (which would cause a
 /// 503 between the two operations). `spawn_drain_cleanup` only schedules a
-/// tokio task — no lock contention while held.
+/// tokio task: no lock contention while held.
 pub async fn swap_upstream(
     state: &ProxyState,
     hostname: &str,
@@ -38,11 +38,11 @@ pub async fn swap_upstream(
     // Mark the old entry draining first so the cleanup task (scheduled below)
     // has the right state to compare against.
     w.set_state(hostname, UpstreamState::Draining);
-    // tokio::spawn doesn't take the lock — holding the write lock across this
+    // tokio::spawn doesn't take the lock: holding the write lock across this
     // call is microsecond-cheap.
     spawn_drain_cleanup(state.clone(), hostname.to_string(), grace_period);
     // Install the new upstream under the SAME lock. The router's next read
-    // sees `Active` directly — no Draining window from its perspective.
+    // sees `Active` directly: no Draining window from its perspective.
     w.set(hostname.to_string(), new_active);
     drop(w);
 

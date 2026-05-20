@@ -13,12 +13,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Cheap healthcheck primitive. One probe attempt per `check_once` call.
 pub struct HealthChecker {
+    /// Optional HTTP path. `None` means TCP-only liveness.
     path: Option<String>,
+    /// Per-probe budget for both the connect and the GET.
     timeout: Duration,
 }
 
 impl HealthChecker {
+    /// HTTP-mode checker: probes `GET <path>` and accepts any 2xx.
     pub fn new(path: String, timeout: Duration) -> Self {
         Self {
             path: Some(path),
@@ -26,6 +30,7 @@ impl HealthChecker {
         }
     }
 
+    /// TCP-only checker: a successful `connect()` is enough.
     pub fn tcp_only(timeout: Duration) -> Self {
         Self {
             path: None,
@@ -33,6 +38,7 @@ impl HealthChecker {
         }
     }
 
+    /// Run one probe. Returns `true` on healthy.
     pub async fn check_once(&self, addr: SocketAddr) -> bool {
         let connect = timeout(self.timeout, TcpStream::connect(addr)).await;
         let mut stream = match connect {

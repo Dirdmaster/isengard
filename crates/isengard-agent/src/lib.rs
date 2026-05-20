@@ -1,5 +1,6 @@
-//! Agent-mode runtime: load plugins, run their lifecycle hooks, wait for
-//! shutdown. Minimum — no gRPC client, no docker integration.
+#![doc = include_str!("../docs/crate-overview.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 pub mod agent_labels;
 pub mod agent_state;
@@ -41,6 +42,8 @@ use tracing::{info, instrument, warn};
 
 use crate::deployment::{DeploymentSupervisor, SupervisorDispatcher};
 
+/// Boot-time configuration the agent reads to come up. Built by the
+/// `isd join` / `isd agent` CLI handlers from flags + config files.
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
     /// URL of the controller, e.g. `https://controller.example.com:9417`.
@@ -49,15 +52,18 @@ pub struct AgentOptions {
     /// Directory where the agent persists its state (`agent.json` +
     /// `certs/{ca,agent.crt,agent.key}` etc). Created if missing.
     pub state_dir: std::path::PathBuf,
+    /// Plugin-specific configuration, keyed by plugin name. Each plugin
+    /// reads its own subtree from this `Value` at `init` time.
     pub config: serde_json::Value,
     /// Reverse-proxy ports. If both are `None`, the proxy
-    /// supervisor is not spawned — useful for integration tests that don't
+    /// supervisor is not spawned: useful for integration tests that don't
     /// want to fight over port 8080/8443. Production passes `Some(8080)` /
     /// `Some(8443)`. Plan B will read these from settings.
     pub proxy_http_port: Option<u16>,
+    /// HTTPS port for the Pingora listener. See [`Self::proxy_http_port`].
     pub proxy_https_port: Option<u16>,
     /// TLS subsystem options (Plan B 8e). If `None`, the cert store + HTTPS
-    /// listener + ACME are all disabled — useful for integration tests.
+    /// listener + ACME are all disabled: useful for integration tests.
     /// Production passes `Some(TlsOptions { ... })`.
     pub tls: Option<TlsOptions>,
     /// One-time enrollment token. Used only on first boot when
@@ -75,10 +81,13 @@ pub struct AgentOptions {
     /// advertise on (v0.3a). When `None`, the responder picks the first
     /// non-loopback IPv4 interface. When the chosen interface lacks a
     /// non-loopback IPv4, the responder is not started and the agent logs
-    /// a warning: routing still works, just without `.local` advertisement.
+    /// a warning: routing still works, without `.local` advertisement.
     pub advertise_iface: Option<String>,
 }
 
+/// TLS subsystem options. Production wiring fills this from the agent's
+/// settings; tests pass `None` on [`AgentOptions::tls`] to skip the
+/// subsystem entirely.
 #[derive(Debug, Clone)]
 pub struct TlsOptions {
     /// Directory where issued cert/key pairs and the ACME account live
@@ -92,6 +101,9 @@ pub struct TlsOptions {
     pub acme_directory_url: String,
 }
 
+/// Construct every agent-mode plugin registered via `inventory`. The
+/// returned vector preserves registration order; the boot path calls
+/// `Plugin::init` then `Plugin::start` on each entry.
 pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
     registrations_for(HostMode::Agent)
         .into_iter()
@@ -99,6 +111,19 @@ pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
         .collect()
 }
 
+/// Agent entry point. Runs until SIGINT or the sync loop returns.
+///
+/// On first boot the agent enrolls against the controller (fingerprint-
+/// verified CA + `Enroll` RPC), persists the cert bundle, and brings up
+/// the sync stream + proxy + label watcher. Subsequent boots load
+/// `agent.json` and re-attach without a fresh enroll.
+///
+/// # Errors
+///
+/// Returns `Err` for any unrecoverable boot failure (missing state dir,
+/// enroll token rejected, on-disk state corrupt). Once the sync loop is
+/// running, transient stream errors are absorbed by the reconnect loop;
+/// only `cancel` or an unrecoverable plugin error tears the agent down.
 #[instrument(skip(opts), fields(controller = %opts.controller_url))]
 pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     info!(state_dir = ?opts.state_dir, "starting agent");
@@ -131,7 +156,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         Some(state) => {
             if !cert_store::exists(&opts.state_dir) {
                 anyhow::bail!(
-                    "agent.json present but no cert bundle in {}/certs — wipe state and re-enroll",
+                    "agent.json present but no cert bundle in {}/certs: wipe state and re-enroll",
                     opts.state_dir.display(),
                 );
             }
@@ -150,7 +175,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
             // and ask the operator to clean up.
             if cert_store::exists(&opts.state_dir) {
                 anyhow::bail!(
-                    "cert bundle present in {}/certs but no agent.json — wipe certs/ and re-enroll",
+                    "cert bundle present in {}/certs but no agent.json: wipe certs/ and re-enroll",
                     opts.state_dir.display(),
                 );
             }
@@ -228,12 +253,12 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 
     // -- build the mTLS endpoint reused by the sync stream + any future
     //    direct RPC the agent issues (RenewCert, etc). One Endpoint, many
-    //    `connect()` calls — sync's reconnect loop dials per attempt.
+    //    `connect()` calls: sync's reconnect loop dials per attempt.
     //
     //    Imp-2: wrap the Endpoint in `Arc<RwLock<_>>` so the cert renewal
     //    task can swap in a freshly-built Endpoint after rotating the
     //    on-disk cert. Sync's reconnect loop reads this on every attempt
-    //    and adopts the new identity at the next stream cycle — without a
+    //    and adopts the new identity at the next stream cycle: without a
     //    restart.
     let bundle = cert_store::load(&opts.state_dir)
         .map_err(|e| anyhow::anyhow!("loading cert bundle: {e}"))?;
@@ -245,7 +270,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
     //    this scope and is passed by &mut into the sync loop so events stay
     //    queued across reconnects.
     let (emitter, mut events_rx) = events::OutboundEmitter::new();
-    // Grab a sender clone before erasing the concrete type — the proxy
+    // Grab a sender clone before erasing the concrete type: the proxy
     // healthcheck loop needs to publish through the same channel.
     let proxy_event_tx = emitter.sender();
     let emitter: Arc<dyn EventEmitter> = Arc::new(emitter);
@@ -655,7 +680,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
 
     // -- mDNS responder (v0.3a). The advertise IP is the chosen interface's
     //    first non-loopback IPv4. Failures are non-fatal: the agent keeps
-    //    serving traffic, you just don't get `.local` advertisement until the
+    //    serving traffic, without `.local` advertisement until the
     //    interface comes back. The responder advertises on the same port the
     //    HTTP listener bound (defaults to 80 when proxy_http_port is None,
     //    matching the production compose setup).
@@ -688,7 +713,7 @@ pub async fn run_agent(opts: AgentOptions) -> Result<()> {
         .as_ref()
         .map(|d| Arc::new(crate::logs::BollardLogSource { docker: d.clone() }));
 
-    // The sync loop borrows `events_rx` for its lifetime — own it here.
+    // The sync loop borrows `events_rx` for its lifetime: own it here.
     let sync_endpoint = endpoint.clone();
     let sync_agent_id = agent_id.clone();
     let sync_cancel = cancel.clone();
@@ -794,7 +819,7 @@ const DEFAULT_HEARTBEAT_INTERVAL_SECS: u32 = 10;
 
 /// Build the reusable mTLS [`tonic::transport::Endpoint`] every post-enroll
 /// RPC dials through. The endpoint is cheap to clone and each `connect()`
-/// call produces a fresh transport — sync's reconnect loop relies on this.
+/// call produces a fresh transport: sync's reconnect loop relies on this.
 fn build_mtls_endpoint(
     controller_url: &str,
     bundle: &cert_store::CertBundle,
@@ -821,7 +846,7 @@ fn build_mtls_endpoint(
 /// `https://controller.local:9417/foo` → `Some("controller.local")`.
 /// Used as the SNI / cert-verification name for the mTLS channel.
 ///
-/// Tiny manual parser — pulling in `url` for one call wasn't worth it.
+/// Tiny manual parser: pulling in `url` for one call wasn't worth it.
 fn controller_dns_from_url(url: &str) -> Option<String> {
     let after_scheme = match url.split_once("://") {
         Some((_, rest)) => rest,
@@ -839,7 +864,7 @@ fn controller_dns_from_url(url: &str) -> Option<String> {
         // IPv6 literal: take everything before the closing bracket.
         rest.split(']').next()?.to_string()
     } else {
-        // host[:port] — drop the port if present.
+        // host[:port]: drop the port if present.
         host_with_port
             .split_once(':')
             .map(|(h, _)| h.to_string())

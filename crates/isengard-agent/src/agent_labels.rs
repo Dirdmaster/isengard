@@ -161,6 +161,7 @@ fn ingest_pair(out: &mut BTreeMap<String, String>, raw_key: &str, raw_value: &st
     out.insert(key, raw_value.to_string());
 }
 
+/// Internal helper: is valid key.
 fn is_valid_key(k: &str) -> bool {
     !k.is_empty()
         && k.bytes().all(|b| {
@@ -168,6 +169,7 @@ fn is_valid_key(k: &str) -> bool {
         })
 }
 
+/// Internal helper: is valid value.
 fn is_valid_value(v: &str) -> bool {
     !v.contains(',') && !v.contains('=')
 }
