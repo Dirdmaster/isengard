@@ -1,7 +1,9 @@
-//! `PluginContext`: services the host exposes to plugins via their lifecycle hooks.
+//! `PluginContext`: services the host exposes to plugins via their lifecycle
+//! hooks.
 //!
-//! Minimum: host mode + plugin's slice of the merged config. Subsequent
-//! phases will add: logger handle, journal writer, gRPC clients, secret store.
+//! Minimum: host mode + the plugin's slice of the merged config. Subsequent
+//! phases will add: logger handle, journal writer, gRPC clients, secret
+//! store.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -10,56 +12,78 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ApprovalStore, EventEmitter, HostId, PolicyLoader, UpdateDispatcher};
 
-/// Which mode the host is running in. Affects which capability sub-traits a
-/// plugin's lifecycle hooks are called through.
+/// Which mode the host is running in.
+///
+/// Affects which capability sub-traits a plugin's lifecycle hooks are called
+/// through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostMode {
+    /// Host is running as the controller (central control plane).
     Controller,
+    /// Host is running as an agent on a fleet node.
     Agent,
 }
 
-/// Context handed to a plugin during `init`/`start`. Cheap to clone (Arc-backed
-/// fields will land in later phases).
+/// Context handed to a plugin during `init`/`start`.
+///
+/// Cheap to clone: Arc-backed fields will land in later phases. Construct
+/// with [`PluginContext::new`] and chain `with_*` builders to attach the
+/// optional services the host wires up.
 #[derive(Clone)]
 pub struct PluginContext {
+    /// Which mode the host is running in.
     pub mode: HostMode,
-    /// The plugin's slice of the merged configuration tree. Empty `Value::Null`
-    /// when the plugin has no configuration.
+    /// The plugin's slice of the merged configuration tree.
+    ///
+    /// Empty `Value::Null` when the plugin has no configuration.
     pub config: serde_json::Value,
-    /// Optional event sink. `None` on the controller in phase 4a; `Some` on
-    /// the agent once 4b wires the gRPC client through.
+    /// Optional event sink.
+    ///
+    /// `None` on the controller in phase 4a; `Some` on the agent once 4b
+    /// wires the gRPC client through.
     pub events: Option<Arc<dyn EventEmitter>>,
     /// Optional opaque handle passed by the controller host to plugins.
-    /// Currently carries `Arc<ControllerHandles>` (inventory + journal + bus bundle);
-    /// downcast in plugin `start()` to access concrete state. Field name is
-    /// retained for backward compatibility — see TODO in isengard-controller for
-    /// a future migration of ControllerHandles to isengard-core.
+    ///
+    /// Currently carries `Arc<ControllerHandles>` (inventory + journal + bus
+    /// bundle); downcast in plugin `start()` to access concrete state. Field
+    /// name is retained for backward compatibility (see the TODO in
+    /// isengard-controller for a future migration of `ControllerHandles`
+    /// to isengard-core).
     pub bus: Option<Arc<dyn Any + Send + Sync>>,
     /// Optional sink the updater plugin consults before recreating a
-    /// container. Wired by the agent host so the
-    /// `DeploymentSupervisor` can intercept and run a blue-green driver
-    /// instead of an in-place recreate. `None` outside the agent.
+    /// container.
+    ///
+    /// Wired by the agent host so the `DeploymentSupervisor` can intercept
+    /// and run a blue-green driver instead of an in-place recreate. `None`
+    /// outside the agent.
     pub update_dispatcher: Option<Arc<dyn UpdateDispatcher>>,
-    /// Stable identifier for the host running this plugin. Set by the
-    /// agent runtime once enrollment + local DB lookup have produced a
-    /// `HostId`; `None` outside the agent (controller mode, plugin loaders
-    /// in unit tests).
+    /// Stable identifier for the host running this plugin.
+    ///
+    /// Set by the agent runtime once enrollment + local DB lookup have
+    /// produced a [`HostId`]; `None` outside the agent (controller mode,
+    /// plugin loaders in unit tests).
     pub host_id: Option<HostId>,
-    /// Optional policy loader. Plugins that respect update policies (the
-    /// updater, primarily) call `list()` to fetch the current policy
-    /// snapshot before deciding whether to act on a candidate. `None`
-    /// outside the agent or when the agent runtime hasn't wired the
-    /// loader yet (older agents, certain test harnesses).
+    /// Optional policy loader.
+    ///
+    /// Plugins that respect update policies (the updater, primarily) call
+    /// `list()` to fetch the current policy snapshot before deciding whether
+    /// to act on a candidate. `None` outside the agent or when the agent
+    /// runtime hasn't wired the loader yet (older agents, certain test
+    /// harnesses).
     pub policy_loader: Option<Arc<dyn PolicyLoader>>,
-    /// Optional approval store. The updater plugin persists pending
-    /// approvals via this seam when a candidate's resolved policy gates on
-    /// `Approval`. `None` outside the agent or in test harnesses that
-    /// don't exercise the approval path.
+    /// Optional approval store.
+    ///
+    /// The updater plugin persists pending approvals via this seam when a
+    /// candidate's resolved policy gates on `Approval`. `None` outside the
+    /// agent or in test harnesses that don't exercise the approval path.
     pub approval_store: Option<Arc<dyn ApprovalStore>>,
 }
 
 impl PluginContext {
+    /// Build a context with the bare minimum: mode + config.
+    ///
+    /// Chain `with_*` calls to attach optional services.
     pub fn new(mode: HostMode, config: serde_json::Value) -> Self {
         Self {
             mode,
@@ -73,31 +97,40 @@ impl PluginContext {
         }
     }
 
+    /// Attach an [`EventEmitter`] so plugins can emit journal events.
     pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
         self.events = Some(events);
         self
     }
 
+    /// Attach an opaque host-provided handle (controller mode).
     pub fn with_bus(mut self, bus: Arc<dyn Any + Send + Sync>) -> Self {
         self.bus = Some(bus);
         self
     }
 
+    /// Attach an [`UpdateDispatcher`] so the updater can hand triggers to
+    /// the blue-green supervisor (agent mode).
     pub fn with_update_dispatcher(mut self, d: Arc<dyn UpdateDispatcher>) -> Self {
         self.update_dispatcher = Some(d);
         self
     }
 
+    /// Attach the [`HostId`] of the running agent.
     pub fn with_host_id(mut self, host_id: HostId) -> Self {
         self.host_id = Some(host_id);
         self
     }
 
+    /// Attach a [`PolicyLoader`] so policy-respecting plugins (the updater,
+    /// primarily) can fetch the current snapshot.
     pub fn with_policy_loader(mut self, loader: Arc<dyn PolicyLoader>) -> Self {
         self.policy_loader = Some(loader);
         self
     }
 
+    /// Attach an [`ApprovalStore`] so the updater can persist
+    /// pending-approval rows when the resolved gate is `Approval`.
     pub fn with_approval_store(mut self, store: Arc<dyn ApprovalStore>) -> Self {
         self.approval_store = Some(store);
         self

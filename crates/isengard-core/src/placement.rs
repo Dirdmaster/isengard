@@ -1,48 +1,38 @@
-//! Native placement verbs + label selectors.
-//!
-//! The compose parser populates `DesiredService::placement` with one of
-//! the [`Placement`] variants when a service uses `spread:`, `global:`,
-//! `on:`, or `where:` keys (or the Swarm-compat `deploy:` block). The
-//! scheduler in `isengard-controller` reads this enum to compute the
-//! target host(s).
-//!
-//! Selector grammar (subset of k8s label-selector, comma-separated):
-//!
-//! ```text
-//! selector = expr ("," expr)*
-//! expr     = key (op value)?
-//! op       = "==" | "!=" | "in (" v ("," v)* ")" | "notin (" v ("," v)* ")"
-//! ```
-//!
-//! - Keys: ASCII `[a-z0-9._-]+`, max 63 chars.
-//! - Values: any UTF-8 except `,` and `=` (matches the agent_labels
-//!   ingest rule).
-//! - A bare key (no op) means "exists" (`key == any`).
-//!
-//! Selector parsing is intentionally simple: no nested parens, no regex,
-//! no globbing. The flat string form keeps the YAML/TOML readable and
-//! covers "give me a GPU host."
+#![doc = include_str!("../docs/placement.md")]
 
 use std::fmt;
 
 /// Per-service deploy strategy. Maps to the controller's rollout
-/// behavior. `Auto` lets the controller pick per-service heuristically.
+/// behavior.
 ///
-/// Parsed from the stack file's per-service `strategy:` key. See the
-/// 2026-05-15 one-file stack model design spec for the
+/// [`Auto`](Self::Auto) lets the controller pick per-service
+/// heuristically. Parsed from the stack file's per-service `strategy:`
+/// key. See the 2026-05-15 one-file stack model design spec for the
 /// rationale of pushing strategy choice into the stack file itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Strategy {
+    /// Controller picks per-service heuristically.
     #[default]
     Auto,
+    /// Stand up a fresh "green" deployment alongside the running "blue"
+    /// and swap traffic.
     BlueGreen,
+    /// Replace replicas one at a time, draining traffic between each.
     Rolling,
+    /// Stop everything, then bring up the new version.
     Recreate,
 }
 
 impl Strategy {
-    /// Parse a strategy keyword. Accepts exactly the four kebab-case
-    /// forms; anything else is an error naming the allowed set.
+    /// Parse a strategy keyword.
+    ///
+    /// Accepts exactly the four kebab-case forms; anything else is an
+    /// error naming the allowed set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `anyhow::Error` listing the allowed values when the
+    /// input is not one of `auto`, `blue-green`, `rolling`, `recreate`.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
         match s {
             "auto" => Ok(Self::Auto),
@@ -55,6 +45,8 @@ impl Strategy {
         }
     }
 
+    /// Inverse of [`parse`](Self::parse): emit the stable kebab-case
+    /// keyword.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -65,53 +57,79 @@ impl Strategy {
     }
 }
 
-/// Where to place a service's replicas. Set by the compose parser; read
-/// by the scheduler.
+/// Where to place a service's replicas.
+///
+/// Set by the compose parser; read by the scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Placement {
-    /// Default. One replica, scheduler picks any host that matches
-    /// `selector` (or any healthy host if `selector.is_none()`).
-    Singleton { selector: Option<LabelSelector> },
-    /// N replicas. Prefer one-per-host. When fleet size < N, replicas
-    /// stack onto already-used hosts (round-robin).
-    Spread {
-        count: u32,
+    /// One replica on any host matching `selector` (or any healthy host
+    /// if the selector is `None`). The default verb when no explicit
+    /// placement is set.
+    Singleton {
+        /// Optional eligibility selector.
         selector: Option<LabelSelector>,
     },
-    /// Exactly one replica per eligible host. Auto-place on new
-    /// enrollees (after the next reconcile tick).
-    Global { selector: Option<LabelSelector> },
-    /// Pinned to a specific hostname. Never relocated. Selector still
-    /// applies as a sanity check: if the pinned host doesn't match the
-    /// selector the scheduler emits `placement.host_excluded` and the
-    /// service stays Unavailable.
+    /// `count` replicas, prefer one-per-host.
+    ///
+    /// When fleet size < `count`, replicas stack onto already-used hosts
+    /// (round-robin).
+    Spread {
+        /// Number of replicas to maintain.
+        count: u32,
+        /// Optional eligibility selector.
+        selector: Option<LabelSelector>,
+    },
+    /// Exactly one replica per eligible host.
+    ///
+    /// Auto-place on new enrollees (after the next reconcile tick).
+    Global {
+        /// Optional eligibility selector.
+        selector: Option<LabelSelector>,
+    },
+    /// Pinned to a specific hostname. Never relocated.
+    ///
+    /// `selector` still applies as a sanity check: if the pinned host
+    /// doesn't match the selector the scheduler emits
+    /// `placement.host_excluded` and the service stays Unavailable.
     On {
+        /// Hostname the service is pinned to.
         host: String,
+        /// Optional eligibility selector (sanity check).
         selector: Option<LabelSelector>,
     },
 }
 
 impl Default for Placement {
-    /// `Singleton { selector: None }` is the scheduler-side default when
-    /// the stack file declares no placement verb. Keeping the default
-    /// explicit lets callers (the scheduler, tests) materialise an
-    /// "implicit placement" without juggling `Option<Placement>` shapes.
+    /// [`Placement::Singleton`] with no selector is the scheduler-side
+    /// default when the stack file declares no placement verb.
+    ///
+    /// Keeping the default explicit lets callers (the scheduler, tests)
+    /// materialise an "implicit placement" without juggling
+    /// `Option<Placement>` shapes.
     fn default() -> Self {
         Self::Singleton { selector: None }
     }
 }
 
-/// A parsed label selector with its canonical re-emitted source. The
-/// `raw` form is what `isd placement explain` shows back to operators.
+/// A parsed label selector with its canonical re-emitted source.
+///
+/// The `raw` form is what `isd placement explain` shows back to operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelSelector {
+    /// Canonicalised source form (re-emitted from parsed `exprs`).
     pub raw: String,
+    /// Parsed clauses, in input order.
     pub exprs: Vec<SelectorExpr>,
 }
 
 impl LabelSelector {
-    /// Parse a selector string. Errors when the grammar doesn't match
-    /// or when a key is empty / has forbidden chars.
+    /// Parse a selector string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SelectorParseError`] when the grammar doesn't match, a
+    /// key is empty or has forbidden chars, or a value violates the
+    /// `,`/`=` exclusion.
     pub fn parse(s: &str) -> Result<Self, SelectorParseError> {
         let s = s.trim();
         if s.is_empty() {
@@ -132,8 +150,9 @@ impl LabelSelector {
     }
 
     /// Return true iff every clause matches the given label map.
-    /// (Public so `isengard-controller::scheduler::eligible` can reuse
-    /// without forking the matcher.)
+    ///
+    /// Public so `isengard-controller::scheduler::eligible` can reuse
+    /// without forking the matcher.
     pub fn matches(&self, labels: &std::collections::BTreeMap<String, String>) -> bool {
         self.exprs.iter().all(|e| e.matches(labels))
     }
@@ -148,14 +167,45 @@ impl fmt::Display for LabelSelector {
 /// One clause in a label selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorExpr {
-    Eq { key: String, value: String },
-    Neq { key: String, value: String },
-    In { key: String, values: Vec<String> },
-    NotIn { key: String, values: Vec<String> },
-    Exists { key: String },
+    /// `key==value` clause.
+    Eq {
+        /// Label key.
+        key: String,
+        /// Required label value.
+        value: String,
+    },
+    /// `key!=value` clause. Absent keys count as "not equal" (k8s
+    /// semantics).
+    Neq {
+        /// Label key.
+        key: String,
+        /// Disallowed label value.
+        value: String,
+    },
+    /// `key in (a, b, c)` clause.
+    In {
+        /// Label key.
+        key: String,
+        /// Allowed label values.
+        values: Vec<String>,
+    },
+    /// `key notin (a, b, c)` clause. Absent keys count as "not in" (k8s
+    /// semantics).
+    NotIn {
+        /// Label key.
+        key: String,
+        /// Disallowed label values.
+        values: Vec<String>,
+    },
+    /// Bare key: matches when the key exists (any value).
+    Exists {
+        /// Label key.
+        key: String,
+    },
 }
 
 impl SelectorExpr {
+    /// Check whether this clause matches the given label map.
     pub fn matches(&self, labels: &std::collections::BTreeMap<String, String>) -> bool {
         match self {
             Self::Eq { key, value } => labels.get(key).map(|v| v == value).unwrap_or(false),
@@ -175,15 +225,39 @@ impl SelectorExpr {
     }
 }
 
+/// Parse failure modes for [`LabelSelector::parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorParseError {
+    /// Selector string was empty or whitespace-only.
     Empty,
+    /// A clause between two commas was empty.
     EmptyClause,
-    InvalidKey { key: String },
-    InvalidValue { value: String },
-    MalformedClause { clause: String },
-    UnclosedSet { clause: String },
-    UnknownOperator { clause: String },
+    /// Key violated the `[a-z0-9._-]+` rule or exceeded the length cap.
+    InvalidKey {
+        /// The offending key.
+        key: String,
+    },
+    /// Value contained `,` or `=`, or was empty.
+    InvalidValue {
+        /// The offending value.
+        value: String,
+    },
+    /// Clause did not match any grammar production.
+    MalformedClause {
+        /// The offending clause text.
+        clause: String,
+    },
+    /// `in (...)` or `notin (...)` set was missing its closing paren.
+    UnclosedSet {
+        /// The offending clause text.
+        clause: String,
+    },
+    /// Recognised the structure but the operator was something other
+    /// than `==`, `!=`, `in`, `notin`.
+    UnknownOperator {
+        /// The offending clause text.
+        clause: String,
+    },
 }
 
 impl fmt::Display for SelectorParseError {
@@ -217,8 +291,10 @@ impl fmt::Display for SelectorParseError {
 
 impl std::error::Error for SelectorParseError {}
 
+/// Maximum length of a selector key.
 const MAX_KEY_LEN: usize = 63;
 
+/// Split `s` on top-level commas, leaving commas inside parens alone.
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut depth = 0usize;
     let mut start = 0usize;
@@ -240,6 +316,7 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     out
 }
 
+/// Parse one clause `s` (no top-level commas) into a [`SelectorExpr`].
 fn parse_expr(s: &str) -> Result<SelectorExpr, SelectorParseError> {
     // Detect `in (...)` / `notin (...)` first; they contain commas.
     if let Some((key, rest)) = match_set_op(s, " in ") {
@@ -266,8 +343,8 @@ fn parse_expr(s: &str) -> Result<SelectorExpr, SelectorParseError> {
     })
 }
 
-/// Match `<key>(<delim>)(<rest>)`. Returns `(key, rest)` if delim appears
-/// outside any parens.
+/// Match `<key>(<delim>)(<rest>)`. Returns `(key, rest)` if `delim`
+/// appears outside any parens.
 fn match_set_op<'a>(s: &'a str, delim: &str) -> Option<(&'a str, &'a str)> {
     let bytes = s.as_bytes();
     let needle = delim.as_bytes();
@@ -289,6 +366,7 @@ fn match_set_op<'a>(s: &'a str, delim: &str) -> Option<(&'a str, &'a str)> {
     None
 }
 
+/// Parse a set operator: `key in (a, b)` or `key notin (a, b)`.
 fn parse_set(key: &str, rest: &str, negate: bool) -> Result<SelectorExpr, SelectorParseError> {
     let key = key.trim();
     validate_key(key)?;
@@ -325,6 +403,7 @@ fn parse_set(key: &str, rest: &str, negate: bool) -> Result<SelectorExpr, Select
     })
 }
 
+/// Build a [`SelectorExpr::Eq`] after validating both halves.
 fn finalize_eq(key: &str, value: &str) -> Result<SelectorExpr, SelectorParseError> {
     if key.is_empty() {
         return Err(SelectorParseError::MalformedClause {
@@ -339,6 +418,7 @@ fn finalize_eq(key: &str, value: &str) -> Result<SelectorExpr, SelectorParseErro
     })
 }
 
+/// Build a [`SelectorExpr::Neq`] after validating both halves.
 fn finalize_neq(key: &str, value: &str) -> Result<SelectorExpr, SelectorParseError> {
     if key.is_empty() {
         return Err(SelectorParseError::MalformedClause {
@@ -353,6 +433,7 @@ fn finalize_neq(key: &str, value: &str) -> Result<SelectorExpr, SelectorParseErr
     })
 }
 
+/// Validate a selector key against the `[a-z0-9._-]+` + max-length rule.
 fn validate_key(k: &str) -> Result<(), SelectorParseError> {
     if k.is_empty() || k.len() > MAX_KEY_LEN {
         return Err(SelectorParseError::InvalidKey { key: k.to_string() });
@@ -365,6 +446,7 @@ fn validate_key(k: &str) -> Result<(), SelectorParseError> {
     Ok(())
 }
 
+/// Validate a selector value: non-empty and free of `=` / `,`.
 fn validate_value(v: &str) -> Result<(), SelectorParseError> {
     if v.is_empty() {
         return Err(SelectorParseError::InvalidValue {
@@ -379,6 +461,7 @@ fn validate_value(v: &str) -> Result<(), SelectorParseError> {
     Ok(())
 }
 
+/// Render a list of clauses back to the canonical selector source string.
 fn canonicalize(exprs: &[SelectorExpr]) -> String {
     let mut parts = Vec::with_capacity(exprs.len());
     for e in exprs {

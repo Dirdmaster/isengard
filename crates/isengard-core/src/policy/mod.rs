@@ -1,12 +1,12 @@
-//! Update-policy types shared between the storage DAO, the resolver, and the
-//! updater plugin.
+//! Update-policy types shared between the storage DAO, the resolver, and
+//! the updater plugin.
 //!
 //! See spec §"Policy struct (in `isengard-core`)" of
 //! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
 //!
-//! All `Policy` fields are `Option`. `None` means "inherit from a less-specific
-//! scope". The implicit root resolved value (when no rows exist) is exposed as
-//! the [`defaults`] module's constants.
+//! All [`Policy`] fields are `Option`. `None` means "inherit from a
+//! less-specific scope". The implicit root resolved value (when no rows
+//! exist) is exposed as the [`defaults`] module's constants.
 
 pub mod gate;
 pub mod labels;
@@ -24,23 +24,29 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-/// Discriminator for the polymorphic `scope_key` column. Mirrors the SQL
-/// CHECK constraint in `0016_policies.sql`.
+/// Discriminator for the polymorphic `scope_key` column.
 ///
-/// Lives in `isengard-core` so the pure resolver can sort and compare scopes
+/// Mirrors the SQL CHECK constraint in `0016_policies.sql`. Lives in
+/// `isengard-core` so the pure resolver can sort and compare scopes
 /// without taking a dependency on `isengard-storage`. Storage re-exports it
 /// for backwards compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PolicyScopeType {
+    /// Applies to every host (rank 0).
     Global,
+    /// Applies to all hosts in a fleet (rank 1).
     Fleet,
+    /// Applies to every container in a stack (rank 2).
     Stack,
+    /// Applies to every container of one service (rank 3).
     Service,
+    /// Applies to one specific container (rank 4).
     Container,
 }
 
 impl PolicyScopeType {
+    /// Stable kebab-case string used by storage and the resolver.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Global => "global",
@@ -51,8 +57,10 @@ impl PolicyScopeType {
         }
     }
 
-    /// Specificity rank: smaller wins, so `Global` (rank 0) is overridden by
-    /// every other scope. Used to order layered resolution.
+    /// Specificity rank: smaller wins, so [`Global`](Self::Global)
+    /// (rank 0) is overridden by every other scope.
+    ///
+    /// Used to order layered resolution.
     pub fn rank(&self) -> u8 {
         match self {
             Self::Global => 0,
@@ -66,7 +74,10 @@ impl PolicyScopeType {
 
 /// Error returned when parsing an unknown scope-type string.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownPolicyScopeType(pub String);
+pub struct UnknownPolicyScopeType(
+    /// The offending input string.
+    pub String,
+);
 
 impl std::fmt::Display for UnknownPolicyScopeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,98 +103,129 @@ impl FromStr for PolicyScopeType {
 
 /// How aggressively the updater should bump a service's image.
 ///
-/// `Pinned` is the strongest constraint: never update. `TagOnly` updates only
-/// when the resolved tag's digest changes (no semver shift). `Minor` allows
-/// patch+minor bumps once lands. `Any` is the loosest: take whatever
-/// the registry serves for the configured tag.
+/// [`Pinned`](Self::Pinned) is the strongest constraint: never update.
+/// [`TagOnly`](Self::TagOnly) updates only when the resolved tag's digest
+/// changes (no semver shift). [`Minor`](Self::Minor) allows patch + minor
+/// bumps. [`Any`](Self::Any) is the loosest: take whatever the registry
+/// serves for the configured tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateStrategy {
+    /// Never update.
     Pinned,
+    /// Update when the digest behind the same tag changes.
     TagOnly,
+    /// Allow patch + minor semver bumps.
     Minor,
+    /// Take whatever the registry serves for the configured tag.
     Any,
 }
 
-/// Whether the updater applies an eligible update on its own, asks for human
-/// approval, or is blocked entirely.
+/// Whether the updater applies an eligible update on its own, asks for
+/// human approval, or is blocked entirely.
 ///
-/// `Approval` is data-modeled here but not yet enforced: enforcement lands in
-/// Until then, REST writes that set `gate=Approval` are rejected at
-/// the API layer.
+/// [`Approval`](Self::Approval) is data-modeled here but not yet enforced:
+/// enforcement lands in a later phase. Until then, REST writes that set
+/// `gate=Approval` are rejected at the API layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateGate {
+    /// Apply the update without asking.
     Auto,
+    /// Persist a pending-approval row and wait for a human decision.
     Approval,
+    /// Block the update.
     Never,
 }
 
 /// What to do when an update fails health checks.
 ///
-/// `Rollback` couples with blue-green collapse recovery.
-/// `Keep` leaves the broken green up for forensic inspection.
-/// `Notify` is the safe default: emit an event, leave the previous container
-/// in place.
+/// [`Rollback`](Self::Rollback) couples with blue-green collapse recovery.
+/// [`Keep`](Self::Keep) leaves the broken green up for forensic
+/// inspection. [`Notify`](Self::Notify) is the safe default: emit an
+/// event, leave the previous container in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailureHandling {
+    /// Roll back to the previous container.
     Rollback,
+    /// Leave the broken new container up for forensic inspection.
     Keep,
+    /// Emit an event, leave the previous container in place.
     Notify,
 }
 
-/// Maintenance window: when may updates apply? A cron expression plus an
-/// optional IANA timezone name. `None` timezone resolves as UTC.
+/// Maintenance window: when may updates apply?
+///
+/// A cron expression plus an optional IANA timezone name. `None` timezone
+/// resolves as UTC.
 ///
 /// The cron expression is standard 5-field syntax:
-/// `minute hour day-of-month month day-of-week`. Uses the `croner`
-/// crate, which accepts both 5- and 6-field forms; the UI and validation
-/// helper text only document 5-field for clarity.
+/// `minute hour day-of-month month day-of-week`. Uses the `croner` crate,
+/// which accepts both 5- and 6-field forms; the UI and validation helper
+/// text only document 5-field for clarity.
 ///
 /// The window's effective duration (how long after a firing the cycle
 /// considers itself "in window") is fixed at [`window::WINDOW_DURATION`]
-/// (1h) for v1. Operators wanting longer windows use multiple cron lines or
-/// step expressions (e.g. `0 2-4 * * 0`).
+/// (1h) for v1. Operators wanting longer windows use multiple cron lines
+/// or step expressions (e.g. `0 2-4 * * 0`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaintenanceWindow {
+    /// 5-field cron expression. See module docs for syntax.
     pub cron_expr: String,
+    /// IANA timezone name (e.g. `"Europe/Zurich"`). `None` resolves to UTC.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timezone: Option<String>,
 }
 
-/// One layer of an update-policy. A `None` field means "inherit from a less
-/// specific scope". The actual layered resolution lives in the resolver.
+/// One layer of an update-policy.
+///
+/// A `None` field means "inherit from a less specific scope". The actual
+/// layered resolution lives in the [`resolve`] module.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
+    /// Update aggressiveness for this layer.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub strategy: Option<UpdateStrategy>,
+    /// Approval gating for this layer.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub gate: Option<UpdateGate>,
+    /// Pause updates until this UTC instant.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub paused_until: Option<DateTime<Utc>>,
+    /// Failure handling override.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub on_failure: Option<FailureHandling>,
+    /// Notifier channel id to route approval prompts to.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub approver_channel: Option<String>,
-    /// Maintenance window. `None` means "no window constraint";
-    /// updates may apply at any time.
+    /// Maintenance window.
+    ///
+    /// `None` means "no window constraint"; updates may apply at any time.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub window: Option<MaintenanceWindow>,
-    /// External-action gate. `None` means "no gate"; the
-    /// updater applies the existing post-policy logic. `Some(...)` makes
-    /// the updater consult the gate URL before any update.
+    /// External-action gate.
+    ///
+    /// `None` means "no gate"; the updater applies the existing
+    /// post-policy logic. `Some(...)` makes the updater consult the gate
+    /// URL before any update.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub external_gate: Option<ExternalGate>,
 }
 
-/// Resolver fall-back constants. These are the values the resolver uses for
-/// any field that ends up `None` after walking every applicable row.
+/// Resolver fall-back constants.
+///
+/// These are the values the resolver uses for any field that ends up
+/// `None` after walking every applicable row.
 pub mod defaults {
     use super::{FailureHandling, UpdateGate, UpdateStrategy};
 
+    /// Default strategy when no policy row sets one: [`UpdateStrategy::TagOnly`].
     pub const DEFAULT_STRATEGY: UpdateStrategy = UpdateStrategy::TagOnly;
+    /// Default gate when no policy row sets one: [`UpdateGate::Auto`].
     pub const DEFAULT_GATE: UpdateGate = UpdateGate::Auto;
+    /// Default failure handling when no policy row sets one:
+    /// [`FailureHandling::Notify`].
     pub const DEFAULT_ON_FAILURE: FailureHandling = FailureHandling::Notify;
 }
 

@@ -1,44 +1,41 @@
-//! Parse `isengard.hooks.*` Docker labels into a `ParsedHooks` struct.
-//!
-//! Pure module: `HashMap<String, String>` in, `ParsedHooks` out. The ingest
-//! caller (controller's `HookLabelIngest`) decides what to upsert.
-//!
-//! Recognized labels:
-//!
-//! | Label                                | Field           |
-//! |--------------------------------------|-----------------|
-//! | `isengard.hooks.pre_deploy`          | pre_deploy_url  |
-//! | `isengard.hooks.post_deploy`         | post_deploy_url |
-//! | `isengard.hooks.on_failure`          | on_failure_url  |
-//! | `isengard.hooks.secret`              | secret          |
-//!
-//! Unset / empty values are treated as "no hook for this kind". Malformed
-//! URLs are NOT rejected here: the worker surfaces the parse error in
-//! `last_error` when it tries to dispatch, which is more visible to operators.
+#![doc = include_str!("../docs/hooks-labels.md")]
 
 use std::collections::HashMap;
 
 /// Common prefix for all hook labels.
 pub const HOOK_LABEL_PREFIX: &str = "isengard.hooks.";
 
+/// Label key carrying the pre-deploy webhook URL.
 pub const LABEL_PRE_DEPLOY: &str = "isengard.hooks.pre_deploy";
+/// Label key carrying the post-deploy webhook URL.
 pub const LABEL_POST_DEPLOY: &str = "isengard.hooks.post_deploy";
+/// Label key carrying the on-failure webhook URL.
 pub const LABEL_ON_FAILURE: &str = "isengard.hooks.on_failure";
+/// Label key carrying the HMAC signing secret.
 pub const LABEL_SECRET: &str = "isengard.hooks.secret";
 
-/// Pure parsed result. Empty (`has_any_url() == false`) means the container
-/// carries no usable hooks; the ingest treats that as a delete.
+/// Pure parsed result.
+///
+/// Empty ([`has_any_url`](Self::has_any_url) returns `false`) means the
+/// container carries no usable hooks; the ingest treats that as a delete.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedHooks {
+    /// URL to fire before a deploy.
     pub pre_deploy_url: Option<String>,
+    /// URL to fire after a successful deploy.
     pub post_deploy_url: Option<String>,
+    /// URL to fire when a deploy fails.
     pub on_failure_url: Option<String>,
+    /// HMAC signing secret. Bare presence does not enable a hook on its
+    /// own; pair it with at least one URL.
     pub secret: Option<String>,
 }
 
 impl ParsedHooks {
-    /// Returns true iff at least one URL field is set. Used to gate
-    /// "is this row worth keeping at all" decisions in the ingest path.
+    /// Returns true iff at least one URL field is set.
+    ///
+    /// Used to gate "is this row worth keeping at all" decisions in the
+    /// ingest path.
     pub fn has_any_url(&self) -> bool {
         self.pre_deploy_url.is_some()
             || self.post_deploy_url.is_some()
@@ -48,7 +45,7 @@ impl ParsedHooks {
 
 /// Parse the `isengard.hooks.*` subset of a Docker label map.
 ///
-/// Returns `ParsedHooks::default()` when no hook labels are present. The
+/// Returns [`ParsedHooks::default`] when no hook labels are present. The
 /// caller can treat that as the "delete the row" signal.
 pub fn parse_hook_labels(labels: &HashMap<String, String>) -> ParsedHooks {
     ParsedHooks {
@@ -59,13 +56,15 @@ pub fn parse_hook_labels(labels: &HashMap<String, String>) -> ParsedHooks {
     }
 }
 
-/// Convenience predicate: does this label map carry any `isengard.hooks.*`
-/// key at all? Used by the agent watcher to decide whether to ship a
+/// Returns true iff `labels` carries any `isengard.hooks.*` key at all.
+///
+/// Used by the agent watcher to decide whether to ship a
 /// `ContainerLabelsReport` for an otherwise-unlabeled container.
 pub fn has_any_hook_label(labels: &HashMap<String, String>) -> bool {
     labels.keys().any(|k| k.starts_with(HOOK_LABEL_PREFIX))
 }
 
+/// Trim whitespace and treat empty strings as `None`. Internal helper.
 fn nonempty(v: Option<&String>) -> Option<String> {
     v.map(|s| s.trim())
         .filter(|s| !s.is_empty())

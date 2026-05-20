@@ -1,14 +1,4 @@
-//! Pure policy resolver: walks layered scopes to produce a `ResolvedPolicy`
-//! with field-level provenance.
-//!
-//! See spec §"Resolver" of
-//! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
-//!
-//! This module is intentionally storage-free. The caller (typically the
-//! updater plugin or a REST handler) loads `PolicyRow` values from
-//! `isengard-storage`, projects them down to `(PolicyScopeType, scope_key,
-//! &Policy)` tuples, then hands them to [`resolve_policy`] together with a
-//! [`PolicyContext`] describing the target.
+#![doc = include_str!("../../docs/policy-resolve.md")]
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,28 +17,43 @@ use super::{
 /// `scope_key` happens to be empty.
 #[derive(Debug, Clone, Default)]
 pub struct PolicyContext<'a> {
+    /// Fleet name the target host belongs to.
     pub fleet: Option<&'a str>,
+    /// Compose stack name the target container belongs to.
     pub stack: Option<&'a str>,
+    /// Service name within the stack.
     pub service: Option<&'a str>,
+    /// Host id in hex form. Paired with `container_name` for
+    /// container-scoped lookups.
     pub host_id_hex: Option<&'a str>,
+    /// Docker container name. Paired with `host_id_hex` for
+    /// container-scoped lookups.
     pub container_name: Option<&'a str>,
 }
 
-/// The scope a resolved field came from. `Default` means no row supplied
-/// the field and the implicit root constant (see
-/// [`super::defaults`]) was used.
+/// The scope a resolved field came from.
+///
+/// [`Default`](Self::Default) means no row supplied the field and the
+/// implicit root constant (see [`super::defaults`]) was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PolicyOrigin {
+    /// No row supplied this field; the root default constant was used.
     Default,
+    /// Field came from a `Global` row.
     Global,
+    /// Field came from a `Fleet` row.
     Fleet,
+    /// Field came from a `Stack` row.
     Stack,
+    /// Field came from a `Service` row.
     Service,
+    /// Field came from a `Container` row.
     Container,
 }
 
 impl PolicyOrigin {
+    /// Map a [`PolicyScopeType`] to the matching [`PolicyOrigin`].
     fn from_scope(scope: PolicyScopeType) -> Self {
         match scope {
             PolicyScopeType::Global => Self::Global,
@@ -63,11 +68,17 @@ impl PolicyOrigin {
 /// Per-field origin tracking. Mirrors the fields of [`ResolvedPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedProvenance {
+    /// Where the resolved `strategy` came from.
     pub strategy: PolicyOrigin,
+    /// Where the resolved `gate` came from.
     pub gate: PolicyOrigin,
+    /// Where the resolved `paused_until` came from.
     pub paused_until: PolicyOrigin,
+    /// Where the resolved `on_failure` came from.
     pub on_failure: PolicyOrigin,
+    /// Where the resolved `approver_channel` came from.
     pub approver_channel: PolicyOrigin,
+    /// Where the resolved `window` came from.
     pub window: PolicyOrigin,
     /// Where the resolved `external_gate` came from.
     pub external_gate: PolicyOrigin,
@@ -87,41 +98,41 @@ impl Default for ResolvedProvenance {
     }
 }
 
-/// The fully resolved policy for a target. Every field has a concrete value
-/// (or `None` for the genuinely optional fields, `paused_until`,
-/// `approver_channel`, `window`, and `external_gate`) and a recorded origin.
+/// The fully resolved policy for a target.
+///
+/// Every field has a concrete value (or `None` for the genuinely optional
+/// fields: `paused_until`, `approver_channel`, `window`, and
+/// `external_gate`) and a recorded origin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPolicy {
+    /// Effective update strategy.
     pub strategy: UpdateStrategy,
+    /// Effective approval gating.
     pub gate: UpdateGate,
+    /// Pause-until instant, if set.
     pub paused_until: Option<DateTime<Utc>>,
+    /// Effective failure-handling mode.
     pub on_failure: FailureHandling,
+    /// Notifier channel id, if set.
     pub approver_channel: Option<String>,
     /// Maintenance window. `None` means "no window constraint".
     pub window: Option<MaintenanceWindow>,
-    /// External-action gate. `None` means "no gate"; the
-    /// updater proceeds to the existing decision logic.
+    /// External-action gate.
+    ///
+    /// `None` means "no gate"; the updater proceeds to the existing
+    /// decision logic.
     pub external_gate: Option<ExternalGate>,
+    /// Per-field origin tracking.
     pub provenance: ResolvedProvenance,
 }
 
 /// Resolve the effective policy for the given context.
 ///
 /// `rows` is a slice of `(scope_type, scope_key, body)` tuples. The
-/// resolver:
+/// function is total and side-effect free: no I/O, no allocation beyond
+/// the optional `approver_channel` clone.
 ///
-/// 1. Filters rows that apply to `ctx` (a `Fleet` row only applies if
-///    `ctx.fleet == Some(scope_key)`, etc; `Global` always applies).
-/// 2. Sorts the survivors by `scope_type.rank()` ascending so more
-///    specific scopes overwrite less specific ones.
-/// 3. For each policy field, walks rows in rank order and overwrites
-///    whenever the row's field is `Some`. The provenance for that field
-///    is updated to the row's origin.
-/// 4. Any field still unset after the walk falls back to the
-///    `defaults::DEFAULT_*` constant with origin `Default`.
-///
-/// The function is total and side-effect free. It does no I/O and does
-/// not allocate beyond the optional `approver_channel` clone.
+/// See the module-level docs for the full algorithm.
 pub fn resolve_policy(
     rows: &[(PolicyScopeType, &str, &Policy)],
     ctx: &PolicyContext<'_>,

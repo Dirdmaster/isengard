@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::HostId;
 
-/// Canonical event-kind strings emitted by the updater plugin. Re-exported
-/// so subscribers (notifier, journal filters, dashboard streams) and tests
-/// can refer to them by symbol rather than by raw string literal.
+/// Canonical event-kind strings emitted by the updater plugin.
+///
+/// Re-exported so subscribers (notifier, journal filters, dashboard streams)
+/// and tests can refer to them by symbol rather than by raw string literal.
 pub mod kinds {
     /// Cycle summary, one per `do_cycle` invocation.
     pub const UPDATE_CHECKED: &str = "update.checked";
@@ -23,53 +24,80 @@ pub mod kinds {
     /// A `needs_update` candidate failed to recreate.
     pub const UPDATE_FAILED: &str = "update.failed";
     /// A candidate was skipped because the resolved policy said so.
+    ///
     /// Emitted for `strategy=Pinned` and active `paused_until`.
     pub const UPDATE_POLICY_SKIPPED: &str = "update.policy_skipped";
-    /// A `needs_update` candidate resolved with `gate=Approval`. The updater
-    /// has persisted a `pending_open` approval row and is waiting on a
-    /// dashboard or notifier callback decision before recreating.
+    /// A `needs_update` candidate resolved with `gate=Approval`.
+    ///
+    /// The updater has persisted a `pending_open` approval row and is waiting
+    /// on a dashboard or notifier callback decision before recreating.
     pub const UPDATE_PENDING_APPROVAL: &str = "update.pending_approval";
-    /// An operator (or auto-decider) approved a pending update via the
-    /// dashboard or a notifier callback. The agent will pick up the queued
-    /// `apply_update` HostAction on its next sync.
+    /// An operator (or auto-decider) approved a pending update.
+    ///
+    /// Source is the dashboard or a notifier callback. The agent will pick
+    /// up the queued `apply_update` HostAction on its next sync.
     pub const UPDATE_APPROVED: &str = "update.approved";
-    /// An operator rejected a pending update. No recreate happens until the
-    /// digest changes again.
+    /// An operator rejected a pending update.
+    ///
+    /// No recreate happens until the digest changes again.
     pub const UPDATE_REJECTED: &str = "update.rejected";
-    /// An operator snoozed a pending update. The service-scope policy is
-    /// updated with `paused_until = now + N hours`; the next scan skips.
+    /// An operator snoozed a pending update.
+    ///
+    /// The service-scope policy is updated with `paused_until = now + N hours`;
+    /// the next scan skips.
     pub const UPDATE_SNOOZED: &str = "update.snoozed";
-    /// A pending approval row aged past its `expires_at` and was
-    /// auto-transitioned to `pending_expired` by the controller's periodic
+    /// A pending approval row aged past its `expires_at`.
+    ///
+    /// Auto-transitioned to `pending_expired` by the controller's periodic
     /// expiry tick.
     pub const UPDATE_EXPIRED: &str = "update.expired";
     /// A `needs_update` candidate fell outside its resolved policy's
-    /// maintenance window. Payload includes the `next_window`
-    /// (RFC3339, UTC) so notifier consumers can quote the back-online time.
+    /// maintenance window.
+    ///
+    /// Payload includes the `next_window` (RFC 3339, UTC) so notifier
+    /// consumers can quote the back-online time.
     pub const UPDATE_DEFERRED: &str = "update.deferred";
 }
 
-/// A journal event. Plugin-defined `kind` strings (e.g. "update.success",
-/// "agent.connect") drive subscriber filtering. Optional fields are populated
-/// when relevant; `metadata` is a free-form JSON escape hatch.
+/// A journal event.
+///
+/// Plugin-defined `kind` strings (e.g. `"update.success"`, `"agent.connect"`)
+/// drive subscriber filtering. Optional fields are populated when relevant;
+/// `metadata` is a free-form JSON escape hatch for plugin-specific payloads.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Event {
+    /// Plugin-defined event kind (e.g. `"update.success"`).
     pub kind: String,
+    /// When the event happened, in UTC.
     pub occurred_at: DateTime<Utc>,
+    /// Host the event originated from. `None` for controller-side events.
     pub host_id: Option<HostId>,
+    /// Short human-readable summary line.
     pub summary: String,
+    /// Container the event is about, when applicable.
     pub container_name: Option<String>,
+    /// Image reference the event is about, when applicable.
     pub image: Option<String>,
+    /// Previous digest (for update events).
     pub old_digest: Option<String>,
+    /// New digest (for update events).
     pub new_digest: Option<String>,
+    /// Error message, when the event reports a failure.
     pub error: Option<String>,
+    /// Free-form JSON escape hatch for plugin-specific payloads.
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
 
 /// Async sink for events emitted by plugins.
+///
+/// Implementations live in higher crates: the agent emitter ships events to
+/// the controller via gRPC, the controller emitter writes to the journal +
+/// EventBus, and [`NoopEmitter`] is the safe default for unit tests.
 #[async_trait::async_trait]
 pub trait EventEmitter: Send + Sync + 'static {
+    /// Forward `event` to whatever sink this emitter wraps. Implementations
+    /// must not panic: callers cannot recover.
     async fn emit(&self, event: Event);
 }
 
@@ -82,6 +110,15 @@ impl EventEmitter for NoopEmitter {
 }
 
 /// Convenience for plugins: wrap an emitter into an `Arc<dyn EventEmitter>`.
+///
+/// # Examples
+///
+/// ```
+/// use isengard_core::event::{NoopEmitter, arc_emitter};
+///
+/// let sink = arc_emitter(NoopEmitter);
+/// assert_eq!(std::sync::Arc::strong_count(&sink), 1);
+/// ```
 pub fn arc_emitter<E: EventEmitter>(e: E) -> Arc<dyn EventEmitter> {
     Arc::new(e)
 }
