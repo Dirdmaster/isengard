@@ -1,5 +1,16 @@
 //! TOML deserialization + post-parse validation for `stack.toml` and
-//! `isengard.toml`. Uses `serde` for shape, then runs validators on top.
+//! `isengard.toml`.
+//!
+//! Two passes: `serde` decodes the TOML into a `Raw*` shape that mirrors
+//! the file format. Then validators promote the raw shape to the
+//! public types ([`StackManifest`], [`FleetManifest`]) and reject
+//! anything that violates the schema rules (missing `name`, empty
+//! `compose`, absolute paths, unknown strategy keywords).
+//!
+//! Serialization is a single pass via [`serialize_stack_manifest`],
+//! which writes a `toml::Value::Table` to keep field ordering
+//! deterministic without introducing a parallel `#[derive(Serialize)]`
+//! shape.
 
 use crate::{
     FleetManifest, HookErrorPolicy, HookEvent, HookSpec, OverlaySpec, StackManifest, Strategy,
@@ -10,74 +21,139 @@ use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
-/// Errors raised when a manifest body fails parsing or validation.
+/// Every way a manifest body can fail to load.
+///
+/// The error variants name the specific schema rule that failed; the CLI
+/// surfaces them verbatim. Each variant carries enough context (path,
+/// offending value) for the operator to fix the input without grepping
+/// the source.
 #[derive(Debug, Error)]
 pub enum ManifestError {
+    /// Reading the file from disk failed.
     #[error("read {path}: {source}")]
     Io {
+        /// File path the I/O call targeted.
         path: PathBuf,
+        /// Underlying I/O error.
         #[source]
         source: std::io::Error,
     },
+    /// The manifest path can't be turned into a parent directory (e.g.
+    /// it points at the filesystem root). Blocks [`StackManifest::load`]
+    /// from resolving [`StackManifest::root`].
     #[error("invalid manifest path {0:?} (no parent directory)")]
     InvalidPath(PathBuf),
+    /// The TOML parser rejected the body.
     #[error("toml: {0}")]
     Toml(String),
+    /// A required field is absent or empty. Carries the field name.
     #[error("missing required field `{0}`")]
     MissingField(&'static str),
+    /// `compose = []` was declared, which would deploy nothing.
     #[error("compose list must be non-empty")]
     EmptyCompose,
+    /// A `compose` entry (base or overlay) is absolute. Manifest paths
+    /// must be relative so the manifest stays portable across hosts.
     #[error("compose path {path:?} is absolute; manifest paths must be relative")]
-    AbsoluteComposePath { path: PathBuf },
+    AbsoluteComposePath {
+        /// The offending absolute path.
+        path: PathBuf,
+    },
+    /// `strategy = "..."` named a value outside the known set.
     #[error("unknown strategy {0:?}; allowed: auto, blue-green, rolling, recreate")]
     UnknownStrategy(String),
+    /// `[[hooks]] on = "..."` named a value outside the known set.
     #[error("unknown hook event {0:?}; allowed: pre-deploy, post-deploy, failure")]
     UnknownHookEvent(String),
+    /// [`StackManifest::resolved_compose_paths`] was asked for an
+    /// overlay name that isn't declared in [`StackManifest::overlays`].
     #[error("unknown overlay {0:?}")]
     UnknownOverlay(String),
+    /// A `[[hooks]] timeout = "..."` value couldn't be parsed.
+    ///
+    /// First field is the raw input. Second field is the underlying
+    /// reason ("empty string", a `ParseIntError` message, etc.).
     #[error("hook timeout {0:?} could not be parsed: {1}")]
     HookTimeout(String, String),
+    /// `[[hooks]] on_error = "..."` named a value other than `abort`
+    /// or `continue`.
     #[error("hook on_error {0:?} must be `abort` or `continue`")]
     UnknownHookErrorPolicy(String),
+    /// A hook declared no command. Hooks must run something.
     #[error("hook cmd cannot be empty")]
     EmptyHookCmd,
+    /// TOML serialization (via [`StackManifest::to_toml_string`])
+    /// failed.
     #[error("serialize: {0}")]
     Serialize(String),
 }
 
+/// Pre-validation shape matching `stack.toml`. Fields are `Option` so
+/// the validator can produce structured [`ManifestError::MissingField`]
+/// errors instead of opaque serde errors.
 #[derive(Debug, Deserialize)]
 struct RawStack {
+    /// Stack name. Required after validation.
     name: Option<String>,
+    /// Fleet binding.
     fleet: Option<String>,
+    /// Compose file list. Required and non-empty after validation.
     compose: Option<Vec<PathBuf>>,
+    /// Deploy strategy keyword.
     strategy: Option<String>,
+    /// Per-stack secret names. Defaults to empty.
     #[serde(default)]
     secrets: Vec<String>,
+    /// Lifecycle hooks. Defaults to empty.
     #[serde(default)]
     hooks: Vec<RawHook>,
+    /// Named overlay blocks keyed by overlay name. Defaults to empty.
     #[serde(default)]
     overlays: BTreeMap<String, RawOverlay>,
 }
 
+/// Pre-validation shape for an `[overlays.<name>]` block.
 #[derive(Debug, Deserialize)]
 struct RawOverlay {
+    /// Extra compose files this overlay adds, in declared order.
     compose: Vec<PathBuf>,
 }
 
+/// Pre-validation shape for a `[[hooks]]` entry.
 #[derive(Debug, Deserialize)]
 struct RawHook {
+    /// Lifecycle event keyword. Validated against [`HookEvent`].
     on: String,
+    /// Argv to run. Must be non-empty after validation.
     cmd: Vec<String>,
+    /// Duration string ("120s", "60000ms"). Defaults to 60 seconds when
+    /// absent.
     timeout: Option<String>,
+    /// Error policy keyword. Validated against [`HookErrorPolicy`].
+    /// Defaults to `abort` when absent.
     on_error: Option<String>,
 }
 
+/// Pre-validation shape for `isengard.toml`.
 #[derive(Debug, Deserialize)]
 struct RawFleet {
+    /// Default fleet name.
     fleet: Option<String>,
+    /// Default docker / controller context name.
     context: Option<String>,
 }
 
+/// Parses a `stack.toml` body into a validated [`StackManifest`].
+///
+/// `root` becomes [`StackManifest::root`] verbatim. The caller is
+/// responsible for picking it (parent directory on disk, synthetic
+/// `/etc/isengard/...` on the controller side).
+///
+/// # Errors
+///
+/// Returns the full set of validation errors in [`ManifestError`]:
+/// missing `name` / `compose`, empty compose list, absolute compose
+/// paths, unknown strategy / hook / on-error keywords.
 pub fn parse_stack_manifest(text: &str, root: PathBuf) -> Result<StackManifest, ManifestError> {
     let raw: RawStack = toml::from_str(text).map_err(|e| ManifestError::Toml(e.to_string()))?;
     let name = raw
@@ -136,6 +212,11 @@ pub fn parse_stack_manifest(text: &str, root: PathBuf) -> Result<StackManifest, 
     })
 }
 
+/// Promotes a [`RawHook`] to a validated [`HookSpec`].
+///
+/// Validates the event keyword, rejects empty `cmd`, parses the timeout
+/// string (defaulting to 60 seconds), and validates the error policy
+/// keyword (defaulting to `abort`).
 fn parse_hook(raw: RawHook) -> Result<HookSpec, ManifestError> {
     let on = match raw.on.as_str() {
         "pre-deploy" => HookEvent::PreDeploy,
@@ -164,10 +245,19 @@ fn parse_hook(raw: RawHook) -> Result<HookSpec, ManifestError> {
     })
 }
 
-/// Tiny duration parser: accepts "<n>s", "<n>ms", "<n>m", "<n>h", or a
-/// plain integer (interpreted as seconds). Designed to cover the handful
-/// of shapes the spec calls out ("120s", "60000ms"). No external dep
-/// because we want a single source of truth for the formats we accept.
+/// Parses one of the small duration shapes the spec accepts.
+///
+/// Accepts `<n>s`, `<n>ms`, `<n>m`, `<n>h`, or a plain integer
+/// interpreted as seconds. Designed to cover the handful of shapes the
+/// spec calls out (`120s`, `60000ms`). No external dep: one source of
+/// truth for the formats this crate accepts.
+///
+/// Suffix matching is longest-first so `ms` beats `s`.
+///
+/// # Errors
+///
+/// Returns [`ManifestError::HookTimeout`] for an empty string or a
+/// numeric component that doesn't parse as `u64`.
 fn parse_duration(s: &str) -> Result<Duration, ManifestError> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -197,6 +287,15 @@ fn parse_duration(s: &str) -> Result<Duration, ManifestError> {
     Ok(Duration::from_millis(n.saturating_mul(mult_ms)))
 }
 
+/// Parses an `isengard.toml` body into a [`FleetManifest`].
+///
+/// Both fields are optional. An empty body returns a manifest with no
+/// fleet and no context.
+///
+/// # Errors
+///
+/// Returns [`ManifestError::Toml`] when the TOML parser rejects the
+/// body.
 pub fn parse_fleet_manifest(text: &str) -> Result<FleetManifest, ManifestError> {
     let raw: RawFleet = toml::from_str(text).map_err(|e| ManifestError::Toml(e.to_string()))?;
     Ok(FleetManifest {
@@ -205,13 +304,20 @@ pub fn parse_fleet_manifest(text: &str) -> Result<FleetManifest, ManifestError> 
     })
 }
 
-/// Serialize a `StackManifest` back to TOML for `to_toml_string`.
-/// Round-trips through `parse_stack_manifest`. `root` is NOT serialized
-/// (the manifest path implies it on disk).
+/// Serializes a [`StackManifest`] back to TOML for
+/// [`StackManifest::to_toml_string`].
+///
+/// Round-trips through [`parse_stack_manifest`]. Builds the output as a
+/// `toml::Value::Table` so field ordering stays deterministic across
+/// runs. [`StackManifest::root`] is omitted: the manifest's location on
+/// disk implies it.
+///
+/// # Errors
+///
+/// Returns [`ManifestError::Serialize`] when the TOML writer fails.
 pub fn serialize_stack_manifest(m: &StackManifest) -> Result<String, ManifestError> {
-    // Build a serde_json::Value tree so we get deterministic ordering
-    // without writing a giant `#[derive(Serialize)]` wrapper. The TOML
-    // crate accepts a `toml::Value::Table` directly.
+    // Build a toml::Value::Table tree so we get deterministic ordering
+    // without writing a giant `#[derive(Serialize)]` wrapper.
     let mut root = toml::map::Map::new();
     root.insert("name".into(), toml::Value::String(m.name.clone()));
     if let Some(f) = &m.fleet {
