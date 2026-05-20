@@ -9,9 +9,11 @@
 //!
 //! - [`OPERATOR_DOCS`] is the operator-facing guide tree under
 //!   `docs/` (getting-started, concepts, reference, recipes).
-//! - [`API_DOCS`] is the workspace's `crates/` tree. The resource
-//!   enumerator only surfaces files under any `crates/<crate>/docs/`
-//!   subtree; the rest of the source comes along for the ride.
+//! - [`API_DOCS`] is a build-time mirror of every `crates/<crate>/docs/`
+//!   (and nested `crates/<group>/<crate>/docs/`) subtree. `build.rs`
+//!   stages the mirror under `$OUT_DIR/api_docs/` before this macro
+//!   runs, so the binary embeds only markdown reference, not the
+//!   surrounding Rust source.
 //! - [`SKILLS`] is the top-level `skills/` tree, one markdown file
 //!   per AI playbook.
 //!
@@ -25,10 +27,12 @@ use include_dir::{Dir, include_dir};
 /// Operator-facing guides. Mounted at `isengard://docs/<path>`.
 pub static OPERATOR_DOCS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../docs");
 
-/// Workspace `crates/` tree. The MCP resource enumerator filters this
-/// down to `*/docs/*.md` so only API reference is exposed at
-/// `isengard://api/<crate>/<symbol>`.
-pub static API_DOCS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../crates");
+/// Build-time mirror of every per-crate `docs/` subtree. `build.rs`
+/// stages this under `$OUT_DIR/api_docs/` so the layout matches what
+/// the resource enumerator expects: `<crate>/docs/<file>.md` for
+/// top-level crates and `<group>/<plugin>/docs/<file>.md` for nested
+/// plugin crates. Exposed at `isengard://api/<crate>/<symbol>`.
+pub static API_DOCS: Dir<'_> = include_dir!("$OUT_DIR/api_docs");
 
 /// AI playbooks. Mounted at `isengard://skill/<name>`.
 pub static SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../skills");
