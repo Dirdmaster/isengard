@@ -55,6 +55,19 @@ pub enum KeyType {
 pub struct SchemaEntry {
     /// Dotted lowercase key, e.g. `cloudflare.api_token`.
     pub key: &'static str,
+    /// Operator-facing label rendered in menu rows and prompts.
+    ///
+    /// Example: `Cloudflare API token` for `cloudflare.api_token`. The
+    /// CLI menu prefers this over the dotted key so the surface stays
+    /// readable as the schema grows (Route53, deSEC, etc. all nest
+    /// under one category and need short labels to disambiguate).
+    pub display_name: &'static str,
+    /// Top-level menu bucket used by the CLI's two-level configure menu.
+    ///
+    /// Grouped by feature (e.g. `Certificates`, `Routing`, `SSH bastion`)
+    /// rather than by provider so future DNS-01 backends slot in without
+    /// inventing a new top-level bucket.
+    pub category: &'static str,
     /// Type of the value bound to `key`.
     #[serde(rename = "type")]
     pub ty: KeyType,
@@ -108,30 +121,40 @@ impl Schema {
             entries: vec![
                 SchemaEntry {
                     key: "cloudflare.api_token",
+                    display_name: "Cloudflare API token",
+                    category: "Certificates",
                     ty: KeyType::Secret,
                     default: None,
                     doc: "Cloudflare API token used by cf-tunnel and DNS-01 solver",
                 },
                 SchemaEntry {
                     key: "cloudflare.zone_id",
+                    display_name: "Cloudflare zone ID",
+                    category: "Certificates",
                     ty: KeyType::String,
                     default: None,
                     doc: "Cloudflare zone UUID (for DNS-01)",
                 },
                 SchemaEntry {
                     key: "routing.default_zone",
+                    display_name: "Default zone",
+                    category: "Routing",
                     ty: KeyType::String,
                     default: None,
                     doc: "Default zone appended to bare hostnames in stack manifests",
                 },
                 SchemaEntry {
                     key: "acme.contact_email",
+                    display_name: "Contact email",
+                    category: "Certificates",
                     ty: KeyType::String,
                     default: None,
                     doc: "ACME account contact email",
                 },
                 SchemaEntry {
                     key: "acme.directory",
+                    display_name: "ACME directory (prod vs staging)",
+                    category: "Certificates",
                     ty: KeyType::String,
                     default: Some(serde_json::json!(
                         "https://acme-v02.api.letsencrypt.org/directory"
@@ -140,6 +163,8 @@ impl Schema {
                 },
                 SchemaEntry {
                     key: "ssh.max_ttl_seconds",
+                    display_name: "Max cert TTL (seconds)",
+                    category: "SSH bastion",
                     ty: KeyType::Int,
                     default: Some(serde_json::json!(2_592_000)),
                     doc: "Maximum TTL ceiling for minted SSH operator certs",
@@ -454,6 +479,41 @@ mod tests {
         assert!(entry.validate(&json!("ok")).is_ok());
         assert!(entry.validate(&json!("")).is_err());
         assert!(entry.validate(&json!(42)).is_err());
+    }
+
+    #[test]
+    fn schema_entries_carry_display_name_and_category() {
+        let schema = Schema::v01();
+        let allowed = ["Certificates", "Routing", "SSH bastion"];
+        for entry in schema.entries() {
+            assert!(
+                !entry.display_name.is_empty(),
+                "{} missing display_name",
+                entry.key
+            );
+            assert!(!entry.category.is_empty(), "{} missing category", entry.key);
+            assert!(
+                allowed.contains(&entry.category),
+                "{} has unexpected category {:?}",
+                entry.key,
+                entry.category
+            );
+        }
+    }
+
+    #[test]
+    fn schema_serializes_display_name_and_category() {
+        // The dashboard echoes SchemaEntry verbatim via serde. If a
+        // `skip` attribute ever creeps in on these fields, the CLI menu
+        // breaks silently. Guard that here so the wire shape stays
+        // stable.
+        let schema = Schema::v01();
+        let entry = schema.get("cloudflare.api_token").unwrap();
+        let raw = serde_json::to_string(entry).unwrap();
+        assert!(raw.contains("display_name"), "raw: {raw}");
+        assert!(raw.contains("Cloudflare API token"), "raw: {raw}");
+        assert!(raw.contains("category"), "raw: {raw}");
+        assert!(raw.contains("Certificates"), "raw: {raw}");
     }
 
     #[test]
