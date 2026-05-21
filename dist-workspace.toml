@@ -1,67 +1,31 @@
 [workspace]
 members = ["cargo:."]
 
-# Config for 'dist' (cargo-dist).
-#
-# This file drives the v0.6.0 distribution story for the operator CLI
-# (`isd`). The fleet-side `isengard` daemon binary is intentionally NOT
-# shipped through cargo-dist: it has a BoringSSL / pingora link that
-# requires the musl cross-toolchain, which fights cargo-dist's gnu-by-default
-# targeting. The daemon stays on the hand-rolled `binaries.yml` +
-# `docker.yml` pipeline (see `.github/workflows/`).
-#
-# Per-crate visibility (`dist = true|false`) lives in each crate's
-# `[package.metadata.dist]` block; only `crates/isd/Cargo.toml` sets
-# `dist = true`. Everything else is opted out.
-#
-# Spec: 3 Resources/Superpowers/specs/2026-05-21-isengard-v0.6.0-distribution-design.md
+# Config for 'dist'
 [dist]
-# Default visibility for workspace crates: opted OUT of cargo-dist.
-# Only `crates/isd/Cargo.toml` flips this back on via its
-# `[package.metadata.dist] dist = true` block.
+# Whether to consider the binaries in a package for distribution (defaults true)
 dist = false
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.28.0"
+cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
-# Installers we want to publish alongside binary tarballs.
-#   shell:    curl ... | sh entry point hosted on the Release.
-#   homebrew: auto-generated formula, pushed to the tap below.
+# The installers to generate for each app
 installers = ["shell", "homebrew"]
-# Target platforms to build apps for (Rust target-triple syntax).
-# Windows is intentionally omitted this release; `isd` does not yet have
-# a Windows install story.
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-]
-# Path that installers should place binaries in.
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Path that installers should place binaries in
 install-path = "CARGO_HOME"
-# Where to host releases.
+# Where to host releases
 hosting = "github"
-# Skip the auto-updater bundle. `isd` doesn't ship an in-place updater;
-# Homebrew + curl + docker tags handle updates externally.
+# Whether to install an updater program
 install-updater = false
-# Don't run the Release workflow on PRs. dist-workspace.toml changes
-# rarely (once per release), CI on each PR sat in the runner queue
-# for hours and never produced actionable signal anyway. The real
-# release runs on tag-push, which is when correctness matters.
+# Which actions to run on pull requests
 pr-run-mode = "skip"
-# `.github/workflows/release.yml` is hand-patched: cargo-dist 0.28
-# emits `runs-on: ubuntu-20.04`, which GitHub retired in 2025. We
-# replaced every occurrence with `ubuntu-latest` and asserted
-# allow-dirty here so cargo-dist accepts the divergence instead of
-# refusing to run. Remove this when we upgrade to cargo-dist 0.31+
-# (which generates `ubuntu-latest` natively).
+# Skip checking whether the specified configuration files are up to date
 allow-dirty = ["ci"]
-# Homebrew tap repo (separate, lives at Weavers-Engineering/homebrew-isengard).
-# Requires a HOMEBREW_TAP_TOKEN secret on the Isengard repo with
-# `contents: write` on the tap. Without it the homebrew job no-ops.
+# A GitHub repo to push Homebrew formulas to
 tap = "Weavers-Engineering/homebrew-isengard"
-# Formula name inside the tap. Matches the binary name.
+# Customize the Homebrew formula name
 formula = "isd"
-# Enable the Homebrew publish job in CI so cargo-dist pushes the
-# generated formula to the tap on release.
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
