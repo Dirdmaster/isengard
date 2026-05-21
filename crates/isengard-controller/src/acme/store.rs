@@ -18,20 +18,31 @@ use tokio::sync::RwLock;
 
 use isengard_storage::{Inventory, UpsertWildcardCert};
 
+/// One issued wildcard cert in memory.
 #[derive(Debug, Clone)]
 pub struct WildcardCert {
     /// All SANs covered by this cert. The first is the primary key.
     pub identifiers: Vec<String>,
+    /// PEM-encoded certificate chain.
     pub cert_pem: String,
+    /// PEM-encoded leaf private key.
     pub key_pem: String,
 }
 
+/// In-memory cache keyed by primary identifier.
+///
+/// The on-disk `tls_wildcard_certs` table is the source of truth;
+/// this cache hydrates from there at boot.
 #[derive(Debug, Default)]
 pub struct WildcardCertStore {
+    /// `primary_identifier` -> shared cert handle.
     inner: RwLock<HashMap<String, Arc<WildcardCert>>>,
 }
 
 impl WildcardCertStore {
+    /// Builds an empty store. Hydrate from storage via
+    /// [`WildcardCertStore::hydrate_from`] before the first agent
+    /// push.
     pub fn new() -> Self {
         Self::default()
     }

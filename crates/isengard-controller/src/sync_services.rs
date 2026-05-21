@@ -1,16 +1,25 @@
-//! Persist service info from agent heartbeats: upsert reported services and
-//! prune any that are no longer reported for that host.
+//! Persists service info from agent heartbeats.
+//!
+//! [`process_heartbeat_services`] resolves stack ids, upserts the
+//! reported services, and prunes anything for the host the heartbeat
+//! no longer mentions.
 
 use std::collections::HashSet;
 
 use isengard_proto::pb::ServiceInfo as ProtoServiceInfo;
 use isengard_storage::{HostId, InsertService, Inventory, Result, ServiceState};
 
-/// Apply a heartbeat's reported services to the inventory:
-/// - Resolve stack_id from the per-host stacks table for each service that
-///   declares a stack name.
-/// - Upsert each reported service (idempotent per `(host_id, name)`).
-/// - Delete any existing services for this host that the heartbeat no longer mentions.
+/// Applies a heartbeat's reported services to the inventory.
+///
+/// - Resolves `stack_id` from the per-host stacks table for each
+///   service that declares a stack name.
+/// - Upserts each reported service (idempotent per `(host_id, name)`).
+/// - Deletes any existing services for this host the heartbeat no
+///   longer mentions.
+///
+/// # Errors
+///
+/// Returns `Err` on storage failure.
 pub async fn process_heartbeat_services(
     inv: &Inventory,
     host_id: HostId,

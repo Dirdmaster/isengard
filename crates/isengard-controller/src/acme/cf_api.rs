@@ -19,18 +19,26 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Production CF v4 API base URL.
 const CF_API_BASE: &str = "https://api.cloudflare.com/client/v4";
+/// Per-request timeout. Long enough to ride out brief CF slowness
+/// without letting a hung TCP connection stall the renewal scheduler.
 const CF_API_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Thin client for the subset of CF v4 API the DNS-01 flow uses:
-/// zone lookup, TXT record create, TXT record delete.
+/// Thin client for the subset of the Cloudflare v4 API the DNS-01
+/// flow uses: zone lookup, TXT record create, TXT record delete.
 pub struct CloudflareApi {
+    /// Pre-built reqwest client with the 30s timeout applied.
     client: reqwest::Client,
+    /// Bearer token used on every request.
     api_token: String,
+    /// API base URL. `CF_API_BASE` in production; wiremock URL in
+    /// tests.
     base_url: String,
 }
 
 impl CloudflareApi {
+    /// Builds a client against the public CF v4 base URL.
     pub fn new(api_token: String) -> Self {
         Self {
             client: build_client(),
@@ -39,7 +47,8 @@ impl CloudflareApi {
         }
     }
 
-    /// Test-only: override the API base URL (for wiremock).
+    /// Test-only constructor that overrides the API base URL (for
+    /// wiremock).
     pub fn with_base_url(api_token: String, base_url: String) -> Self {
         Self {
             client: build_client(),
@@ -48,13 +57,21 @@ impl CloudflareApi {
         }
     }
 
+    /// Adds bearer auth to a request builder.
     fn auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         builder.bearer_auth(&self.api_token)
     }
 
-    /// Find the zone whose name is the longest suffix of `domain`. CF
-    /// requires the bare zone (e.g. `vallee.casa`), not a subdomain. Strips
-    /// a leading `*.` if present (wildcards live under the apex zone).
+    /// Finds the zone whose name is the longest suffix of `domain`.
+    ///
+    /// CF requires the bare zone (e.g. `vallee.casa`), not a
+    /// subdomain. Strips a leading `*.` if present (wildcards live
+    /// under the apex zone).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when no suffix of `domain` matches a zone the
+    /// API token has access to.
     pub async fn find_zone_for_domain(&self, domain: &str) -> Result<Zone> {
         let bare = domain.trim_start_matches("*.");
         // CF's /zones?name=... requires an exact match. Walk the suffixes:
@@ -72,6 +89,8 @@ impl CloudflareApi {
         }
     }
 
+    /// Exact-match zone lookup. Returns `None` when no zone with that
+    /// name is visible to the token.
     async fn zones_by_name(&self, name: &str) -> Result<Option<Zone>> {
         let url = format!("{}/zones?name={}", self.base_url, name);
         let resp: CfResponse<Vec<Zone>> = self
@@ -86,9 +105,18 @@ impl CloudflareApi {
         Ok(zones.pop())
     }
 
-    /// Create a TXT record at `name` (FQDN, e.g. `_acme-challenge.foo.com`)
-    /// with body `content`. Returns the new record's id so the caller can
-    /// `delete_dns_record` it after validation.
+    /// Creates a TXT record at `name` (FQDN, e.g.
+    /// `_acme-challenge.foo.com`) with body `content`.
+    ///
+    /// Returns the new record id so the caller can
+    /// [`CloudflareApi::delete_dns_record`] it after validation. TTL
+    /// is hard-coded to 60 seconds; LE validates almost immediately,
+    /// so record lifetime is dominated by the delete-after-validation
+    /// step rather than by TTL expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on transport failure or any CF error response.
     pub async fn create_txt_record(
         &self,
         zone_id: &str,
@@ -116,9 +144,15 @@ impl CloudflareApi {
         Ok(resp.into_result()?.id)
     }
 
-    /// Delete a DNS record by id. Idempotent on the CF side: deleting an
-    /// already-deleted record returns success (we accept either; no special
-    /// handling needed here).
+    /// Deletes a DNS record by id.
+    ///
+    /// Idempotent on the CF side; deleting an already-deleted record
+    /// returns success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on transport failure or non-success CF
+    /// response.
     pub async fn delete_dns_record(&self, zone_id: &str, record_id: &str) -> Result<()> {
         let url = format!(
             "{}/zones/{}/dns_records/{}",
@@ -135,9 +169,14 @@ impl CloudflareApi {
         resp.into_result().map(|_| ())
     }
 
-    /// Verify a token is valid by calling `/user/tokens/verify`. Used at
-    /// boot to fail fast with a clear message rather than failing later
-    /// inside the order flow.
+    /// Verifies a token by calling `/user/tokens/verify`.
+    ///
+    /// Used at boot to fail fast with a clear message rather than
+    /// failing later inside the order flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the token is invalid or revoked.
     pub async fn verify_token(&self) -> Result<()> {
         let url = format!("{}/user/tokens/verify", self.base_url);
         let resp: CfResponse<serde_json::Value> = self
@@ -152,32 +191,45 @@ impl CloudflareApi {
     }
 }
 
+/// CF zone descriptor returned from `/zones?name=...`.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Zone {
+    /// CF zone id (opaque hex string).
     pub id: String,
+    /// Zone name (e.g. `vallee.casa`).
     pub name: String,
 }
 
+/// Body of a successful `dns_records` create.
 #[derive(Debug, Deserialize)]
 struct DnsRecordCreated {
+    /// New record id.
     id: String,
 }
 
+/// CF v4 response envelope.
 #[derive(Debug, Deserialize)]
 struct CfResponse<T> {
+    /// Top-level success flag.
     success: bool,
+    /// Per-error details when `success == false`.
     #[serde(default)]
     errors: Vec<CfError>,
+    /// Payload when `success == true`.
     result: Option<T>,
 }
 
+/// One CF error code + message pair.
 #[derive(Debug, Deserialize, Serialize)]
 struct CfError {
+    /// CF error code.
     code: i64,
+    /// Human-readable message.
     message: String,
 }
 
 impl<T> CfResponse<T> {
+    /// Collapses the envelope into an `anyhow::Result`.
     fn into_result(self) -> Result<T> {
         if self.success {
             self.result
@@ -194,6 +246,8 @@ impl<T> CfResponse<T> {
     }
 }
 
+/// Builds the shared reqwest client. Falls back to defaults when the
+/// build with timeout fails (should be unreachable in practice).
 fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(CF_API_TIMEOUT)

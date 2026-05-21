@@ -1,14 +1,22 @@
-//! Internal Certificate Authority for issuing per-agent mTLS certs.
+//! Internal Certificate Authority that issues every Isengard mTLS leaf.
 //!
-//! See spec docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md.
+//! Spec: `docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md`.
 //!
-//! The CA is a single self-signed ECDSA P-256 root persisted in the
-//! controller's SQLite (`ca` table, single row). On controller boot,
-//! [`Authority::load_or_init`] either loads the persisted root or generates
-//! and persists a new one. Per-agent leaf certs are minted by
-//! [`Authority::sign_agent_leaf`] (ClientAuth-only, used by the enrollment
-//! service for agent leaves) and the controller's own server cert is
-//! minted by [`Authority::sign_server_leaf`] (ClientAuth + ServerAuth).
+//! The CA is one self-signed ECDSA P-256 root persisted in the
+//! controller's SQLite (`ca` table, single row).
+//! [`Authority::load_or_init`] loads the persisted root or generates and
+//! persists a new one on first boot. Two leaf-mint entry points sit on
+//! top:
+//!
+//! - [`Authority::sign_agent_leaf`] mints agent leaves with the
+//!   `ClientAuth` EKU only. The enrollment service calls this.
+//! - [`Authority::sign_server_leaf_with_sans`] mints the controller's
+//!   own server cert with `ClientAuth + ServerAuth`. The boot path
+//!   calls this once during gRPC server setup.
+//!
+//! The EKU split is the Bl-1 fix: pre-fix an agent could enroll with
+//! hostname `controller.local` and present its leaf as a server cert
+//! that other peers trust as the controller.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -22,34 +30,56 @@ use isengard_storage::Inventory;
 use isengard_storage::ca::CaRow;
 use isengard_storage::host::HostId;
 
-/// Root CA validity. Picked long enough that we don't have to think about
-/// rotating the root for the foreseeable lifetime of an Isengard install.
+/// Root CA validity. Ten years, long enough that root rotation is not
+/// something the operator has to think about for the lifetime of an
+/// Isengard install.
 const CA_TTL_DAYS: i64 = 365 * 10;
 
-/// In-memory handle to the controller's internal CA. Holds the parsed root
-/// cert + signing key, plus the PEM blobs (kept around so callers asking for
-/// the trust anchor don't have to re-serialize on every request).
+/// In-memory handle to the controller's internal CA.
+///
+/// Holds the parsed root cert and signing key plus the PEM blobs (kept
+/// around so callers asking for the trust anchor don't have to
+/// re-serialize on every request).
 pub struct Authority {
+    /// Root cert in PEM form. Served from `GetCaPem` and pinned by
+    /// agents.
     cert_pem: String,
+    /// Root private key in PEM form. Used by the rcgen `signed_by`
+    /// path; never sent over the wire.
     key_pem: String,
+    /// Parsed root certificate.
     cert: Certificate,
+    /// Parsed root signing key.
     key_pair: KeyPair,
 }
 
-/// Output of [`Authority::sign_agent_leaf`]. The serial is the 16-byte
-/// random value the controller assigned (mirrored into the
-/// `agent_certs.serial` PK so revocation can match).
+/// Output of every leaf mint call.
+///
+/// The serial is the 16-byte random value the controller assigned,
+/// mirrored into `agent_certs.serial` so revocation lookups match.
 pub struct IssuedLeaf {
+    /// PEM-encoded leaf certificate.
     pub cert_pem: String,
+    /// PEM-encoded leaf private key.
     pub key_pem: String,
+    /// 16-byte random serial. Matches the serial embedded in
+    /// `cert_pem`.
     pub serial: Vec<u8>,
+    /// Wall-clock expiry. Mirrors `not_after`.
     pub expires_at: DateTime<Utc>,
 }
 
 impl Authority {
-    /// Load the CA from inventory, or generate + persist a new one if the
-    /// `ca` table is empty. Idempotent: calling twice returns an Authority
-    /// backed by the same persisted PEM blobs.
+    /// Loads the CA from inventory, or generates and persists a new
+    /// one when the `ca` table is empty.
+    ///
+    /// Idempotent: calling twice on the same inventory returns an
+    /// `Authority` backed by the same persisted PEM blobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on inventory read failures, on key/cert parse
+    /// failures (corrupted row), or on `rcgen` self-sign failures.
     pub async fn load_or_init(inventory: &Inventory) -> Result<Self> {
         if let Some(row) = inventory.get_ca().await.context("ca lookup")? {
             let key_pair = KeyPair::from_pem(&row.root_key_pem).context("parse ca key")?;
@@ -95,33 +125,44 @@ impl Authority {
         })
     }
 
-    /// PEM-encoded root certificate. This is what agents pin as their trust
-    /// anchor; also returned in the enroll response.
+    /// Returns the PEM-encoded root certificate.
+    ///
+    /// This is what agents pin as their trust anchor. Also returned in
+    /// the `Enroll` response and from the public `GetCaPem` RPC.
     pub fn root_cert_pem(&self) -> &str {
         &self.cert_pem
     }
 
-    /// PEM-encoded root private key. Used by the controller's own
-    /// server-cert generation path; never sent over the wire.
+    /// Returns the PEM-encoded root private key.
+    ///
+    /// Used by the controller's own server-cert generation path; never
+    /// sent over the wire.
     pub fn root_key_pem(&self) -> &str {
         &self.key_pem
     }
 
-    /// Maximum length of an agent-supplied hostname. DNS labels are bounded
-    /// to 253 characters total; we apply the same cap as a basic sanity
-    /// guard against absurd inputs (Imp-1 bonus). Anything longer is
-    /// rejected up-front so we never feed a 4-MB SAN to rcgen.
+    /// Maximum length of an agent-supplied hostname.
+    ///
+    /// DNS labels are bounded to 253 characters total; the same cap
+    /// applies here as a sanity guard. Anything longer is rejected up
+    /// front so an absurd input never reaches rcgen as a 4-MB SAN.
     const MAX_HOSTNAME_LEN: usize = 253;
 
-    /// Mint a per-agent leaf cert (Imp-1: ClientAuth EKU only).
+    /// Mints a per-agent leaf cert.
     ///
-    /// CN = host UUID, single SAN (DNS) = hostname, EKU = ClientAuth.
-    /// Random 16-byte serial. Pre-Imp-1 the EKU also included ServerAuth,
-    /// which combined with agent-controlled hostnames let an agent get a
-    /// cert other peers would trust as the controller (e.g. by enrolling
-    /// with `hostname: "controller.local"`). Restricting agent leaves to
-    /// ClientAuth closes that path. Controller-side server certs are
-    /// minted via [`sign_server_leaf`] instead.
+    /// CN is set to `host_id.to_string()`, the single DNS SAN is
+    /// `hostname`, the EKU is `ClientAuth` only, the serial is 16 random
+    /// bytes. Pre-Bl-1 the EKU also included `ServerAuth`, which
+    /// combined with agent-controlled hostnames let an agent get a cert
+    /// other peers would trust as the controller (e.g. by enrolling
+    /// with `hostname: "controller.local"`). Restricting agent leaves
+    /// to `ClientAuth` closes that path. Controller-side server certs
+    /// go through [`Authority::sign_server_leaf_with_sans`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `hostname` exceeds
+    /// `Authority::MAX_HOSTNAME_LEN` or rcgen fails to sign.
     pub fn sign_agent_leaf(
         &self,
         host_id: HostId,
@@ -137,10 +178,17 @@ impl Authority {
         )
     }
 
-    /// Mint the controller's own server cert. Same shape as
-    /// [`sign_agent_leaf`] but with both ClientAuth (so the controller can
-    /// also dial out via mTLS in future) and ServerAuth (required for the
-    /// gRPC server's TLS handshake).
+    /// Mints the controller's own server cert with one DNS SAN.
+    ///
+    /// Same shape as [`Authority::sign_agent_leaf`] but with both
+    /// `ClientAuth` (so the controller can also dial out via mTLS in
+    /// future) and `ServerAuth` (required for the gRPC server's TLS
+    /// handshake). Thin wrapper around
+    /// [`Authority::sign_server_leaf_with_sans`] with no extra SANs.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Authority::sign_server_leaf_with_sans`].
     pub fn sign_server_leaf(
         &self,
         host_id: HostId,
@@ -150,17 +198,26 @@ impl Authority {
         self.sign_server_leaf_with_sans(host_id, hostname, &[], ttl)
     }
 
-    /// Mint a server cert with extra Subject Alternative Names
-    /// beyond the primary `hostname`. Each entry in `extra_sans` is parsed
-    /// as either an IP address (v4 or v6) when it lexes as one, or a DNS
-    /// name otherwise. Empty / blank entries are silently skipped so the
-    /// caller can pass an unfiltered comma-split.
+    /// Mints the controller's server cert with extra Subject Alternative
+    /// Names.
     ///
-    /// Used by `isengard init` to thread `localhost`, `127.0.0.1`, the
-    /// auto-detected host IP, and any operator-supplied hostnames through
-    /// to the controller's first-boot server-cert generation. Without this,
-    /// the local agent can't reach `https://localhost:9417` and remote
-    /// `isengard join` hosts can't pin the controller by IP.
+    /// Each entry in `extra_sans` is parsed as an IP address (v4 or v6)
+    /// when it lexes as one and as a DNS name otherwise. Empty and
+    /// blank entries are silently skipped so the caller can pass an
+    /// unfiltered comma-split.
+    ///
+    /// `isengard init` uses this to thread `localhost`, `127.0.0.1`,
+    /// the auto-detected host IP, and any operator-supplied hostnames
+    /// through to the controller's first-boot server-cert generation.
+    /// Without these SANs the local agent could not reach
+    /// `https://localhost:9417` and remote `isengard join` hosts could
+    /// not pin the controller by IP.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `hostname` or any `extra_sans` entry exceeds
+    /// the IA5 charset, when `hostname` is longer than
+    /// `Authority::MAX_HOSTNAME_LEN`, or when rcgen fails to sign.
     pub fn sign_server_leaf_with_sans(
         &self,
         host_id: HostId,
@@ -180,6 +237,9 @@ impl Authority {
         )
     }
 
+    /// Shared mint path behind every leaf sign call. Validates the
+    /// hostname length, generates the leaf key, builds SANs, sets the
+    /// EKUs, mints a 16-byte random serial, and signs with the root.
     fn sign_leaf_inner(
         &self,
         host_id: HostId,
@@ -246,11 +306,16 @@ impl Authority {
     }
 }
 
-/// Convert a `chrono::DateTime<Utc>` to the `time::OffsetDateTime` that
-/// rcgen's `not_before` / `not_after` fields require. rcgen has no chrono
-/// interop. Lossless within nanosecond precision; both wrap the same UNIX
-/// instant. Panics only on values that can't fit in i64 seconds, which
-/// can't happen for `Utc::now()`-derived times.
+/// Converts a `chrono::DateTime<Utc>` to the `time::OffsetDateTime`
+/// shape rcgen's `not_before` / `not_after` fields require.
+///
+/// rcgen has no chrono interop. Lossless within nanosecond precision;
+/// both wrap the same UNIX instant.
+///
+/// # Panics
+///
+/// Panics only on values that don't fit in `i64` seconds. That can't
+/// happen for `Utc::now()`-derived inputs, which is the only call site.
 fn chrono_to_offset(dt: DateTime<Utc>) -> time::OffsetDateTime {
     time::OffsetDateTime::from_unix_timestamp(dt.timestamp())
         .expect("chrono Utc::now()-derived timestamp always fits in i64 seconds")

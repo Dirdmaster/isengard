@@ -1,22 +1,26 @@
-//! Per-RPC client cert validation + revocation check.
-//! Replaces `TokenAuthLayer` (bearer-token middleware).
+//! Per-RPC client cert validation plus revocation check.
 //!
-//! All RPCs except those listed in [`PUBLIC_METHODS`] require a valid client
+//! Every RPC except the two in `PUBLIC_METHODS` requires a valid client
 //! certificate signed by the controller's internal CA. The interceptor
 //! additionally checks the cert's serial against the in-memory
-//! [`RevocationSet`] so revoked agents are rejected on the very next RPC.
+//! [`RevocationSet`] so a revoked agent is rejected on the next RPC, not
+//! at the next reconnect.
 //!
-//! `Enroll` is intentionally public: an agent that hasn't enrolled yet has no
-//! cert to present, so the bootstrap chicken-and-egg is solved by configuring
-//! the tonic server with `client_auth_optional(true)` and letting the layer
-//! enforce cert presence per-RPC.
+//! `GetCaPem` is public because an agent that hasn't enrolled yet pins
+//! its trust anchor over a skip-verify TLS channel. `Enroll` is public
+//! because the same agent has no cert to present yet: the join token is
+//! what gates that call. The tonic server is configured with
+//! `client_auth_optional(true)` so both calls can complete without a
+//! client cert; this layer then enforces cert presence per-RPC for
+//! everything else.
 //!
-//! Why a tower layer (not a [`tonic::service::Interceptor`]): tonic
-//! interceptors receive `tonic::Request<()>`, which drops the URI during the
-//! `http::Request -> tonic::Request` conversion in `InterceptedService`. We
-//! need the URI path to dispatch by method (`/isengard.v1.Controller/Enroll`)
-//! AND we need the request extensions (where `TlsConnectInfo` lives) — both
-//! of which are available on the raw `http::Request` before it's split.
+//! This is a `tower::Layer` rather than a `tonic::service::Interceptor`
+//! because tonic interceptors receive `tonic::Request<()>`, which loses
+//! the URI and the request extensions during the conversion in
+//! `InterceptedService`. The URI is what dispatches by method
+//! (`/isengard.v1.Controller/Enroll`) and the extensions are where
+//! `TlsConnectInfo` lives. Both are still on the raw `http::Request`
+//! the tower layer sees.
 
 #![allow(clippy::result_large_err)]
 
@@ -33,16 +37,19 @@ use tower::{Layer, Service};
 use crate::ca::Authority;
 use crate::revocation::RevocationSet;
 
-/// RPCs that don't require a client cert (the bootstrap chicken-and-egg).
-/// Format matches the gRPC URI path tonic dispatches on.
+/// RPC method paths that bypass mTLS, listed as the URI paths tonic
+/// dispatches on.
 ///
-/// - `GetCaPem`: returns the controller's public CA cert. Agents fetch
+/// Both members solve a bootstrap chicken-and-egg:
+///
+/// - `GetCaPem` returns the controller's CA root PEM. The agent fetches
 ///   this over a skip-verify TLS channel during pre-enroll fingerprint
-///   verification; they have no cert to present yet, and the response
-///   itself is public data.
-/// - `Enroll`: redeems a one-time join token for a freshly minted mTLS
-///   cert. The token gates access; subsequent RPCs use the cert.
-/// - `GetSshCa`: returns the controller's SSH user-cert authority
+///   verification; the response is public data, and the agent has no
+///   cert to present yet.
+/// - `Enroll` redeems a one-time join token for a freshly minted mTLS
+///   cert. The token (not a cert) gates the call; every subsequent RPC
+///   uses the new cert.
+/// - `GetSshCa` returns the controller's SSH user-cert authority
 ///   public key. Agents install it as a `TrustedUserCAKeys` drop-in
 ///   right after enrollment. Response is public data (a pubkey).
 const PUBLIC_METHODS: &[&str] = &[
@@ -51,19 +58,23 @@ const PUBLIC_METHODS: &[&str] = &[
     "/isengard.v1.Controller/GetSshCa",
 ];
 
-/// Tower layer producing a [`CertAuth`] middleware around a service.
+/// Tower layer that wraps a service in [`CertAuth`].
 ///
-/// Cheap to clone: internally `Arc`s.
+/// Cheap to clone: the interior state is an [`Arc`].
 #[derive(Clone)]
 pub struct CertAuthInterceptor {
+    /// Shared revocation set the inner service checks every request
+    /// against. Cloning the layer clones the same `Arc<RwLock<_>>`.
     revocation: RevocationSet,
 }
 
 impl CertAuthInterceptor {
-    /// `_ca` is unused now — the per-handler cert CN extraction lives in
-    /// `service.rs` (Bl-1/Bl-2 fix), not at the layer level. Kept in the
-    /// signature so existing call sites in `lib.rs` and the test harnesses
-    /// don't churn; the parameter is intentionally discarded.
+    /// Builds an interceptor.
+    ///
+    /// `_ca` is unused now: the per-handler cert CN extraction lives in
+    /// `service.rs` (the Bl-1 and Bl-2 fixes), not at the layer level.
+    /// The parameter stays in the signature so existing call sites in
+    /// `lib.rs` and the test harnesses do not churn.
     pub fn new(revocation: RevocationSet, _ca: Arc<Authority>) -> Self {
         Self { revocation }
     }
@@ -79,10 +90,13 @@ impl<S> Layer<S> for CertAuthInterceptor {
     }
 }
 
-/// Tower service that gates each request behind cert presence + revocation.
+/// Tower service that gates each request behind cert presence and the
+/// revocation check.
 #[derive(Clone)]
 pub struct CertAuth<S> {
+    /// Wrapped service that handles the request after the gate passes.
     inner: S,
+    /// Shared revocation set, read on every call.
     revocation: RevocationSet,
 }
 
@@ -154,20 +168,20 @@ where
     }
 }
 
-/// Pull the X.509 serial out of a DER-encoded cert. Used by the layer to
-/// look the serial up in the [`RevocationSet`].
+/// Pulls the X.509 serial out of a DER-encoded cert.
 ///
-/// `raw_serial` returns the ASN.1 INTEGER bytes verbatim. If the high bit of
-/// the original 16-byte random serial happens to be set, ASN.1 prepends a
-/// leading 0x00 to keep the integer positive — strip it so the result lines
-/// up with the serial we persisted in `agent_certs.serial` (which is the
-/// raw 16 bytes from `OsRng`).
+/// The layer uses this to look the serial up in the [`RevocationSet`].
+/// `raw_serial` returns the ASN.1 INTEGER bytes verbatim. When the high
+/// bit of the original 16-byte random serial happens to be set, ASN.1
+/// prepends a leading `0x00` to keep the integer positive; the strip
+/// step undoes that so the bytes match what `agent_certs.serial` holds
+/// (the raw 16 bytes from `OsRng`).
 ///
-/// Returns `None` for empty serials (Bl-3 fix). A serial encoded as the
-/// single byte `0x00` collapses to `[]` after sign-pad stripping; an empty
-/// serial would never match any entry in the revocation set, so a
-/// successful lookup would silently bypass revocation. We treat this as a
-/// malformed cert and reject upstream.
+/// Returns `None` for empty serials (the Bl-3 fix). A serial encoded as
+/// the single byte `0x00` collapses to `[]` after sign-pad stripping;
+/// an empty serial would never match any entry in the revocation set,
+/// so a successful lookup would silently bypass revocation. The layer
+/// treats this as a malformed cert and rejects upstream.
 fn extract_serial(cert_der: &[u8]) -> Option<Vec<u8>> {
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der).ok()?;
     let raw = cert.tbs_certificate.raw_serial();
@@ -178,9 +192,12 @@ fn extract_serial(cert_der: &[u8]) -> Option<Vec<u8>> {
     Some(stripped.to_vec())
 }
 
-/// Strip the ASN.1 INTEGER positive-sign padding byte, if present. A leading
-/// 0x00 is significant only when the next byte's MSB is set; otherwise it's
-/// either non-canonical encoding or simply absent.
+/// Strips the ASN.1 INTEGER positive-sign padding byte if present.
+///
+/// A leading `0x00` is significant only when the next byte's MSB is set
+/// (the bytes would otherwise read as a negative integer). When the
+/// next byte's MSB is clear the leading zero is either non-canonical or
+/// absent.
 fn strip_asn1_sign_pad(raw: &[u8]) -> &[u8] {
     match raw {
         [0x00, rest @ ..] if rest.first().is_some_and(|b| b & 0x80 != 0) => rest,

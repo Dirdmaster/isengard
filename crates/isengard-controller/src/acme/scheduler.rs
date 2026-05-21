@@ -39,17 +39,21 @@ fn wildcard_host_id() -> HostId {
     HostId::from_db_bytes(vec![0u8; 16]).expect("16-byte zero ULID is always valid")
 }
 
-/// Each scheduler invocation iterates over the configured wildcard domain
-/// groups. A "group" is the set of identifiers in a single LE order — for
-/// the homelab this is `["*.vallee.casa", "vallee.casa"]`, both covered by
-/// the same cert. The first identifier is the canonical key into the
-/// `tls_certs` table.
+/// One LE order's worth of identifiers.
+///
+/// Each scheduler invocation iterates over the configured wildcard
+/// domain groups. A group is the set of identifiers in a single LE
+/// order; for the homelab this is `["*.vallee.casa", "vallee.casa"]`,
+/// both covered by the same cert. The first identifier is the
+/// canonical key into the `tls_certs` table.
 #[derive(Debug, Clone)]
 pub struct WildcardGroup {
+    /// All identifiers in this order. The first is the primary key.
     pub identifiers: Vec<String>,
 }
 
 impl WildcardGroup {
+    /// Returns the primary identifier (the key into `tls_certs`).
     pub fn primary(&self) -> &str {
         &self.identifiers[0]
     }
@@ -222,6 +226,10 @@ pub fn should_retry(meta: &TlsCertMeta, now: DateTime<Utc>) -> bool {
     now >= last + ChronoDuration::hours(backoff_hours)
 }
 
+/// Post-issuance handler: installs the cert in memory, parses
+/// validity, persists to `tls_wildcard_certs`, and updates
+/// `tls_cert_meta`. Persistence and metadata failures are logged but
+/// do not unwind: the cert is already in the store and serving.
 async fn handle_issued(
     inventory: &Arc<Inventory>,
     cert_store: &Arc<WildcardCertStore>,

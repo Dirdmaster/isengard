@@ -73,15 +73,21 @@ impl PlacementSource for EmptyPlacementSource {
     }
 }
 
-/// One assignment in the scheduler's in-memory state. The DB-backed
-/// `PlacementRow` is the authority; this is the projection the
-/// reconcile loop walks every tick.
+/// One assignment in the scheduler's in-memory state.
+///
+/// The DB-backed `PlacementRow` is the authority; this is the
+/// projection the reconcile loop walks every tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementAssignment {
+    /// Service this assignment belongs to.
     pub service_id: ServiceId,
+    /// Host the replica runs on.
     pub host_id: HostId,
+    /// Zero-based replica index within the service.
     pub replica_index: u32,
+    /// When this assignment was made.
     pub assigned_at: DateTime<Utc>,
+    /// Current persistent state.
     pub state: isengard_storage::PlacementState,
 }
 
@@ -97,31 +103,47 @@ impl From<PlacementRow> for PlacementAssignment {
     }
 }
 
-/// Health gate for a host. Derived from `last_seen_at` + the disconnect
-/// grace; updated by `on_heartbeat_labels` / `on_host_disconnect_long`.
+/// Health gate for a host.
+///
+/// Derived from `last_seen_at` and the disconnect grace; updated by
+/// [`Scheduler::on_heartbeat_labels`] and
+/// [`Scheduler::on_host_disconnect_long`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostHealth {
+    /// Currently reachable.
     Healthy,
+    /// Past the disconnect grace; placements re-route away.
     Disconnected {
+        /// When the host went stale.
         since: DateTime<Utc>,
     },
+    /// Bouncing between healthy and disconnected.
     Flapping {
+        /// When flapping started.
         since: DateTime<Utc>,
+        /// How many transitions have occurred.
         flip_count: u32,
     },
 }
 
-/// In-memory scheduler state. Rebuilt from `placements` + `agent_labels`
-/// + `hosts` rows on controller boot.
+/// In-memory scheduler state.
+///
+/// Rebuilt from `placements`, `agent_labels`, and `hosts` rows on
+/// controller boot.
 #[derive(Debug, Default)]
 pub struct SchedulerState {
+    /// `service_id` -> current assignments.
     pub placements: HashMap<ServiceId, Vec<PlacementAssignment>>,
+    /// `host_id` -> last-seen label set.
     pub labels: HashMap<HostId, BTreeMap<String, String>>,
+    /// `host_id` -> current health.
     pub health: HashMap<HostId, HostHealth>,
-    /// Hash of the last-seen labels per host. Used by
-    /// `on_heartbeat_labels` to skip a reconcile when the heartbeat
-    /// label set hasn't changed since the previous tick (prevents
-    /// reconcile chatter under noisy agents).
+    /// Hash of the last-seen labels per host.
+    ///
+    /// [`Scheduler::on_heartbeat_labels`] uses this to skip a
+    /// reconcile when the heartbeat label set hasn't changed since
+    /// the previous tick. Prevents reconcile chatter under noisy
+    /// agents.
     pub label_hash: HashMap<HostId, u64>,
 }
 
@@ -317,12 +339,16 @@ impl Scheduler {
     }
 }
 
-/// Quick check the test harness uses to assert scheduler boot rebuild.
+/// Test-only snapshot the harness uses to assert scheduler boot
+/// rebuild.
 #[cfg(test)]
 #[derive(Debug)]
 pub struct SchedulerStateSnapshot {
+    /// Total placement assignments across every service.
     pub placement_count: usize,
+    /// Number of hosts with a cached label set.
     pub label_host_count: usize,
+    /// Number of hosts in `HostHealth::Healthy`.
     pub healthy_host_count: usize,
 }
 

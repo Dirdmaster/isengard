@@ -1,36 +1,4 @@
-//! Stack-level deployment orchestrator. (10i, refs #50).
-//!
-//! When the same stack runs on multiple hosts and an image change is detected
-//! (or a force-update is dispatched stack-wide), the orchestrator decides how
-//! many hosts deploy in lockstep: 1 (rolling, default), 2, 3, or all.
-//!
-//! Single-host deploys bypass the orchestrator entirely. Existing per-host
-//! deployment supervisors keep their behaviour: agents only ever receive the
-//! `apply_update` HostAction the controller queued for them.
-//!
-//! ## Design
-//!
-//! The orchestrator owns three pieces of state:
-//!
-//! 1. The persistent `deployment_groups` row (created via storage DAO).
-//! 2. An in-memory map keyed by group_id holding the wave plan + the deployment
-//!    ids the orchestrator is waiting on for the current wave.
-//! 3. A subscription to the controller's event bus which surfaces
-//!    `deployment.completed`, `deployment.aborted`, and `deployment.failed`
-//!    events.
-//!
-//! State machine driven by `tokio::select!` over (event_bus, periodic
-//! reconcile, abort_signal). The reconcile tick exists to break ties when an
-//! event is missed (network partition, lagged subscriber): every N seconds we
-//! re-query storage for the current wave's deployments and treat the result
-//! as authoritative.
-//!
-//! ## Dispatch trait
-//!
-//! `WaveDispatcher` is the seam between the orchestrator and the rest of the
-//! controller. Production wires it to `Inventory::queue_action` +
-//! `routing::RoutingPusher`; tests inject a recording mock so they don't need
-//! a real agent or gRPC stack.
+#![doc = include_str!("../docs/stack-deploy-orchestrator.md")]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -49,19 +17,23 @@ use tracing::{info, warn};
 
 use crate::bus::EventBus;
 
-/// Parsed parallelism setting. Either a positive integer batch size, or
-/// "everything in one wave".
+/// Parsed parallelism setting.
+///
+/// Either a positive integer batch size, or "every host in one wave".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parallelism {
-    /// `1`, `2`, .., capped at the number of target hosts.
+    /// `1`, `2`, etc. Capped at the number of target hosts in
+    /// [`Parallelism::build_waves`].
     Batch(u32),
     /// `"all"`: every host in a single wave.
     All,
 }
 
 impl Parallelism {
-    /// Resolve `Option<&str>` from storage to a `Parallelism`. `None` and
-    /// unrecognised strings fall back to `Batch(1)` (the rolling default).
+    /// Resolves `Option<&str>` from storage to a [`Parallelism`].
+    ///
+    /// `None` and unrecognised strings fall back to `Batch(1)` (the
+    /// rolling default).
     pub fn from_storage(raw: Option<&str>) -> Self {
         let Some(s) = raw else { return Self::Batch(1) };
         if s.eq_ignore_ascii_case("all") {
@@ -73,8 +45,10 @@ impl Parallelism {
         }
     }
 
-    /// Snapshot string used for the `parallelism` column on a freshly inserted
-    /// group row. Mirrors what `from_storage` accepts.
+    /// Snapshot string for the `parallelism` column on a freshly
+    /// inserted group row.
+    ///
+    /// Mirrors what [`Parallelism::from_storage`] accepts.
     pub fn as_storage_str(self) -> String {
         match self {
             Self::Batch(n) => n.to_string(),
@@ -82,8 +56,10 @@ impl Parallelism {
         }
     }
 
-    /// Compute waves for a list of host ids. Hosts are sorted alphabetically
-    /// by lowercase hex of their UUID so wave membership is deterministic.
+    /// Computes waves for a list of host ids.
+    ///
+    /// Hosts are sorted by their ULID string so wave membership is
+    /// deterministic across runs.
     pub fn build_waves(self, hosts: &[HostId]) -> Vec<Vec<HostId>> {
         if hosts.is_empty() {
             return Vec::new();
@@ -99,14 +75,23 @@ impl Parallelism {
     }
 }
 
-/// Per-wave dispatch surface. The production impl queues a `force_update`
-/// HostAction (the `apply_update` of phase 10) for every host in the wave.
-/// Tests record calls into a Vec.
+/// Per-wave dispatch surface.
+///
+/// The production impl queues a `ForceUpdate` host action for every
+/// host in the wave; tests record calls into a `Vec`.
 #[async_trait]
 pub trait WaveDispatcher: Send + Sync + 'static {
-    /// Dispatch the wave. The `service_name` is informational (the controller
-    /// already filters per-stack updates by service); the orchestrator passes
-    /// it through for trace context and for impls that want to use it.
+    /// Dispatches one wave.
+    ///
+    /// `service_name` is informational (the controller already filters
+    /// per-stack updates by service); the orchestrator passes it
+    /// through for trace context and for impls that want to use it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on per-host queue or storage failure. The
+    /// orchestrator does not retry: the caller (start path or the
+    /// reconcile loop) decides what to do next.
     async fn dispatch(
         &self,
         host_ids: &[HostId],
@@ -116,15 +101,19 @@ pub trait WaveDispatcher: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-/// Production dispatcher: queues a stack-wide ForceUpdate HostAction for each
-/// host. The agent's deployment supervisor pulls the action on its next
-/// heartbeat, computes the new digest, and runs blue-green per its existing
-/// strategy.
+/// Production dispatcher.
+///
+/// Queues a stack-wide `ForceUpdate` host action for each host. The
+/// agent's deployment supervisor pulls the action on its next
+/// heartbeat, computes the new digest, and runs blue-green per its
+/// existing strategy.
 pub struct ProductionDispatcher {
+    /// Shared inventory for the `queue_action` write.
     inventory: Arc<Inventory>,
 }
 
 impl ProductionDispatcher {
+    /// Builds a dispatcher over the shared inventory.
     pub fn new(inventory: Arc<Inventory>) -> Self {
         Self { inventory }
     }
@@ -160,51 +149,69 @@ impl WaveDispatcher for ProductionDispatcher {
     }
 }
 
-/// Optional behaviour when a wave has at least one failed/aborted deployment.
+/// Behaviour when a wave has at least one failed or aborted
+/// deployment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnFailure {
-    /// Stop rolling forward, mark the group as `aborted`. Default.
+    /// Stop rolling forward; mark the group as `aborted`. Default.
     #[default]
     Rollback,
     /// Continue dispatching subsequent waves regardless of failures.
     Continue,
 }
 
-/// One in-memory group descriptor. The orchestrator keeps these alive only
-/// while at least one wave is unfinished; on terminal transition the entry is
-/// removed.
+/// One in-memory group descriptor.
+///
+/// The orchestrator keeps these alive while at least one wave is
+/// unfinished; on terminal transition the entry is removed.
 #[derive(Debug, Clone)]
 struct GroupRuntime {
+    /// Pre-computed wave plan; one inner `Vec<HostId>` per wave.
     waves: Vec<Vec<HostId>>,
+    /// Index of the wave currently in flight.
     current_wave: usize,
-    /// Deployment ids the orchestrator dispatched for the current wave.
-    /// Indexed by deployment_id for O(1) terminal-event matching.
+    /// Deployment ids dispatched for the current wave.
+    ///
+    /// Indexed by `deployment_id` for O(1) terminal-event matching.
     pending_deployment_ids: HashSet<String>,
+    /// Stack the group belongs to.
     stack_id: StackId,
+    /// Service name carried through to dispatch for trace context.
     service_name: String,
+    /// Failure handling policy for this group.
     on_failure: OnFailure,
 }
 
-/// Outcome reported back to callers of `start_group`. `Direct` means a single
-/// host was targeted and the orchestrator delegated straight to the existing
-/// per-host path (no group row created). `Group(group_id)` means the multi-host
-/// orchestrator took ownership.
+/// Outcome reported back to callers of
+/// [`StackDeployOrchestrator::start_group`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartOutcome {
+    /// Single host targeted; the orchestrator delegated straight to
+    /// the existing per-host path. No group row was created.
     Direct,
+    /// Multi-host group took ownership. The string is the group id.
     Group(String),
 }
 
+/// Stack-level deployment orchestrator.
 #[derive(Clone)]
 pub struct StackDeployOrchestrator {
+    /// Shared inventory for group and deployment writes.
     inventory: Arc<Inventory>,
+    /// Event bus subscription used by the background task.
     bus: Arc<EventBus>,
+    /// Wave dispatcher (production or test mock).
     dispatcher: Arc<dyn WaveDispatcher>,
+    /// Live group state, keyed by group id.
     state: Arc<Mutex<HashMap<String, GroupRuntime>>>,
+    /// Periodic reconcile cadence. Defaults to 30 seconds in
+    /// production; tests override with a shorter interval.
     reconcile_interval: Duration,
 }
 
 impl StackDeployOrchestrator {
+    /// Builds an orchestrator over the shared inventory, bus, and a
+    /// dispatcher.
     pub fn new(
         inventory: Arc<Inventory>,
         bus: Arc<EventBus>,
@@ -219,25 +226,31 @@ impl StackDeployOrchestrator {
         }
     }
 
-    /// Override the periodic reconciliation cadence. Tests use a short
-    /// interval; production keeps the default 30 seconds.
+    /// Overrides the periodic reconciliation cadence.
+    ///
+    /// Tests use a short interval; production keeps the 30-second
+    /// default.
     pub fn with_reconcile_interval(mut self, d: Duration) -> Self {
         self.reconcile_interval = d;
         self
     }
 
-    /// Decide whether to spin up a new group + dispatch wave 0, or bypass
+    /// Spins up a new group and dispatches wave 0, or bypasses
     /// entirely for single-host deploys.
     ///
-    /// Caller pre-computes the deployments rows (one per host) and passes
-    /// their ids; the orchestrator records the group id back onto each
-    /// deployment via `set_deployment_group`.
-    ///
-    /// # Single-host shortcut
+    /// The caller pre-computes the deployment rows (one per host) and
+    /// passes their ids; the orchestrator records the group id back
+    /// onto each deployment via `set_deployment_group`.
     ///
     /// When `target_hosts.len() <= 1` the orchestrator returns
-    /// `StartOutcome::Direct` without writing a group row. Callers are
-    /// responsible for the existing per-host path in that case.
+    /// [`StartOutcome::Direct`] without writing a group row, and the
+    /// caller takes the existing per-host path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure during the group insert, the
+    /// per-deployment link, the state transition to rolling, or wave 0
+    /// dispatch.
     pub async fn start_group(
         &self,
         stack_id: StackId,
@@ -349,9 +362,10 @@ impl StackDeployOrchestrator {
         Ok(StartOutcome::Group(group.id))
     }
 
-    /// Spawn the background task that watches `deployment.*` events on the
-    /// bus and advances/aborts groups accordingly. Returns a JoinHandle the
-    /// caller aborts on shutdown.
+    /// Spawns the background task that watches `deployment.*` events
+    /// on the bus and advances or aborts groups accordingly.
+    ///
+    /// Returns a [`JoinHandle`] the caller aborts on shutdown.
     pub fn start_background(self: Arc<Self>) -> JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {
@@ -385,7 +399,10 @@ impl StackDeployOrchestrator {
         })
     }
 
-    /// Handle one event. Cheap on no-match (most events are unrelated).
+    /// Handles one event from the bus.
+    ///
+    /// Cheap on no-match: most events on the bus are unrelated to
+    /// deployments and short-circuit on the kind prefix check.
     async fn handle_event(&self, ev: &Event) -> Result<()> {
         if !ev.kind.starts_with("deployment.") {
             return Ok(());
@@ -411,7 +428,12 @@ impl StackDeployOrchestrator {
         self.advance_group(&group_id, &dep).await
     }
 
-    /// Storage helper: read the `deployments.group_id` column for a single id.
+    /// Resolves which group a deployment belongs to.
+    ///
+    /// Walks the in-memory state first (pending wave ids), then falls
+    /// back to a storage scan of every active group's deployments.
+    /// The DAO doesn't expose `deployments.group_id` on the public
+    /// `Deployment` struct, so the scan is the canonical lookup path.
     async fn lookup_group_for_deployment(&self, deployment_id: &str) -> Result<Option<String>> {
         // The DAO doesn't expose this column on the public Deployment struct,
         // so reach in with a raw query. The pool method is `pub(crate)`,
@@ -453,9 +475,12 @@ impl StackDeployOrchestrator {
         Ok(None)
     }
 
-    /// Treat one terminal deployment as a hint to re-evaluate the group's
-    /// current wave. We re-query storage for the current wave's deployments
-    /// so the decision is always grounded in the canonical state.
+    /// Treats one terminal deployment as a hint to re-evaluate the
+    /// group's current wave.
+    ///
+    /// Re-queries storage for the current wave's deployments so the
+    /// decision is grounded in the canonical state, not the in-memory
+    /// snapshot which can lag a missed event.
     async fn advance_group(
         &self,
         group_id: &str,
@@ -560,9 +585,11 @@ impl StackDeployOrchestrator {
         Ok(())
     }
 
-    /// Reconcile every active group: query storage for the current wave's
-    /// deployments and advance if all are terminal. Used as a periodic
-    /// safety-net + after a broadcast Lag.
+    /// Reconciles every active group.
+    ///
+    /// Queries storage for each group's current wave and advances when
+    /// every deployment is terminal. Used as a periodic safety net and
+    /// after a broadcast `Lag`.
     async fn reconcile_all(&self) -> Result<()> {
         let group_ids: Vec<String> = self.state.lock().await.keys().cloned().collect();
         for gid in group_ids {
@@ -585,8 +612,11 @@ impl StackDeployOrchestrator {
 // Storage helper missing on `Inventory` (tiny enough to inline here).
 // ---------------------------------------------------------------------------
 
+/// Internal extension trait for the bits of "list active groups" the
+/// DAO doesn't expose directly.
 #[async_trait]
 trait ListActiveGroups {
+    /// Lists every non-terminal deployment group across every stack.
     async fn list_active_deployment_groups(&self) -> Result<Vec<DeploymentGroup>>;
 }
 

@@ -1,5 +1,6 @@
-//! Controller-mode runtime: load plugins, bind the gRPC server, await
-//! shutdown, drain, stop plugins, exit.
+#![doc = include_str!("../docs/_crate.md")]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 mod service;
 
@@ -48,48 +49,72 @@ use crate::enrollment::EnrollmentService;
 use crate::revocation::RevocationSet;
 use crate::ssh_ca::SshAuthority;
 
-/// Bundle of references controller-side plugins need to access controller state.
-/// Passed via `PluginContext.bus` (downcast from `Arc<dyn Any>`).
+/// Bundle of long-lived references controller-side plugins need.
+///
+/// Built by [`run_controller`] after every primitive has booted, then
+/// downcast through `Arc<dyn Any>` on the [`isengard_core::PluginContext`]
+/// so plugins can reach into the controller's state without depending on
+/// this crate's private types.
 #[derive(Clone)]
 pub struct ControllerHandles {
+    /// Shared inventory pool. Every DAO call (hosts, stacks, services,
+    /// routing rules, deployments, placements, policies) lands here.
     pub inventory: Arc<Inventory>,
+    /// Append-only event log. Shares the SQLite file with
+    /// `inventory`; the two facades co-migrate.
     pub journal: Arc<Journal>,
+    /// Broadcast surface for `Event`. Plugins subscribe at start.
     pub bus: Arc<EventBus>,
+    /// Agent-facing routing reconciler. Plugins push routing
+    /// changes by mutating the inventory then calling
+    /// [`routing::RoutingPusher::push_to_host`].
     pub routing: Arc<routing::RoutingPusher>,
-    /// Enrollment-token mint/redeem service. Surfaced so the
-    /// dashboard plugin can expose REST endpoints for token management.
+    /// Enrollment-token mint and redeem.
+    ///
+    /// The dashboard plugin exposes the REST endpoints that wrap
+    /// [`EnrollmentService::mint`] and present packed tokens to the
+    /// operator.
     pub enrollment: Arc<EnrollmentService>,
-    /// In-memory revocation set the auth interceptor reads on every
-    /// RPC. Surfaced so the dashboard plugin can revoke an agent's cert via
-    /// `revoke_agent` (which both writes the DB row and updates this set).
+    /// In-memory revocation set the auth interceptor reads on every RPC.
+    ///
+    /// The dashboard's revoke handler calls [`revocation::revoke_agent`]
+    /// which writes the DB row and updates this set in one pass.
     pub revocation: RevocationSet,
-    /// On-disk path to the controller's SQLite file. Surfaced so
-    /// the backup plugin can open its own pool for WAL checkpoint + file
-    /// copy without needing a public `Inventory::pool()` getter.
+    /// On-disk path to the controller's SQLite file.
+    ///
+    /// The backup plugin opens its own pool against this path for a WAL
+    /// checkpoint plus file copy. Surfaced rather than exposing
+    /// `Inventory::pool()`.
     pub db_path: std::path::PathBuf,
-    /// Subscription registry for log streaming. Dashboard's
-    /// WebSocket handler `register`s a fresh subscription, then sends
-    /// `StartLogStream` ControllerMessages via `routing.register_sender` to
-    /// each involved host. Inbound `AgentMessage::LogChunk` frames are
-    /// routed through this fanout to the matching WebSocket task.
+    /// Log-streaming subscription registry.
+    ///
+    /// The dashboard WebSocket handler registers a subscription, dispatches
+    /// `StartLogStream` `ControllerMessage`s to the involved hosts via the
+    /// routing pusher's sender registry, and reads chunks back through this
+    /// fanout as inbound `AgentMessage::LogChunk` frames land on the Sync
+    /// stream.
     pub log_fanout: Arc<log_fanout::LogFanout>,
-    /// v0.3d: pending `WriteCompose` request resolver. Dashboard
-    /// registers a oneshot keyed by request_id; the gRPC handler
-    /// resolves it when the matching `WriteComposeAck` lands.
+    /// Compose-write request resolver (v0.3d).
+    ///
+    /// The dashboard's `PUT /api/v1/stacks/<id>/compose` registers a
+    /// oneshot keyed by `request_id`, sends `WriteCompose` to the host,
+    /// and awaits the matching `WriteComposeAck` here.
     pub compose_broker: Arc<compose_broker::ComposeBroker>,
-    /// v0.3.6: Isengard-managed encrypted secrets store. Operators put
-    /// secrets via `isd secret put` (or the installer's bootstrap
-    /// subcommand); agents fetch over mTLS at container start and mount
-    /// as tmpfs at `/run/secrets/<name>`. The store is "unlocked" when
+    /// Isengard-managed encrypted secrets store (v0.3.6).
+    ///
+    /// Operators write secrets via `isd secret put` or the installer's
+    /// bootstrap path; agents fetch over mTLS at container start and
+    /// mount as tmpfs at `/run/secrets/<name>`. The store unlocks when
     /// the master key file (`ISENGARD_MASTER_KEY_FILE`, default
     /// `/run/secrets/master.key`) is readable and 32 bytes long;
-    /// otherwise the controller refuses to start.
+    /// otherwise [`run_controller`] refuses to start.
     pub secrets: Arc<secrets::SecretsStore>,
-    /// Controller's internal CA. Same `Authority` instance held by
-    /// `EnrollmentService` (token minting) and `ControllerService` (the
-    /// unauthenticated `GetCaPem` RPC agents call during pre-enroll
-    /// fingerprint verification). Surfaced here so plugins can read
-    /// the root cert if they need to.
+    /// Controller's internal CA.
+    ///
+    /// Same [`ca::Authority`] held by [`EnrollmentService`] (for leaf
+    /// signing) and [`service::ControllerService`] (for the
+    /// unauthenticated `GetCaPem` RPC). Plugins read the root cert here
+    /// when they need to.
     pub ca: Arc<Authority>,
     /// SSH user-certificate authority. Sibling primitive to `ca`: the
     /// controller mints short-lived OpenSSH user certs through this
@@ -100,12 +125,13 @@ pub struct ControllerHandles {
     pub ssh_ca: Arc<SshAuthority>,
 }
 
-/// Journal an event then broadcast it on the bus. Used by both the Sync
-/// handler (for agent-originated events) and controller-internal producers
-/// like `disconnect_monitor`.
+/// Journals an event then publishes it to the bus.
 ///
-/// On journal write failure, broadcasts NO event: better to drop than to
-/// notify on something we have no record of.
+/// Used by the Sync handler for agent-originated events and by
+/// controller-internal producers ([`disconnect_monitor`], the scheduler,
+/// the enrollment success path). The journal write happens first; a
+/// failure there returns without publishing so a downstream notifier
+/// never reacts to an event we have no record of.
 pub async fn persist_and_broadcast(journal: &Journal, bus: &EventBus, event: Event) {
     let insert = InsertEvent {
         host_id: event.host_id.map(|id| id.into()),
@@ -130,28 +156,33 @@ pub async fn persist_and_broadcast(journal: &Journal, bus: &EventBus, event: Eve
     bus.publish(event);
 }
 
-/// Options for running the controller.
+/// Boot configuration for [`run_controller`].
 #[derive(Debug, Clone)]
 pub struct ControllerOptions {
     /// Address the gRPC server binds to (e.g. `0.0.0.0:9417`).
     pub listen: SocketAddr,
-    /// Directory where mutable state lives (the SQLite db, future config cache, etc).
-    /// Created if missing.
+    /// Directory where mutable state lives. The SQLite database and the
+    /// future config cache land here. Created if missing.
     pub state_dir: std::path::PathBuf,
-    /// Optional config tree (per-plugin slices keyed by plugin name).
+    /// Per-plugin config slices keyed by plugin name.
     pub config: serde_json::Value,
-    /// v0.3b: zone name served by the embedded DNS resolver (e.g. `iso`).
-    /// Empty string = resolver disabled, zero overhead.
+    /// Zone served by the embedded DNS resolver (e.g. `iso`).
+    ///
+    /// Empty string disables the resolver entirely; the boot path skips
+    /// the socket bind and the polling task.
     pub dns_zone: String,
-    /// v0.3b: address the embedded DNS resolver binds to (UDP). Defaults to
-    /// `0.0.0.0:5300` for dev; production compose maps :53 with
-    /// `cap_add: NET_BIND_SERVICE`. Ignored when `dns_zone` is empty.
+    /// Address the embedded DNS resolver binds to (UDP).
+    ///
+    /// Defaults to `0.0.0.0:5300` for dev; the production compose recipe
+    /// maps `:53` with `cap_add: NET_BIND_SERVICE`. Ignored when
+    /// `dns_zone` is empty.
     pub dns_listen: SocketAddr,
-    /// DNS-01 ACME wildcard cert config. Empty = subsystem disabled.
+    /// DNS-01 ACME wildcard cert config. Empty disables the subsystem.
     pub acme: acme::AcmeConfig,
 }
 
-/// Discover and instantiate every plugin that advertises `Capability::Controller`.
+/// Discovers and instantiates every plugin that advertises
+/// `Capability::Controller`.
 pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
     registrations_for(HostMode::Controller)
         .into_iter()
@@ -159,8 +190,20 @@ pub fn load_plugins() -> Vec<Box<dyn Plugin>> {
         .collect()
 }
 
-/// Run controller-mode: init+start every plugin, bind the gRPC server, await
-/// ctrl_c, drain in-flight requests, stop every plugin, return.
+/// Runs controller mode end to end.
+///
+/// Boots inventory and journal, unlocks the secrets store, loads or
+/// generates the CA, hydrates the revocation set, starts plugins, spawns
+/// the placement scheduler, disconnect monitor, deployment orchestrator,
+/// DNS resolver (if configured), and ACME scheduler (if configured),
+/// then binds the gRPC server. Returns when SIGINT lands and the server
+/// finishes draining.
+///
+/// # Errors
+///
+/// Returns `Err` when any boot step fails: opening the SQLite file,
+/// reading the master key, signing the controller's own server cert,
+/// binding the listener, or installing the server TLS config.
 #[instrument(skip(opts), fields(listen = %opts.listen))]
 pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     info!("starting controller");

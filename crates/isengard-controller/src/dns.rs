@@ -1,22 +1,25 @@
-//! v0.3b: controller-hosted DNS resolver for a configurable zone.
+//! Controller-hosted DNS resolver for one operator-configured zone.
 //!
-//! mDNS (v0.3a) covers `.local`. Operators with their own zone (e.g. `.iso`,
-//! `.weavers`, `.lan`) get a small embedded server here. Records derive from
-//! the existing `routing_rules` table: `<public_hostname>.<zone>` resolves to
-//! the LAN IP of the agent that owns the rule.
+//! mDNS already covers `.local`. Operators with their own zone (e.g.
+//! `.iso`, `.weavers`, `.lan`) get a small embedded server here.
+//! Records derive from the existing `routing_rules` table:
+//! `<public_hostname>.<zone>` resolves to the LAN IP of the agent that
+//! owns the rule.
 //!
 //! Locked decisions (per `1 Projects/Isengard/v0.3b DNS Resolver.md`):
 //!
-//! - One zone per controller for v0.3b. Multi-zone is v0.4.
-//! - Zone is configured via `--dns-zone <name>` on the controller subcommand.
-//! - Listen address defaults to `0.0.0.0:5300` for dev; prod compose maps :53
-//!   with `cap_add: NET_BIND_SERVICE`.
-//! - TTL: 30 seconds.
+//! - One zone per controller.
+//! - Zone configured via `--dns-zone <name>` on the controller
+//!   subcommand.
+//! - Listen address defaults to `0.0.0.0:5300` for dev; the production
+//!   compose recipe maps `:53` with `cap_add: NET_BIND_SERVICE`.
+//! - 30-second TTL.
 //! - Names ending in `.local` are filtered out: mDNS owns that zone.
-//! - Inside-zone unknown name -> NXDOMAIN. Outside-zone -> REFUSED so the
-//!   client OS falls through to its upstream resolver.
-//! - Records are refreshed by polling routing rules every 5s. v0.4 will
-//!   switch to event-driven via the bus.
+//! - Inside-zone unknown names return `NXDOMAIN`. Outside-zone names
+//!   return `REFUSED` so the client OS falls through to its upstream
+//!   resolver.
+//! - Records refresh by polling routing rules every 5 seconds. A
+//!   future change moves to event-driven via the bus.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -46,9 +49,10 @@ pub const RECORD_TTL_SECS: u32 = 30;
 /// event-bus subscription so changes propagate within milliseconds.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// One A record. Carried in the live record map. Hostnames are stored
-/// fully-qualified and lower-cased so lookups can use exact equality on the
-/// query name's lowercased UTF-8 form.
+/// One A record entry in the live record map.
+///
+/// Hostnames are stored fully-qualified and lowercased so lookups use
+/// exact equality on the query name's lowercased UTF-8 form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneRecord {
     /// Full FQDN: `<public_hostname>.<zone>` plus a trailing dot.
@@ -57,20 +61,28 @@ pub struct ZoneRecord {
     pub ip: Ipv4Addr,
 }
 
-/// Ownership of the resolver: holds the live record map (shared with the
-/// hickory `RequestHandler`) plus the polling task. Used by the controller
-/// runtime to bind a socket and spawn the server.
+/// Ownership of the resolver.
+///
+/// Holds the live record map (shared with the hickory `RequestHandler`)
+/// plus the polling task. The controller runtime calls
+/// [`DnsResolver::start`] to bind a socket and spawn the server.
 pub struct DnsResolver {
+    /// Configured zone, normalised (lowercase, no leading or trailing
+    /// dots).
     zone: String,
+    /// Live record map, shared with the request handler.
     records: SharedRecords,
+    /// Shared inventory for the polling task.
     inventory: Arc<Inventory>,
 }
 
+/// Live record map: `<fqdn-without-trailing-dot>` -> A record value.
 type SharedRecords = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
 
 impl DnsResolver {
-    /// Build a resolver wired to a specific zone and inventory. Does not yet
-    /// bind a socket; call `start` to do that.
+    /// Builds a resolver wired to a zone and inventory.
+    ///
+    /// Does not yet bind a socket; call [`DnsResolver::start`] for that.
     pub fn new(zone: String, inventory: Arc<Inventory>) -> Self {
         Self {
             zone: normalize_zone(&zone),
@@ -79,13 +91,16 @@ impl DnsResolver {
         }
     }
 
-    /// Bind a UDP socket and begin serving. Returns the join handle for the
-    /// background polling task; the hickory server itself is owned by the
-    /// returned future via the `JoinSet` it manages internally.
+    /// Binds a UDP socket and begins serving.
     ///
-    /// Cancellation: drop the returned `JoinHandle` to stop the polling
-    /// task. The hickory server runs until the underlying socket is dropped
-    /// (the polling handle owns the only reference path back to it).
+    /// Returns a [`DnsResolverHandle`] owning both the background
+    /// polling task and the `ServerFuture`. Aborting the poll task
+    /// stops the polling loop; dropping the whole handle drops the
+    /// hickory server and unbinds the UDP socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the UDP bind on `listen` fails.
     pub async fn start(self, listen: SocketAddr) -> Result<DnsResolverHandle> {
         let socket = UdpSocket::bind(listen)
             .await
@@ -127,40 +142,56 @@ impl DnsResolver {
         })
     }
 
-    /// Re-derive records once. Exposed for tests; production calls the
-    /// version embedded in the polling task.
+    /// Re-derives records once.
+    ///
+    /// Exposed for tests; production calls the version embedded in the
+    /// polling task.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on storage failure during the refresh.
     pub async fn refresh_once(&self) -> Result<()> {
         refresh(&self.inventory, &self.zone, &self.records).await
     }
 
-    /// Snapshot of the current record map. Used by tests + future REST
-    /// debug endpoint (see spec "API surface" §).
+    /// Snapshot of the current record map.
+    ///
+    /// Used by tests and the future REST debug endpoint.
     pub async fn snapshot(&self) -> HashMap<String, Ipv4Addr> {
         self.records.read().await.clone()
     }
 }
 
-/// Combined ownership of the polling task + server future. Aborting the
-/// poll handle stops the polling loop; dropping the whole handle drops the
-/// `ServerFuture` and unbinds the UDP socket.
+/// Combined ownership of the polling task and the server future.
+///
+/// Aborting the poll handle stops the polling loop; dropping the whole
+/// handle drops the `ServerFuture` and unbinds the UDP socket.
 pub struct DnsResolverHandle {
+    /// Handle on the polling task. Aborts the loop on drop or
+    /// [`DnsResolverHandle::abort`].
     pub poll_handle: JoinHandle<()>,
+    /// Owns the hickory server. Dropping unbinds the socket.
     _server: ServerFuture<ZoneHandler>,
 }
 
 impl DnsResolverHandle {
-    /// Abort the polling task. Equivalent to `self.poll_handle.abort()`.
+    /// Aborts the polling task. Equivalent to
+    /// `self.poll_handle.abort()`.
     pub fn abort(&self) {
         self.poll_handle.abort();
     }
 }
 
-/// Hickory `RequestHandler` impl: looks up the queried name in the live
-/// record map and either answers, NXDOMAINs (inside-zone miss), or REFUSEDs
+/// Hickory `RequestHandler` impl.
+///
+/// Looks up the queried name in the live record map and either answers,
+/// returns `NXDOMAIN` (inside-zone miss), or returns `REFUSED`
 /// (outside-zone). Cloned per inbound request by hickory's internals.
 #[derive(Clone)]
 pub struct ZoneHandler {
+    /// Zone this handler is authoritative for.
     zone: String,
+    /// Live record map (shared with the resolver and the polling task).
     records: SharedRecords,
 }
 
@@ -213,6 +244,7 @@ impl RequestHandler for ZoneHandler {
     }
 }
 
+/// Builds and sends an authoritative answer.
 async fn send_answer<R: ResponseHandler>(
     request: &Request,
     response_handle: &mut R,
@@ -234,6 +266,8 @@ async fn send_answer<R: ResponseHandler>(
     }
 }
 
+/// Builds and sends an error response with the given DNS response
+/// code.
 async fn reply_error<R: ResponseHandler>(
     request: &Request,
     response_handle: &mut R,
@@ -250,9 +284,12 @@ async fn reply_error<R: ResponseHandler>(
     }
 }
 
-/// In-zone non-A query: respond NoError but with no answers (matches what
-/// authoritative servers do for AAAA on an IPv4-only zone). Out-of-zone is
-/// already handled upstream as REFUSED.
+/// In-zone non-A query path.
+///
+/// Responds `NoError` with no answers when the name exists in the
+/// record map (matches what authoritative servers do for AAAA on an
+/// IPv4-only zone). Returns `NXDOMAIN` for names not in the map.
+/// Out-of-zone names are already handled upstream as `REFUSED`.
 async fn reply_nxdomain_or_empty<R: ResponseHandler>(
     request: &Request,
     response_handle: &mut R,
@@ -280,8 +317,11 @@ async fn reply_nxdomain_or_empty<R: ResponseHandler>(
     reply_error(request, response_handle, ResponseCode::NXDomain).await
 }
 
-/// Pull every routing rule, drop `.local` (mDNS territory), join with each
-/// owning host's cached LAN IP, swap the live map atomically.
+/// Re-derives the live record map.
+///
+/// Pulls every routing rule, drops `.local` (mDNS territory), joins
+/// with each owning host's cached LAN IP, then swaps the live map
+/// atomically.
 async fn refresh(inventory: &Inventory, zone: &str, records: &SharedRecords) -> Result<()> {
     let rules = inventory
         .list_all_routing_rules()
@@ -316,6 +356,9 @@ async fn refresh(inventory: &Inventory, zone: &str, records: &SharedRecords) -> 
     Ok(())
 }
 
+/// Builds one A-record entry for a routing rule, or returns `None`
+/// when the rule is out of zone, `.local`, or the host has no cached
+/// LAN IP.
 async fn build_record_for_rule(
     inventory: &Inventory,
     rule: &RoutingRule,
@@ -378,9 +421,11 @@ async fn build_record_for_rule(
     })
 }
 
-/// Lower-case + trim a query name for matching. `Name::to_string` returns
-/// `foo.iso.` (with the trailing dot); we keep that form for the return
-/// value but match against the dot-stripped, lower-cased map key.
+/// Lowercases and trims a query name into a canonical form.
+///
+/// `Name::to_string` returns `foo.iso.` (with the trailing dot); the
+/// returned form keeps the dot but matching uses the dot-stripped,
+/// lowercased map key.
 fn format_query_name(raw: &str) -> String {
     let trimmed = raw.trim().to_ascii_lowercase();
     if trimmed.ends_with('.') {
@@ -390,14 +435,18 @@ fn format_query_name(raw: &str) -> String {
     }
 }
 
-/// Strip leading + trailing dots, lower-case, drop empty segments.
+/// Normalises a zone string: trim whitespace, strip leading/trailing
+/// dots, lowercase.
 fn normalize_zone(zone: &str) -> String {
     zone.trim().trim_matches('.').to_ascii_lowercase()
 }
 
-/// Is `name` (trimmed of trailing dot) inside the zone? `foo.iso` matches
-/// `iso`, `a.b.iso` matches `iso`, `iso` itself matches (apex), `foo.local`
-/// does not, and `foo.isolation` does not (suffix-with-dot enforced).
+/// Returns `true` when `name` (trimmed of trailing dot) is inside the
+/// zone.
+///
+/// `foo.iso` matches `iso`, `a.b.iso` matches `iso`, the apex `iso`
+/// matches, `foo.local` does not, and `foo.isolation` does not (the
+/// match requires a label boundary, not a substring).
 pub fn is_in_zone(name: &str, zone: &str) -> bool {
     let n = name.trim_end_matches('.').to_ascii_lowercase();
     let z = normalize_zone(zone);

@@ -1,13 +1,14 @@
-//! Persist container info from agent heartbeats.
+//! Persists container info from agent heartbeats.
 //!
-//! For each `ContainerInfo` in the heartbeat we derive the operator-
-//! visible id (see [`crate::container_id::derive_container_id`]) and
-//! upsert a row into `containers`. After the loop, any rows that the
-//! agent did NOT report (and that were previously alive for this host)
-//! are marked removed at `server_now_seconds`.
+//! For each `ContainerInfo` in the heartbeat the path derives the
+//! operator-visible id (see
+//! [`crate::container_id::derive_container_id`]) and upserts a row into
+//! `containers`. After the loop, any rows the agent did NOT report (and
+//! that were previously alive for this host) are marked removed at
+//! `server_now_seconds`.
 //!
 //! `last_seen_at` is clamped to `min(server_now_seconds,
-//! observed_at_ms/1000)` so a wildly skewed agent clock can not push
+//! observed_at_ms / 1000)` so a wildly skewed agent clock cannot push
 //! the row's last-seen into the future.
 
 use isengard_proto::pb::ContainerInfo as ProtoContainerInfo;
@@ -17,12 +18,16 @@ use sqlx::SqlitePool;
 
 use crate::container_id::derive_container_id;
 
-/// Apply a heartbeat's reported containers to the inventory:
-/// 1. Upsert one row per `ContainerInfo`, deriving the operator id.
-/// 2. Mark every row for this host that was NOT in the heartbeat as
+/// Applies a heartbeat's reported containers to the inventory.
+///
+/// 1. Upserts one row per `ContainerInfo`, deriving the operator id.
+/// 2. Marks every row for this host that was not in the heartbeat as
 ///    removed at `server_now_seconds`.
 ///
-/// Errors propagate as-is; callers log at the heartbeat boundary.
+/// # Errors
+///
+/// Returns `Err` on the first storage failure; callers log at the
+/// heartbeat boundary.
 pub async fn process_heartbeat_containers(
     pool: &SqlitePool,
     host_id: HostId,
@@ -90,6 +95,8 @@ pub async fn process_heartbeat_containers(
     Ok(())
 }
 
+/// Collapses empty strings to `None` so the storage row stores NULL
+/// rather than the empty-string sentinel.
 fn opt_string(s: &str) -> Option<String> {
     if s.is_empty() {
         None

@@ -1,14 +1,22 @@
-//! Persist stack info from agent heartbeats: upsert reported stacks and
-//! prune any that are no longer reported for that host.
+//! Persists stack info from agent heartbeats.
+//!
+//! [`process_heartbeat_stacks`] upserts the reported stacks and prunes
+//! anything for the host the heartbeat no longer mentions.
 
 use std::collections::HashSet;
 
 use isengard_proto::pb::StackInfo as ProtoStackInfo;
 use isengard_storage::{HostId, InsertStack, Inventory, Result, StackSource};
 
-/// Apply a heartbeat's reported stacks to the inventory:
-/// - Upsert each reported stack (idempotent per `(host_id, name)`).
-/// - Delete any existing stacks for this host that the heartbeat no longer mentions.
+/// Applies a heartbeat's reported stacks to the inventory.
+///
+/// - Upserts each reported stack (idempotent per `(host_id, name)`).
+/// - Deletes any existing stacks for this host the heartbeat no longer
+///   mentions.
+///
+/// # Errors
+///
+/// Returns `Err` on storage failure.
 pub async fn process_heartbeat_stacks(
     inv: &Inventory,
     host_id: HostId,

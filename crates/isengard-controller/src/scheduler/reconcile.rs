@@ -246,6 +246,8 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Upserts one placement row with the given state and optional
+    /// `last_event` blob.
     async fn persist_state(
         &self,
         service_id: ServiceId,
@@ -268,6 +270,8 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Emits a `placement.*` event with a derived summary and
+    /// `service_id` baked into `metadata` for downstream filtering.
     pub(super) fn emit_placement_event(
         &self,
         kind: &str,
@@ -331,6 +335,8 @@ impl Scheduler {
     }
 }
 
+/// Extracts the optional `LabelSelector` from any [`Placement`]
+/// variant.
 fn placement_selector(p: &Placement) -> Option<&isengard_core::placement::LabelSelector> {
     match p {
         Placement::Singleton { selector } => selector.as_ref(),

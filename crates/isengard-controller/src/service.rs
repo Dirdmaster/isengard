@@ -1,5 +1,14 @@
-//! `Controller` gRPC service. `enroll` (refactored Task 6)
-//! and `sync` are real.
+//! `Controller` gRPC service handlers.
+//!
+//! Every RPC method tonic dispatches on lives here:
+//!
+//! - `get_ca_pem`: public, returns the CA root.
+//! - `enroll`: public, redeems a join token (see
+//!   [`crate::enrollment::EnrollmentService`]).
+//! - `renew_cert`: signs a fresh leaf for the calling agent, host id
+//!   read from the cert CN (the Bl-1 fix).
+//! - `fetch_secret`: mTLS-gated secret read.
+//! - `sync`: bidirectional stream; see [`ControllerService::sync`].
 
 #![allow(clippy::result_large_err)]
 
@@ -26,39 +35,62 @@ use crate::revocation::RevocationSet;
 use crate::routing::RoutingPusher;
 use crate::secrets::{SecretsError, SecretsStore};
 
+/// Owns every primitive a `Controller` RPC handler needs.
+///
+/// Cheap to clone via interior `Arc`s. Constructed once by
+/// [`crate::run_controller`] and handed to tonic via
+/// [`isengard_proto::pb::controller_server::ControllerServer::new`].
 #[derive(Clone)]
 pub struct ControllerService {
+    /// Shared inventory pool.
     pub inventory: Arc<Inventory>,
+    /// Append-only event log; co-shares the SQLite file with
+    /// `inventory`.
     pub journal: Arc<Journal>,
+    /// In-process event bus.
     pub bus: Arc<EventBus>,
+    /// Agent-facing routing reconciler.
     pub routing: Arc<RoutingPusher>,
-    /// Container-scope policy ingest from `isengard.policy.*`
-    /// labels.
+    /// Container-scope policy ingest from `isengard.policy.*` labels.
     pub policy_ingest: Arc<PolicyLabelIngest>,
-    /// Container-scope lifecycle-hook ingest from
-    /// `isengard.hooks.*` labels.
+    /// Container-scope lifecycle-hook ingest from `isengard.hooks.*`
+    /// labels.
     pub hook_ingest: Arc<HookLabelIngest>,
+    /// Controller's internal CA. The `GetCaPem` handler reads the
+    /// root cert here.
     pub ca: Arc<Authority>,
+    /// Enrollment service. The `Enroll` and `RenewCert` handlers go
+    /// through here.
     pub enrollment: Arc<EnrollmentService>,
     /// In-memory revocation set the auth interceptor reads on every
-    /// RPC. Carried on the service so future handlers (e.g. an admin RPC for
-    /// `revoke_agent`) can mutate it without re-fetching from inventory.
+    /// RPC.
+    ///
+    /// Carried on the service so future handlers (e.g. an admin RPC
+    /// for `revoke_agent`) can mutate it without re-fetching from
+    /// inventory.
     pub revocation: RevocationSet,
-    /// Log subscription registry. Inbound `AgentMessage::LogChunk`
-    /// frames on the Sync stream are routed through this fanout to the
-    /// dashboard's WebSocket tasks.
+    /// Log-streaming subscription registry.
+    ///
+    /// Inbound `AgentMessage::LogChunk` frames on the Sync stream
+    /// route through this fanout to the dashboard's WebSocket tasks.
     pub log_fanout: Arc<LogFanout>,
-    /// v0.3d: resolves pending `WriteCompose` requests when the agent's
-    /// matching `WriteComposeAck` arrives on the Sync stream.
+    /// Resolves pending `WriteCompose` requests when the agent's
+    /// matching `WriteComposeAck` arrives on the Sync stream (v0.3d).
     pub compose_broker: Arc<ComposeBroker>,
-    /// v0.3.6: managed-secrets store. The `FetchSecret` RPC reads
-    /// through this; the auth interceptor already gated the connection
-    /// behind a valid client cert.
+    /// Managed-secrets store (v0.3.6).
+    ///
+    /// The `FetchSecret` RPC reads through this; the auth interceptor
+    /// already gated the connection behind a valid client cert.
     pub secrets: Arc<SecretsStore>,
-    /// Placement scheduler. Optional so the `new_for_test`
-    /// constructor doesn't need to fabricate one. The Sync handler calls
-    /// `on_heartbeat_labels` here; `enroll` calls `on_host_enroll`;
-    /// `disconnect_monitor.rs` calls `on_host_disconnect_long`.
+    /// Placement scheduler.
+    ///
+    /// Optional so [`ControllerService::new_for_test`] doesn't have to
+    /// fabricate one. The Sync handler calls
+    /// [`crate::scheduler::Scheduler::on_heartbeat_labels`] here;
+    /// `enroll` calls
+    /// [`crate::scheduler::Scheduler::on_host_enroll`];
+    /// [`crate::disconnect_monitor`] calls
+    /// [`crate::scheduler::Scheduler::on_host_disconnect_long`].
     pub scheduler: Option<Arc<crate::scheduler::Scheduler>>,
     /// SSH user-certificate authority. The `GetSshCa` RPC returns
     /// `public_key_openssh()` so agents install it as a
@@ -68,6 +100,7 @@ pub struct ControllerService {
 }
 
 impl ControllerService {
+    /// Builds the service over every controller primitive.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         inventory: Arc<Inventory>,
@@ -103,10 +136,12 @@ impl ControllerService {
         }
     }
 
-    /// Test constructor: stubs the bus, journal, and routing pusher with
-    /// fresh in-memory instances. Caller supplies the inventory + CA +
-    /// enrollment service it wants to exercise. Used by task tests
-    /// that only care about the enrollment / cert flows.
+    /// Test constructor: stubs the bus, journal, and routing pusher
+    /// with fresh in-memory instances.
+    ///
+    /// The caller supplies the inventory, CA, enrollment service, and
+    /// revocation set it wants to exercise. Used by tests that only
+    /// care about the enrollment or cert flows.
     pub async fn new_for_test(
         inventory: Arc<Inventory>,
         ca: Arc<Authority>,
@@ -154,6 +189,12 @@ impl ControllerService {
 impl Controller for ControllerService {
     type SyncStream = ReceiverStream<Result<ControllerMessage, Status>>;
 
+    /// Returns the controller's CA root PEM.
+    ///
+    /// Unauthenticated by design: the response is public data and the
+    /// agent has no client cert to present here. Listed in
+    /// `auth::PUBLIC_METHODS` so the interceptor lets the call
+    /// through without an mTLS handshake.
     async fn get_ca_pem(
         &self,
         _request: Request<GetCaPemRequest>,
@@ -166,17 +207,30 @@ impl Controller for ControllerService {
         Ok(Response::new(GetCaPemResponse { pem }))
     }
 
+    /// Returns the controller's SSH user-cert authority public key.
+    ///
+    /// Unauthenticated by design: the response is a public CA pubkey.
+    /// Listed in `auth::PUBLIC_METHODS`. Agents call this right after
+    /// `Enroll` and drop the bytes into the host's
+    /// `TrustedUserCAKeys` directive so the host trusts user certs
+    /// minted via [`crate::ssh_ca::SshAuthority::sign_user_cert`].
     async fn get_ssh_ca(
         &self,
         _request: Request<GetSshCaRequest>,
     ) -> Result<Response<GetSshCaResponse>, Status> {
-        // Unauthenticated: the response is the controller's SSH user-
-        // cert authority public key. Agents drop it into
-        // `TrustedUserCAKeys` right after mTLS enrollment.
         let pubkey = self.ssh_ca.public_key_openssh().to_vec();
         Ok(Response::new(GetSshCaResponse { pubkey }))
     }
 
+    /// Redeems a join token for an agent leaf cert and bundle.
+    ///
+    /// Unauthenticated by design (the agent has no cert to present
+    /// yet; the token gates the call). Listed in
+    /// `auth::PUBLIC_METHODS`. The handler delegates to
+    /// [`crate::enrollment::EnrollmentService::redeem`]; any failure
+    /// surfaces as `Status::unauthenticated`. Most failures are
+    /// unknown / expired / already-consumed token, and the handler
+    /// deliberately doesn't leak which.
     async fn enroll(
         &self,
         request: Request<EnrollRequest>,
@@ -241,11 +295,14 @@ impl Controller for ControllerService {
         }))
     }
 
-    /// Sign a fresh leaf cert for the calling agent. The host_id is read
-    /// authoritatively from the client cert's CN (set by `ca::sign_agent_leaf`
-    /// to `host_id.to_string()`); the request body carries no fields. This
-    /// closes the Bl-1 horizontal-escalation hole where agent A could request
-    /// a cert minted for agent B by passing B's host_id in the request body.
+    /// Signs a fresh leaf cert for the calling agent.
+    ///
+    /// The host id is read authoritatively from the client cert's CN
+    /// ([`crate::ca::Authority::sign_agent_leaf`] sets the CN to
+    /// `host_id.to_string()`); the request body carries no fields.
+    /// This closes the Bl-1 horizontal-escalation hole where agent A
+    /// could request a cert minted for agent B by passing B's host_id
+    /// in the request body.
     async fn renew_cert(
         &self,
         request: Request<RenewCertRequest>,
@@ -265,14 +322,16 @@ impl Controller for ControllerService {
         }))
     }
 
-    /// v0.3.6: agent fetches a managed secret on container start. The
-    /// CertAuthInterceptor already gated the connection: any caller
-    /// reaching this handler has a valid, non-revoked agent cert. We
-    /// derive `host_id` from the cert CN so the request body can't lie
-    /// about who's asking, then return the decrypted plaintext.
+    /// Agent fetches a managed secret on container start (v0.3.6).
     ///
-    /// Logs include the agent host_id and secret name. The secret VALUE
-    /// is never logged at any level.
+    /// The [`crate::auth::CertAuthInterceptor`] has already gated the
+    /// connection: any caller reaching this handler has a valid,
+    /// non-revoked agent cert. The handler derives `host_id` from the
+    /// cert CN so the request body cannot lie about who's asking, then
+    /// returns the decrypted plaintext.
+    ///
+    /// Logs include the agent host id and secret name. The secret
+    /// value is never logged at any level.
     async fn fetch_secret(
         &self,
         request: Request<FetchSecretRequest>,
@@ -339,6 +398,7 @@ impl Controller for ControllerService {
         }))
     }
 
+    #[doc = include_str!("../docs/sync-handler.md")]
     async fn sync(
         &self,
         request: Request<Streaming<AgentMessage>>,
@@ -735,18 +795,20 @@ impl Controller for ControllerService {
     }
 }
 
-/// Extract the authoritative `HostId` from the caller's mTLS client cert.
-/// The CN of every agent leaf is set to `host_id.to_string()` by
-/// [`crate::ca::Authority::sign_agent_leaf`], so the CN is the source of
-/// truth for which agent is calling.
+/// Extracts the authoritative `HostId` from the caller's mTLS client
+/// cert.
 ///
-/// Used by `renew_cert` (Bl-1 fix) and `sync` (Bl-2 fix) to prevent
-/// horizontal-escalation attacks where one agent's cert is used to mint
-/// or impersonate another agent.
+/// [`crate::ca::Authority::sign_agent_leaf`] sets every agent leaf's CN
+/// to `host_id.to_string()`, so the CN is the source of truth for
+/// which agent is calling. Used by `renew_cert` (the Bl-1 fix) and
+/// `sync` (the Bl-2 fix) to block horizontal-escalation attacks where
+/// one agent's cert is used to mint or impersonate another agent.
 ///
-/// Returns `Status::unauthenticated` on missing peer cert (the auth layer
-/// rejects this on non-public methods, so this is a defense-in-depth
-/// double-check) or a CN that doesn't parse as a ULID.
+/// # Errors
+///
+/// Returns `Status::unauthenticated` on missing peer cert (the auth
+/// layer rejects this on non-public methods, so this is a
+/// defense-in-depth double-check) or a CN that doesn't parse as a ULID.
 fn host_id_from_peer_cert<T>(request: &Request<T>) -> Result<isengard_storage::HostId, Status> {
     use tonic::transport::server::TlsConnectInfo;
     use x509_parser::prelude::*;
