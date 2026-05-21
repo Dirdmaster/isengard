@@ -4,6 +4,24 @@
 >
 > **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
 
+## Install
+
+Four ways to put `isd` (the operator CLI) on your machine. The fleet-side
+daemon images (`isengard-agent`, `isengard-controller`) are pulled separately
+via `docker run`; see [Production install](#production-install) below.
+
+| Channel | Install |
+|---|---|
+| Shell installer | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Weavers-Engineering/Isengard/releases/latest/download/isd-installer.sh \| sh` |
+| Homebrew | `brew install weavers-engineering/isengard/isd` (after `brew tap weavers-engineering/isengard`) |
+| Docker | `docker run --rm -it ghcr.io/weavers-engineering/isd:latest --version` |
+| `cargo install` | `cargo install --git https://github.com/Weavers-Engineering/Isengard isd` |
+
+Updates: re-run the installer (shell), `brew upgrade isd` (Homebrew), repull
+`:latest` or pin a `:vX.Y.Z` tag (Docker), or `cargo install --git ... --force`
+(cargo). Distribution design lives in the vault spec
+`2026-05-21-isengard-v0.6.0-distribution-design.md`.
+
 ## Production install
 
 Bring up a cluster with one command on your operator machine:

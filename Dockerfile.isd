@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.7
+#
+# Builds an `isd`-only docker image, published to
+# `ghcr.io/weavers-engineering/isd`. Separate from the main `Dockerfile`
+# (which builds the daemon stack `isengard-agent` + `isengard-controller`
+# on a `FROM scratch` musl base) because:
+#
+#   1. `isd` doesn't have the BoringSSL / pingora link the daemon does,
+#      so it builds cleanly on the official Rust image without a musl
+#      cross-toolchain.
+#   2. Operators using `docker run isd` want a shell to poke around in,
+#      so the runtime stage is `debian:bookworm-slim` with `bash` + an
+#      `openssh-client` for `isd ssh dial`.
+#
+# Spec: 3 Resources/Superpowers/specs/2026-05-21-isengard-v0.6.0-distribution-design.md
+
+ARG RUST_VERSION=1.95
+
+# ---------------------------------------------------------------------------
+# Builder. Official rust:bookworm image; plenty of system libs already
+# present. We add protoc 27.x (the workspace's proto3-optional minimum)
+# and bun (the dashboard plugin's build.rs invokes `bun run build`).
+# ---------------------------------------------------------------------------
+FROM rust:${RUST_VERSION}-bookworm AS builder
+WORKDIR /src
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        clang \
+        libclang-dev \
+        pkg-config \
+        protobuf-compiler \
+        curl \
+        unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install protoc 27.x. Debian bookworm ships 3.21.x which doesn't support
+# proto3 `optional` without a feature flag prost-build doesn't pass.
+ARG PROTOC_VERSION=27.3
+RUN curl -fsSL -o /tmp/protoc.zip \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+ && unzip -q /tmp/protoc.zip -d /usr/local \
+ && rm /tmp/protoc.zip \
+ && protoc --version
+
+# bun is needed by the dashboard plugin's build.rs (transitive workspace dep).
+RUN curl -fsSL https://bun.sh/install | bash \
+ && ln -s /root/.bun/bin/bun /usr/local/bin/bun
+
+COPY . .
+
+# `ISENGARD_RELEASE_VERSION` is read by `crates/isd/build.rs` so the baked
+# binary reports the release tag from `isd --version` rather than the
+# workspace's static `0.6.0`. Defaults to `dev` for local builds;
+# docker-isd.yml overrides this with the tag on release builds.
+ARG ISENGARD_RELEASE_VERSION=dev
+ENV ISENGARD_RELEASE_VERSION=${ISENGARD_RELEASE_VERSION}
+
+RUN cargo build --release --bin isd \
+ && strip target/release/isd
+
+# ---------------------------------------------------------------------------
+# Runtime. debian:bookworm-slim so the operator can `docker run --rm -it
+# isd bash` and poke around. ca-certificates for outbound TLS;
+# openssh-client because `isd ssh dial` shells out to the host's ssh.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+LABEL org.opencontainers.image.source="https://github.com/Weavers-Engineering/Isengard"
+LABEL org.opencontainers.image.description="Isengard operator CLI"
+LABEL org.opencontainers.image.licenses="MIT"
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/isd /usr/local/bin/isd
+
+ENTRYPOINT ["/usr/local/bin/isd"]
