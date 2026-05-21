@@ -7,6 +7,7 @@ pub mod api;
 pub mod approvals;
 pub mod backup;
 pub mod compose_diff;
+pub mod config;
 pub mod containers;
 pub mod deployment_groups;
 pub mod deployments;
@@ -138,6 +139,7 @@ fn build_router(handles: Option<Arc<ControllerHandles>>) -> Router {
             .nest("/api/v1", webhooks::router(h.clone()))
             .nest("/api/v1", backup::router(h.clone()))
             .nest("/api/v1", secrets::router(h.clone()))
+            .nest("/api/v1", config::router(h.clone()))
             .nest("/api/v1", enrollment::router(h))
             .merge(ws_router)
             .merge(install_router);
