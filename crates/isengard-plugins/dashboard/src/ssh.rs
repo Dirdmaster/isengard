@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use isengard_controller::ControllerHandles;
 use isengard_storage::InsertEvent;
+use isengard_storage::journal::EventRow;
 use serde::{Deserialize, Serialize};
 use ssh_key::{HashAlg, PublicKey};
 use tracing::warn;
@@ -198,6 +199,124 @@ fn cap_ttl(requested: u64) -> Duration {
 /// dashboard API.
 fn error_response(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(serde_json::json!({ "error": msg.into() }))).into_response()
+}
+
+/// Default cap on returned audit rows. Matches the dashboard's other
+/// list endpoints (e.g. `GET /events`) and keeps the payload small for
+/// the common `isd ssh audit` interactive call.
+const DEFAULT_AUDIT_LIMIT: usize = 100;
+
+/// Hard upper bound on rows the audit endpoint will return. Mirrors
+/// the journal scan ceiling already used by `list_events` so a
+/// misbehaving client cannot ask the controller to walk an unbounded
+/// slice of the journal.
+const MAX_AUDIT_LIMIT: usize = 5_000;
+
+/// Journal-scan ceiling. We filter the `ssh.cert.*` slice in memory,
+/// so the SQL `LIMIT` must be wide enough that unrelated newer events
+/// do not push every cert issuance out of the window. 5k matches the
+/// `deployment_id` filter path in `list_events`.
+const JOURNAL_SCAN_LIMIT: i64 = 5_000;
+
+/// Query params for `GET /api/v1/ssh/audit`. Both fields are optional.
+#[derive(Debug, Deserialize, Default)]
+pub struct AuditQuery {
+    /// Inclusive lower bound on `occurred_at`. Accepts any RFC3339
+    /// timestamp; entries with `occurred_at < since` are dropped.
+    pub since: Option<String>,
+    /// Cap on returned entries. Defaults to [`DEFAULT_AUDIT_LIMIT`]
+    /// and is clamped to [`MAX_AUDIT_LIMIT`].
+    pub limit: Option<usize>,
+}
+
+/// One row in the `GET /api/v1/ssh/audit` response. The shape is
+/// projected from [`EventRow`]; we keep only the columns operators
+/// actually read when answering "who minted what, when?".
+#[derive(Debug, Serialize)]
+pub struct SshAuditEntry {
+    /// Journal row id. Stable across reads, useful for `isd ssh audit`
+    /// to deduplicate across paginated calls.
+    pub id: i64,
+    /// Event kind. Always begins with `ssh.cert.` for rows returned
+    /// here (currently `ssh.cert.issued`; revocation lands in v0.2).
+    pub kind: String,
+    /// When the event happened, RFC3339 in UTC.
+    pub occurred_at: String,
+    /// Operator-readable one-line summary.
+    pub summary: String,
+    /// Decoded metadata payload. Carries `pubkey_fingerprint`,
+    /// `principals`, `ttl_seconds`, `comment` for `ssh.cert.issued`.
+    pub metadata: serde_json::Value,
+}
+
+impl From<EventRow> for SshAuditEntry {
+    fn from(r: EventRow) -> Self {
+        let metadata = r
+            .metadata_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        Self {
+            id: r.id,
+            kind: r.kind,
+            occurred_at: r.occurred_at.to_rfc3339(),
+            summary: r.summary,
+            metadata,
+        }
+    }
+}
+
+/// `GET /api/v1/ssh/audit` handler. Returns the journal's
+/// `ssh.cert.*` slice, newest-first.
+///
+/// Filters: `?since=<RFC3339>` (inclusive lower bound on
+/// `occurred_at`) and `?limit=<N>` (default 100, capped at 5000).
+///
+/// # Errors
+///
+/// Returns:
+/// - `400 Bad Request` when `since` is set but not parseable RFC3339.
+/// - `500 Internal Server Error` when the journal read fails.
+pub async fn get_ssh_audit(
+    State(handles): State<Arc<ControllerHandles>>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<SshAuditEntry>>, Response> {
+    let since = match q.since.as_deref() {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(s)
+                .map_err(|e| {
+                    error_response(StatusCode::BAD_REQUEST, format!("invalid since: {e}"))
+                })?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_AUDIT_LIMIT)
+        .clamp(1, MAX_AUDIT_LIMIT);
+
+    let rows = handles
+        .journal
+        .list_recent(JOURNAL_SCAN_LIMIT)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "ssh audit: journal list_recent failed");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "journal read failed")
+        })?;
+
+    let entries: Vec<SshAuditEntry> = rows
+        .into_iter()
+        .filter(|r| r.kind.starts_with("ssh.cert."))
+        .filter(|r| match since {
+            Some(cutoff) => r.occurred_at >= cutoff,
+            None => true,
+        })
+        .take(limit)
+        .map(SshAuditEntry::from)
+        .collect();
+
+    Ok(Json(entries))
 }
 
 #[cfg(test)]

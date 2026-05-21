@@ -36,6 +36,31 @@ fn ssh_help_lists_subcommands() {
         "ssh --help mentions hosts: {stdout}"
     );
     assert!(stdout.contains("ca"), "ssh --help mentions ca: {stdout}");
+    assert!(
+        stdout.contains("audit"),
+        "ssh --help mentions audit: {stdout}"
+    );
+}
+
+#[test]
+fn ssh_audit_help_lists_filter_flags() {
+    // Phase 6: `isd ssh audit` exposes `--since` and `--limit`.
+    // The integration test sticks to `--help` so we never need a
+    // live controller; the rendering path is covered by unit tests
+    // in `crates/isd/src/ssh.rs`.
+    let out = isd_bin()
+        .args(["ssh", "audit", "--help"])
+        .output()
+        .expect("run isd ssh audit --help");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--since"),
+        "audit --help mentions --since: {stdout}"
+    );
+    assert!(
+        stdout.contains("--limit"),
+        "audit --help mentions --limit: {stdout}"
+    );
 }
 
 #[test]

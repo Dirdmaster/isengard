@@ -79,6 +79,12 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         // when an operator needs to drop the controller's user CA
         // into a non-Isengard host's `TrustedUserCAKeys` manually.
         .route("/ssh/ca", get(crate::ssh::get_ssh_ca_pubkey))
+        // SSH cert issuance audit log. `isd ssh audit` filters the
+        // journal to `ssh.cert.*` rows so operators can answer
+        // "who minted what, when?" without grepping the full event
+        // stream. `?since=<rfc3339>` and `?limit=<n>` (default 100)
+        // shape the response.
+        .route("/ssh/audit", get(crate::ssh::get_ssh_audit))
         .with_state(handles)
 }
 

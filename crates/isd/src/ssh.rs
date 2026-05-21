@@ -43,8 +43,8 @@ pub struct SshArgs {
 
 /// Sub-verbs under `isd ssh`. The `Host` variant is an
 /// `external_subcommand`: any token that does not match `mint`,
-/// `status`, `hosts`, or `ca` is captured here as the dial target +
-/// passthrough `ssh` arguments.
+/// `status`, `hosts`, `ca`, or `audit` is captured here as the dial
+/// target + passthrough `ssh` arguments.
 #[derive(Debug, Subcommand)]
 pub enum SshCommand {
     /// Connect to a fleet host (auto-mints a cert if needed).
@@ -59,15 +59,30 @@ pub enum SshCommand {
     /// CA introspection.
     #[command(subcommand)]
     Ca(CaCommand),
+    /// Show recent SSH cert issuances.
+    Audit(AuditArgs),
 }
 
 /// Sub-verbs under `isd ssh ca`. Reserved as a subcommand group so the
-/// future `rotate` / `audit` verbs slot in cleanly without breaking
-/// the `pubkey` surface.
+/// future `rotate` verb slots in cleanly without breaking the
+/// `pubkey` surface.
 #[derive(Debug, Subcommand)]
 pub enum CaCommand {
     /// Print the controller SSH CA pubkey in OpenSSH wire format.
     Pubkey,
+}
+
+/// CLI flags for `isd ssh audit`. Both filters are optional.
+#[derive(Debug, Args, Clone)]
+pub struct AuditArgs {
+    /// Show entries from this RFC3339 timestamp onward (inclusive).
+    /// Anything before the cutoff is dropped server-side.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Cap the number of entries returned. The dashboard further
+    /// clamps this against an internal 5000-row ceiling.
+    #[arg(long, default_value_t = 50)]
+    pub limit: u32,
 }
 
 /// CLI flags for `isd ssh mint`. Defaults match what the auto-mint
@@ -164,6 +179,7 @@ pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
         SshCommand::Status => run_status().await,
         SshCommand::Hosts => run_hosts(context).await,
         SshCommand::Ca(CaCommand::Pubkey) => run_ca_pubkey(context).await,
+        SshCommand::Audit(a) => run_audit(a, context).await,
     }
 }
 
@@ -423,6 +439,143 @@ async fn run_ca_pubkey(context: Option<&str>) -> Result<()> {
         .context("decoding SSH CA pubkey JSON")?;
     println!("{}", body.pubkey.trim_end());
     Ok(())
+}
+
+/// One row in the `GET /api/v1/ssh/audit` response. Mirrors the
+/// dashboard's `SshAuditEntry`. Fields we do not render are tolerated
+/// thanks to serde's default behaviour.
+#[derive(Debug, Deserialize)]
+struct AuditEntry {
+    /// Event kind. Always `ssh.cert.*` for rows returned here.
+    kind: String,
+    /// RFC3339 timestamp in UTC.
+    occurred_at: String,
+    /// Decoded metadata payload (principals, fingerprint, ttl, etc.).
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+/// Fetch the SSH cert audit log and render it as a table.
+///
+/// # Errors
+///
+/// Returns `Err` on HTTP failure, controller-less context, or JSON
+/// decode error.
+async fn run_audit(args: AuditArgs, context: Option<&str>) -> Result<()> {
+    let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
+    let mut url = format!("{controller_url}/api/v1/ssh/audit?limit={}", args.limit);
+    if let Some(since) = &args.since {
+        // URL-encode lightly: RFC3339 carries `:` and `+`, both of
+        // which need percent-encoding to survive an HTTP query.
+        let encoded = since
+            .replace('+', "%2B")
+            .replace(':', "%3A")
+            .replace(' ', "%20");
+        url.push_str(&format!("&since={encoded}"));
+    }
+    let resp = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let entries: Vec<AuditEntry> = resp
+        .error_for_status()
+        .context("listing ssh audit")?
+        .json()
+        .await
+        .context("decoding ssh audit JSON")?;
+    let rendered = render_audit_table(&entries);
+    println!("{}", rendered.trim_end());
+    Ok(())
+}
+
+/// Render the audit rows under `isd ssh audit`. Empty input still
+/// prints the header so the operator can pipe through `wc -l` or
+/// `grep` without losing column labels.
+fn render_audit_table(rows: &[AuditEntry]) -> String {
+    let mut t = Table::new();
+    t.load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Disabled)
+        .set_header(vec![
+            "WHEN",
+            "KIND",
+            "PRINCIPALS",
+            "FINGERPRINT",
+            "TTL",
+            "COMMENT",
+        ]);
+    for row in rows {
+        let when = format_audit_timestamp(&row.occurred_at);
+        let principals = row
+            .metadata
+            .get("principals")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".into());
+        let fingerprint = row
+            .metadata
+            .get("pubkey_fingerprint")
+            .and_then(|v| v.as_str())
+            .map(shorten_fingerprint)
+            .unwrap_or_else(|| "-".into());
+        let ttl = row
+            .metadata
+            .get("ttl_seconds")
+            .and_then(|v| v.as_u64())
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| "-".into());
+        let comment = row
+            .metadata
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+            .to_string();
+        t.add_row(vec![
+            when.as_str(),
+            row.kind.as_str(),
+            principals.as_str(),
+            fingerprint.as_str(),
+            ttl.as_str(),
+            comment.as_str(),
+        ]);
+    }
+    t.to_string()
+}
+
+/// Render the `occurred_at` timestamp as a compact UTC `Z` string. We
+/// keep the second resolution because audit reads care about ordering
+/// down to the issuance call, not sub-second precision. Falls back to
+/// the raw string when parsing fails so a malformed row still renders.
+fn format_audit_timestamp(raw: &str) -> String {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| {
+            dt.with_timezone(&Utc)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// SHA-256 fingerprints are 50+ chars in OpenSSH's `SHA256:` form,
+/// which blows out the table on narrow terminals. The first 16 chars
+/// after the `SHA256:` prefix are unique enough for visual scanning
+/// in a 50-row window. Operators who need the full value can pipe
+/// through `jq` against the raw endpoint.
+fn shorten_fingerprint(s: &str) -> String {
+    let body = s.strip_prefix("SHA256:").unwrap_or(s);
+    let short: String = body.chars().take(16).collect();
+    if body.len() > 16 {
+        format!("SHA256:{short}...")
+    } else {
+        format!("SHA256:{short}")
+    }
 }
 
 /// Default pubkey path: `~/.ssh/id_ed25519.pub`.
@@ -812,5 +965,84 @@ mod tests {
         // Hosts with no last_seen_at render the dash placeholder so
         // the column never collapses.
         assert!(t.contains(" - "));
+    }
+
+    #[test]
+    fn render_audit_table_has_header_columns() {
+        let t = render_audit_table(&[]);
+        assert!(t.contains("WHEN"));
+        assert!(t.contains("KIND"));
+        assert!(t.contains("PRINCIPALS"));
+        assert!(t.contains("FINGERPRINT"));
+        assert!(t.contains("TTL"));
+        assert!(t.contains("COMMENT"));
+    }
+
+    #[test]
+    fn render_audit_table_pulls_fields_from_metadata() {
+        let rows = vec![AuditEntry {
+            kind: "ssh.cert.issued".into(),
+            occurred_at: "2026-05-21T10:30:00+00:00".into(),
+            metadata: serde_json::json!({
+                "pubkey_fingerprint": "SHA256:abcdef0123456789longersuffixhere",
+                "principals": ["isengard", "root"],
+                "ttl_seconds": 3600,
+                "comment": "operator@laptop 2026-05-21T10:30:00Z",
+            }),
+        }];
+        let t = render_audit_table(&rows);
+        assert!(t.contains("ssh.cert.issued"), "kind column: {t}");
+        assert!(t.contains("2026-05-21T10:30:00Z"), "when column: {t}");
+        assert!(t.contains("isengard,root"), "principals column: {t}");
+        assert!(
+            t.contains("SHA256:abcdef0123456789..."),
+            "fingerprint column (shortened): {t}"
+        );
+        assert!(t.contains("3600s"), "ttl column: {t}");
+        assert!(t.contains("operator@laptop"), "comment column: {t}");
+    }
+
+    #[test]
+    fn render_audit_table_handles_missing_metadata_gracefully() {
+        // No metadata fields at all: every projected column falls
+        // back to the `-` placeholder. The table still renders so
+        // pipeline consumers do not break on a malformed row.
+        let rows = vec![AuditEntry {
+            kind: "ssh.cert.issued".into(),
+            occurred_at: "2026-05-21T10:30:00+00:00".into(),
+            metadata: serde_json::Value::Null,
+        }];
+        let t = render_audit_table(&rows);
+        assert!(t.contains("ssh.cert.issued"));
+        // Three `-` placeholders for principals, fingerprint shortener
+        // result on missing input, ttl, comment. Don't pin the exact
+        // count: the table padding can collapse adjacent dashes into
+        // a single space cell. Just assert one is present.
+        assert!(t.contains(" - "), "placeholder is rendered: {t}");
+    }
+
+    #[test]
+    fn shorten_fingerprint_truncates_long_sha() {
+        let short = shorten_fingerprint("SHA256:abcdef0123456789longersuffix");
+        assert_eq!(short, "SHA256:abcdef0123456789...");
+    }
+
+    #[test]
+    fn shorten_fingerprint_passes_short_value_through() {
+        let short = shorten_fingerprint("SHA256:abc");
+        assert_eq!(short, "SHA256:abc");
+    }
+
+    #[test]
+    fn format_audit_timestamp_normalises_to_z_suffix() {
+        let t = format_audit_timestamp("2026-05-21T10:30:00+00:00");
+        assert_eq!(t, "2026-05-21T10:30:00Z");
+    }
+
+    #[test]
+    fn format_audit_timestamp_falls_back_on_garbage() {
+        let raw = "not-a-timestamp";
+        let t = format_audit_timestamp(raw);
+        assert_eq!(t, raw);
     }
 }
