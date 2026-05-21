@@ -582,7 +582,10 @@ fn prompt_for_update(_entry: &SchemaEntry, source: &str) -> Result<bool, WizardE
         "default" => ("Override the default?", false),
         _ => ("Set this now?", true),
     };
-    match inquire::Confirm::new(message).with_default(default).prompt() {
+    match inquire::Confirm::new(message)
+        .with_default(default)
+        .prompt()
+    {
         Ok(v) => Ok(v),
         Err(inquire::InquireError::OperationCanceled)
         | Err(inquire::InquireError::OperationInterrupted) => Err(WizardExit::Aborted),
@@ -609,9 +612,7 @@ fn prompt_for_value(entry: &SchemaEntry) -> Result<Value, WizardExit> {
             KeyType::Int => inquire::CustomType::<i64>::new("Value:")
                 .prompt()
                 .map(Value::from),
-            KeyType::Bool => inquire::Confirm::new("Value:")
-                .prompt()
-                .map(Value::Bool),
+            KeyType::Bool => inquire::Confirm::new("Value:").prompt().map(Value::Bool),
         };
         match attempt {
             Ok(Value::String(s)) if s.is_empty() => {
@@ -963,7 +964,11 @@ mod tests {
         // `isd configure` with no sub-verb must parse, with
         // `command = None`. That is what dispatches to the wizard.
         let w = WrapArgs::try_parse_from(["x"]).unwrap();
-        assert!(w.a.command.is_none(), "expected None, got {:?}", w.a.command);
+        assert!(
+            w.a.command.is_none(),
+            "expected None, got {:?}",
+            w.a.command
+        );
     }
 
     #[test]
