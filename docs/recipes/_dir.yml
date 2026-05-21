@@ -1,1 +1,6 @@
 title: Recipes
+navigation:
+  - ssh-into-a-fleet-host
+  - expose-a-service-on-tailscale
+  - rotate-the-controller-ca
+  - recover-from-a-bad-deploy

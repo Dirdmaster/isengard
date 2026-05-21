@@ -1,1 +1,7 @@
 title: Concepts
+navigation:
+  - architecture
+  - stack-vs-compose
+  - labels
+  - transport-and-trust
+  - ssh-bastion
