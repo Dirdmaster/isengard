@@ -578,6 +578,27 @@ fn shorten_fingerprint(s: &str) -> String {
     }
 }
 
+/// Split a `user@host` token into `(Some(user), host)`. A bare `host`
+/// returns `(None, host)`. An empty user (`@host`) is also reported as
+/// `None` so the dial path falls back to the default user instead of
+/// shelling out `ssh @host` with no principal.
+///
+/// The last `@` is the splitter: this matches what OpenSSH does and
+/// tolerates email-shaped principals correctly.
+fn parse_user_host(token: &str) -> (Option<String>, String) {
+    if let Some(idx) = token.rfind('@') {
+        let user = &token[..idx];
+        let host = &token[idx + 1..];
+        if user.is_empty() {
+            (None, host.to_string())
+        } else {
+            (Some(user.to_string()), host.to_string())
+        }
+    } else {
+        (None, token.to_string())
+    }
+}
+
 /// Default pubkey path: `~/.ssh/id_ed25519.pub`.
 fn default_pubkey_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("home dir not found")?;
@@ -837,6 +858,45 @@ fn parse_keygen_timestamp(s: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_user_host_user_at_host() {
+        assert_eq!(
+            parse_user_host("root@edge-1"),
+            (Some("root".into()), "edge-1".into())
+        );
+    }
+
+    #[test]
+    fn parse_user_host_bare_host() {
+        assert_eq!(parse_user_host("edge-1"), (None, "edge-1".into()));
+    }
+
+    #[test]
+    fn parse_user_host_dotted_host() {
+        assert_eq!(
+            parse_user_host("u@a.b.c"),
+            (Some("u".into()), "a.b.c".into())
+        );
+    }
+
+    #[test]
+    fn parse_user_host_ipv4() {
+        assert_eq!(
+            parse_user_host("u@1.2.3.4"),
+            (Some("u".into()), "1.2.3.4".into())
+        );
+    }
+
+    #[test]
+    fn parse_user_host_empty_user_treated_as_none() {
+        // `@host` form: last-@ splitter yields user="". The function
+        // reports that as `None` so the caller substitutes the default
+        // user instead of attempting to ssh with an empty username.
+        let (u, h) = parse_user_host("@host");
+        assert_eq!(h, "host");
+        assert!(u.is_none());
+    }
 
     fn fixture_valid() -> String {
         // Minted with `ssh-keygen -L -f`. Stable across OpenSSH
