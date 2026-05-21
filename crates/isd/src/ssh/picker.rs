@@ -9,10 +9,13 @@
 //!    operator onboarded via `isd ssh trust`. Reported as
 //!    `HostClass::Trusted`, no last-seen data.
 //!
-//! Task 4.1 wires the source merge and rendering shape. Task 4.2 adds
-//! the fzf / inquire frontends on top.
+//! When `fzf` is on `$PATH` the picker shells out to it (full-screen,
+//! fuzzy-search). Otherwise it falls back to `inquire::Select`, which
+//! works in any terminal without external deps.
 
 use std::collections::HashSet;
+
+use anyhow::Result;
 
 /// Source bucket for a picker row. The picker prints the bucket label
 /// in square brackets so the operator can tell at a glance which hosts
@@ -66,6 +69,81 @@ pub fn render_row(r: &PickerRow) -> String {
     };
     let last = r.last_seen.as_deref().unwrap_or("-");
     format!("{}\t[{}]\t{}", r.hostname, class, last)
+}
+
+/// Extract the hostname from a picker-rendered line. Returns the
+/// trimmed first tab field, or `None` when the line is empty (e.g. the
+/// user dismissed fzf without picking). Anything past the first tab is
+/// presentation-only: `[isengard]\t2026-05-...` etc.
+pub fn parse_selected_line(s: &str) -> Option<String> {
+    let token = s.split('\t').next()?.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// True when `fzf` is on `$PATH`. Used by the dispatcher to pick the
+/// preferred picker frontend: fzf when available, `inquire::Select`
+/// otherwise.
+pub fn fzf_available() -> bool {
+    which::which("fzf").is_ok()
+}
+
+/// Spawn `fzf`, pipe the rendered rows to its stdin, and parse the
+/// selected line. Returns `Ok(None)` when the user dismissed the
+/// picker (Esc / Ctrl-C / no match): the caller treats that as "no
+/// host selected" rather than an error.
+///
+/// `--with-nth=1,2,3` and `--delimiter=\t` mean fzf displays all three
+/// columns but searches against the full line, which keeps the
+/// hostname-first UX while letting the operator fuzzy-match on
+/// `[isengard]` or the last-seen timestamp.
+pub async fn pick_with_fzf(rows: &[PickerRow]) -> Result<Option<String>> {
+    use tokio::io::AsyncWriteExt;
+
+    let input: String = rows
+        .iter()
+        .map(render_row)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut child = tokio::process::Command::new("fzf")
+        .arg("--prompt=host: ")
+        .arg("--height=40%")
+        .arg("--reverse")
+        .arg("--with-nth=1,2,3")
+        .arg("--delimiter=\t")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("fzf stdin missing"))?;
+        stdin.write_all(input.as_bytes()).await?;
+        stdin.shutdown().await.ok();
+    }
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        // fzf exits 1 on no-match and 130 on Ctrl-C. Both mean "the
+        // operator did not pick a host"; surface as Ok(None).
+        return Ok(None);
+    }
+    let line = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+    Ok(parse_selected_line(&line))
+}
+
+/// Render the picker via `inquire::Select`. Used when fzf is not on
+/// PATH (operator never installed it, or stripped PATH in a CI shim).
+/// `prompt_skippable` returns `Ok(None)` on Esc instead of erroring,
+/// matching the fzf-cancel semantics.
+pub fn pick_with_inquire(rows: &[PickerRow]) -> Result<Option<String>> {
+    use inquire::Select;
+    let options: Vec<String> = rows.iter().map(render_row).collect();
+    let pick = Select::new("host:", options).prompt_skippable()?;
+    Ok(pick.and_then(|s| parse_selected_line(&s)))
 }
 
 #[cfg(test)]
@@ -178,5 +256,31 @@ mod tests {
         assert_eq!(parts[0], "edge-1");
         assert_eq!(parts[1], "[isengard]");
         assert_eq!(parts[2], "ts");
+    }
+
+    #[test]
+    fn parse_selected_line_extracts_hostname() {
+        let h = parse_selected_line("edge-1\t[isengard]\t2026-05-21T10:00:00Z");
+        assert_eq!(h.as_deref(), Some("edge-1"));
+    }
+
+    #[test]
+    fn parse_selected_line_handles_empty() {
+        assert_eq!(parse_selected_line(""), None);
+    }
+
+    #[test]
+    fn parse_selected_line_trims_whitespace() {
+        // fzf sometimes appends a trailing newline or space; the
+        // parser must strip it so the dial path does not receive
+        // `"edge-1\n"` as a hostname.
+        let h = parse_selected_line("  edge-1  \t[isengard]\t-");
+        assert_eq!(h.as_deref(), Some("edge-1"));
+    }
+
+    #[test]
+    fn parse_selected_line_returns_none_for_whitespace_only_first_field() {
+        let h = parse_selected_line("   \t[isengard]\t-");
+        assert_eq!(h, None);
     }
 }
