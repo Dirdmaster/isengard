@@ -79,6 +79,53 @@ Webhook URLs fired during the deploy lifecycle. All optional.
 
 Parser: `crates/isengard-core/src/hooks.rs::parse_hook_labels`.
 
+## SSH Bastion (`isengard.ssh.*`)
+
+Per-host knobs for the SSH bastion. The LSP recognises the vocabulary today; runtime enforcement (controller + agent actually reading these at mint and install time) lands in a later phase.
+
+| Label | What it does | Values |
+|---|---|---|
+| `isengard.ssh.disabled` | Skip SSH CA install on this host | `true` / `false` |
+| `isengard.ssh.principals` | Override default cert principals (default: `isengard`) | comma-separated list |
+| `isengard.ssh.max_ttl_seconds` | Per-host cap on minted SSH cert TTL, in seconds | u32 (capped at the controller's 24h ceiling) |
+| `isengard.ssh.allowed_users` | Whitelist of SSH usernames allowed to dial this host | comma-separated list (empty = allow all) |
+
+### `isengard.ssh.disabled`
+
+Set to `true` to skip installing the SSH CA on this host's sshd. Same effect as the `ISENGARD_SSH_BASTION_DISABLED=1` environment variable, but per-host and label-driven. Useful for taking one host out of the bastion without redeploying the agent.
+
+```yaml
+labels:
+  isengard.ssh.disabled: "true"
+```
+
+### `isengard.ssh.principals`
+
+Comma-separated list of SSH principals embedded in certs minted for this host. Defaults to `isengard`. Use this when the host's `authorized_principals` file lists a non-default identity.
+
+```yaml
+labels:
+  isengard.ssh.principals: "admin,deploy"
+```
+
+### `isengard.ssh.max_ttl_seconds`
+
+Per-host override of the controller's `ISENGARD_SSH_CERT_MAX_TTL` ceiling, in seconds. The controller's absolute 24h ceiling (86400 seconds) still applies; this label can only tighten the cap, never raise it.
+
+```yaml
+labels:
+  isengard.ssh.max_ttl_seconds: "3600"
+```
+
+### `isengard.ssh.allowed_users`
+
+Comma-separated whitelist of SSH usernames. When set, the controller rejects mint requests whose principal is not in this list. Empty / unset means allow all.
+
+```yaml
+labels:
+  isengard.ssh.allowed_users: "isengard,deploy"
+```
+
 ## System Plane (`io.isengard.*`)
 
 Set by the platform on its own containers. Don't put these on workload containers.

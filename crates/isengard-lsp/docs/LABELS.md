@@ -15,7 +15,7 @@ The columns are deliberately rigid:
 | Column | Meaning |
 |---|---|
 | `Label` | Exact label key (literal or `isengard.expose.<name>.port` style pattern). |
-| `Kind` | One of `Enum`, `Port`, `Url`, `Rfc3339`, `String`, `StringList`. |
+| `Kind` | One of `Enum`, `Port`, `U32`, `Url`, `Rfc3339`, `String`, `StringList`. |
 | `Values` | Pipe-separated allowed values when `Kind = Enum`, free text otherwise. |
 
 ## Core
@@ -66,6 +66,19 @@ not in the reserved property set (`port`, `tls`, `health`, `adapter`, `auth`).
 | `isengard.hooks.post_deploy` | Url | http(s) webhook URL |
 | `isengard.hooks.on_failure` | Url | http(s) webhook URL |
 | `isengard.hooks.secret` | String | shared HMAC secret |
+
+## SSH bastion (`isengard.ssh.*`)
+
+Per-host configuration for the SSH bastion. Runtime enforcement lands in
+a later phase; the LSP recognises the vocabulary today so YAML
+diagnostics and hover stay correct while operators edit compose.
+
+| Label | Kind | Values |
+|---|---|---|
+| `isengard.ssh.disabled` | Enum | true \| false |
+| `isengard.ssh.principals` | StringList | comma-separated SSH principals |
+| `isengard.ssh.max_ttl_seconds` | U32 | per-host TTL cap in seconds |
+| `isengard.ssh.allowed_users` | StringList | comma-separated allowed SSH usernames |
 
 ## System plane (`io.isengard.*`)
 
