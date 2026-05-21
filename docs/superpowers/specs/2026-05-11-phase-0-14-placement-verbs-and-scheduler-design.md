@@ -240,7 +240,7 @@ Three sources, merged in this order (later wins):
    tier = "gpu"
    zone = "eu-west"
    ```
-2. Environment variables matching `ISENGARD_LABEL_<KEY>=<VALUE>`. Useful for systemd: `Environment=ISENGARD_LABEL_ROLE=worker` in `iso-agent.service`.
+2. Environment variables matching `ISENGARD_LABEL_<KEY>=<VALUE>`. Useful for systemd: `Environment=ISENGARD_LABEL_ROLE=worker` in `isd-agent.service`.
 3. Future: dynamic labels from runtime probes (e.g. detect GPU). NOT shipped in 0.14; placeholder design only.
 
 Key rules:

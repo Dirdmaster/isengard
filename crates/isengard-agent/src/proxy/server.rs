@@ -84,7 +84,7 @@ impl ShutdownSignalWatch for OneshotShutdown {
 ///     bound on any sensible request.
 ///   - `graceful_shutdown_timeout_seconds = 30`. Tokio runtime
 ///     shutdown window. 30s is the cap before systemd's
-///     TimeoutStopSec=15s (set on iso-agent.service in this commit)
+///     TimeoutStopSec=15s (set on isd-agent.service in this commit)
 ///     escalates to SIGKILL, so the SIGKILL is the actual ceiling.
 fn server_conf() -> ServerConf {
     ServerConf {

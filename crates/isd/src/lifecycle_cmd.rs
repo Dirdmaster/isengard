@@ -119,7 +119,7 @@ pub struct StartArgs {
 }
 
 /// Start one or more containers. No protection guard: starting an
-/// already-running container is a no-op, and starting an iso-controller
+/// already-running container is a no-op, and starting an isd-controller
 /// the operator deliberately stopped is intentional.
 ///
 /// # Errors
@@ -267,15 +267,15 @@ mod tests {
     /// with an actionable error naming both override paths.
     #[test]
     fn rm_refuses_protected_container_without_force_system() {
-        let err = check_one_target_protection("iso-controller", Some("controller"), false, "rm")
+        let err = check_one_target_protection("isd-controller", Some("controller"), false, "rm")
             .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("refused"), "got: {msg}");
-        assert!(msg.contains("iso-controller"), "got: {msg}");
+        assert!(msg.contains("isd-controller"), "got: {msg}");
         assert!(msg.contains("io.isengard.role=controller"), "got: {msg}");
         assert!(msg.contains("isd uninit"), "got: {msg}");
         assert!(
-            msg.contains("isd rm --force-system iso-controller"),
+            msg.contains("isd rm --force-system isd-controller"),
             "got: {msg}"
         );
     }
@@ -284,7 +284,7 @@ mod tests {
     /// teardown (`isd uninit` internals) can target system containers.
     #[test]
     fn rm_allows_protected_with_force_system() {
-        check_one_target_protection("iso-controller", Some("controller"), true, "rm")
+        check_one_target_protection("isd-controller", Some("controller"), true, "rm")
             .expect("force_system bypasses the guard");
     }
 
@@ -293,12 +293,12 @@ mod tests {
     #[test]
     fn stop_refuses_protected_container_without_force_system() {
         let err =
-            check_one_target_protection("iso-agent", Some("agent"), false, "stop").unwrap_err();
+            check_one_target_protection("isd-agent", Some("agent"), false, "stop").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("refused"), "got: {msg}");
         assert!(msg.contains("io.isengard.role=agent"), "got: {msg}");
         assert!(
-            msg.contains("isd stop --force-system iso-agent"),
+            msg.contains("isd stop --force-system isd-agent"),
             "got: {msg}"
         );
     }
@@ -307,11 +307,11 @@ mod tests {
     #[test]
     fn restart_refuses_protected_container_without_force_system() {
         let err =
-            check_one_target_protection("iso-controller", Some("controller"), false, "restart")
+            check_one_target_protection("isd-controller", Some("controller"), false, "restart")
                 .unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("isd restart --force-system iso-controller"),
+            msg.contains("isd restart --force-system isd-controller"),
             "got: {msg}"
         );
     }
@@ -320,10 +320,10 @@ mod tests {
     #[test]
     fn kill_refuses_protected_container_without_force_system() {
         let err =
-            check_one_target_protection("iso-agent", Some("agent"), false, "kill").unwrap_err();
+            check_one_target_protection("isd-agent", Some("agent"), false, "kill").unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("isd kill --force-system iso-agent"),
+            msg.contains("isd kill --force-system isd-agent"),
             "got: {msg}"
         );
     }

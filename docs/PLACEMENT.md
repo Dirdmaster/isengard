@@ -174,7 +174,7 @@ values containing `=` / `,` are dropped with a warning, not errored:
 the agent keeps booting even with a typo.
 
 Re-read on SIGHUP is future work. Today a change to labels means
-`systemctl restart iso-agent`.
+`systemctl restart isd-agent`.
 
 ## Operator decisions (locked 2026-05-11)
 
@@ -273,7 +273,7 @@ STACK  SERVICE  REPLICA  HOST  STATE   ASSIGNED
 Relabel alice (`role=worker` env var or agent.toml edit + restart):
 
 ```
-$ ssh alice systemctl restart iso-agent
+$ ssh alice systemctl restart isd-agent
 $ isd placement show
 STACK  SERVICE  REPLICA  HOST  STATE   ASSIGNED
 1      web      0        bob   active  ...

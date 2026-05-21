@@ -1,6 +1,6 @@
 //! `isd restore`: inverse of `isd backup`. Decrypts ciphertext from
 //! filesystem / docker named volume / S3-API and extracts the tar into the
-//! `iso-controller-state` docker volume.
+//! `isd-controller-state` docker volume.
 //!
 //! Pipeline:
 //!   source reader (file / alpine cat / S3 get_object)
@@ -9,7 +9,7 @@
 //!     -> SyncIoBridge (blocking Write over tokio AsyncWrite)
 //!     -> alpine `tar x -C /state` stdin
 //!
-//! Refuses to overwrite a populated `iso-controller-state` unless
+//! Refuses to overwrite a populated `isd-controller-state` unless
 //! `--overwrite` is set: protects an operator from blowing away a live
 //! controller's state on a typo.
 
@@ -28,7 +28,7 @@ use crate::backup_storage::{self, BackupDestination};
 const HELPER_IMAGE: &str = "alpine:3.21";
 
 /// Named volume to restore into.
-const STATE_VOLUME: &str = "iso-controller-state";
+const STATE_VOLUME: &str = "isd-controller-state";
 
 /// CLI flags for `isd restore`.
 #[derive(Debug, Args)]
@@ -39,13 +39,13 @@ pub struct RestoreArgs {
     /// Decrypt with passphrase from file (overrides env + stored).
     #[arg(long)]
     pub passphrase_file: Option<PathBuf>,
-    /// Refuse if iso-controller-state already has content; --overwrite
+    /// Refuse if isd-controller-state already has content; --overwrite
     /// is required to clobber a populated volume.
     #[arg(long)]
     pub overwrite: bool,
 }
 
-/// Restore the `iso-controller-state` volume from an encrypted
+/// Restore the `isd-controller-state` volume from an encrypted
 /// backup. Refuses to clobber a populated volume unless
 /// `--overwrite` is set.
 ///
@@ -158,7 +158,7 @@ fn parse_source(
     Ok(BackupDestination::Fs(PathBuf::from(spec)))
 }
 
-/// Ask docker whether `iso-controller-state` has any entries. Uses a
+/// Ask docker whether `isd-controller-state` has any entries. Uses a
 /// one-shot alpine `ls -A /state` whose exit code is 0 iff the directory
 /// is readable; we treat any captured stdout line as "non-empty". Volume
 /// not yet created -> the bind mount creates it empty, so we still see
@@ -229,7 +229,7 @@ async fn state_volume_populated(docker: &isd_runtime::DockerBackend) -> Result<b
     Ok(!buf.trim().is_empty())
 }
 
-/// Spawn a one-shot `alpine tar x -C /state` container with `iso-controller-state`
+/// Spawn a one-shot `alpine tar x -C /state` container with `isd-controller-state`
 /// mounted read-write, attached to its stdin. Returns the stdin sink so the
 /// pipeline can write age-decrypted tar bytes into it.
 async fn spawn_tar_extractor(

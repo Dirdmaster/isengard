@@ -556,7 +556,7 @@ mod tests {
             "create",
             "iso.vallee.casa",
             "--service",
-            "iso-controller",
+            "isd-controller",
             "--port",
             "9418",
         ])
@@ -566,7 +566,7 @@ mod tests {
                 assert_eq!(a.public_hostname.as_deref(), Some("iso.vallee.casa"));
                 assert!(a.host_id.is_none());
                 assert!(a.host.is_none());
-                assert_eq!(a.service.as_deref(), Some("iso-controller"));
+                assert_eq!(a.service.as_deref(), Some("isd-controller"));
                 assert_eq!(a.port, Some(9418));
                 assert_eq!(a.protocol, "http");
                 assert_eq!(a.adapter, "none");
@@ -591,7 +591,7 @@ mod tests {
             "--host-id",
             "01H000000000000000000000",
             "--service",
-            "iso-controller",
+            "isd-controller",
             "--port",
             "9418",
         ])

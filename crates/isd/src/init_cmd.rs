@@ -5,7 +5,7 @@
 //! Step machine (each step is a discrete async function with its own
 //! error context):
 //!   1. check no existing controller (or --force tears it down)
-//!   2. create iso-controller-state docker volume
+//!   2. create isd-controller-state docker volume
 //!   3. generate master.key inside the volume via bootstrap container
 //!   4. docker compose up -d controller (embedded recipe)
 //!   5. wait for controller to become discoverable + healthy
@@ -26,10 +26,10 @@ use clap::Args;
 /// CLI flags for `isd init`.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Tear down any existing iso-controller / iso-agent containers
-    /// before bringing up new ones. Preserves the iso-controller-state
+    /// Tear down any existing isd-controller / isd-agent containers
+    /// before bringing up new ones. Preserves the isd-controller-state
     /// docker volume (master key + SQLite kept). To wipe everything:
-    /// `docker volume rm iso-controller-state`.
+    /// `docker volume rm isd-controller-state`.
     #[arg(long)]
     pub force: bool,
 
@@ -46,7 +46,7 @@ pub struct InitArgs {
 pub(crate) const EMBEDDED_COMPOSE: &str = include_str!("../../../install/compose.yaml");
 
 /// Image used for the one-shot bootstrap container that seeds
-/// `/state/master.key` in the iso-controller-state volume. Pinned to a
+/// `/state/master.key` in the isd-controller-state volume. Pinned to a
 /// concrete minor so the binary's behaviour does not silently shift if
 /// Docker Hub re-tags `alpine:latest`.
 const BOOTSTRAP_IMAGE: &str = "alpine:3.21";
@@ -146,16 +146,16 @@ async fn step_check_no_existing_controller(docker_uri: &str, force: bool) -> Res
     Ok(())
 }
 
-// === Step 2: create the iso-controller-state docker volume ===
+// === Step 2: create the isd-controller-state docker volume ===
 
-/// Step 2: create the `iso-controller-state` named volume. Idempotent:
+/// Step 2: create the `isd-controller-state` named volume. Idempotent:
 /// docker returns the existing volume on a re-run.
 async fn step_create_state_volume(docker_uri: &str) -> Result<()> {
     use bollard::volume::CreateVolumeOptions;
 
     let docker = isd_runtime::DockerBackend::from_uri(docker_uri).await?;
     let options = CreateVolumeOptions::<&str> {
-        name: "iso-controller-state",
+        name: "isd-controller-state",
         driver: "local",
         ..Default::default()
     };
@@ -163,8 +163,8 @@ async fn step_create_state_volume(docker_uri: &str) -> Result<()> {
         .client()
         .create_volume(options)
         .await
-        .context("creating iso-controller-state volume")?;
-    eprintln!("isd init: volume iso-controller-state ready");
+        .context("creating isd-controller-state volume")?;
+    eprintln!("isd init: volume isd-controller-state ready");
     Ok(())
 }
 
@@ -206,7 +206,7 @@ async fn step_generate_master_key(docker_uri: &str) -> Result<()> {
         image: Some(BOOTSTRAP_IMAGE.into()),
         cmd: Some(cmd),
         host_config: Some(HostConfig {
-            binds: Some(vec!["iso-controller-state:/state".into()]),
+            binds: Some(vec!["isd-controller-state:/state".into()]),
             auto_remove: Some(true),
             ..Default::default()
         }),
@@ -235,7 +235,7 @@ async fn step_generate_master_key(docker_uri: &str) -> Result<()> {
             ));
         }
     }
-    eprintln!("isd init: master key ready (in iso-controller-state volume)");
+    eprintln!("isd init: master key ready (in isd-controller-state volume)");
     Ok(())
 }
 
@@ -288,7 +288,7 @@ async fn step_wait_for_controller_ready(docker_uri: &str) -> Result<()> {
         if Instant::now() > deadline {
             eprintln!();
             return Err(anyhow!(
-                "controller did not become ready within 30s. Check `docker logs iso-controller`."
+                "controller did not become ready within 30s. Check `docker logs isd-controller`."
             ));
         }
         if let Ok(endpoint) = isd_runtime::discover(docker.client()).await {
@@ -324,7 +324,7 @@ async fn step_mint_first_join_token(docker_uri: &str) -> Result<String> {
     let exec = docker
         .client()
         .create_exec(
-            "iso-controller",
+            "isd-controller",
             CreateExecOptions::<String> {
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
@@ -457,7 +457,7 @@ async fn step_wait_for_agent_enrolled(docker_uri: &str) -> Result<()> {
         if Instant::now() > deadline {
             eprintln!();
             return Err(anyhow!(
-                "agent did not enrol within 60s. Check `docker logs iso-agent`."
+                "agent did not enrol within 60s. Check `docker logs isd-agent`."
             ));
         }
         if let Ok(resp) = reqwest::get(&url).await

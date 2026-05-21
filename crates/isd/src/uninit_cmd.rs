@@ -1,7 +1,7 @@
 //! `isd uninit`: tear down the cluster created by `isd init`.
 //!
-//! Stops + removes iso-controller and iso-agent. Preserves the
-//! iso-controller-state, iso-agent-state, iso-stacks docker volumes by
+//! Stops + removes isd-controller and isd-agent. Preserves the
+//! isd-controller-state, isd-agent-state, isd-stacks docker volumes by
 //! default so a subsequent `isd init` (idempotent) or `isd restore <backup>`
 //! brings the cluster back with all data intact. Pass `--wipe-state` to
 //! also delete the volumes: UNRECOVERABLE without a prior `isd backup`.
@@ -22,7 +22,7 @@ pub struct UninitArgs {
     /// Skip the y/N prompt.
     #[arg(long)]
     pub yes: bool,
-    /// Also remove the iso-controller-state / iso-agent-state / iso-stacks
+    /// Also remove the isd-controller-state / isd-agent-state / isd-stacks
     /// docker volumes. UNRECOVERABLE without a prior backup.
     #[arg(long)]
     pub wipe_state: bool,
@@ -33,17 +33,17 @@ pub struct UninitArgs {
 
 /// Named volumes the cluster's state lives in. Preserved by default;
 /// removed only when `--wipe-state` is set.
-const VOLUMES: &[&str] = &["iso-controller-state", "iso-agent-state", "iso-stacks"];
+const VOLUMES: &[&str] = &["isd-controller-state", "isd-agent-state", "isd-stacks"];
 
 /// System containers the cluster runs. Removed unconditionally as part
 /// of teardown.
-const CONTAINERS: &[&str] = &["iso-controller", "iso-agent"];
+const CONTAINERS: &[&str] = &["isd-controller", "isd-agent"];
 
 /// Tear down the cluster on the resolved docker context.
 ///
 /// Optionally takes an encrypted backup first (`--backup-first`),
 /// prompts the operator (skipped with `--yes`), then removes the
-/// iso-controller and iso-agent containers. Preserves the named state
+/// isd-controller and isd-agent containers. Preserves the named state
 /// volumes by default; `--wipe-state` deletes them too.
 ///
 /// Calls `remove_container` directly via bollard, bypassing the
@@ -65,7 +65,7 @@ pub async fn run(args: UninitArgs, context: Option<&str>) -> Result<()> {
     }
 
     if !args.yes {
-        eprintln!("isd uninit: will stop + remove iso-controller and iso-agent on {docker_uri}.");
+        eprintln!("isd uninit: will stop + remove isd-controller and isd-agent on {docker_uri}.");
         if args.wipe_state {
             eprintln!(
                 "isd uninit: --wipe-state WILL DELETE volumes: {}",

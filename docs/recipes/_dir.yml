@@ -4,3 +4,4 @@ navigation:
   - expose-a-service-on-tailscale
   - rotate-the-controller-ca
   - recover-from-a-bad-deploy
+  - upgrade-iso-to-isd-naming

@@ -56,10 +56,10 @@ Token minted (expires in 15m).
 To enroll an agent, run on the host where you want it to live:
 
     docker run -d \
-      --name iso-agent \
+      --name isd-agent \
       --restart unless-stopped \
       --platform linux/amd64 \
-      -v iso-agent-state:/var/lib/isengard \
+      -v isd-agent-state:/var/lib/isengard \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -e ISENGARD_ENROLL_TOKEN=01HX... \
       -e ISENGARD_CONTROLLER_CA_PEM_BASE64=LS0t... \

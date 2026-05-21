@@ -672,10 +672,10 @@ fn render_join_command(a: JoinCommandArgs<'_>) -> String {
     out.push_str(&format!("Token minted (expires in {}).\n\n", a.ttl));
     out.push_str("To enroll an agent, run on the host where you want it to live:\n\n");
     out.push_str("    docker run -d \\\n");
-    out.push_str("      --name iso-agent \\\n");
+    out.push_str("      --name isd-agent \\\n");
     out.push_str("      --restart unless-stopped \\\n");
     out.push_str("      --platform linux/amd64 \\\n");
-    out.push_str("      -v iso-agent-state:/var/lib/isengard \\\n");
+    out.push_str("      -v isd-agent-state:/var/lib/isengard \\\n");
     out.push_str("      -v /var/run/docker.sock:/var/run/docker.sock \\\n");
     out.push_str(&format!("      -e ISENGARD_ENROLL_TOKEN={} \\\n", a.token));
     out.push_str(&format!("      {} \\\n", a.image));

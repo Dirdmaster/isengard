@@ -22,7 +22,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::backup_credentials::S3Creds;
 
 /// Image used for the tar / cat one-shot containers that bridge the
-/// iso-controller-state volume into a stdin / stdout byte stream.
+/// isd-controller-state volume into a stdin / stdout byte stream.
 /// Same tag as `init_cmd::BOOTSTRAP_IMAGE` so cached layers stay shared.
 const HELPER_IMAGE: &str = "alpine:3.21";
 
@@ -181,7 +181,7 @@ pub async fn open_reader(dest: &BackupDestination) -> Result<Box<dyn AsyncRead +
 
 // === Volume destination (Task 5.5) ============================================
 //
-// Each side spawns a one-shot alpine container with the iso-controller-state
+// Each side spawns a one-shot alpine container with the isd-controller-state
 // volume mounted at /dst and attaches to its stdin (writer) or stdout (reader).
 // `auto_remove: true` means the container vanishes after exit; we don't need to
 // track its ID after attach. The bollard image-pull is skipped here on the

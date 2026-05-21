@@ -282,9 +282,9 @@ mod tests {
     #[test]
     fn ps_hides_system_containers_by_default() {
         let rows = vec![
-            make_row("iso-controller", Some("controller")),
+            make_row("isd-controller", Some("controller")),
             make_row("bazarr", None),
-            make_row("iso-agent", Some("agent")),
+            make_row("isd-agent", Some("agent")),
             make_row("plex", None),
         ];
         let filtered = filter_system(rows, false);
@@ -308,14 +308,14 @@ mod tests {
     #[test]
     fn ps_all_system_shows_everything() {
         let rows = vec![
-            make_row("iso-controller", Some("controller")),
+            make_row("isd-controller", Some("controller")),
             make_row("bazarr", None),
-            make_row("iso-agent", Some("agent")),
+            make_row("isd-agent", Some("agent")),
         ];
         let filtered = filter_system(rows, true);
         assert_eq!(filtered.len(), 3);
         let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
-        assert_eq!(names, vec!["iso-controller", "bazarr", "iso-agent"]);
+        assert_eq!(names, vec!["isd-controller", "bazarr", "isd-agent"]);
     }
 
     #[test]
