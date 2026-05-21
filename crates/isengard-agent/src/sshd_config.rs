@@ -2,7 +2,7 @@
 //! drop-in for the host's sshd.
 //!
 //! Triggered once per enrollment from the agent main flow. The pubkey
-//! lives at `/host/etc/isengard/ssh_ca.pub`; sshd picks it up via the
+//! lives at `/host/etc/ssh/isengard_ca.pub`; sshd picks it up via the
 //! drop-in at `/host/etc/ssh/sshd_config.d/40-isengard-ca.conf`. After
 //! the write, the agent issues a HUP-equivalent reload so sshd picks
 //! up the new directive without restarting open sessions.
@@ -26,13 +26,13 @@ use tracing::{debug, warn};
 /// host's perspective it's `/etc/...`. sshd's drop-in references the
 /// host-perspective path.
 /// Where the agent writes the CA pubkey, as seen from inside the
-/// agent's container (the host's `/etc/isengard/ssh_ca.pub` lives at
-/// `/host/etc/isengard/ssh_ca.pub` because the agent compose mounts
+/// agent's container (the host's `/etc/ssh/isengard_ca.pub` lives at
+/// `/host/etc/ssh/isengard_ca.pub` because the agent compose mounts
 /// the host root at `/host`).
-const CA_PATH_INSIDE_CONTAINER: &str = "/host/etc/isengard/ssh_ca.pub";
+const CA_PATH_INSIDE_CONTAINER: &str = "/host/etc/ssh/isengard_ca.pub";
 /// Same file's path as sshd sees it from the host's perspective.
 /// Referenced inside the drop-in body.
-const CA_PATH_FROM_SSHD: &str = "/etc/isengard/ssh_ca.pub";
+const CA_PATH_FROM_SSHD: &str = "/etc/ssh/isengard_ca.pub";
 
 /// Path of the sshd drop-in that wires the CA into `TrustedUserCAKeys`.
 const DROPIN_PATH_INSIDE_CONTAINER: &str = "/host/etc/ssh/sshd_config.d/40-isengard-ca.conf";
@@ -203,7 +203,7 @@ mod tests {
     fn dropin_body_pins_managed_comment_and_ca_path() {
         let body = dropin_body();
         assert!(body.starts_with("# Managed by isengard-agent."));
-        assert!(body.contains("TrustedUserCAKeys /etc/isengard/ssh_ca.pub"));
+        assert!(body.contains("TrustedUserCAKeys /etc/ssh/isengard_ca.pub"));
         assert!(body.ends_with('\n'));
     }
 

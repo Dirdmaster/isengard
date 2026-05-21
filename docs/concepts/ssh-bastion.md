@@ -9,14 +9,14 @@ description: Short-lived SSH user certs minted by the controller, trusted by eve
 
 The controller mints short-lived SSH user certificates. Every enrolled agent host trusts those certs automatically via a `TrustedUserCAKeys` drop-in. Operators run `isd ssh <host>` and land in a shell. No per-host accounts, no `~/.ssh/authorized_keys` to chase across the fleet, no shared bastion box.
 
-The whole thing rides on the controller's SSH user CA: one keypair, generated at first boot, kept on the controller. Every agent gets the CA pubkey at enrollment and writes it to `/etc/isengard/ssh_ca.pub`. Sshd reads the drop-in at `/etc/ssh/sshd_config.d/40-isengard-ca.conf` and starts honoring certs signed by that CA.
+The whole thing rides on the controller's SSH user CA: one keypair, generated at first boot, kept on the controller. Every agent gets the CA pubkey at enrollment and writes it to `/etc/ssh/isengard_ca.pub`. Sshd reads the drop-in at `/etc/ssh/sshd_config.d/40-isengard-ca.conf` and starts honoring certs signed by that CA.
 
 ## How it works
 
 Four pieces talk to each other across the lifecycle:
 
 1. **Controller**: owns an `SshAuthority` (the CA keypair). Exposes `GET /api/v1/ssh/ca` to hand out the public half, and `POST /api/v1/ssh/cert` to sign operator pubkeys into user certs.
-2. **Agent**: fetches the CA pubkey during enrollment, writes it to the host's `/etc/isengard/ssh_ca.pub`, drops the sshd config snippet, reloads sshd.
+2. **Agent**: fetches the CA pubkey during enrollment, writes it to the host's `/etc/ssh/isengard_ca.pub`, drops the sshd config snippet, reloads sshd.
 3. **Dashboard**: hosts the two endpoints above. Caps TTL via `ISENGARD_SSH_CERT_MAX_TTL` (default 1h, absolute ceiling 24h) and writes an `ssh.cert.issued` event to the journal on every successful mint.
 4. **`isd ssh`**: the operator CLI. Reads `~/.ssh/id_ed25519.pub`, POSTs it to the dashboard, writes the signed cert next to the pubkey as `id_ed25519-cert.pub`, and exec's `ssh isengard@<host>`. OpenSSH picks the cert up automatically because of the `-cert.pub` naming.
 
