@@ -40,6 +40,54 @@ fn ssh_help_lists_subcommands() {
         stdout.contains("audit"),
         "ssh --help mentions audit: {stdout}"
     );
+    assert!(
+        stdout.contains("trust"),
+        "ssh --help mentions trust: {stdout}"
+    );
+    assert!(
+        stdout.contains("untrust"),
+        "ssh --help mentions untrust: {stdout}"
+    );
+}
+
+#[test]
+fn ssh_trust_help_lists_bootstrap_flags() {
+    let out = isd_bin()
+        .args(["ssh", "trust", "--help"])
+        .output()
+        .expect("run isd ssh trust --help");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--user"),
+        "trust --help mentions --user: {stdout}"
+    );
+    assert!(
+        stdout.contains("--port"),
+        "trust --help mentions --port: {stdout}"
+    );
+    assert!(
+        stdout.contains("--no-record"),
+        "trust --help mentions --no-record: {stdout}"
+    );
+}
+
+#[test]
+fn ssh_untrust_errors_when_host_not_in_store() {
+    // No trusted_hosts.toml exists in the tmp HOME, so `untrust foo`
+    // hits the "not in file" error path without ever touching the
+    // network or a controller.
+    let home = tempfile::tempdir().expect("tmp home");
+    let out = isd_bin()
+        .args(["ssh", "untrust", "nonexistent.example.invalid"])
+        .env("HOME", home.path())
+        .output()
+        .expect("run isd ssh untrust");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not in") || stderr.contains("nothing to remove"),
+        "stderr explains the host is absent: {stderr}"
+    );
 }
 
 #[test]

@@ -33,6 +33,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
+pub mod trust;
+pub mod trusted_hosts;
+
 /// CLI flags for `isd ssh`.
 #[derive(Debug, Args)]
 pub struct SshArgs {
@@ -43,8 +46,8 @@ pub struct SshArgs {
 
 /// Sub-verbs under `isd ssh`. The `Host` variant is an
 /// `external_subcommand`: any token that does not match `mint`,
-/// `status`, `hosts`, `ca`, or `audit` is captured here as the dial
-/// target + passthrough `ssh` arguments.
+/// `status`, `hosts`, `ca`, `audit`, `trust`, or `untrust` is captured
+/// here as the dial target + passthrough `ssh` arguments.
 #[derive(Debug, Subcommand)]
 pub enum SshCommand {
     /// Connect to a fleet host (auto-mints a cert if needed).
@@ -61,6 +64,13 @@ pub enum SshCommand {
     Ca(CaCommand),
     /// Show recent SSH cert issuances.
     Audit(AuditArgs),
+    /// Bootstrap a non-Isengard server: install the controller CA via
+    /// the operator's existing SSH access, then record the host in
+    /// `~/.config/isd/trusted_hosts.toml`.
+    Trust(TrustArgs),
+    /// Remove a host from the local trusted_hosts.toml. Remote sshd
+    /// config is left alone (operator-managed).
+    Untrust(UntrustArgs),
 }
 
 /// Sub-verbs under `isd ssh ca`. Reserved as a subcommand group so the
@@ -83,6 +93,35 @@ pub struct AuditArgs {
     /// clamps this against an internal 5000-row ceiling.
     #[arg(long, default_value_t = 50)]
     pub limit: u32,
+}
+
+/// CLI flags for `isd ssh trust`. The operator must already have SSH
+/// access to `<host>` via their existing key: `isd ssh trust` does not
+/// know any host-side passwords.
+#[derive(Debug, Args, Clone)]
+pub struct TrustArgs {
+    /// The host to bootstrap (must already be SSH-reachable with the
+    /// operator's existing key).
+    pub host: String,
+    /// Override the SSH user for the bootstrap connection. Defaults to
+    /// `$USER` (via `whoami` then `$USER`).
+    #[arg(long)]
+    pub user: Option<String>,
+    /// Override the SSH port for the bootstrap connection.
+    #[arg(long, default_value_t = 22)]
+    pub port: u16,
+    /// Skip the local `trusted_hosts.toml` write. The bootstrap script
+    /// still runs; only the local record is suppressed.
+    #[arg(long)]
+    pub no_record: bool,
+}
+
+/// CLI flags for `isd ssh untrust`. Local-only: removes the host from
+/// `trusted_hosts.toml`. Does not touch the remote sshd config.
+#[derive(Debug, Args, Clone)]
+pub struct UntrustArgs {
+    /// The host to remove from `~/.config/isd/trusted_hosts.toml`.
+    pub host: String,
 }
 
 /// CLI flags for `isd ssh mint`. Defaults match what the auto-mint
@@ -149,9 +188,9 @@ struct IssueResponse {
 
 /// Response shape for `GET /api/v1/ssh/ca`.
 #[derive(Debug, Deserialize)]
-struct CaPubkeyResponse {
+pub(super) struct CaPubkeyResponse {
     /// SSH CA pubkey in OpenSSH wire format.
-    pubkey: String,
+    pub pubkey: String,
 }
 
 /// Subset of the dashboard `HostDto` we render under `isd ssh hosts`.
@@ -182,6 +221,8 @@ pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
         SshCommand::Hosts => run_hosts(context).await,
         SshCommand::Ca(CaCommand::Pubkey) => run_ca_pubkey(context).await,
         SshCommand::Audit(a) => run_audit(a, context).await,
+        SshCommand::Trust(a) => trust::run_trust(a, context).await,
+        SshCommand::Untrust(a) => trust::run_untrust(a).await,
     }
 }
 
@@ -667,7 +708,7 @@ fn ensure_local_keypair() -> Result<()> {
 /// to an empty string. Callers in the dial/mint paths fail loudly when
 /// the result is empty so the operator gets an actionable error
 /// instead of a `ssh @host` invocation.
-fn default_user() -> String {
+pub(super) fn default_user() -> String {
     let w = whoami::username();
     if !w.is_empty() {
         return w;
