@@ -25,10 +25,10 @@ Copy the printed `isd join` command, paste it on the target host, wait for `agen
 
 ## 2. Confirm the agent installed the CA
 
-The agent writes the controller's SSH CA pubkey to `/etc/isengard/ssh_ca.pub` and a sshd drop-in at `/etc/ssh/sshd_config.d/40-isengard-ca.conf`, then reloads sshd. From the target host:
+The agent writes the controller's SSH CA pubkey to `/etc/ssh/isengard_ca.pub` and a sshd drop-in at `/etc/ssh/sshd_config.d/40-isengard-ca.conf`, then reloads sshd. From the target host:
 
 ```sh
-cat /etc/isengard/ssh_ca.pub
+cat /etc/ssh/isengard_ca.pub
 cat /etc/ssh/sshd_config.d/40-isengard-ca.conf
 sudo sshd -T | grep -i trustedusercakeys
 ```
