@@ -49,6 +49,13 @@ install-updater = false
 # for hours and never produced actionable signal anyway. The real
 # release runs on tag-push, which is when correctness matters.
 pr-run-mode = "skip"
+# `.github/workflows/release.yml` is hand-patched: cargo-dist 0.28
+# emits `runs-on: ubuntu-20.04`, which GitHub retired in 2025. We
+# replaced every occurrence with `ubuntu-latest` and asserted
+# allow-dirty here so cargo-dist accepts the divergence instead of
+# refusing to run. Remove this when we upgrade to cargo-dist 0.31+
+# (which generates `ubuntu-latest` natively).
+allow-dirty = ["ci"]
 # Homebrew tap repo (separate, lives at Weavers-Engineering/homebrew-isengard).
 # Requires a HOMEBREW_TAP_TOKEN secret on the Isengard repo with
 # `contents: write` on the tap. Without it the homebrew job no-ops.
