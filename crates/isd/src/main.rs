@@ -27,6 +27,7 @@ mod backup_credentials;
 mod backup_crypto;
 mod backup_storage;
 mod compose_cmd;
+mod configure;
 mod confirm;
 mod context;
 mod docker_context;
@@ -117,6 +118,10 @@ enum Command {
     /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
+    /// Get, set, unset, list, or print the schema for controller-wide
+    /// configuration keys (Cloudflare token, ACME email, default zone,
+    /// SSH TTL cap, etc.).
+    Configure(configure::ConfigureArgs),
     /// Manage routing rules.
     #[command(subcommand)]
     Route(route::RouteCommand),
@@ -202,6 +207,7 @@ async fn main() {
         Command::Secret(cmd) => {
             secret::run(secret::SecretArgs { command: cmd }, cli.context.as_deref()).await
         }
+        Command::Configure(args) => configure::run(args, cli.context.as_deref()).await,
         Command::Route(cmd) => {
             route::run(route::RouteArgs { command: cmd }, cli.context.as_deref()).await
         }

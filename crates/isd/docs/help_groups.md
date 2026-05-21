@@ -18,7 +18,7 @@ first sit at the top.
 |---|---|
 | Containers | `ps`, `logs`, `stop`, `start`, `restart`, `rm`, `kill` |
 | Stacks | `stack` (with sub-verbs `ls`, `ps`, `deploy`, `diff`, `edit`, `manifest`), `open` |
-| Cluster | `hosts`, `service`, `route`, `secret`, `placement`, `join`, `join-token` |
+| Cluster | `hosts`, `service`, `route`, `secret`, `configure`, `placement`, `join`, `join-token` |
 | Setup | `init`, `uninit`, `upgrade`, `context`, `update` |
 | Backup | `backup`, `restore` |
 | Editor | `lsp`, `mcp` |

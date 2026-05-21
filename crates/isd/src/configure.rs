@@ -1,0 +1,769 @@
+//! `isd configure` operator surface (controller-wide configuration).
+//!
+//! Five sub-verbs:
+//!
+//!  - `isd configure get <key> [--show-secret]`: print one key.
+//!  - `isd configure set <key> [<value>|--stdin|--from-file <path>]`:
+//!    write one key. Secret-typed keys refuse inline values at the
+//!    parser-side level via clap `conflicts_with`, and again at runtime
+//!    via a schema fetch before the PUT.
+//!  - `isd configure unset <key>`: clear one key (falls back to the
+//!    schema default if any).
+//!  - `isd configure list [--show-secrets]`: print every key with its
+//!    current value (secrets redacted by default).
+//!  - `isd configure schema`: print the static schema (key, type,
+//!    default, description).
+//!
+//! All five verbs hit the dashboard's `/api/v1/config*` routes through
+//! a [`Session`] (same pattern as `secret.rs` and `ssh/mod.rs`).
+//!
+//! There is no rotation verb: operators just `set` again. See the
+//! `2026-05-21-isd-configure-design` spec for the locked decisions.
+
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
+
+use anyhow::{Context as _, Result, anyhow};
+use clap::{Args, Subcommand};
+use comfy_table::{ContentArrangement, Table, presets::NOTHING};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::session::Session;
+
+/// Type of a schema entry. Mirrors the controller's `KeyType` over the
+/// wire: serialised as a lower-snake-case string.
+///
+/// Defined locally so the `isd` crate does not need to depend on
+/// `isengard-controller` (which pulls in sqlx, the docker plugins, the
+/// secrets store, etc.). The wire format is the source of truth; this
+/// enum is just the deserialisation target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyType {
+    /// Plain UTF-8 string. Lands in the `settings` table.
+    String,
+    /// String persisted to the encrypted secrets store. The CLI refuses
+    /// inline values for these.
+    Secret,
+    /// Signed integer.
+    Int,
+    /// Boolean.
+    Bool,
+}
+
+/// CLI flags for `isd configure`.
+#[derive(Debug, Args)]
+pub struct ConfigureArgs {
+    /// Resolved sub-verb.
+    #[command(subcommand)]
+    pub cmd: ConfigureCommand,
+}
+
+/// Sub-verbs under `isd configure`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigureCommand {
+    /// Print one key's current value.
+    Get(GetArgs),
+    /// Set a key. Use the inline positional for plain types; pass
+    /// `--stdin` or `--from-file` for secrets.
+    Set(SetArgs),
+    /// Remove a key. Falls back to the schema default if one exists.
+    Unset(UnsetArgs),
+    /// Print every key with its current value (secrets redacted).
+    List(ListArgs),
+    /// Print the schema (key, type, default, description).
+    Schema,
+}
+
+/// CLI flags for `isd configure get`.
+#[derive(Debug, Args)]
+pub struct GetArgs {
+    /// Schema key, e.g. `acme.directory` or `cloudflare.api_token`.
+    pub key: String,
+    /// Print secret-typed values in cleartext. Off by default.
+    #[arg(long)]
+    pub show_secret: bool,
+}
+
+/// CLI flags for `isd configure set`. Exactly one value-source must be
+/// supplied; clap's `conflicts_with_all` enforces that at parse time.
+#[derive(Debug, Args)]
+pub struct SetArgs {
+    /// Schema key.
+    pub key: String,
+    /// Inline value for plain-typed keys (rejected for secret-typed
+    /// keys at runtime; see [`SetArgs::stdin`] / [`SetArgs::from_file`]).
+    pub value: Option<String>,
+    /// Read the value from stdin (refused when stdin is a TTY).
+    #[arg(long, conflicts_with_all = ["value", "from_file"])]
+    pub stdin: bool,
+    /// Read the value from a file.
+    #[arg(long = "from-file", conflicts_with_all = ["value", "stdin"])]
+    pub from_file: Option<PathBuf>,
+}
+
+/// CLI flags for `isd configure unset`.
+#[derive(Debug, Args)]
+pub struct UnsetArgs {
+    /// Schema key.
+    pub key: String,
+}
+
+/// CLI flags for `isd configure list`.
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Print secret-typed values in cleartext. Off by default.
+    #[arg(long)]
+    pub show_secrets: bool,
+}
+
+/// JSON shape returned by `GET /api/v1/config/{key}`.
+#[derive(Debug, Deserialize)]
+struct GetResponse {
+    /// Echoed schema key.
+    #[allow(dead_code)]
+    key: String,
+    /// Schema-declared type.
+    #[serde(rename = "type")]
+    ty: KeyType,
+    /// Current value. Stored, default, or `<redacted>`.
+    value: Value,
+    /// `"set"` (stored) or `"default"` (from schema).
+    source: String,
+    /// `true` when a backing-store row exists.
+    #[allow(dead_code)]
+    is_set: bool,
+}
+
+/// JSON shape returned by `GET /api/v1/config`.
+#[derive(Debug, Deserialize)]
+struct ListRow {
+    /// Schema key.
+    key: String,
+    /// Schema-declared type.
+    #[serde(rename = "type")]
+    ty: KeyType,
+    /// Current value: stored, default, redacted, or null.
+    value: Value,
+    /// `"set"`, `"default"`, or `"unset"`.
+    source: String,
+}
+
+/// JSON shape for one row in `GET /api/v1/config/schema`.
+#[derive(Debug, Deserialize, Clone)]
+struct SchemaEntry {
+    /// Schema key.
+    key: String,
+    /// Schema-declared type.
+    #[serde(rename = "type")]
+    ty: KeyType,
+    /// Optional default value.
+    default: Option<Value>,
+    /// One-line description.
+    doc: String,
+}
+
+/// PUT body for `/api/v1/config/{key}`.
+#[derive(Debug, Serialize)]
+struct PutBody {
+    /// New value. The controller validates against the schema.
+    value: Value,
+}
+
+/// Dispatch to the matching `configure` sub-verb.
+///
+/// # Errors
+///
+/// Propagates the sub-verb's error.
+pub async fn run(args: ConfigureArgs, context: Option<&str>) -> Result<()> {
+    let session = Session::open(context).await?;
+    let base = session.require_controller()?.to_owned();
+    match args.cmd {
+        ConfigureCommand::Get(a) => run_get(&session, &base, a).await,
+        ConfigureCommand::Set(a) => run_set(&session, &base, a).await,
+        ConfigureCommand::Unset(a) => run_unset(&session, &base, a).await,
+        ConfigureCommand::List(a) => run_list(&session, &base, a).await,
+        ConfigureCommand::Schema => run_schema(&session, &base).await,
+    }
+}
+
+/// `GET /api/v1/config/{key}` then render.
+async fn run_get(session: &Session, base: &str, args: GetArgs) -> Result<()> {
+    let mut url = format!("{base}/api/v1/config/{}", args.key);
+    if args.show_secret {
+        url.push_str("?show_secret=1");
+    }
+    let resp = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "{}: {}",
+            args.key,
+            parse_error_message(&body, "not found")
+        ));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("GET {url} -> {status}: {body}"));
+    }
+    let r: GetResponse = resp.json().await.context("decoding /config/{key} body")?;
+    print_get_value(&r, args.show_secret);
+    Ok(())
+}
+
+/// Render a single-key fetch. Pulled out so the formatter can be unit
+/// tested without spinning up a fake controller.
+fn print_get_value(r: &GetResponse, show_secret: bool) {
+    let rendered = json_to_display(&r.value);
+    if r.source == "default" {
+        println!("{rendered}  (default)");
+    } else if r.ty == KeyType::Secret && !show_secret {
+        println!("<redacted>  (use --show-secret to print)");
+    } else {
+        println!("{rendered}");
+    }
+}
+
+/// `PUT /api/v1/config/{key}` after resolving the value source.
+async fn run_set(session: &Session, base: &str, args: SetArgs) -> Result<()> {
+    // 1. Fetch the schema so we can refuse inline values for secret keys
+    //    BEFORE we put them on the wire. Also lets us echo the right
+    //    confirmation line ("secret; value not echoed" vs the value).
+    let schema = fetch_schema(session, base).await?;
+    let entry = schema.iter().find(|e| e.key == args.key);
+    if let Some(e) = entry {
+        if e.ty == KeyType::Secret && args.value.is_some() {
+            return Err(anyhow!(
+                "{} is a secret-typed key; pass via --stdin or --from-file (shell history is not safe)",
+                args.key
+            ));
+        }
+    }
+
+    // 2. Resolve the value: exactly one of inline / stdin / from-file
+    //    must be set. clap's conflicts_with_all enforces "at most one";
+    //    we enforce "at least one" here.
+    let value_str = resolve_set_value(&args)?;
+
+    // 3. Wire the typed value. Secrets and strings ride as JSON strings.
+    //    Int and bool keys parse the input so the controller validates
+    //    against the right JSON type.
+    let value_json = encode_value(entry.map(|e| e.ty), &value_str)?;
+    let url = format!("{base}/api/v1/config/{}", args.key);
+    let resp = session
+        .client
+        .put(&url)
+        .json(&PutBody { value: value_json })
+        .send()
+        .await
+        .with_context(|| format!("PUT {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        // The controller carries did-you-mean / type-mismatch detail in
+        // the body; surface it verbatim so the operator sees the hint.
+        let detail = parse_error_message(&body, &body);
+        return Err(anyhow!("{}: {}", args.key, detail));
+    }
+    match entry.map(|e| e.ty) {
+        Some(KeyType::Secret) => println!("Set {} (secret; value not echoed)", args.key),
+        _ => println!("Set {} = {}", args.key, value_str),
+    }
+    Ok(())
+}
+
+/// Resolve the `set` value from one of three sources. Returns the
+/// raw string; type-aware parsing happens in [`encode_value`].
+fn resolve_set_value(args: &SetArgs) -> Result<String> {
+    if let Some(v) = args.value.as_deref() {
+        return Ok(v.to_string());
+    }
+    if args.stdin {
+        if std::io::stdin().is_terminal() {
+            return Err(anyhow!(
+                "stdin is a TTY; pipe a value or pass --from-file <path>"
+            ));
+        }
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading value from stdin")?;
+        return Ok(buf.trim_end_matches('\n').to_string());
+    }
+    if let Some(p) = args.from_file.as_deref() {
+        return std::fs::read_to_string(p)
+            .with_context(|| format!("reading {}", p.display()))
+            .map(|s| s.trim_end_matches('\n').to_string());
+    }
+    Err(anyhow!(
+        "no value provided; pass an inline value, --stdin, or --from-file <path>"
+    ))
+}
+
+/// Encode the raw string for the controller's PUT body. Strings and
+/// secrets ride as JSON strings; int / bool parse so the controller
+/// validates against the right JSON type. Unknown keys fall through as
+/// JSON strings so the server's did-you-mean path still fires.
+fn encode_value(ty: Option<KeyType>, raw: &str) -> Result<Value> {
+    match ty {
+        Some(KeyType::Int) => {
+            let n: i64 = raw
+                .parse()
+                .with_context(|| format!("expected integer, got {raw:?}"))?;
+            Ok(Value::from(n))
+        }
+        Some(KeyType::Bool) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" | "on" => Ok(Value::Bool(true)),
+            "false" | "no" | "0" | "off" => Ok(Value::Bool(false)),
+            other => Err(anyhow!(
+                "expected boolean (true/false/yes/no/1/0/on/off), got {other:?}"
+            )),
+        },
+        _ => Ok(Value::String(raw.to_string())),
+    }
+}
+
+/// `DELETE /api/v1/config/{key}` then render the outcome.
+async fn run_unset(session: &Session, base: &str, args: UnsetArgs) -> Result<()> {
+    let url = format!("{base}/api/v1/config/{}", args.key);
+    let resp = session
+        .client
+        .delete(&url)
+        .send()
+        .await
+        .with_context(|| format!("DELETE {url}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        println!("{} was not set", args.key);
+        return Ok(());
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("DELETE {url} -> {status}: {body}"));
+    }
+    // 204: row removed. Mention the default fallback if the schema has
+    // one, so the operator sees what the next read will return.
+    let schema = fetch_schema(session, base).await.unwrap_or_default();
+    let entry = schema.iter().find(|e| e.key == args.key);
+    match entry.and_then(|e| e.default.clone()) {
+        Some(default) => println!(
+            "Unset {} (will fall back to default: {})",
+            args.key,
+            json_to_display(&default)
+        ),
+        None => println!("Unset {}", args.key),
+    }
+    Ok(())
+}
+
+/// `GET /api/v1/config` then render the snapshot as a table.
+async fn run_list(session: &Session, base: &str, args: ListArgs) -> Result<()> {
+    let mut url = format!("{base}/api/v1/config");
+    if args.show_secrets {
+        url.push_str("?show_secrets=1");
+    }
+    let resp = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let rows: Vec<ListRow> = resp.error_for_status()?.json().await?;
+    if rows.is_empty() {
+        println!("No config keys.");
+        return Ok(());
+    }
+    println!("{}", render_list_table(&rows));
+    Ok(())
+}
+
+/// Build the `KEY / TYPE / VALUE / SOURCE` table. Pulled out so the
+/// formatter stays testable without an HTTP stub.
+fn render_list_table(rows: &[ListRow]) -> Table {
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Disabled)
+        .set_header(vec!["KEY", "TYPE", "VALUE", "SOURCE"]);
+    for r in rows {
+        table.add_row(vec![
+            r.key.clone(),
+            key_type_label(r.ty).to_string(),
+            json_to_display(&r.value),
+            r.source.clone(),
+        ]);
+    }
+    table
+}
+
+/// `GET /api/v1/config/schema` then render `KEY / TYPE / DEFAULT / DESCRIPTION`.
+async fn run_schema(session: &Session, base: &str) -> Result<()> {
+    let entries = fetch_schema(session, base).await?;
+    println!("{}", render_schema_table(&entries));
+    Ok(())
+}
+
+/// Build the schema table. Pulled out so the formatter stays testable.
+fn render_schema_table(entries: &[SchemaEntry]) -> Table {
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Disabled)
+        .set_header(vec!["KEY", "TYPE", "DEFAULT", "DESCRIPTION"]);
+    for e in entries {
+        let default = match &e.default {
+            Some(v) => json_to_display(v),
+            None => "(none)".to_string(),
+        };
+        table.add_row(vec![
+            e.key.clone(),
+            key_type_label(e.ty).to_string(),
+            default,
+            e.doc.clone(),
+        ]);
+    }
+    table
+}
+
+/// `GET /api/v1/config/schema` shared helper. `set` and `unset` call this
+/// to drive their client-side guards and default-fallback messaging.
+async fn fetch_schema(session: &Session, base: &str) -> Result<Vec<SchemaEntry>> {
+    let url = format!("{base}/api/v1/config/schema");
+    let resp = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let entries: Vec<SchemaEntry> = resp.error_for_status()?.json().await?;
+    Ok(entries)
+}
+
+/// Lower-snake-case label for a [`KeyType`]. Used in table rendering.
+fn key_type_label(ty: KeyType) -> &'static str {
+    match ty {
+        KeyType::String => "string",
+        KeyType::Secret => "secret",
+        KeyType::Int => "int",
+        KeyType::Bool => "bool",
+    }
+}
+
+/// Render a JSON value for terminal display. Strings drop their quotes
+/// so `acme.directory` prints as `https://...` (not `"https://..."`).
+/// `null` renders as `(unset)` so list rows stay readable.
+fn json_to_display(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "(unset)".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Extract the `error` field from a controller error envelope
+/// (`{"error": "..."}`). Falls back to `default` when the body is not
+/// JSON or carries no `error` field.
+fn parse_error_message(body: &str, default: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        if let Some(s) = v.get("error").and_then(Value::as_str) {
+            return s.to_string();
+        }
+    }
+    default.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct Wrap {
+        #[command(subcommand)]
+        c: ConfigureCommand,
+    }
+
+    #[test]
+    fn configure_get_parses() {
+        let w = Wrap::try_parse_from(["x", "get", "acme.directory"]).unwrap();
+        match w.c {
+            ConfigureCommand::Get(a) => {
+                assert_eq!(a.key, "acme.directory");
+                assert!(!a.show_secret);
+            }
+            other => panic!("expected Get, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_get_with_show_secret_parses() {
+        let w =
+            Wrap::try_parse_from(["x", "get", "cloudflare.api_token", "--show-secret"]).unwrap();
+        match w.c {
+            ConfigureCommand::Get(a) => assert!(a.show_secret),
+            other => panic!("expected Get, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_set_inline_parses() {
+        let w = Wrap::try_parse_from(["x", "set", "routing.default_zone", "weavers.engineering"])
+            .unwrap();
+        match w.c {
+            ConfigureCommand::Set(a) => {
+                assert_eq!(a.key, "routing.default_zone");
+                assert_eq!(a.value.as_deref(), Some("weavers.engineering"));
+                assert!(!a.stdin);
+                assert!(a.from_file.is_none());
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_set_stdin_parses() {
+        let w = Wrap::try_parse_from(["x", "set", "cloudflare.api_token", "--stdin"]).unwrap();
+        match w.c {
+            ConfigureCommand::Set(a) => {
+                assert_eq!(a.key, "cloudflare.api_token");
+                assert!(a.value.is_none());
+                assert!(a.stdin);
+                assert!(a.from_file.is_none());
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_set_from_file_parses() {
+        let w = Wrap::try_parse_from([
+            "x",
+            "set",
+            "cloudflare.api_token",
+            "--from-file",
+            "/tmp/cf.token",
+        ])
+        .unwrap();
+        match w.c {
+            ConfigureCommand::Set(a) => {
+                assert!(a.value.is_none());
+                assert!(!a.stdin);
+                assert_eq!(
+                    a.from_file.as_deref().and_then(|p| p.to_str()),
+                    Some("/tmp/cf.token")
+                );
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_set_value_conflicts_with_stdin() {
+        // Inline value AND --stdin must be rejected by clap's
+        // conflicts_with_all.
+        let err = Wrap::try_parse_from(["x", "set", "k", "v", "--stdin"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("conflict") || msg.contains("cannot be used") || msg.contains("cannot"),
+            "expected conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn configure_set_value_conflicts_with_from_file() {
+        let err =
+            Wrap::try_parse_from(["x", "set", "k", "v", "--from-file", "/tmp/x"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("conflict") || msg.contains("cannot be used") || msg.contains("cannot"),
+            "expected conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn configure_set_stdin_and_from_file_conflict() {
+        let err = Wrap::try_parse_from(["x", "set", "k", "--stdin", "--from-file", "/tmp/x"])
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("conflict") || msg.contains("cannot be used") || msg.contains("cannot"),
+            "expected conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn configure_set_refuses_three_positional_args() {
+        // The third positional should be rejected: `set` accepts at most
+        // `<key> [value]`.
+        let err = Wrap::try_parse_from(["x", "set", "k", "v", "extra"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected")
+                || msg.contains("extra")
+                || msg.contains("argument")
+                || msg.contains("found"),
+            "expected extra-arg error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn configure_unset_parses() {
+        let w = Wrap::try_parse_from(["x", "unset", "acme.directory"]).unwrap();
+        match w.c {
+            ConfigureCommand::Unset(a) => assert_eq!(a.key, "acme.directory"),
+            other => panic!("expected Unset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_list_parses_default() {
+        let w = Wrap::try_parse_from(["x", "list"]).unwrap();
+        match w.c {
+            ConfigureCommand::List(a) => assert!(!a.show_secrets),
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_list_with_show_secrets_parses() {
+        let w = Wrap::try_parse_from(["x", "list", "--show-secrets"]).unwrap();
+        match w.c {
+            ConfigureCommand::List(a) => assert!(a.show_secrets),
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_schema_parses() {
+        let w = Wrap::try_parse_from(["x", "schema"]).unwrap();
+        assert!(matches!(w.c, ConfigureCommand::Schema));
+    }
+
+    #[test]
+    fn json_to_display_drops_string_quotes() {
+        assert_eq!(json_to_display(&Value::String("hi".into())), "hi");
+        assert_eq!(json_to_display(&serde_json::json!(42)), "42");
+        assert_eq!(json_to_display(&serde_json::json!(true)), "true");
+        assert_eq!(json_to_display(&Value::Null), "(unset)");
+    }
+
+    #[test]
+    fn key_type_label_renders_snake_case() {
+        assert_eq!(key_type_label(KeyType::String), "string");
+        assert_eq!(key_type_label(KeyType::Secret), "secret");
+        assert_eq!(key_type_label(KeyType::Int), "int");
+        assert_eq!(key_type_label(KeyType::Bool), "bool");
+    }
+
+    #[test]
+    fn encode_value_parses_int_for_int_type() {
+        let v = encode_value(Some(KeyType::Int), "3600").unwrap();
+        assert_eq!(v, Value::from(3600i64));
+    }
+
+    #[test]
+    fn encode_value_rejects_non_int_for_int_type() {
+        assert!(encode_value(Some(KeyType::Int), "not-a-number").is_err());
+    }
+
+    #[test]
+    fn encode_value_parses_bool_for_bool_type() {
+        assert_eq!(
+            encode_value(Some(KeyType::Bool), "true").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            encode_value(Some(KeyType::Bool), "no").unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            encode_value(Some(KeyType::Bool), "on").unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            encode_value(Some(KeyType::Bool), "0").unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn encode_value_strings_for_unknown_type() {
+        // Unknown key: fall through as a JSON string so the server's
+        // did-you-mean path still fires.
+        let v = encode_value(None, "abc").unwrap();
+        assert_eq!(v, Value::String("abc".into()));
+    }
+
+    #[test]
+    fn parse_error_message_extracts_envelope() {
+        let body = r#"{"error": "unknown key foo"}"#;
+        assert_eq!(parse_error_message(body, "fallback"), "unknown key foo");
+    }
+
+    #[test]
+    fn parse_error_message_falls_back_for_non_json() {
+        assert_eq!(parse_error_message("not-json", "fallback"), "fallback");
+    }
+
+    #[test]
+    fn render_list_table_includes_header_and_rows() {
+        let rows = vec![
+            ListRow {
+                key: "acme.directory".into(),
+                ty: KeyType::String,
+                value: Value::String("https://example.com".into()),
+                source: "default".into(),
+            },
+            ListRow {
+                key: "cloudflare.api_token".into(),
+                ty: KeyType::Secret,
+                value: Value::String("<redacted>".into()),
+                source: "set".into(),
+            },
+        ];
+        let rendered = render_list_table(&rows).to_string();
+        assert!(rendered.contains("KEY"), "rendered: {rendered}");
+        assert!(rendered.contains("TYPE"), "rendered: {rendered}");
+        assert!(rendered.contains("VALUE"), "rendered: {rendered}");
+        assert!(rendered.contains("SOURCE"), "rendered: {rendered}");
+        assert!(rendered.contains("acme.directory"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("https://example.com"),
+            "rendered: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn render_schema_table_renders_none_for_missing_default() {
+        let entries = vec![
+            SchemaEntry {
+                key: "cloudflare.api_token".into(),
+                ty: KeyType::Secret,
+                default: None,
+                doc: "CF token".into(),
+            },
+            SchemaEntry {
+                key: "acme.directory".into(),
+                ty: KeyType::String,
+                default: Some(Value::String("https://example.com".into())),
+                doc: "ACME dir".into(),
+            },
+        ];
+        let rendered = render_schema_table(&entries).to_string();
+        assert!(rendered.contains("DEFAULT"), "rendered: {rendered}");
+        assert!(rendered.contains("DESCRIPTION"), "rendered: {rendered}");
+        assert!(rendered.contains("(none)"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("https://example.com"),
+            "rendered: {rendered}"
+        );
+    }
+}
