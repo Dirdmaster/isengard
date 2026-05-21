@@ -29,6 +29,12 @@ use tower::Service;
 use tower_lsp::LspService;
 use tower_lsp::jsonrpc::Request;
 
+/// Sender into the spawned service: each tuple is a request paired
+/// with a one-shot reply channel.
+type RequestTx = mpsc::Sender<(Request, mpsc::Sender<Option<Value>>)>;
+/// Receiver of server-to-client messages drained from the service.
+type MessageRx = mpsc::Receiver<Value>;
+
 /// Spawns the LSP service on its own task and returns:
 /// - a sender for client-to-server requests / notifications
 /// - a receiver of server-to-client messages (notifications + responses)
@@ -38,11 +44,7 @@ use tower_lsp::jsonrpc::Request;
 /// All channel-blocking happens off the test thread, so a handler
 /// that pushes a `publishDiagnostics` notification cannot deadlock
 /// against the test reader.
-fn spawn_service() -> (
-    mpsc::Sender<(Request, mpsc::Sender<Option<Value>>)>,
-    mpsc::Receiver<Value>,
-    JoinHandle<()>,
-) {
+fn spawn_service() -> (RequestTx, MessageRx, JoinHandle<()>) {
     let (req_tx, mut req_rx) = mpsc::channel::<(Request, mpsc::Sender<Option<Value>>)>(32);
     let (msg_tx, msg_rx) = mpsc::channel::<Value>(64);
 
@@ -85,31 +87,21 @@ fn spawn_service() -> (
     (req_tx, msg_rx, handle)
 }
 
-async fn call(
-    req_tx: &mpsc::Sender<(Request, mpsc::Sender<Option<Value>>)>,
-    payload: Value,
-) -> Option<Value> {
+async fn call(req_tx: &RequestTx, payload: Value) -> Option<Value> {
     let request: Request = serde_json::from_value(payload).unwrap();
     let (reply_tx, mut reply_rx) = mpsc::channel(1);
     req_tx.send((request, reply_tx)).await.unwrap();
     reply_rx.recv().await.unwrap()
 }
 
-async fn notify(
-    req_tx: &mpsc::Sender<(Request, mpsc::Sender<Option<Value>>)>,
-    payload: Value,
-) {
+async fn notify(req_tx: &RequestTx, payload: Value) {
     let _ = call(req_tx, payload).await;
 }
 
 /// Wait up to `budget` for the first message satisfying `pred`. Drops
 /// every non-matching message on the floor. Returns `None` on
 /// timeout.
-async fn wait_for<F>(
-    rx: &mut mpsc::Receiver<Value>,
-    budget: Duration,
-    mut pred: F,
-) -> Option<Value>
+async fn wait_for<F>(rx: &mut MessageRx, budget: Duration, mut pred: F) -> Option<Value>
 where
     F: FnMut(&Value) -> bool,
 {
