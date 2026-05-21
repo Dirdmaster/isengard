@@ -43,9 +43,22 @@ pub enum ManifestError {
     /// from resolving [`StackManifest::root`].
     #[error("invalid manifest path {0:?} (no parent directory)")]
     InvalidPath(PathBuf),
-    /// The TOML parser rejected the body.
-    #[error("toml: {0}")]
-    Toml(String),
+    /// TOML syntax error from `toml::de::Error`. `span` carries the
+    /// byte range when the underlying error reported one (most syntax
+    /// errors do; some structural validation errors do not). Editors
+    /// consuming this via the LSP map the span to a `Range` and emit a
+    /// `Diagnostic`.
+    #[error("toml: {message}")]
+    Toml {
+        /// The `toml::de::Error::message()` rendering. Kept narrow so it
+        /// fits in an LSP diagnostic without flooding the operator.
+        message: String,
+        /// Byte range of the offending TOML span when the underlying
+        /// parser provided one. `None` for structural validation errors
+        /// (missing fields, bad enum values) that don't map to a single
+        /// region of the source text.
+        span: Option<std::ops::Range<usize>>,
+    },
     /// A required field is absent or empty. Carries the field name.
     #[error("missing required field `{0}`")]
     MissingField(&'static str),
@@ -155,7 +168,10 @@ struct RawFleet {
 /// missing `name` / `compose`, empty compose list, absolute compose
 /// paths, unknown strategy / hook / on-error keywords.
 pub fn parse_stack_manifest(text: &str, root: PathBuf) -> Result<StackManifest, ManifestError> {
-    let raw: RawStack = toml::from_str(text).map_err(|e| ManifestError::Toml(e.to_string()))?;
+    let raw: RawStack = toml::from_str(text).map_err(|e| ManifestError::Toml {
+        message: e.message().to_string(),
+        span: e.span(),
+    })?;
     let name = raw
         .name
         .filter(|s| !s.trim().is_empty())
@@ -297,7 +313,10 @@ fn parse_duration(s: &str) -> Result<Duration, ManifestError> {
 /// Returns [`ManifestError::Toml`] when the TOML parser rejects the
 /// body.
 pub fn parse_fleet_manifest(text: &str) -> Result<FleetManifest, ManifestError> {
-    let raw: RawFleet = toml::from_str(text).map_err(|e| ManifestError::Toml(e.to_string()))?;
+    let raw: RawFleet = toml::from_str(text).map_err(|e| ManifestError::Toml {
+        message: e.message().to_string(),
+        span: e.span(),
+    })?;
     Ok(FleetManifest {
         fleet: raw.fleet,
         context: raw.context,
