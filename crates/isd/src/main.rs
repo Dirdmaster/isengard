@@ -92,7 +92,7 @@ enum Command {
     Context(context::ContextCommand),
     /// Bootstrap a controller (and first agent) on this host. Swarm-style.
     Init(init_cmd::InitArgs),
-    /// Tear down a cluster (stops + removes iso-controller and iso-agent).
+    /// Tear down a cluster (stops + removes isd-controller and isd-agent).
     Uninit(uninit_cmd::UninitArgs),
     /// Join this host to an existing cluster.
     Join(join_cmd::JoinArgs),

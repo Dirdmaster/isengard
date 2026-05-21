@@ -1,7 +1,7 @@
 //! `isd join-token`: mint a join-token via the controller and print
 //! the operator-visible `isd join ...` invocation.
 //!
-//! Runs `docker exec iso-controller isengard controller token mint
+//! Runs `docker exec isd-controller isengard controller token mint
 //! --role agent --format joincmd` against the operator's current
 //! docker context. The command output is a single line ready to paste.
 
@@ -21,7 +21,7 @@ pub struct JoinTokenArgs {
 /// Mint a join-token via the controller and print the operator-visible
 /// `isd join ...` invocation on stdout.
 ///
-/// Resolves the operator's docker context, attaches to iso-controller,
+/// Resolves the operator's docker context, attaches to isd-controller,
 /// and runs `isengard controller token mint --format joincmd`. The
 /// stream is validated (`isd join`-prefixed, contains `--token`) before
 /// printing so a broken controller binary can't poison the operator's
@@ -40,7 +40,7 @@ pub async fn run(args: JoinTokenArgs, context: Option<&str>) -> Result<()> {
     let exec = docker
         .client()
         .create_exec(
-            "iso-controller",
+            "isd-controller",
             CreateExecOptions::<String> {
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),

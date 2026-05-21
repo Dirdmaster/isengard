@@ -1,4 +1,4 @@
-//! `isd backup`: stream the `iso-controller-state` docker volume through
+//! `isd backup`: stream the `isd-controller-state` docker volume through
 //! a one-shot `tar c -C /state .` container, encrypt with age, and write to
 //! a destination (filesystem / docker volume / S3-API).
 //!
@@ -27,7 +27,7 @@ const HELPER_IMAGE: &str = "alpine:3.21";
 
 /// Named volume holding the controller's SQLite + master.key. Source
 /// for backup, destination for restore.
-const STATE_VOLUME: &str = "iso-controller-state";
+const STATE_VOLUME: &str = "isd-controller-state";
 
 /// CLI flags for `isd backup`.
 #[derive(Debug, Args, Default)]
@@ -51,7 +51,7 @@ impl BackupArgs {
     }
 }
 
-/// Stream the `iso-controller-state` volume to an encrypted backup.
+/// Stream the `isd-controller-state` volume to an encrypted backup.
 ///
 /// Resolves the destination, gathers the passphrase (CLI flag, env,
 /// stored, or interactive prompt), spawns the tar producer container,
@@ -134,7 +134,7 @@ pub async fn run(args: BackupArgs, context: Option<&str>) -> Result<()> {
 }
 
 /// Spawn a one-shot `alpine tar c -C /state .` container with the
-/// `iso-controller-state` volume mounted and return its stdout as an
+/// `isd-controller-state` volume mounted and return its stdout as an
 /// `AsyncRead`. The container auto-removes on exit.
 async fn spawn_tar_producer(
     docker: &isd_runtime::DockerBackend,

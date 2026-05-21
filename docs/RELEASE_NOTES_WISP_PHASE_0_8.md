@@ -7,7 +7,7 @@
 The systemd-native install replaces docker-compose as the default. A host with the new install has only:
 
 - `/usr/local/bin/isengard` (the static musl binary)
-- `/etc/systemd/system/iso-controller.service`, `iso-agent.service`, `iso-agent.target`
+- `/etc/systemd/system/isd-controller.service`, `isd-agent.service`, `isd-agent.target`
 - `/etc/isengard/` (master.key, isengard.env, agent-token.env, master-key.env, ca.pem)
 - `/var/lib/isengard/` (controller SQLite, agent state, per-stack compose files)
 - `/var/lib/wisp/` (wisp content store + bundles + IPAM)
@@ -18,7 +18,7 @@ The agent uses wisp (clone3 + cgroup v2 + iptables, via `wisp` + `wisp-image` + 
 
 ### New systemd unit files
 
-`install/systemd/iso-controller.service`
+`install/systemd/isd-controller.service`
 
 ```ini
 [Unit]
@@ -44,12 +44,12 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-`install/systemd/iso-agent.service`
+`install/systemd/isd-agent.service`
 
 ```ini
 [Unit]
-After=network-online.target iso-controller.service
-PartOf=iso-controller.service
+After=network-online.target isd-controller.service
+PartOf=isd-controller.service
 
 [Service]
 Type=simple
@@ -65,15 +65,15 @@ NoNewPrivileges=false
 PrivateTmp=false
 ```
 
-`install/systemd/iso-agent.target` is a convenience wrapper (`Wants= iso-controller iso-agent`).
+`install/systemd/isd-agent.target` is a convenience wrapper (`Wants= isd-controller isd-agent`).
 
-`PartOf=iso-controller.service` on the agent means a controller restart cycles the agent automatically. Agents bind their mTLS cert to the running controller's CA, so a fresh CA needs a fresh handshake.
+`PartOf=isd-controller.service` on the agent means a controller restart cycles the agent automatically. Agents bind their mTLS cert to the running controller's CA, so a fresh CA needs a fresh handshake.
 
 ### Capability story
 
 Phase 0.8 runs both services as root with no AppArmor profile. The agent needs SYS_ADMIN (mount, namespace, pivot_root for clone3), NET_ADMIN (iptables, bridge, veth), SYS_PTRACE (`/proc/<pid>/ns/*` for nsenter healthchecks), SYS_RESOURCE (cgroup v2 writes outside its own slice), and CHOWN/SETUID/SETGID/DAC_OVERRIDE/FOWNER/SETPCAP for workload bootstrap (nginx-style images that drop privs).
 
-Holding all of that explicitly via `Capabilities=` + `AmbientCapabilities=` is doable but pulls in subtle interactions with `NoNewPrivileges=` and the agent's per-container cap drops. Phase 0.10+ tightens this to a dedicated `iso-agent` user + AmbientCapabilities + an AppArmor profile.
+Holding all of that explicitly via `Capabilities=` + `AmbientCapabilities=` is doable but pulls in subtle interactions with `NoNewPrivileges=` and the agent's per-container cap drops. Phase 0.10+ tightens this to a dedicated `isd-agent` user + AmbientCapabilities + an AppArmor profile.
 
 ### install.sh rewrite
 
@@ -83,10 +83,10 @@ Holding all of that explicitly via `Capabilities=` + `AmbientCapabilities=` is d
 - Verifies sha256 before installing to `/usr/local/bin/isengard`.
 - Same secrets bootstrap flow as the legacy script: master key in `/etc/isengard/master.key`, hidden-input prompts for individual secrets, encrypted SQLite, plaintext never on disk.
 - Writes `/etc/isengard/isengard.env` with `ISENGARD_RUNTIME=wisp` baked in (the systemd flow is wisp-only by design).
-- Installs the systemd units, `daemon-reload`, `enable --now iso-controller`, waits up to 30s for the CA to initialize.
+- Installs the systemd units, `daemon-reload`, `enable --now isd-controller`, waits up to 30s for the CA to initialize.
 - Mints a 15-minute enrollment token via `isengard controller --state-dir <dir> token mint --role agent --format token` and writes it to `/etc/isengard/agent-token.env`.
 - Exports the controller CA via `isengard controller --state-dir <dir> ca export` to `/etc/isengard/ca.pem`.
-- `enable --now iso-agent`. The agent picks up the token + CA path from `agent-token.env`, enrolls, persists its mTLS cert under `/var/lib/isengard/agent`, and ignores the env var on subsequent restarts.
+- `enable --now isd-agent`. The agent picks up the token + CA path from `agent-token.env`, enrolls, persists its mTLS cert under `/var/lib/isengard/agent`, and ignores the env var on subsequent restarts.
 
 The reinstall menu now offers refresh-binary | refresh-config | wipe | abort:
 
@@ -111,7 +111,7 @@ Flow:
 2. Download to `<target>.new` next to it (same fs guarantees an atomic rename).
 3. Verify sha256 (size capped at 512 MiB so a corrupt URL can't OOM the agent).
 4. `chmod 0755` and `fs::rename` onto the running binary's path. On the same filesystem, `rename(2)` is atomic.
-5. Spawn `systemctl restart iso-agent.service` (default; pass `--no-restart` to skip). The current process catches SIGTERM; systemd's Type=simple unit ExecStarts the new binary.
+5. Spawn `systemctl restart isd-agent.service` (default; pass `--no-restart` to skip). The current process catches SIGTERM; systemd's Type=simple unit ExecStarts the new binary.
 
 The legacy docker-coupled rename-and-recreate flow in `crates/isengard-plugins/updater/src/self_update.rs` stays around for the docker-compose path. It's not wired into the binary today (no force-link in main.rs); Phase 0.10+ removes both the legacy plugin path and `install/install-docker.sh`.
 

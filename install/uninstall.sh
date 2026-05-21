@@ -108,7 +108,7 @@ remove_network() {
 
 main() {
   log "Isengard uninstall starting (purge=${PURGE}, network=${REMOVE_NETWORK})"
-  if ! confirm "Stop iso-controller + iso-agent?"; then
+  if ! confirm "Stop isd-controller + isd-agent?"; then
     die "aborted"
   fi
   stop_stack

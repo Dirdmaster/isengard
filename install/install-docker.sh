@@ -481,7 +481,7 @@ write_compose_to() {
 # /etc/isengard. Group-writable to the `docker` group when present so any
 # operator already in that group can `vi /etc/isengard/<file>` without
 # sudo. Falls back to mode 0644 (world-readable, root-only-write) when
-# the docker group is missing — surfaces a warn so the operator knows.
+# the docker group is missing: surfaces a warn so the operator knows.
 #
 # Master key, secrets DB, and other genuinely-secret material take a
 # different code path and stay 0600 root.
@@ -596,7 +596,7 @@ bootstrap_ca_export() {
   # spawning a process inside the container just to check if it is alive.
   local i state
   for i in $(seq 1 30); do
-    state="$(docker inspect iso-controller --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+    state="$(docker inspect isd-controller --format '{{.State.Status}}' 2>/dev/null || echo missing)"
     if [[ "${state}" == "running" ]]; then
       break
     fi
@@ -606,7 +606,7 @@ bootstrap_ca_export() {
   log "ca: exporting controller CA to ${ca_path}"
   local tmp
   tmp="$(mktemp)"
-  if docker exec iso-controller isengard controller ca export 2>/dev/null > "${tmp}"; then
+  if docker exec isd-controller isengard controller ca export 2>/dev/null > "${tmp}"; then
     if grep -q "BEGIN CERTIFICATE" "${tmp}"; then
       mv "${tmp}" "${ca_path}"
       chmod 0644 "${ca_path}"
@@ -617,7 +617,7 @@ bootstrap_ca_export() {
     fi
   else
     rm -f "${tmp}"
-    warn "ca: failed to exec ca export against iso-controller; agent will fail to verify"
+    warn "ca: failed to exec ca export against isd-controller; agent will fail to verify"
   fi
 }
 
@@ -785,8 +785,8 @@ detect_existing() {
 
 print_existing_report() {
   local sync_status="$(compose_sync_status)"
-  local controller_state="$(container_state iso-controller)"
-  local agent_state="$(container_state iso-agent)"
+  local controller_state="$(container_state isd-controller)"
+  local agent_state="$(container_state isd-agent)"
   local key_size="absent"
   if [[ -f "${ISENGARD_MASTER_KEY}" ]]; then
     key_size="$(wc -c <"${ISENGARD_MASTER_KEY}" 2>/dev/null | tr -d '[:space:]') bytes"
@@ -813,8 +813,8 @@ print_existing_report() {
   compose.yaml:  ${ISENGARD_COMPOSE_FILE} (${compose_state})
   isengard.env:  ${ISENGARD_ENV_FILE} (${env_state})
   secrets DB:    ${ISENGARD_PREFIX}/controller/isengard.db (${db_state})
-  controllers:   iso-controller (${controller_state})
-  agents:        iso-agent (${agent_state})
+  controllers:   isd-controller (${controller_state})
+  agents:        isd-agent (${agent_state})
 
 EOF
 }
@@ -1078,8 +1078,8 @@ post_install_hints() {
   Isengard is up.
 
   Dashboard:  http://127.0.0.1:9418  (loopback by default)
-  Logs:       docker logs -f iso-controller
-              docker logs -f iso-agent
+  Logs:       docker logs -f isd-controller
+              docker logs -f isd-agent
 
   Secrets:
     - Master key:     ${ISENGARD_MASTER_KEY} (mode 0600 root)
@@ -1089,7 +1089,7 @@ post_install_hints() {
 
   To enroll the agent (first time only):
     1. Mint a token:
-       docker exec iso-controller isengard controller token mint --role agent
+       docker exec isd-controller isengard controller token mint --role agent
     2. Paste the token at the prompt the agent shows in its logs, or
        export ISENGARD_ENROLL_TOKEN=<token> and 'docker compose up -d agent'.
 

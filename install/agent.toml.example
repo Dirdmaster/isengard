@@ -5,7 +5,7 @@
 # install path that mounts the file from elsewhere).
 #
 # This file is read once at agent boot. SIGHUP re-read is future work
-# (0.15+); for now any change requires `systemctl restart iso-agent`.
+# (0.15+); for now any change requires `systemctl restart isd-agent`.
 
 # ---------------------------------------------------------------------------
 # Phase 0.14: agent labels for placement selectors.

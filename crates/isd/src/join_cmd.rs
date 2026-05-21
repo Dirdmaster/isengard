@@ -1,4 +1,4 @@
-//! `isd join`: bring up an iso-agent container on the target docker
+//! `isd join`: bring up an isd-agent container on the target docker
 //! context, enrol it against an existing controller.
 //!
 //! Mirrors `docker swarm join`. Usage:
@@ -96,7 +96,7 @@ pub async fn run(args: JoinArgs, context: Option<&str>) -> Result<()> {
 /// # Errors
 ///
 /// Returns `Err` when no host is visible inside the 60 second budget.
-/// The message points the operator at `docker logs iso-agent` on the
+/// The message points the operator at `docker logs isd-agent` on the
 /// target host since the failure is almost always agent-side
 /// (fingerprint mismatch, network partition).
 async fn poll_for_enrolment(controller_url: &str) -> Result<()> {
@@ -126,6 +126,6 @@ async fn poll_for_enrolment(controller_url: &str) -> Result<()> {
     }
     eprintln!();
     Err(anyhow!(
-        "agent did not enrol within 60s. Check `docker logs iso-agent` on the target host."
+        "agent did not enrol within 60s. Check `docker logs isd-agent` on the target host."
     ))
 }

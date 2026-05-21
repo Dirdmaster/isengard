@@ -1,7 +1,7 @@
 //! Round-trip integration test for `isd backup` + `isd restore` against a
 //! real local docker. The test:
 //!
-//!   1. Creates a fresh docker volume named `iso-controller-state` (the
+//!   1. Creates a fresh docker volume named `isd-controller-state` (the
 //!      backup pipeline's hard-coded source) seeded with a known marker file.
 //!   2. Runs `isd backup --out <tmp>/back.tgz.age` with a known passphrase.
 //!   3. Wipes the volume (and the operator's host-side backup.toml).
@@ -22,11 +22,11 @@ use std::process::Command;
 
 use assert_cmd::cargo::CommandCargoExt;
 
-const STATE_VOLUME: &str = "iso-controller-state";
+const STATE_VOLUME: &str = "isd-controller-state";
 const TEST_CONTEXT: &str = "backup-roundtrip-test";
 const PASSPHRASE: &str = "roundtrip-passphrase";
 const MARKER_FILENAME: &str = "marker.txt";
-const MARKER_BODY: &str = "iso-controller-state survived the round trip";
+const MARKER_BODY: &str = "isd-controller-state survived the round trip";
 
 fn docker_uri() -> String {
     std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".into())

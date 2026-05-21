@@ -82,14 +82,14 @@ pub fn render(diagnosis: EnrollmentDiagnosis, controller_url: &str) -> String {
         EnrollmentDiagnosis::TokenRejected => format!(
             "x Enrollment token rejected by controller at {controller_url}.\n\n\
              \x20 The token has expired or was already redeemed. Mint a fresh one:\n\
-             \x20   docker exec iso-controller isengard controller token mint --role agent\n\n\
+             \x20   docker exec isd-controller isengard controller token mint --role agent\n\n\
              \x20 For full error chain: rerun with RUST_LOG=debug",
         ),
         EnrollmentDiagnosis::ConnectionRefused => format!(
             "x Cannot reach controller at {controller_url}\n\n\
              \x20 Reason: connection refused. The controller is not listening on this address.\n\n\
              \x20 Common fixes:\n\
-             \x20   - Is the controller container running? `docker ps | grep iso-controller`\n\
+             \x20   - Is the controller container running? `docker ps | grep isd-controller`\n\
              \x20   - Check the controller's listen address. Default 0.0.0.0:9417 for gRPC.\n\
              \x20   - From inside another container, the controller's hostname may differ\n\
              \x20     from the host (e.g. `controller` via Compose DNS, NOT 127.0.0.1).\n\n\

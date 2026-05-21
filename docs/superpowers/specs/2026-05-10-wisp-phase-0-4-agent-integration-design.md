@@ -161,7 +161,7 @@ A single host runs ONE runtime backend at a time. Containers created under bolla
 
 1. `isd stack down <stack>` (under bollard) : drains containers, frees ports.
 2. Edit `/etc/isengard/isengard.env`: add `ISENGARD_RUNTIME=wisp`.
-3. `docker restart iso-agent` (the agent container itself still runs under bollard / its host's docker; wisp is for the workload, not for the agent).
+3. `docker restart isd-agent` (the agent container itself still runs under bollard / its host's docker; wisp is for the workload, not for the agent).
 4. `isd stack up <stack>` (under wisp) : wisp-image pulls, wisp-net wires, wisp-runtime runs.
 
 Lifetime of bollard-managed containers + wisp-managed containers on the same host = mutually exclusive. The trait selection is global per agent process. Future: per-stack backend opt-in (operator labels a stack `isengard.runtime=wisp`); deferred to 0.5+.

@@ -3,11 +3,11 @@
 //!
 //! Default takes an encrypted backup first (same pipeline as `isd backup`)
 //! to `<tmpdir>/iso-upgrade-pre-<date>.tgz.age`. On failure, the error
-//! surfaces the backup path + `docker logs iso-controller` so the operator
+//! surfaces the backup path + `docker logs isd-controller` so the operator
 //! can roll back via `isd restore <path>`.
 //!
 //! Step machine:
-//!   1. Detect the current tag from `docker inspect iso-controller`
+//!   1. Detect the current tag from `docker inspect isd-controller`
 //!      (parses `Config.Image`, falls back to `Image` if needed).
 //!   2. Compute the target tag (operator-supplied via `--tag`, or
 //!      re-pull the current tag for image-digest refresh).
@@ -16,8 +16,8 @@
 //!   5. `docker pull` controller + agent images at the target tag.
 //!   6. `docker compose up -d` against the embedded recipe with
 //!      `ISENGARD_IMAGE_TAG=<target>` so compose recreates containers
-//!      whose image reference changed. State volumes (iso-controller-state,
-//!      iso-agent-state, iso-stacks) survive because they are external
+//!      whose image reference changed. State volumes (isd-controller-state,
+//!      isd-agent-state, isd-stacks) survive because they are external
 //!      named volumes.
 //! 7. Poll discovery + `GET /api/v1/hosts` for 90s.
 //!   8. On success print the upgraded tag + backup path.
@@ -122,7 +122,7 @@ pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
                 .unwrap_or_else(|| "<no backup taken; recreate via `isd init --force`>".into());
             anyhow!(
                 "{e}\n\
-                 Cluster did not come back healthy. Inspect with `docker logs iso-controller`. \
+                 Cluster did not come back healthy. Inspect with `docker logs isd-controller`. \
                  Roll back with `{restore_hint}`."
             )
         })?;
@@ -134,17 +134,17 @@ pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `docker inspect iso-controller` and parse the tag out of the
+/// `docker inspect isd-controller` and parse the tag out of the
 /// `Config.Image` field (operator-visible spec like
 /// `ghcr.io/weavers-engineering/isengard-controller:next`). Falls back
 /// to the top-level `Image` field (digest form) only if Config is empty.
 async fn inspect_current_tag(docker: &isd_runtime::DockerBackend) -> Result<String> {
     let inspect = docker
         .client()
-        .inspect_container("iso-controller", None)
+        .inspect_container("isd-controller", None)
         .await
         .context(
-            "inspecting iso-controller (is the controller running? bootstrap with `isd init`)",
+            "inspecting isd-controller (is the controller running? bootstrap with `isd init`)",
         )?;
 
     let image_ref = inspect
@@ -152,7 +152,7 @@ async fn inspect_current_tag(docker: &isd_runtime::DockerBackend) -> Result<Stri
         .as_ref()
         .and_then(|c| c.image.clone())
         .or(inspect.image)
-        .ok_or_else(|| anyhow!("iso-controller has no Image field; cannot detect current tag"))?;
+        .ok_or_else(|| anyhow!("isd-controller has no Image field; cannot detect current tag"))?;
 
     Ok(parse_tag(&image_ref))
 }
@@ -242,7 +242,7 @@ fn compose_up(
             .unwrap_or_else(|| "<no backup taken>".into());
         return Err(anyhow!(
             "`docker compose up -d` failed (exit {:?}). \
-             Roll back with `{restore_hint}` and inspect with `docker logs iso-controller`.",
+             Roll back with `{restore_hint}` and inspect with `docker logs isd-controller`.",
             status.code()
         ));
     }

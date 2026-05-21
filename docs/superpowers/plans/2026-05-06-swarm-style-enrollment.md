@@ -70,7 +70,7 @@ New file `docker/compose.yaml`:
 services:
   controller:
     image: ghcr.io/dirdmaster/isengard:next
-    container_name: iso-controller
+    container_name: isd-controller
     command: ["controller", "--public-addr", "controller:9417"]
     restart: unless-stopped
     ports:
@@ -81,7 +81,7 @@ services:
 
   agent:
     image: ghcr.io/dirdmaster/isengard:next
-    container_name: iso-agent
+    container_name: isd-agent
     depends_on: [controller]
     restart: unless-stopped
     command:
@@ -109,7 +109,7 @@ URL for compose-network use.
 New file. Walks through:
 
 1. `docker compose up -d controller`
-2. Mint a token: `docker exec iso-controller isengard controller token
+2. Mint a token: `docker exec isd-controller isengard controller token
    mint --role agent` (output is the join command).
 3. For compose: extract the env values from the printed command and
    stuff them in `.env`, then `docker compose up -d agent`.

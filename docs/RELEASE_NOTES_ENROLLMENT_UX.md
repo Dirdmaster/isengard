@@ -7,12 +7,12 @@ copy-pasteable `docker run` block instead of a bare token. Inspired by
 ## Before
 
 ```sh
-docker exec iso-controller isengard controller ca export > ca.pem
-docker exec iso-controller isengard controller token mint --role agent
+docker exec isd-controller isengard controller ca export > ca.pem
+docker exec isd-controller isengard controller token mint --role agent
 # 4N44VZMDJXGQ7PWPIIEOVP63ZVSOV5FJENS67K6N6RRXRUR3UCIQ
-docker run -d --name iso-agent \
+docker run -d --name isd-agent \
   -v $(pwd)/ca.pem:/etc/isengard/ca.pem:ro \
-  -v iso-agent-state:/var/lib/isengard \
+  -v isd-agent-state:/var/lib/isengard \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e ISENGARD_CONTROLLER_CA_PEM_PATH=/etc/isengard/ca.pem \
   -e ISENGARD_ENROLL_TOKEN=4N44VZ... \
@@ -25,7 +25,7 @@ Three commands, one side file, easy to typo.
 ## After
 
 ```sh
-docker exec iso-controller isengard controller token mint --role agent
+docker exec isd-controller isengard controller token mint --role agent
 ```
 
 …prints:
@@ -36,10 +36,10 @@ Token minted (expires in 15m).
 To enroll an agent, run on the host where you want it to live:
 
     docker run -d \
-      --name iso-agent \
+      --name isd-agent \
       --restart unless-stopped \
       --platform linux/amd64 \
-      -v iso-agent-state:/var/lib/isengard \
+      -v isd-agent-state:/var/lib/isengard \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -e ISENGARD_ENROLL_TOKEN=01HX... \
       -e ISENGARD_CONTROLLER_CA_PEM_BASE64=LS0t... \

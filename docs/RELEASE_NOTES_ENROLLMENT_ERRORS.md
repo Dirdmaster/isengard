@@ -49,7 +49,7 @@ x Failed to enroll with controller at http://controller:9417
     1. Check the controller URL scheme. Should be https:// for 9417.
     2. Make sure ISENGARD_CONTROLLER_CA_PEM_PATH or _PEM is set, since
        the controller uses a self-signed CA by default.
-       Export the CA: docker exec iso-controller isengard controller ca export
+       Export the CA: docker exec isd-controller isengard controller ca export
     3. Re-run.
 
   For full error chain: rerun with RUST_LOG=debug
@@ -72,7 +72,7 @@ Caused by:
 x Enrollment token rejected by controller at https://controller:9417.
 
   The token has expired or was already redeemed. Mint a fresh one:
-    docker exec iso-controller isengard controller token mint --role agent
+    docker exec isd-controller isengard controller token mint --role agent
 
   For full error chain: rerun with RUST_LOG=debug
 ```
@@ -98,7 +98,7 @@ x Cannot reach controller at https://controller:9417
   Reason: connection refused. The controller is not listening on this address.
 
   Common fixes:
-    - Is the controller container running? `docker ps | grep iso-controller`
+    - Is the controller container running? `docker ps | grep isd-controller`
     - Check the controller's listen address. Default 0.0.0.0:9417 for gRPC.
     - From inside another container, the controller's hostname may differ
       from the host (e.g. `controller` via Compose DNS, NOT 127.0.0.1).

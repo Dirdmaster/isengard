@@ -154,13 +154,13 @@ mod tests {
                 index: 2,
                 context: "lausanne".into(),
                 container_id: "3c4d5e6f7a8b".into(),
-                name: "iso-agent".into(),
+                name: "isd-agent".into(),
             },
             IndexRow {
                 index: 3,
                 context: "lausanne".into(),
                 container_id: "deadbeefcafe".into(),
-                name: "iso-controller".into(),
+                name: "isd-controller".into(),
             },
         ]
     }
@@ -200,6 +200,6 @@ mod tests {
         let resolved = index_resolve::resolve(std::slice::from_ref(&args.target)).unwrap();
         assert_eq!(resolved.len(), 4);
         assert_eq!(resolved[0].name, "web-proxy");
-        assert_eq!(resolved[3].name, "iso-controller");
+        assert_eq!(resolved[3].name, "isd-controller");
     }
 }

@@ -160,7 +160,7 @@ mod tests {
                 index: 2,
                 context: "lausanne".into(),
                 container_id: "3c4d5e6f7a8b".into(),
-                name: "iso-agent".into(),
+                name: "isd-agent".into(),
             },
         ]
     }
@@ -193,7 +193,7 @@ mod tests {
         let r = resolve(&["0-2".into()]).unwrap();
         assert_eq!(r.len(), 3);
         assert_eq!(r[0].name, "web-proxy");
-        assert_eq!(r[2].name, "iso-agent");
+        assert_eq!(r[2].name, "isd-agent");
     }
 
     #[test]
