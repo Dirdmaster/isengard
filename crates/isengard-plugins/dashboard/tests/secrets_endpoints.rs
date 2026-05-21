@@ -45,6 +45,8 @@ async fn setup_app(unlocked: bool) -> (axum::Router, Arc<ControllerHandles>) {
         Arc::new(SecretsStore::new_locked(inv.clone()))
     };
 
+    let config_dispatcher =
+        ControllerHandles::test_config_dispatcher(inv.clone(), secrets_store.clone());
     let handles = Arc::new(ControllerHandles {
         inventory: inv.clone(),
         journal,
@@ -58,6 +60,7 @@ async fn setup_app(unlocked: bool) -> (axum::Router, Arc<ControllerHandles>) {
         secrets: secrets_store,
         ca,
         ssh_ca: Arc::new(isengard_controller::ssh_ca::SshAuthority::for_tests().unwrap()),
+        config_dispatcher,
     });
 
     let app = secrets::router(handles.clone());

@@ -124,6 +124,38 @@ pub struct ControllerHandles {
     /// at enroll time. The cert-issuance RPC and operator CLI land in
     /// later phases; this handle is the shared signing primitive.
     pub ssh_ca: Arc<SshAuthority>,
+    /// Schema-driven dispatcher for `isd configure`.
+    ///
+    /// Reads and writes every operator-settable key, routing secret
+    /// keys to `secrets` and non-secret keys to a [`SettingStore`]
+    /// wrapping the same inventory pool. Built at boot off
+    /// [`config::Schema::v01`]; the dashboard's configure routes
+    /// (added in PR 2 of this track) hang off this handle.
+    pub config_dispatcher: Arc<config::ConfigDispatcher>,
+}
+
+impl ControllerHandles {
+    /// Borrow the schema-driven `isd configure` dispatcher.
+    pub fn config_dispatcher(&self) -> &Arc<config::ConfigDispatcher> {
+        &self.config_dispatcher
+    }
+
+    /// Build a [`config::ConfigDispatcher`] backed by `inventory` and
+    /// `secrets`. Convenience for tests that construct
+    /// [`ControllerHandles`] directly without going through
+    /// [`run_controller`]; production code calls
+    /// [`config::ConfigDispatcher::new`] inline.
+    pub fn test_config_dispatcher(
+        inventory: Arc<Inventory>,
+        secrets: Arc<secrets::SecretsStore>,
+    ) -> Arc<config::ConfigDispatcher> {
+        let setting_store = Arc::new(isengard_storage::SettingStore::new(inventory));
+        Arc::new(config::ConfigDispatcher::new(
+            config::Schema::v01(),
+            secrets,
+            setting_store,
+        ))
+    }
 }
 
 /// Journals an event then publishes it to the bus.
@@ -334,6 +366,18 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     let log_fanout = log_fanout::LogFanout::new();
     let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
 
+    // `isd configure` dispatcher. Wraps the inventory's `settings`
+    // table behind a SettingStore and pairs it with the existing
+    // SecretsStore; the static schema routes per-key writes to the
+    // right backing store. PR 2 of the configure track adds the
+    // dashboard routes that hang off this handle.
+    let setting_store = Arc::new(isengard_storage::SettingStore::new(inventory.clone()));
+    let config_dispatcher = Arc::new(config::ConfigDispatcher::new(
+        config::Schema::v01(),
+        secrets_store.clone(),
+        setting_store,
+    ));
+
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
         journal: journal.clone(),
@@ -347,6 +391,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         secrets: secrets_store.clone(),
         ca: ca.clone(),
         ssh_ca: ssh_ca.clone(),
+        config_dispatcher,
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;

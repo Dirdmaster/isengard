@@ -2010,6 +2010,10 @@ mod tests {
             )),
             ca,
             ssh_ca: Arc::new(isengard_controller::ssh_ca::SshAuthority::for_tests().unwrap()),
+            config_dispatcher: ControllerHandles::test_config_dispatcher(
+                inv.clone(),
+                Arc::new(isengard_controller::secrets::SecretsStore::new_locked(inv.clone())),
+            ),
         })
     }
 
