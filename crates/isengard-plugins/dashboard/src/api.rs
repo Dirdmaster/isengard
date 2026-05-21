@@ -75,6 +75,10 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
         // SshAuthority and journals the issuance. TTL is capped server-
         // side so a leaked client can't ask for a year-long cert.
         .route("/ssh/cert", post(crate::ssh::post_ssh_cert))
+        // SSH CA pubkey introspection. `isd ssh ca pubkey` GETs this
+        // when an operator needs to drop the controller's user CA
+        // into a non-Isengard host's `TrustedUserCAKeys` manually.
+        .route("/ssh/ca", get(crate::ssh::get_ssh_ca_pubkey))
         .with_state(handles)
 }
 

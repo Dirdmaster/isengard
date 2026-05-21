@@ -14,6 +14,7 @@
 //!    `join`, `join-token`.
 //!  - Setup: `init`, `uninit`, `upgrade`, `context`, `update`.
 //!  - Backup: `backup`, `restore`.
+//!  - Access: `ssh` (dial, mint, status, hosts, ca).
 //!  - Editor: `lsp`, `mcp`.
 
 #![warn(missing_docs)]
@@ -50,6 +51,7 @@ mod secret;
 mod selector;
 mod service_cmd;
 mod session;
+mod ssh;
 mod ssh_tunnel;
 mod stack_cmd;
 mod uninit_cmd;
@@ -140,6 +142,10 @@ enum Command {
     Restore(restore_cmd::RestoreArgs),
     /// Upgrade controller + agent to a new image tag (auto-backup first).
     Upgrade(upgrade_cmd::UpgradeArgs),
+    /// Connect to a fleet host over SSH using a short-lived cert. Also
+    /// hosts `mint`, `status`, `hosts`, and `ca pubkey` sub-verbs.
+    #[command(subcommand)]
+    Ssh(ssh::SshCommand),
     /// Run the Isengard language server over stdio. Editors invoke this
     /// via `isd lsp`; filetype detection + auto-attach are configured
     /// by the editor plugin (`isengard.nvim` for Neovim, VSCode extension
@@ -232,6 +238,7 @@ async fn main() {
         Command::Backup(args) => backup_cmd::run(args, cli.context.as_deref()).await,
         Command::Restore(args) => restore_cmd::run(args, cli.context.as_deref()).await,
         Command::Upgrade(args) => upgrade_cmd::run(args, cli.context.as_deref()).await,
+        Command::Ssh(cmd) => ssh::run(ssh::SshArgs { command: cmd }, cli.context.as_deref()).await,
         Command::Lsp => isengard_lsp::run_stdio().await,
         Command::Mcp => isengard_mcp::run_stdio().await,
     };

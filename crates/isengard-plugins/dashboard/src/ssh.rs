@@ -62,6 +62,28 @@ pub struct IssueSshCertBody {
     pub comment: String,
 }
 
+/// Response body for `GET /api/v1/ssh/ca`. Carries the controller's
+/// SSH user CA pubkey in OpenSSH wire format so operators (and the
+/// CLI) can drop it into a `TrustedUserCAKeys` file or compare against
+/// what an agent already trusts.
+#[derive(Debug, Serialize)]
+pub struct CaPubkeyResponse {
+    /// SSH CA pubkey in OpenSSH `authorized_keys` format
+    /// (`ssh-ed25519 AAAA...`). The exact bytes the agent's sshd
+    /// drop-in references via `TrustedUserCAKeys`.
+    pub pubkey: String,
+}
+
+/// `GET /api/v1/ssh/ca` handler. Returns the controller's SSH CA
+/// pubkey in OpenSSH wire format. Read-only; safe to expose to any
+/// caller that already reached the dashboard surface.
+pub async fn get_ssh_ca_pubkey(
+    State(handles): State<Arc<ControllerHandles>>,
+) -> Json<CaPubkeyResponse> {
+    let pubkey = String::from_utf8_lossy(handles.ssh_ca.public_key_openssh()).to_string();
+    Json(CaPubkeyResponse { pubkey })
+}
+
 /// Response body for `POST /api/v1/ssh/cert`. Carries the signed cert
 /// and the effective TTL (after capping) so the client knows the real
 /// validity window without re-parsing the cert.
