@@ -578,6 +578,37 @@ fn shorten_fingerprint(s: &str) -> String {
     }
 }
 
+/// Default Unix user for the operator's laptop. Tries
+/// `whoami::username()` first, falls back to the `$USER` env var, then
+/// to an empty string. Callers in the dial/mint paths fail loudly when
+/// the result is empty so the operator gets an actionable error
+/// instead of a `ssh @host` invocation.
+fn default_user() -> String {
+    let w = whoami::username();
+    if !w.is_empty() {
+        return w;
+    }
+    std::env::var("USER").unwrap_or_default()
+}
+
+/// Resolve the principal list for a mint call. Always includes the
+/// default user; when the operator dialed `user@host`, the override is
+/// appended (deduped against the default and any empty value). One
+/// cert minted with `[default, override]` covers both `isd ssh host`
+/// and `isd ssh override@host` during the TTL window. Audit identity
+/// lives in `key_id`, not in the principal list, so multi-principal
+/// certs do not blur attribution.
+fn effective_principals(override_user: Option<&str>, default: &str) -> Vec<String> {
+    let mut out = vec![default.to_string()];
+    if let Some(o) = override_user
+        && !o.is_empty()
+        && o != default
+    {
+        out.push(o.to_string());
+    }
+    out
+}
+
 /// Split a `user@host` token into `(Some(user), host)`. A bare `host`
 /// returns `(None, host)`. An empty user (`@host`) is also reported as
 /// `None` so the dial path falls back to the default user instead of
@@ -886,6 +917,38 @@ mod tests {
             parse_user_host("u@1.2.3.4"),
             (Some("u".into()), "1.2.3.4".into())
         );
+    }
+
+    #[test]
+    fn effective_principals_no_override_returns_default() {
+        let p = effective_principals(None, "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    #[test]
+    fn effective_principals_with_override_returns_both() {
+        let p = effective_principals(Some("root"), "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string(), "root".to_string()]);
+    }
+
+    #[test]
+    fn effective_principals_dedup_when_override_matches_default() {
+        let p = effective_principals(Some("dirdmaster"), "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    #[test]
+    fn effective_principals_drops_empty_override() {
+        let p = effective_principals(Some(""), "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    #[test]
+    fn default_user_yields_non_empty_in_a_normal_env() {
+        // Exact value depends on the env, but every reasonable
+        // dev/CI host has either `whoami::username()` or `$USER` set.
+        let u = default_user();
+        assert!(!u.is_empty(), "default_user returned empty");
     }
 
     #[test]
