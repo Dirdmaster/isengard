@@ -144,8 +144,8 @@ enum Command {
     Upgrade(upgrade_cmd::UpgradeArgs),
     /// Connect to a fleet host over SSH using a short-lived cert. Also
     /// hosts `mint`, `status`, `hosts`, and `ca pubkey` sub-verbs.
-    #[command(subcommand)]
-    Ssh(ssh::SshCommand),
+    /// Bare `isd ssh` opens the interactive host picker.
+    Ssh(ssh::SshArgs),
     /// Run the Isengard language server over stdio. Editors invoke this
     /// via `isd lsp`; filetype detection + auto-attach are configured
     /// by the editor plugin (`isengard.nvim` for Neovim, VSCode extension
@@ -238,7 +238,7 @@ async fn main() {
         Command::Backup(args) => backup_cmd::run(args, cli.context.as_deref()).await,
         Command::Restore(args) => restore_cmd::run(args, cli.context.as_deref()).await,
         Command::Upgrade(args) => upgrade_cmd::run(args, cli.context.as_deref()).await,
-        Command::Ssh(cmd) => ssh::run(ssh::SshArgs { command: cmd }, cli.context.as_deref()).await,
+        Command::Ssh(args) => ssh::run(args, cli.context.as_deref()).await,
         Command::Lsp => isengard_lsp::run_stdio().await,
         Command::Mcp => isengard_mcp::run_stdio().await,
     };

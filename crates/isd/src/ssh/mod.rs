@@ -38,11 +38,17 @@ pub mod trust;
 pub mod trusted_hosts;
 
 /// CLI flags for `isd ssh`.
+///
+/// `command` is optional: bare `isd ssh` (no sub-verb, no positional)
+/// dispatches to the interactive host picker (`run_picker`). This
+/// matches the picker-by-default contract from PR #236 and keeps clap
+/// from bailing with "the following required arguments were not
+/// provided" when an operator just types `isd ssh`.
 #[derive(Debug, Args)]
 pub struct SshArgs {
-    /// Resolved sub-verb.
+    /// Resolved sub-verb. `None` means bare `isd ssh`: open the picker.
     #[command(subcommand)]
-    pub command: SshCommand,
+    pub command: Option<SshCommand>,
 }
 
 /// Sub-verbs under `isd ssh`. The `Host` variant is an
@@ -212,18 +218,19 @@ struct HostRow {
 /// Propagates the sub-verb's error.
 pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
     match args.command {
-        SshCommand::Host(tokens) => run_dial(tokens, context).await,
-        SshCommand::Mint(a) => {
+        None => run_picker(context).await,
+        Some(SshCommand::Host(tokens)) => run_dial(tokens, context).await,
+        Some(SshCommand::Mint(a)) => {
             let issued = run_mint(a, context).await?;
             print_mint_summary(&issued);
             Ok(())
         }
-        SshCommand::Status => run_status().await,
-        SshCommand::Hosts => run_hosts(context).await,
-        SshCommand::Ca(CaCommand::Pubkey) => run_ca_pubkey(context).await,
-        SshCommand::Audit(a) => run_audit(a, context).await,
-        SshCommand::Trust(a) => trust::run_trust(a, context).await,
-        SshCommand::Untrust(a) => trust::run_untrust(a).await,
+        Some(SshCommand::Status) => run_status().await,
+        Some(SshCommand::Hosts) => run_hosts(context).await,
+        Some(SshCommand::Ca(CaCommand::Pubkey)) => run_ca_pubkey(context).await,
+        Some(SshCommand::Audit(a)) => run_audit(a, context).await,
+        Some(SshCommand::Trust(a)) => trust::run_trust(a, context).await,
+        Some(SshCommand::Untrust(a)) => trust::run_untrust(a).await,
     }
 }
 

@@ -162,6 +162,41 @@ fn ssh_status_errors_when_ssh_dir_empty() {
 }
 
 #[test]
+fn ssh_bare_no_args_does_not_print_clap_help() {
+    // Regression for PR #236 follow-up: bare `isd ssh` (no positional,
+    // no subcommand) must enter the host picker, not bail out with
+    // clap's "the following required arguments were not provided"
+    // message. The picker hits the controller, so we force a bogus
+    // context to fail fast and assert the failure is the runtime
+    // `isd:` chain, not a clap parse error.
+    let home = tempfile::tempdir().expect("tmp home");
+    let out = isd_bin()
+        .args(["ssh"])
+        .env("HOME", home.path())
+        .args(["--context", "nonexistent-context-for-ssh-cmd-test"])
+        .output()
+        .expect("run isd ssh (no args)");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Clap parse errors print "error: the following required arguments"
+    // or "Usage:" to stderr. The picker path produces an `isd:` error
+    // (from our anyhow wrapper) once Session::open fails.
+    assert!(
+        !stderr.contains("the following required arguments"),
+        "must not bail with clap missing-subcommand error: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Usage: isd ssh"),
+        "must not print clap help on stdout: {stdout}"
+    );
+    assert!(
+        stderr.starts_with("isd:") || stderr.contains("context") || stderr.contains("no hosts"),
+        "expected runtime error (picker path), got: stderr={stderr} stdout={stdout}"
+    );
+}
+
+#[test]
 fn ssh_external_subcommand_captures_host_arg() {
     // `isd ssh <host>` parses successfully (clap routes to the
     // external_subcommand). We deliberately do NOT let the dial
