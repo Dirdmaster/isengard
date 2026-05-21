@@ -104,9 +104,13 @@ mod tests {
     #[tokio::test]
     async fn upsert_inserts_new_row() {
         let s = store().await;
-        s.upsert("acme.directory", &json!("https://example.com"), Some("test"))
-            .await
-            .unwrap();
+        s.upsert(
+            "acme.directory",
+            &json!("https://example.com"),
+            Some("test"),
+        )
+        .await
+        .unwrap();
         let v = s.get("acme.directory").await.unwrap();
         assert_eq!(v, Some(json!("https://example.com")));
     }

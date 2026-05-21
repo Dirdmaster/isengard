@@ -554,7 +554,9 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_secret() {
         let d = test_dispatcher().await;
-        d.put("cloudflare.api_token", json!("v"), None).await.unwrap();
+        d.put("cloudflare.api_token", json!("v"), None)
+            .await
+            .unwrap();
         assert!(d.delete("cloudflare.api_token").await.unwrap());
         // Default is None for this key, so get returns None.
         assert_eq!(d.get("cloudflare.api_token").await.unwrap(), None);
@@ -569,16 +571,25 @@ mod tests {
         let rows = d.list().await.unwrap();
         assert_eq!(rows.len(), 6);
         // routing.default_zone is Set.
-        let routing = rows.iter().find(|(e, _)| e.key == "routing.default_zone").unwrap();
+        let routing = rows
+            .iter()
+            .find(|(e, _)| e.key == "routing.default_zone")
+            .unwrap();
         assert_eq!(
             routing.1,
             Some(ConfigValue::Set(json!("weavers.engineering")))
         );
         // acme.directory is Default.
-        let acme_dir = rows.iter().find(|(e, _)| e.key == "acme.directory").unwrap();
+        let acme_dir = rows
+            .iter()
+            .find(|(e, _)| e.key == "acme.directory")
+            .unwrap();
         assert!(matches!(acme_dir.1, Some(ConfigValue::Default(_))));
         // acme.contact_email is None (unset, no default).
-        let contact = rows.iter().find(|(e, _)| e.key == "acme.contact_email").unwrap();
+        let contact = rows
+            .iter()
+            .find(|(e, _)| e.key == "acme.contact_email")
+            .unwrap();
         assert_eq!(contact.1, None);
     }
 }

@@ -47,8 +47,7 @@ async fn make_handles() -> Arc<ControllerHandles> {
     let secrets = std::sync::Arc::new(isengard_controller::secrets::SecretsStore::new_locked(
         inv.clone(),
     ));
-    let config_dispatcher =
-        ControllerHandles::test_config_dispatcher(inv.clone(), secrets.clone());
+    let config_dispatcher = ControllerHandles::test_config_dispatcher(inv.clone(), secrets.clone());
     Arc::new(ControllerHandles {
         inventory: inv,
         journal,
