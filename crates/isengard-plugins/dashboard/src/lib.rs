@@ -15,6 +15,7 @@ pub mod enrollment;
 pub mod policies;
 pub mod routing;
 pub mod secrets;
+pub mod ssh;
 pub mod webhooks;
 pub mod ws;
 

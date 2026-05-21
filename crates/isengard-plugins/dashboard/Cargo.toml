@@ -35,6 +35,7 @@ tracing.workspace = true
 ulid.workspace = true
 sha2.workspace = true
 serde_yaml.workspace = true
+ssh-key.workspace = true
 
 [dev-dependencies]
 data-encoding.workspace = true
