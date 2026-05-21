@@ -85,6 +85,8 @@ mod tests {
             .unwrap();
         let secrets = Arc::new(crate::secrets::SecretsStore::new_locked(inventory.clone()));
         let ssh_ca = Arc::new(crate::ssh_ca::SshAuthority::for_tests().unwrap());
+        let config_dispatcher =
+            ControllerHandles::test_config_dispatcher(inventory.clone(), secrets.clone());
         let handles = Arc::new(ControllerHandles {
             inventory,
             journal: Arc::new(Journal::open_in_memory().await.unwrap()),
@@ -98,6 +100,7 @@ mod tests {
             secrets,
             ca,
             ssh_ca,
+            config_dispatcher,
         });
         let loaded = load_controller_plugins(handles, Value::Null).await;
         // We don't assert exact count — depends on what crates are linked into
