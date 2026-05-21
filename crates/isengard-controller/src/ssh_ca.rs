@@ -16,7 +16,7 @@
 //!
 //! - [`SshAuthority::load_or_init`]: boot-time load or fresh-mint. Idempotent.
 //! - [`SshAuthority::public_key_openssh`]: pubkey bytes agents drop into
-//!   `/etc/isengard/ssh_ca.pub`.
+//!   `/etc/ssh/isengard_ca.pub`.
 //! - [`SshAuthority::sign_user_cert`]: mint a short-lived user cert for the
 //!   given operator pubkey.
 
@@ -115,7 +115,7 @@ impl SshAuthority {
     /// OpenSSH-wire-format public key bytes.
     ///
     /// Agents fetch these once at enrollment and drop them into
-    /// `/etc/isengard/ssh_ca.pub`. The format is the standard
+    /// `/etc/ssh/isengard_ca.pub`. The format is the standard
     /// `ssh-ed25519 AAAA...` single-line representation `sshd` consumes
     /// via `TrustedUserCAKeys`.
     pub fn public_key_openssh(&self) -> &[u8] {
