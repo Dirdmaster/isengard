@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
+pub mod picker;
 pub mod trust;
 pub mod trusted_hosts;
 
@@ -240,6 +241,11 @@ pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
 /// path fails, or when `ssh` cannot be spawned. The function exits
 /// the process with `ssh`'s exit code on success.
 async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
+    if tokens.is_empty() {
+        // No-args entry point: surface the interactive picker (fzf or
+        // inquire), then re-enter `run_dial` with the chosen host.
+        return run_picker(context).await;
+    }
     let mut iter = tokens.into_iter();
     let host_token = iter
         .next()
@@ -279,6 +285,70 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
         .await
         .with_context(|| format!("spawning ssh {ssh_user}@{host}"))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Interactive host picker. Fetches Isengard-enrolled hosts from the
+/// controller, merges with the local `trusted_hosts.toml`, then routes
+/// the selection through fzf (when on PATH) or `inquire::Select`. The
+/// picked hostname is fed back into `run_dial` so the cert refresh +
+/// `ssh` exec path stays in one place.
+///
+/// # Errors
+///
+/// Returns `Err` on HTTP failure, controller-less context, trusted
+/// store I/O failure, picker spawn failure, or when the picker returns
+/// no selection (Esc / Ctrl-C / empty fleet).
+async fn run_picker(context: Option<&str>) -> Result<()> {
+    let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/hosts");
+    let isengard_rows: Vec<HostRow> = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .context("listing hosts for picker")?
+        .json()
+        .await
+        .context("decoding hosts JSON for picker")?;
+    let isengard: Vec<picker::PickerRow> = isengard_rows
+        .into_iter()
+        .map(|h| picker::PickerRow {
+            hostname: h.hostname,
+            class: picker::HostClass::Isengard,
+            last_seen: h
+                .last_seen_at
+                .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        })
+        .collect();
+
+    let trusted_path = trusted_hosts::TrustedHostsFile::default_path()?;
+    let store = trusted_hosts::TrustedHostsFile::load(&trusted_path)?;
+    let trusted: Vec<picker::PickerRow> = store
+        .entries
+        .into_iter()
+        .map(|t| picker::PickerRow {
+            hostname: t.hostname,
+            class: picker::HostClass::Trusted,
+            last_seen: None,
+        })
+        .collect();
+
+    let rows = picker::merge_sources(isengard, trusted);
+    if rows.is_empty() {
+        return Err(anyhow!(
+            "no hosts to pick from. enroll an agent or `isd ssh trust <host>`"
+        ));
+    }
+    let picked = if picker::fzf_available() {
+        picker::pick_with_fzf(&rows).await?
+    } else {
+        picker::pick_with_inquire(&rows)?
+    };
+    let host = picked.ok_or_else(|| anyhow!("no host selected"))?;
+    Box::pin(run_dial(vec![host], context)).await
 }
 
 /// Return true when the cert at `cert_path` carries every principal in

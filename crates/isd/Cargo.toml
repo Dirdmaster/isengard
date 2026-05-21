@@ -102,6 +102,12 @@ whoami = "1"
 # workspace for the controller; we reuse the same version here.
 ssh-key.workspace = true
 
+# Bastion v2 PR 4: `isd ssh` (no args) opens a host picker. `which`
+# detects `fzf` on PATH so we can fall through to `inquire::Select`
+# when it is missing. Same workspace pin as the dev-dependencies entry
+# we used to gate the ssh-keygen test.
+which.workspace = true
+
 # Track G Phase 5: backup/restore pipeline.
 # `age` does the passphrase encryption, `aws-sdk-s3` + `aws-config` cover the
 # S3-API destination (works against AWS, R2, MinIO, B2, Wasabi via custom
