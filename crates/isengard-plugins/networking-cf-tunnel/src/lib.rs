@@ -42,15 +42,28 @@ pub mod cloudflared;
 
 /// Parsed shape of the `[networking]` settings block for this adapter.
 ///
-/// Required: `api_token`, `account_id`, `zone_id`. Optional:
+/// Required: `account_id`, `zone_id`. Optional: `api_token` (legacy
+/// per-host path; migrate to `isd configure set cloudflare.api_token`),
 /// `tunnel_id`, `tunnel_name`, `tunnel_token`. When `tunnel_token` is
 /// missing the adapter creates a fresh tunnel on `join` and logs the
 /// new id and token for the operator to persist.
+///
+/// `api_token` used to be required and was read straight from the
+/// per-host `adapter_config.config_json.api_token` row. The
+/// `isd configure` track (v0.6) lifts the token into a fleet-wide
+/// `cloudflare.api_token` secret on the controller; the adapter still
+/// accepts a per-host value for backward compatibility, but emits a
+/// migration warning and prefers the new path when wired through.
 #[derive(Deserialize)]
 struct CfTunnelConfig {
     /// Cloudflare API token. Needs `Account:Cloudflare Tunnel:Edit` and
     /// `Zone:DNS:Edit` scopes for the configured account and zone.
-    api_token: String,
+    ///
+    /// Legacy per-host source. New deployments should leave this empty
+    /// and set the fleet-wide secret via
+    /// `isd configure set cloudflare.api_token --stdin`.
+    #[serde(default)]
+    api_token: Option<String>,
     /// Cloudflare account UUID owning the tunnel.
     account_id: String,
     /// Cloudflare zone UUID the hostnames live in.
@@ -63,6 +76,38 @@ struct CfTunnelConfig {
     /// Persisted `cloudflared` connection token. Skips tunnel creation
     /// when set.
     tunnel_token: Option<String>,
+}
+
+impl CfTunnelConfig {
+    /// Returns the Cloudflare API token, preferring the controller-managed
+    /// `cloudflare.api_token` path and falling back to the legacy
+    /// per-host `adapter_config.config_json.api_token` row.
+    ///
+    /// The fleet-wide secret normally arrives via the agent's
+    /// `FetchSecret` RPC and is merged into `ctx.settings` before this
+    /// adapter sees it, so callers do not need to thread the dispatcher
+    /// here. When the new path is wired but unset, the operator gets a
+    /// clear hint pointing at the `isd configure` verb instead of a
+    /// generic "missing field" decode error.
+    fn resolve_api_token(&self) -> Result<String> {
+        match self.api_token.as_deref() {
+            Some(token) if !token.is_empty() => {
+                tracing::warn!(
+                    "cf-tunnel: api_token sourced from adapter_config.config_json; \
+                     migrate to the fleet-wide secret via \
+                     `isd configure set cloudflare.api_token --stdin`"
+                );
+                Ok(token.to_string())
+            }
+            _ => Err(CoreError::Other(
+                "cloudflare.api_token not set; run \
+                 `isd configure set cloudflare.api_token --stdin` \
+                 (or set api_token on the cf-tunnel adapter_config row as a \
+                 legacy fallback)"
+                    .into(),
+            )),
+        }
+    }
 }
 
 /// Cloudflare Tunnel adapter. Stateless; constructed via `Default`.
@@ -117,7 +162,7 @@ impl NetworkingAdapter for CfTunnelAdapter {
         let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
             .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
 
-        let api = api::CfApi::new(cfg.api_token.clone());
+        let api = api::CfApi::new(cfg.resolve_api_token()?);
 
         let tunnel_token = if let Some(t) = cfg.tunnel_token.clone() {
             t
@@ -163,7 +208,7 @@ impl NetworkingAdapter for CfTunnelAdapter {
     async fn expose(&self, ctx: &AdapterContext, spec: &ExposeSpec) -> Result<ExposedEndpoint> {
         let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
             .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
-        let api = api::CfApi::new(cfg.api_token.clone());
+        let api = api::CfApi::new(cfg.resolve_api_token()?);
 
         let tunnel_id = cfg.tunnel_id.clone().ok_or_else(|| {
             CoreError::Other(
@@ -213,7 +258,7 @@ impl NetworkingAdapter for CfTunnelAdapter {
     async fn unexpose(&self, ctx: &AdapterContext, endpoint_id: &str) -> Result<()> {
         let cfg: CfTunnelConfig = serde_json::from_value(ctx.settings.clone())
             .map_err(|e| CoreError::Other(format!("cf-tunnel settings: {e}")))?;
-        let api = api::CfApi::new(cfg.api_token.clone());
+        let api = api::CfApi::new(cfg.resolve_api_token()?);
 
         let hostname = endpoint_id.trim_start_matches("cf-tunnel:");
 
@@ -273,5 +318,71 @@ inventory::submit! {
         name: "networking-cf-tunnel",
         capabilities: &[isengard_core::registration::Capability::Agent],
         constructor: || Box::new(CfTunnelAdapter),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with_token(token: Option<&str>) -> CfTunnelConfig {
+        CfTunnelConfig {
+            api_token: token.map(str::to_string),
+            account_id: "acct-1".into(),
+            zone_id: "zone-1".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            tunnel_token: None,
+        }
+    }
+
+    #[test]
+    fn resolve_api_token_uses_legacy_value_when_present() {
+        let cfg = cfg_with_token(Some("legacy-token"));
+        let token = cfg
+            .resolve_api_token()
+            .expect("legacy api_token must still resolve");
+        assert_eq!(token, "legacy-token");
+    }
+
+    #[test]
+    fn resolve_api_token_errors_when_unset_with_configure_hint() {
+        let cfg = cfg_with_token(None);
+        let err = cfg.resolve_api_token().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cloudflare.api_token"),
+            "error message must reference the configure key: {msg}"
+        );
+        assert!(
+            msg.contains("isd configure set"),
+            "error message must point at the configure verb: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_api_token_treats_empty_string_as_unset() {
+        let cfg = cfg_with_token(Some(""));
+        let err = cfg
+            .resolve_api_token()
+            .expect_err("empty token must be treated as unset");
+        let msg = format!("{err}");
+        assert!(msg.contains("cloudflare.api_token"), "{msg}");
+    }
+
+    #[test]
+    fn cf_tunnel_config_deserialises_without_api_token() {
+        // The migration path: api_token is no longer required at decode
+        // time. Operators set the fleet-wide secret via `isd configure
+        // set cloudflare.api_token`; per-host adapter_config no longer
+        // needs it.
+        let json = serde_json::json!({
+            "account_id": "acct-1",
+            "zone_id": "zone-1"
+        });
+        let cfg: CfTunnelConfig =
+            serde_json::from_value(json).expect("config without api_token must decode");
+        assert!(cfg.api_token.is_none());
+        assert_eq!(cfg.account_id, "acct-1");
     }
 }
