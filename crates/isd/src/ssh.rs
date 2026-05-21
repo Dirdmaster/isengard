@@ -198,19 +198,33 @@ pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
 /// the process with `ssh`'s exit code on success.
 async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
     let mut iter = tokens.into_iter();
-    let host = iter
+    let host_token = iter
         .next()
         .ok_or_else(|| anyhow!("isd ssh <host>: missing host argument"))?;
     let ssh_args: Vec<String> = iter.collect();
 
+    let (override_user, host) = parse_user_host(&host_token);
+    let default = default_user();
+    if default.is_empty() {
+        return Err(anyhow!(
+            "could not determine default user (whoami and $USER both empty); pass user@host explicitly"
+        ));
+    }
+    let ssh_user = override_user.clone().unwrap_or_else(|| default.clone());
+
     let pubkey_path = default_pubkey_path()?;
     let cert_path = cert_path_for(&pubkey_path);
-    if cert_is_stale(&cert_path) {
-        let issued = run_mint(MintArgs::default(), context).await?;
+    let want_principals = effective_principals(override_user.as_deref(), &default);
+
+    if cert_is_stale(&cert_path) || !cert_covers_principals(&cert_path, &want_principals) {
+        let mint_args = MintArgs {
+            principals: want_principals.clone(),
+            ..MintArgs::default()
+        };
+        let issued = run_mint(mint_args, context).await?;
         print_mint_summary(&issued);
     }
 
-    let ssh_user = "isengard";
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg(format!("{ssh_user}@{host}"));
     for arg in &ssh_args {
@@ -221,6 +235,21 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
         .await
         .with_context(|| format!("spawning ssh {ssh_user}@{host}"))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Return true when the cert at `cert_path` carries every principal in
+/// `want`. Used in `run_dial` to force a re-mint when the operator
+/// overrides the user with a name not already in the existing cert
+/// (e.g. cached cert covers `[dirdmaster]`, dial is `root@host`).
+fn cert_covers_principals(cert_path: &Path, want: &[String]) -> bool {
+    let Ok(raw) = ssh_keygen_dump(cert_path) else {
+        return false;
+    };
+    let Ok(parsed) = parse_keygen_dump(&raw) else {
+        return false;
+    };
+    want.iter()
+        .all(|w| parsed.principals.iter().any(|p| p == w))
 }
 
 /// Mint a fresh cert and write it next to the pubkey. Returns the
@@ -941,6 +970,13 @@ mod tests {
     fn effective_principals_drops_empty_override() {
         let p = effective_principals(Some(""), "dirdmaster");
         assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    #[test]
+    fn cert_covers_principals_returns_false_when_cert_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope-cert.pub");
+        assert!(!cert_covers_principals(&path, &["root".into()]));
     }
 
     #[test]
