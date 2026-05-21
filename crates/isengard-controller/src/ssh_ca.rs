@@ -42,7 +42,13 @@ const SSH_CA_CREATED_BY: &str = "controller-bootstrap";
 /// bytes. Cheap to share via `Arc`; the signing path is `&self` and does
 /// not mutate.
 pub struct SshAuthority {
+    /// Ed25519 signing key in `ssh-key` crate form. Loaded from the
+    /// secrets store at boot via `load_or_init`; never serialized back
+    /// to disk after that.
     private_key: PrivateKey,
+    /// Cached OpenSSH-wire-format pubkey bytes. Pre-computed at boot so
+    /// the `GetSshCa` RPC and the `isd ssh ca pubkey` CLI both serve
+    /// without re-encoding on every request.
     public_key_openssh: Vec<u8>,
 }
 
@@ -81,6 +87,10 @@ impl SshAuthority {
         }
     }
 
+    /// Mint a fresh ed25519 keypair, persist the private side as PEM in
+    /// the secrets store under `SSH_CA_SECRET_NAME`, and return an
+    /// authority backed by it. Called from `load_or_init` on the first
+    /// boot when no SSH CA row exists yet.
     async fn mint_and_persist(secrets: &SecretsStore) -> Result<Self> {
         let private_key = PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519)
             .context("mint ssh ca private key")?;
