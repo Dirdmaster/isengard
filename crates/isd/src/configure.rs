@@ -1,8 +1,8 @@
 //! `isd configure` operator surface (controller-wide configuration).
 //!
-//! Bare `isd configure` (no sub-verb) enters an interactive setup
-//! wizard that walks every schema key in order. `isd configure setup`
-//! is an explicit alias for the same wizard.
+//! Bare `isd configure` (no sub-verb) opens a two-level interactive
+//! menu: pick a category, then pick a key inside that category, then
+//! edit. `isd configure setup` is an explicit alias for the same menu.
 //!
 //! Five sub-verbs:
 //!
@@ -59,12 +59,12 @@ pub enum KeyType {
 /// CLI flags for `isd configure`.
 ///
 /// `command` is optional: bare `isd configure` dispatches to the
-/// interactive wizard (`run_wizard`). Same pattern as [`SshArgs`] from
-/// PR #237 (picker-by-default).
+/// interactive two-level menu (`run_menu`). Same pattern as `SshArgs`
+/// from PR #237 (picker-by-default).
 #[derive(Debug, Args)]
 pub struct ConfigureArgs {
     /// Resolved sub-verb. `None` means bare `isd configure`: open the
-    /// interactive wizard.
+    /// interactive menu.
     #[command(subcommand)]
     pub command: Option<ConfigureCommand>,
 }
@@ -83,8 +83,8 @@ pub enum ConfigureCommand {
     List(ListArgs),
     /// Print the schema (key, type, default, description).
     Schema,
-    /// Run the interactive setup wizard. Explicit alias for bare
-    /// `isd configure`.
+    /// Open the interactive two-level configure menu. Explicit alias
+    /// for bare `isd configure`.
     Setup,
 }
 
@@ -167,6 +167,12 @@ struct ListRow {
 struct SchemaEntry {
     /// Schema key.
     key: String,
+    /// Operator-facing label used in menu rows and prompts.
+    #[serde(default)]
+    display_name: String,
+    /// Top-level menu bucket: `Certificates`, `Routing`, `SSH bastion`.
+    #[serde(default)]
+    category: String,
     /// Schema-declared type.
     #[serde(rename = "type")]
     ty: KeyType,
@@ -192,7 +198,7 @@ pub async fn run(args: ConfigureArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let base = session.require_controller()?.to_owned();
     match args.command {
-        None | Some(ConfigureCommand::Setup) => run_wizard(&session, &base).await,
+        None | Some(ConfigureCommand::Setup) => run_menu(&session, &base).await,
         Some(ConfigureCommand::Get(a)) => run_get(&session, &base, a).await,
         Some(ConfigureCommand::Set(a)) => run_set(&session, &base, a).await,
         Some(ConfigureCommand::Unset(a)) => run_unset(&session, &base, a).await,
@@ -471,162 +477,330 @@ async fn fetch_schema(session: &Session, base: &str) -> Result<Vec<SchemaEntry>>
     Ok(entries)
 }
 
-/// Interactive setup wizard. Walks every schema key in order, shows
-/// the current state, and prompts to update.
+/// Interactive two-level menu. Outer level picks a category; inner
+/// level picks a key inside the chosen category; selecting a key opens
+/// the type-aware edit prompt. Esc / `[back]` / `[done]` unwind cleanly.
 ///
-/// Modeled on the Hermes config flow: one key at a time, Confirm-then-
-/// Value, secret-aware redaction. Ctrl-C / Esc exits cleanly with a
-/// summary of what was already updated.
-async fn run_wizard(session: &Session, base: &str) -> Result<()> {
+/// Replaces the sequential walking wizard from PR #244: operators get
+/// a menu where every key is reachable in two hops, and the rendering
+/// groups by feature (Certificates, Routing, SSH bastion) so future
+/// DNS-01 providers nest under one bucket.
+async fn run_menu(session: &Session, base: &str) -> Result<()> {
     let schema = fetch_schema(session, base).await?;
-    let list = fetch_list(session, base, false).await.unwrap_or_default();
-
-    let total = schema.len();
-    println!("isd configure: walking {total} keys.");
+    println!("isd configure: {} keys.", schema.len());
 
     let mut updated: usize = 0;
-    let mut skipped: usize = 0;
 
-    for (idx, entry) in schema.iter().enumerate() {
-        let i = idx + 1;
-        let current = list.iter().find(|r| r.key == entry.key);
-        let source = current.map(|r| r.source.as_str()).unwrap_or("unset");
+    loop {
+        // Refresh on every outer iteration so the operator sees their
+        // edits reflected immediately.
+        let list = fetch_list(session, base, false).await.unwrap_or_default();
+        let groups = group_by_category(&schema);
+        let rows = build_category_rows(&groups, &list);
 
-        println!();
-        println!("[{i}/{total}] {} ({})", entry.key, key_type_label(entry.ty));
-        println!("  {}", entry.doc);
-        println!("  Current: {}", wizard_current_display(entry, current));
-
-        let prompt_outcome = prompt_for_update(entry, source);
-        let should_update = match prompt_outcome {
-            Ok(b) => b,
-            Err(WizardExit::Aborted) => {
-                println!();
-                println!("Wizard aborted. {updated} keys updated, {skipped} skipped.");
-                return Ok(());
-            }
-        };
-        if !should_update {
-            skipped += 1;
-            continue;
-        }
-
-        let value_outcome = prompt_for_value(entry);
-        let value_json = match value_outcome {
-            Ok(v) => v,
-            Err(WizardExit::Aborted) => {
-                println!();
-                println!("Wizard aborted. {updated} keys updated, {skipped} skipped.");
-                return Ok(());
-            }
+        let picked = match inquire::Select::new("Pick a category:", rows)
+            .with_page_size(8)
+            .prompt_skippable()
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => break, // Esc
+            Err(e) => return Err(anyhow!("category picker failed: {e}")),
         };
 
-        match put_value(session, base, &entry.key, value_json.clone()).await {
-            Ok(()) => {
-                updated += 1;
-                if entry.ty == KeyType::Secret {
-                    println!("Set {} (secret; value not echoed)", entry.key);
-                } else {
-                    println!("Set {} = {}", entry.key, json_to_display(&value_json));
-                }
-            }
-            Err(e) => {
-                // Surface the controller's hint, but keep walking so a
-                // single rejected key does not abort the wizard.
-                println!("Skipped {}: {e}", entry.key);
-                skipped += 1;
+        let CategoryRow { kind, .. } = picked;
+        let category = match kind {
+            CategoryRowKind::Done => break,
+            CategoryRowKind::Category(name) => name,
+        };
+
+        // Inner loop for the chosen category. Refresh the list before
+        // each prompt so values update after edits.
+        loop {
+            let list = fetch_list(session, base, false).await.unwrap_or_default();
+            let groups = group_by_category(&schema);
+            let entries = match groups.get(category.as_str()) {
+                Some(v) => v.clone(),
+                None => break, // category vanished (shouldn't happen)
+            };
+            let rows = build_key_rows(&entries, &list);
+
+            let inner_picked = match inquire::Select::new("Pick a key:", rows)
+                .with_page_size(8)
+                .with_help_message(&format!("isd configure > {category}"))
+                .prompt_skippable()
+            {
+                Ok(Some(row)) => row,
+                Ok(None) => break, // Esc -> back to outer
+                Err(e) => return Err(anyhow!("key picker failed: {e}")),
+            };
+
+            let KeyRow { kind, .. } = inner_picked;
+            let entry = match kind {
+                KeyRowKind::Back => break,
+                KeyRowKind::Key(e) => e,
+            };
+
+            match edit_key(session, base, &entry).await {
+                EditOutcome::Saved => updated += 1,
+                EditOutcome::Cancelled => {}
+                EditOutcome::Error(msg) => println!("Skipped {}: {msg}", entry.key),
             }
         }
     }
 
     println!();
-    println!("Done. {updated} keys updated, {skipped} skipped.");
+    println!("{updated} keys updated.");
     Ok(())
 }
 
-/// Sentinel for wizard prompts: differentiate "operator said no, move
-/// on" (returned as `Ok(false)` in the Confirm path) from "operator
-/// hit Ctrl-C / Esc, exit the wizard".
-enum WizardExit {
-    /// Operator hit Ctrl-C or Esc; unwind the wizard cleanly.
-    Aborted,
+/// Outcome of one edit attempt inside the inner menu.
+enum EditOutcome {
+    /// PUT succeeded.
+    Saved,
+    /// Operator hit Esc on the value prompt: no write attempted.
+    Cancelled,
+    /// PUT failed. Carry the server's hint so the caller can print it.
+    Error(String),
 }
 
-/// Render the "Current: ..." line for a schema entry. Secrets are
-/// hidden by source; the wizard never re-fetches with `show_secrets=1`.
-fn wizard_current_display(entry: &SchemaEntry, current: Option<&ListRow>) -> String {
+/// Run the type-aware edit prompt for one key and PUT the result.
+///
+/// Esc on the prompt returns [`EditOutcome::Cancelled`]. PUT errors
+/// surface as [`EditOutcome::Error`] without crashing the menu so a
+/// single bad entry doesn't blow up the whole session.
+async fn edit_key(session: &Session, base: &str, entry: &SchemaEntry) -> EditOutcome {
+    let label = key_label(entry);
+    let value_json = match prompt_for_value(entry, &label) {
+        Ok(v) => v,
+        Err(EditExit::Cancelled) => return EditOutcome::Cancelled,
+    };
+    match put_value(session, base, &entry.key, value_json.clone()).await {
+        Ok(()) => {
+            if entry.ty == KeyType::Secret {
+                println!("Set {} (secret; value not echoed)", entry.key);
+            } else {
+                println!("Set {} = {}", entry.key, json_to_display(&value_json));
+            }
+            EditOutcome::Saved
+        }
+        Err(e) => EditOutcome::Error(format!("{e}")),
+    }
+}
+
+/// Sentinel for the value prompt: Esc / Ctrl-C cancels the edit but
+/// stays inside the menu (unlike the old wizard, where Ctrl-C aborted
+/// the whole flow).
+enum EditExit {
+    /// Operator hit Esc; back out to the inner menu without a write.
+    Cancelled,
+}
+
+/// Type-aware value prompt. Returns the encoded JSON value ready for
+/// the PUT body. `label` is shown in front of the input (e.g.
+/// `Cloudflare API token:`).
+fn prompt_for_value(entry: &SchemaEntry, label: &str) -> Result<Value, EditExit> {
+    let secret_label = format!("{label}:");
+    let value_label = format!("{label}:");
+    let bool_label = format!("{label}?");
+    loop {
+        let attempt: Result<Value, inquire::InquireError> = match entry.ty {
+            KeyType::Secret => inquire::Password::new(&secret_label)
+                .with_display_mode(inquire::PasswordDisplayMode::Masked)
+                .without_confirmation()
+                .prompt()
+                .map(Value::String),
+            KeyType::String => inquire::Text::new(&value_label).prompt().map(Value::String),
+            KeyType::Int => inquire::CustomType::<i64>::new(&value_label)
+                .prompt()
+                .map(Value::from),
+            KeyType::Bool => inquire::Confirm::new(&bool_label).prompt().map(Value::Bool),
+        };
+        match attempt {
+            Ok(Value::String(s)) if s.is_empty() => {
+                println!("Empty value rejected. Try again, or Esc to cancel.");
+                continue;
+            }
+            Ok(v) => return Ok(v),
+            Err(inquire::InquireError::OperationCanceled)
+            | Err(inquire::InquireError::OperationInterrupted) => return Err(EditExit::Cancelled),
+            Err(e) => {
+                println!("prompt error: {e}");
+                return Err(EditExit::Cancelled);
+            }
+        }
+    }
+}
+
+/// Group schema entries by category. Alphabetical order on the outer
+/// keys via `BTreeMap`. Inside a category we preserve schema declaration
+/// order so related keys (e.g. `cloudflare.api_token`,
+/// `cloudflare.zone_id`) stay adjacent.
+///
+/// Pulled out so the grouping behavior is unit-testable without
+/// spinning up a fake controller.
+fn group_by_category<'a>(
+    entries: &'a [SchemaEntry],
+) -> std::collections::BTreeMap<&'a str, Vec<&'a SchemaEntry>> {
+    let mut out: std::collections::BTreeMap<&'a str, Vec<&'a SchemaEntry>> =
+        std::collections::BTreeMap::new();
+    for e in entries {
+        // Defensive: skip entries with an empty category. Should not
+        // happen against a v0.1+ controller but guards against stale
+        // mocks in tests.
+        if e.category.is_empty() {
+            continue;
+        }
+        out.entry(e.category.as_str()).or_default().push(e);
+    }
+    out
+}
+
+/// Operator-facing label for a key. Falls back to the dotted key when
+/// the schema's display_name is empty (older controllers).
+fn key_label(entry: &SchemaEntry) -> String {
+    if entry.display_name.is_empty() {
+        entry.key.clone()
+    } else {
+        entry.display_name.clone()
+    }
+}
+
+/// One row in the outer category picker.
+#[derive(Clone, Debug)]
+struct CategoryRow {
+    /// Pre-rendered label (`Certificates  4 keys  2 set`).
+    label: String,
+    /// What this row resolves to when picked.
+    kind: CategoryRowKind,
+}
+
+/// Variant carried by a [`CategoryRow`]: either a real category or the
+/// `[done]` sentinel that exits the menu.
+#[derive(Clone, Debug)]
+enum CategoryRowKind {
+    /// Pick a category by name.
+    Category(String),
+    /// Sentinel last row that exits the menu.
+    Done,
+}
+
+impl std::fmt::Display for CategoryRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Build the outer category rows. One row per category followed by a
+/// `[done]` sentinel.
+fn build_category_rows(
+    groups: &std::collections::BTreeMap<&str, Vec<&SchemaEntry>>,
+    list: &[ListRow],
+) -> Vec<CategoryRow> {
+    let mut rows: Vec<CategoryRow> = Vec::with_capacity(groups.len() + 1);
+    for (cat, entries) in groups {
+        if entries.is_empty() {
+            continue;
+        }
+        let n = entries.len();
+        let set = entries
+            .iter()
+            .filter(|e| {
+                list.iter()
+                    .find(|r| r.key == e.key)
+                    .map(|r| r.source == "set")
+                    .unwrap_or(false)
+            })
+            .count();
+        let key_word = if n == 1 { "key" } else { "keys" };
+        let set_part = if set == 0 {
+            "0 set".to_string()
+        } else {
+            format!("{set} set")
+        };
+        rows.push(CategoryRow {
+            label: format!("{cat}  ({n} {key_word}, {set_part})"),
+            kind: CategoryRowKind::Category((*cat).to_string()),
+        });
+    }
+    rows.push(CategoryRow {
+        label: "[done]".to_string(),
+        kind: CategoryRowKind::Done,
+    });
+    rows
+}
+
+/// One row in the inner key picker.
+#[derive(Clone, Debug)]
+struct KeyRow {
+    /// Pre-rendered label.
+    label: String,
+    /// What this row resolves to when picked.
+    kind: KeyRowKind,
+}
+
+/// Variant carried by a [`KeyRow`]: either a schema entry to edit or
+/// the `[back]` sentinel that returns to the outer category menu.
+#[derive(Clone, Debug)]
+enum KeyRowKind {
+    /// Pick a key for editing.
+    Key(SchemaEntry),
+    /// Sentinel last row that returns to the outer menu.
+    Back,
+}
+
+impl std::fmt::Display for KeyRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Build the inner key rows. One per entry followed by `[back]`.
+fn build_key_rows(entries: &[&SchemaEntry], list: &[ListRow]) -> Vec<KeyRow> {
+    // Pad the display name column so the type + value line up.
+    let max_label = entries
+        .iter()
+        .map(|e| key_label(e).chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut rows: Vec<KeyRow> = Vec::with_capacity(entries.len() + 1);
+    for entry in entries {
+        let label = key_label(entry);
+        let padded = format!("{label:<max_label$}");
+        let ty = key_type_label(entry.ty);
+        let current = list.iter().find(|r| r.key == entry.key);
+        let value = menu_value_display(entry, current);
+        rows.push(KeyRow {
+            label: format!("{padded}  {ty:<6}  {value}"),
+            kind: KeyRowKind::Key((*entry).clone()),
+        });
+    }
+    rows.push(KeyRow {
+        label: "[back]".to_string(),
+        kind: KeyRowKind::Back,
+    });
+    rows
+}
+
+/// Render the value column for an inner key row. Secrets become
+/// `<set>` / `<unset>`; defaults get the `(default)` marker; plain
+/// values render via [`json_to_display`].
+fn menu_value_display(entry: &SchemaEntry, current: Option<&ListRow>) -> String {
     let source = current.map(|r| r.source.as_str()).unwrap_or("unset");
     match (entry.ty, source) {
-        (KeyType::Secret, "set") => "<set, hidden>".to_string(),
+        (KeyType::Secret, "set") => "<set>".to_string(),
         (KeyType::Secret, _) => "<unset>".to_string(),
         (_, "unset") => "<unset>".to_string(),
         _ => match current.map(|r| &r.value) {
             Some(v) => {
                 let rendered = json_to_display(v);
                 if source == "default" {
-                    format!("{rendered} (default)")
+                    format!("(default) {rendered}")
                 } else {
                     rendered
                 }
             }
             None => "<unset>".to_string(),
         },
-    }
-}
-
-/// Confirm prompt: should we update this key? Default depends on the
-/// current source (set / default / unset).
-fn prompt_for_update(_entry: &SchemaEntry, source: &str) -> Result<bool, WizardExit> {
-    let (message, default) = match source {
-        "set" => ("Update this?", false),
-        "default" => ("Override the default?", false),
-        _ => ("Set this now?", true),
-    };
-    match inquire::Confirm::new(message)
-        .with_default(default)
-        .prompt()
-    {
-        Ok(v) => Ok(v),
-        Err(inquire::InquireError::OperationCanceled)
-        | Err(inquire::InquireError::OperationInterrupted) => Err(WizardExit::Aborted),
-        Err(e) => {
-            println!("prompt error: {e}");
-            Err(WizardExit::Aborted)
-        }
-    }
-}
-
-/// Type-aware value prompt. Returns the encoded JSON value ready for
-/// the PUT body.
-fn prompt_for_value(entry: &SchemaEntry) -> Result<Value, WizardExit> {
-    loop {
-        let attempt: Result<Value, inquire::InquireError> = match entry.ty {
-            KeyType::Secret => {
-                let r = inquire::Password::new("Value:")
-                    .with_display_mode(inquire::PasswordDisplayMode::Masked)
-                    .without_confirmation()
-                    .prompt();
-                r.map(Value::String)
-            }
-            KeyType::String => inquire::Text::new("Value:").prompt().map(Value::String),
-            KeyType::Int => inquire::CustomType::<i64>::new("Value:")
-                .prompt()
-                .map(Value::from),
-            KeyType::Bool => inquire::Confirm::new("Value:").prompt().map(Value::Bool),
-        };
-        match attempt {
-            Ok(Value::String(s)) if s.is_empty() => {
-                println!("Empty value rejected. Try again, or Ctrl-C to abort.");
-                continue;
-            }
-            Ok(v) => return Ok(v),
-            Err(inquire::InquireError::OperationCanceled)
-            | Err(inquire::InquireError::OperationInterrupted) => return Err(WizardExit::Aborted),
-            Err(e) => {
-                println!("prompt error: {e}");
-                return Err(WizardExit::Aborted);
-            }
-        }
     }
 }
 
@@ -938,12 +1112,16 @@ mod tests {
         let entries = vec![
             SchemaEntry {
                 key: "cloudflare.api_token".into(),
+                display_name: "Cloudflare API token".into(),
+                category: "Certificates".into(),
                 ty: KeyType::Secret,
                 default: None,
                 doc: "CF token".into(),
             },
             SchemaEntry {
                 key: "acme.directory".into(),
+                display_name: "ACME directory".into(),
+                category: "Certificates".into(),
                 ty: KeyType::String,
                 default: Some(Value::String("https://example.com".into())),
                 doc: "ACME dir".into(),
@@ -962,7 +1140,7 @@ mod tests {
     #[test]
     fn configure_bare_parses_as_none() {
         // `isd configure` with no sub-verb must parse, with
-        // `command = None`. That is what dispatches to the wizard.
+        // `command = None`. That is what dispatches to the menu.
         let w = WrapArgs::try_parse_from(["x"]).unwrap();
         assert!(
             w.a.command.is_none(),
@@ -974,7 +1152,7 @@ mod tests {
     #[test]
     fn configure_setup_alias_parses() {
         // `isd configure setup` must parse as the explicit Setup
-        // alias for the wizard.
+        // alias for the menu.
         let w = WrapArgs::try_parse_from(["x", "setup"]).unwrap();
         assert!(matches!(w.a.command, Some(ConfigureCommand::Setup)));
     }
@@ -990,43 +1168,208 @@ mod tests {
         }
     }
 
+    // --- menu helpers ------------------------------------------------------
+
+    /// Build the six v0.1 entries inline so the menu helpers can be
+    /// tested without a fake controller round-trip.
+    fn v01_schema_entries() -> Vec<SchemaEntry> {
+        vec![
+            SchemaEntry {
+                key: "cloudflare.api_token".into(),
+                display_name: "Cloudflare API token".into(),
+                category: "Certificates".into(),
+                ty: KeyType::Secret,
+                default: None,
+                doc: "CF token".into(),
+            },
+            SchemaEntry {
+                key: "cloudflare.zone_id".into(),
+                display_name: "Cloudflare zone ID".into(),
+                category: "Certificates".into(),
+                ty: KeyType::String,
+                default: None,
+                doc: "CF zone".into(),
+            },
+            SchemaEntry {
+                key: "routing.default_zone".into(),
+                display_name: "Default zone".into(),
+                category: "Routing".into(),
+                ty: KeyType::String,
+                default: None,
+                doc: "Default routing zone".into(),
+            },
+            SchemaEntry {
+                key: "acme.contact_email".into(),
+                display_name: "Contact email".into(),
+                category: "Certificates".into(),
+                ty: KeyType::String,
+                default: None,
+                doc: "ACME contact".into(),
+            },
+            SchemaEntry {
+                key: "acme.directory".into(),
+                display_name: "ACME directory (prod vs staging)".into(),
+                category: "Certificates".into(),
+                ty: KeyType::String,
+                default: Some(Value::String("https://example.com".into())),
+                doc: "ACME dir".into(),
+            },
+            SchemaEntry {
+                key: "ssh.max_ttl_seconds".into(),
+                display_name: "Max cert TTL (seconds)".into(),
+                category: "SSH bastion".into(),
+                ty: KeyType::Int,
+                default: Some(Value::from(2_592_000i64)),
+                doc: "TTL ceiling".into(),
+            },
+        ]
+    }
+
     #[test]
-    fn wizard_current_display_redacts_set_secret() {
-        let entry = SchemaEntry {
+    fn group_by_category_buckets_v01_keys() {
+        let entries = v01_schema_entries();
+        let groups = group_by_category(&entries);
+        // BTreeMap so iteration is alphabetical.
+        let names: Vec<&str> = groups.keys().copied().collect();
+        assert_eq!(names, vec!["Certificates", "Routing", "SSH bastion"]);
+        assert_eq!(groups["Certificates"].len(), 4);
+        assert_eq!(groups["Routing"].len(), 1);
+        assert_eq!(groups["SSH bastion"].len(), 1);
+        // Declaration order inside a category is preserved.
+        let certs_keys: Vec<&str> = groups["Certificates"]
+            .iter()
+            .map(|e| e.key.as_str())
+            .collect();
+        assert_eq!(
+            certs_keys,
+            vec![
+                "cloudflare.api_token",
+                "cloudflare.zone_id",
+                "acme.contact_email",
+                "acme.directory",
+            ]
+        );
+    }
+
+    #[test]
+    fn group_by_category_skips_empty_category() {
+        // Defensive: an entry from an older controller with no category
+        // serializes as empty string via `#[serde(default)]`. Make sure
+        // the menu still draws.
+        let entries = vec![SchemaEntry {
+            key: "legacy.key".into(),
+            display_name: "Legacy".into(),
+            category: String::new(),
+            ty: KeyType::String,
+            default: None,
+            doc: "no category".into(),
+        }];
+        let groups = group_by_category(&entries);
+        assert!(groups.is_empty(), "expected legacy key dropped: {groups:?}");
+    }
+
+    #[test]
+    fn key_label_falls_back_to_dotted_key() {
+        let mut entry = v01_schema_entries().remove(0);
+        assert_eq!(key_label(&entry), "Cloudflare API token");
+        entry.display_name.clear();
+        assert_eq!(key_label(&entry), "cloudflare.api_token");
+    }
+
+    #[test]
+    fn build_category_rows_counts_set_keys() {
+        let entries = v01_schema_entries();
+        let groups = group_by_category(&entries);
+        let list = vec![
+            ListRow {
+                key: "cloudflare.api_token".into(),
+                ty: KeyType::Secret,
+                value: Value::String("<redacted>".into()),
+                source: "set".into(),
+            },
+            ListRow {
+                key: "acme.directory".into(),
+                ty: KeyType::String,
+                value: Value::String("https://example.com".into()),
+                source: "default".into(),
+            },
+        ];
+        let rows = build_category_rows(&groups, &list);
+        // 3 categories + 1 [done] row.
+        assert_eq!(rows.len(), 4);
+        // Last row is [done].
+        assert!(matches!(rows.last().unwrap().kind, CategoryRowKind::Done));
+        assert_eq!(rows.last().unwrap().label, "[done]");
+        // First (alphabetical) is Certificates with 4 keys, 1 set.
+        let certs = &rows[0];
+        assert!(
+            certs.label.contains("Certificates"),
+            "label: {}",
+            certs.label
+        );
+        assert!(certs.label.contains("4 keys"), "label: {}", certs.label);
+        assert!(certs.label.contains("1 set"), "label: {}", certs.label);
+        match &certs.kind {
+            CategoryRowKind::Category(n) => assert_eq!(n, "Certificates"),
+            other => panic!("expected Category, got {other:?}"),
+        }
+        // Routing: 1 key, 0 set.
+        let routing = rows
+            .iter()
+            .find(|r| r.label.starts_with("Routing"))
+            .unwrap();
+        assert!(routing.label.contains("1 key,"), "label: {}", routing.label);
+        assert!(routing.label.contains("0 set"), "label: {}", routing.label);
+    }
+
+    #[test]
+    fn build_key_rows_renders_back_sentinel_last() {
+        let entries = v01_schema_entries();
+        let groups = group_by_category(&entries);
+        let certs: Vec<&SchemaEntry> = groups["Certificates"].clone();
+        let list: Vec<ListRow> = vec![ListRow {
             key: "cloudflare.api_token".into(),
             ty: KeyType::Secret,
-            default: None,
-            doc: "CF token".into(),
-        };
+            value: Value::String("<redacted>".into()),
+            source: "set".into(),
+        }];
+        let rows = build_key_rows(&certs, &list);
+        assert_eq!(rows.len(), 5); // 4 keys + [back]
+        assert_eq!(rows.last().unwrap().label, "[back]");
+        assert!(matches!(rows.last().unwrap().kind, KeyRowKind::Back));
+        // Secret-set rendered as <set>.
+        let token = rows
+            .iter()
+            .find(|r| r.label.contains("Cloudflare API token"))
+            .expect("api token row present");
+        assert!(token.label.contains("secret"), "label: {}", token.label);
+        assert!(token.label.contains("<set>"), "label: {}", token.label);
+    }
+
+    #[test]
+    fn menu_value_display_redacts_set_secret() {
+        let entry = v01_schema_entries().remove(0); // cloudflare.api_token
         let row = ListRow {
             key: "cloudflare.api_token".into(),
             ty: KeyType::Secret,
             value: Value::String("<redacted>".into()),
             source: "set".into(),
         };
-        assert_eq!(wizard_current_display(&entry, Some(&row)), "<set, hidden>");
+        assert_eq!(menu_value_display(&entry, Some(&row)), "<set>");
     }
 
     #[test]
-    fn wizard_current_display_unset_secret() {
-        let entry = SchemaEntry {
-            key: "cloudflare.api_token".into(),
-            ty: KeyType::Secret,
-            default: None,
-            doc: "CF token".into(),
-        };
-        // No matching list row at all (defensive fallback).
-        assert_eq!(wizard_current_display(&entry, None), "<unset>");
+    fn menu_value_display_unset_secret_no_row() {
+        let entry = v01_schema_entries().remove(0);
+        assert_eq!(menu_value_display(&entry, None), "<unset>");
     }
 
     #[test]
-    fn wizard_current_display_default_marks_default() {
-        let entry = SchemaEntry {
-            key: "acme.directory".into(),
-            ty: KeyType::String,
-            default: Some(Value::String("https://example.com".into())),
-            doc: "ACME dir".into(),
-        };
+    fn menu_value_display_default_marks_default() {
+        let entry = v01_schema_entries()
+            .into_iter()
+            .find(|e| e.key == "acme.directory")
+            .unwrap();
         let row = ListRow {
             key: "acme.directory".into(),
             ty: KeyType::String,
@@ -1034,19 +1377,17 @@ mod tests {
             source: "default".into(),
         };
         assert_eq!(
-            wizard_current_display(&entry, Some(&row)),
-            "https://example.com (default)"
+            menu_value_display(&entry, Some(&row)),
+            "(default) https://example.com"
         );
     }
 
     #[test]
-    fn wizard_current_display_set_string_value() {
-        let entry = SchemaEntry {
-            key: "routing.default_zone".into(),
-            ty: KeyType::String,
-            default: None,
-            doc: "Zone".into(),
-        };
+    fn menu_value_display_set_string_value() {
+        let entry = v01_schema_entries()
+            .into_iter()
+            .find(|e| e.key == "routing.default_zone")
+            .unwrap();
         let row = ListRow {
             key: "routing.default_zone".into(),
             ty: KeyType::String,
@@ -1054,25 +1395,23 @@ mod tests {
             source: "set".into(),
         };
         assert_eq!(
-            wizard_current_display(&entry, Some(&row)),
+            menu_value_display(&entry, Some(&row)),
             "weavers.engineering"
         );
     }
 
     #[test]
-    fn wizard_current_display_unset_string_with_no_default() {
-        let entry = SchemaEntry {
-            key: "routing.default_zone".into(),
-            ty: KeyType::String,
-            default: None,
-            doc: "Zone".into(),
-        };
+    fn menu_value_display_unset_string_no_default() {
+        let entry = v01_schema_entries()
+            .into_iter()
+            .find(|e| e.key == "routing.default_zone")
+            .unwrap();
         let row = ListRow {
             key: "routing.default_zone".into(),
             ty: KeyType::String,
             value: Value::Null,
             source: "unset".into(),
         };
-        assert_eq!(wizard_current_display(&entry, Some(&row)), "<unset>");
+        assert_eq!(menu_value_display(&entry, Some(&row)), "<unset>");
     }
 }
