@@ -2,9 +2,10 @@
 //!
 //! Wires a single `POST /api/v1/ssh/cert` route into the dashboard
 //! router. The handler validates the operator's pubkey, caps the
-//! requested TTL against `ISENGARD_SSH_CERT_MAX_TTL` (default 1h),
-//! signs the cert via the controller's [`SshAuthority`], and journals
-//! an `ssh.cert.issued` event for audit.
+//! requested TTL against the operator-settable `ssh.max_ttl_seconds`
+//! configure key (falling back to `ISENGARD_SSH_CERT_MAX_TTL`, then
+//! a 1h default), signs the cert via the controller's [`SshAuthority`],
+//! and journals an `ssh.cert.issued` event for audit.
 //!
 //! Phase 4 (`isd ssh <host>`) is the primary consumer: it generates a
 //! short-lived operator keypair on the local machine, POSTs the
@@ -21,25 +22,33 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use isengard_controller::ControllerHandles;
+use isengard_controller::config::{ConfigDispatcher, ConfigValue};
 use isengard_storage::InsertEvent;
 use isengard_storage::journal::EventRow;
 use serde::{Deserialize, Serialize};
 use ssh_key::{HashAlg, PublicKey};
 use tracing::warn;
 
-/// Hard upper bound on the TTL the dashboard will mint. `MAX_TTL_SECS`
-/// is overridable per-deployment via the `ISENGARD_SSH_CERT_MAX_TTL`
-/// controller env, but the absolute ceiling is enforced here too: a
-/// misconfigured env can not push past 24h without a code change.
+/// Hard upper bound on the TTL the dashboard will mint. The configure
+/// dispatcher and the legacy `ISENGARD_SSH_CERT_MAX_TTL` env both feed
+/// through this ceiling; a misconfigured override can not push past
+/// 24h without a code change.
 const ABSOLUTE_MAX_TTL_SECS: u64 = 86_400;
 
-/// Default TTL cap when `ISENGARD_SSH_CERT_MAX_TTL` is unset. One hour
+/// Default TTL cap when neither `ssh.max_ttl_seconds` (configure key)
+/// nor `ISENGARD_SSH_CERT_MAX_TTL` (legacy env) is set. One hour
 /// matches the spec's "short-lived" framing for operator certs.
 const DEFAULT_MAX_TTL_SECS: u64 = 3_600;
 
 /// Env var operators set on the controller to raise (or lower) the
 /// per-request TTL ceiling. Capped against [`ABSOLUTE_MAX_TTL_SECS`].
+/// Retained for back-compat; new deployments should use
+/// `isd configure set ssh.max_ttl_seconds <n>` instead.
 pub const MAX_TTL_ENV_VAR: &str = "ISENGARD_SSH_CERT_MAX_TTL";
+
+/// Configure key the dispatcher reads for the TTL ceiling. Mirrors the
+/// schema declared in [`isengard_controller::config::Schema::v01`].
+pub const MAX_TTL_CONFIG_KEY: &str = "ssh.max_ttl_seconds";
 
 /// Request body for `POST /api/v1/ssh/cert`. Mirrors the public
 /// surface the `isd ssh` CLI generates client-side.
@@ -124,7 +133,7 @@ pub async fn post_ssh_cert(
     let target = PublicKey::from_openssh(body.pubkey.trim())
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, format!("invalid pubkey: {e}")))?;
 
-    let effective_ttl = cap_ttl(body.ttl_seconds);
+    let effective_ttl = cap_ttl(body.ttl_seconds, handles.config_dispatcher()).await;
     let cert_bytes = handles
         .ssh_ca
         .sign_user_cert(&target, &body.principals, effective_ttl, &body.comment)
@@ -180,19 +189,64 @@ pub async fn post_ssh_cert(
 
 /// Cap `requested` seconds against the configured + absolute ceilings.
 ///
-/// Reads `ISENGARD_SSH_CERT_MAX_TTL` once per request: keeps the
-/// runtime override hot without restart. Invalid env values (non-
-/// numeric, zero, above the absolute ceiling) fall back to
-/// `DEFAULT_MAX_TTL_SECS`. The returned value is also pinned at
+/// Resolution order: the `ssh.max_ttl_seconds` configure key (when set
+/// to a positive integer within [`ABSOLUTE_MAX_TTL_SECS`]), then the
+/// legacy `ISENGARD_SSH_CERT_MAX_TTL` env (same validity gate), then
+/// [`DEFAULT_MAX_TTL_SECS`]. The returned value is also pinned at
 /// least 1 second so the cert builder never sees a zero window.
-fn cap_ttl(requested: u64) -> Duration {
-    let configured = std::env::var(MAX_TTL_ENV_VAR)
+///
+/// The dispatcher lookup is best-effort: any backing-store failure or
+/// unexpected value shape logs a `warn` and falls through to the next
+/// source rather than failing the issuance.
+async fn cap_ttl(requested: u64, dispatcher: &ConfigDispatcher) -> Duration {
+    let configured = resolve_max_ttl(dispatcher).await;
+    let secs = requested.min(configured).max(1);
+    Duration::from_secs(secs)
+}
+
+/// Resolves the effective TTL ceiling, in seconds.
+///
+/// Tries the configure dispatcher first, the env second, the default
+/// last. Values outside `(0, ABSOLUTE_MAX_TTL_SECS]` are rejected and
+/// fall through.
+async fn resolve_max_ttl(dispatcher: &ConfigDispatcher) -> u64 {
+    if let Some(v) = read_dispatcher_max_ttl(dispatcher).await {
+        return v;
+    }
+    if let Some(v) = read_env_max_ttl() {
+        return v;
+    }
+    DEFAULT_MAX_TTL_SECS
+}
+
+/// Reads `ssh.max_ttl_seconds` from the dispatcher.
+///
+/// Returns `None` when the key is unset, the value falls outside the
+/// `(0, ABSOLUTE_MAX_TTL_SECS]` window, the value is not a positive
+/// integer, or the backing store fails. Failures log at `warn` so a
+/// misconfigured key surfaces during triage.
+async fn read_dispatcher_max_ttl(dispatcher: &ConfigDispatcher) -> Option<u64> {
+    let value = match dispatcher.get(MAX_TTL_CONFIG_KEY).await {
+        Ok(Some(ConfigValue::Set(v))) => v,
+        Ok(_) => return None,
+        Err(e) => {
+            warn!(error = %e, "ssh.max_ttl_seconds lookup failed; falling back");
+            return None;
+        }
+    };
+    let n = value.as_u64()?;
+    (n > 0 && n <= ABSOLUTE_MAX_TTL_SECS).then_some(n)
+}
+
+/// Reads the legacy `ISENGARD_SSH_CERT_MAX_TTL` env override.
+///
+/// Same validity gate as the dispatcher path: positive and within
+/// [`ABSOLUTE_MAX_TTL_SECS`].
+fn read_env_max_ttl() -> Option<u64> {
+    std::env::var(MAX_TTL_ENV_VAR)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&n| n > 0 && n <= ABSOLUTE_MAX_TTL_SECS)
-        .unwrap_or(DEFAULT_MAX_TTL_SECS);
-    let secs = requested.min(configured).max(1);
-    Duration::from_secs(secs)
 }
 
 /// Build a uniform JSON error body shaped like the rest of the
@@ -322,38 +376,152 @@ pub async fn get_ssh_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use isengard_controller::ControllerHandles;
+    use isengard_controller::config::Schema;
+    use isengard_controller::secrets::SecretsStore;
+    use isengard_storage::{Inventory, SettingStore};
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
-    #[test]
-    fn cap_ttl_respects_default_ceiling() {
+    /// Serialises every test that touches `MAX_TTL_ENV_VAR` so parallel
+    /// test execution does not race on the process-wide env var. Async
+    /// mutex so the guard can be held across awaits without tripping
+    /// clippy's `await_holding_lock` lint.
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    async fn fresh_dispatcher() -> Arc<ConfigDispatcher> {
+        let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let secrets = Arc::new(SecretsStore::new(inv.clone(), key));
+        let settings = Arc::new(SettingStore::new(inv));
+        Arc::new(ConfigDispatcher::new(Schema::v01(), secrets, settings))
+    }
+
+    #[tokio::test]
+    async fn cap_ttl_respects_default_ceiling_when_all_unset() {
+        let _g = ENV_LOCK.lock().await;
         unsafe {
             std::env::remove_var(MAX_TTL_ENV_VAR);
         }
-        assert_eq!(cap_ttl(60).as_secs(), 60);
-        assert_eq!(cap_ttl(10_000).as_secs(), DEFAULT_MAX_TTL_SECS);
-        assert_eq!(cap_ttl(0).as_secs(), 1);
+        let dispatcher = fresh_dispatcher().await;
+        assert_eq!(cap_ttl(60, &dispatcher).await.as_secs(), 60);
+        assert_eq!(
+            cap_ttl(10_000, &dispatcher).await.as_secs(),
+            DEFAULT_MAX_TTL_SECS
+        );
+        assert_eq!(cap_ttl(0, &dispatcher).await.as_secs(), 1);
     }
 
-    #[test]
-    fn cap_ttl_honors_env_override_within_absolute_bound() {
+    #[tokio::test]
+    async fn cap_ttl_honors_env_override_within_absolute_bound() {
+        let _g = ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var(MAX_TTL_ENV_VAR, "7200");
         }
-        let capped = cap_ttl(99_999);
+        let dispatcher = fresh_dispatcher().await;
+        let capped = cap_ttl(99_999, &dispatcher).await;
         unsafe {
             std::env::remove_var(MAX_TTL_ENV_VAR);
         }
         assert_eq!(capped.as_secs(), 7200);
     }
 
-    #[test]
-    fn cap_ttl_rejects_env_above_absolute_bound() {
+    #[tokio::test]
+    async fn cap_ttl_rejects_env_above_absolute_bound() {
+        let _g = ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var(MAX_TTL_ENV_VAR, "999999");
         }
-        let capped = cap_ttl(10_000);
+        let dispatcher = fresh_dispatcher().await;
+        let capped = cap_ttl(10_000, &dispatcher).await;
         unsafe {
             std::env::remove_var(MAX_TTL_ENV_VAR);
         }
         assert_eq!(capped.as_secs(), DEFAULT_MAX_TTL_SECS);
+    }
+
+    #[tokio::test]
+    async fn cap_ttl_dispatcher_value_beats_env_and_default() {
+        let _g = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(MAX_TTL_ENV_VAR, "7200");
+        }
+        let dispatcher = fresh_dispatcher().await;
+        dispatcher
+            .put(MAX_TTL_CONFIG_KEY, json!(10_800u64), None)
+            .await
+            .unwrap();
+        let capped = cap_ttl(99_999, &dispatcher).await;
+        unsafe {
+            std::env::remove_var(MAX_TTL_ENV_VAR);
+        }
+        assert_eq!(
+            capped.as_secs(),
+            10_800,
+            "dispatcher must win over env and default"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_ttl_dispatcher_rejects_value_above_absolute_bound() {
+        let _g = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::remove_var(MAX_TTL_ENV_VAR);
+        }
+        let dispatcher = fresh_dispatcher().await;
+        dispatcher
+            .put(MAX_TTL_CONFIG_KEY, json!(ABSOLUTE_MAX_TTL_SECS + 1), None)
+            .await
+            .unwrap();
+        let capped = cap_ttl(10_000, &dispatcher).await;
+        assert_eq!(
+            capped.as_secs(),
+            DEFAULT_MAX_TTL_SECS,
+            "out-of-bound dispatcher value must fall back to env then default"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_ttl_falls_back_to_env_when_dispatcher_unset() {
+        let _g = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(MAX_TTL_ENV_VAR, "5400");
+        }
+        let dispatcher = fresh_dispatcher().await;
+        // Dispatcher has the schema default for ssh.max_ttl_seconds
+        // (30 days = 2_592_000s), which is `Default` not `Set`. The
+        // resolver must treat `Default` as "unset" so the env wins.
+        let capped = cap_ttl(99_999, &dispatcher).await;
+        unsafe {
+            std::env::remove_var(MAX_TTL_ENV_VAR);
+        }
+        assert_eq!(capped.as_secs(), 5400);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_factory_helper_is_compatible() {
+        // Confirm the same helper used by config_endpoints tests still
+        // produces a dispatcher that cap_ttl can read from.
+        let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let secrets = Arc::new(SecretsStore::new(inv.clone(), key));
+        let dispatcher = ControllerHandles::test_config_dispatcher(inv, secrets);
+        dispatcher
+            .put(MAX_TTL_CONFIG_KEY, json!(4_000u64), None)
+            .await
+            .unwrap();
+        let _g = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::remove_var(MAX_TTL_ENV_VAR);
+        }
+        let capped = cap_ttl(99_999, &dispatcher).await;
+        assert_eq!(capped.as_secs(), 4_000);
     }
 }

@@ -130,8 +130,5 @@ async fn test_config_dispatcher_helper_round_trips_through_handles() {
     let host = enroll_host(&inv).await;
     let pusher = RoutingPusher::new(inv.clone()).with_config_dispatcher(dispatcher);
     let cfg = pusher.build_for_host(host).await.unwrap();
-    assert_eq!(
-        cfg.settings.unwrap().acme_contact_email,
-        "ops@example.test"
-    );
+    assert_eq!(cfg.settings.unwrap().acme_contact_email, "ops@example.test");
 }
