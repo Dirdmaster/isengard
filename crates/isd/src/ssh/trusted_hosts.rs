@@ -75,9 +75,7 @@ impl TrustedHostsFile {
         match std::fs::read_to_string(path) {
             Ok(s) => toml::from_str(&s).context("parsing trusted_hosts.toml"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => {
-                Err(anyhow::Error::from(e).context(format!("reading {}", path.display())))
-            }
+            Err(e) => Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
         }
     }
 
@@ -89,8 +87,7 @@ impl TrustedHostsFile {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let s = toml::to_string_pretty(self).context("serializing trusted_hosts")?;
-        std::fs::write(path, s)
-            .with_context(|| format!("writing {}", path.display()))
+        std::fs::write(path, s).with_context(|| format!("writing {}", path.display()))
     }
 
     /// Insert `h`, replacing any existing entry that shares its
