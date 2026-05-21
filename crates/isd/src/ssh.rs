@@ -214,6 +214,7 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
     }
     let ssh_user = override_user.clone().unwrap_or_else(|| default.clone());
 
+    ensure_local_keypair()?;
     let pubkey_path = default_pubkey_path()?;
     let cert_path = cert_path_for(&pubkey_path);
     let want_principals = effective_principals(override_user.as_deref(), &default);
@@ -263,6 +264,7 @@ fn cert_covers_principals(cert_path: &Path, want: &[String]) -> bool {
 /// Returns `Err` on missing pubkey, controller-less context, HTTP
 /// failure, JSON decode failure, or write-to-disk failure.
 async fn run_mint(args: MintArgs, context: Option<&str>) -> Result<MintReceipt> {
+    ensure_local_keypair()?;
     let pubkey_path = match &args.pubkey {
         Some(p) => p.clone(),
         None => default_pubkey_path()?,
@@ -610,6 +612,54 @@ fn shorten_fingerprint(s: &str) -> String {
     } else {
         format!("SHA256:{short}")
     }
+}
+
+/// Generate an ed25519 keypair at `privkey_path` if it does not exist.
+/// No-op if the file is already present: never clobbers an existing
+/// key. The pubkey is written by `ssh-keygen` to `<privkey_path>.pub`.
+///
+/// # Errors
+///
+/// Returns `Err` when `mkdir -p` of the parent directory fails, when
+/// `ssh-keygen` cannot be spawned, or when `ssh-keygen` exits non-zero.
+fn ensure_keypair_at(privkey_path: &Path) -> Result<()> {
+    if privkey_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = privkey_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let comment = format!("operator@{} (isd-generated)", hostname_string());
+    let status = std::process::Command::new("ssh-keygen")
+        .arg("-t")
+        .arg("ed25519")
+        .arg("-N")
+        .arg("")
+        .arg("-f")
+        .arg(privkey_path)
+        .arg("-C")
+        .arg(&comment)
+        .status()
+        .context("spawning ssh-keygen for bootstrap")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "ssh-keygen -t ed25519 -f {} -> {}",
+            privkey_path.display(),
+            status
+        ));
+    }
+    Ok(())
+}
+
+/// Ensure `~/.ssh/id_ed25519` exists, generating one when missing.
+/// Called at the top of `run_dial` and `run_mint` so a fresh laptop
+/// dialing the first time auto-bootstraps its keypair before the mint
+/// HTTP call tries to read the pubkey.
+fn ensure_local_keypair() -> Result<()> {
+    let home = dirs::home_dir().context("home dir not found")?;
+    let privkey = home.join(".ssh").join("id_ed25519");
+    ensure_keypair_at(&privkey)
 }
 
 /// Default Unix user for the operator's laptop. Tries
@@ -975,6 +1025,43 @@ mod tests {
     fn effective_principals_drops_empty_override() {
         let p = effective_principals(Some(""), "dirdmaster");
         assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    /// Skip ssh-keygen-driven tests when the binary is absent so CI
+    /// envs without it (sandboxed builders) pass cleanly. The function
+    /// is still exercised on the operator's laptop where ssh-keygen
+    /// always exists.
+    fn ssh_keygen_available() -> bool {
+        which::which("ssh-keygen").is_ok()
+    }
+
+    #[test]
+    fn ensure_keypair_at_generates_when_missing() {
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let privkey = dir.path().join("id_ed25519");
+        let pubkey = dir.path().join("id_ed25519.pub");
+        ensure_keypair_at(&privkey).expect("generate");
+        assert!(privkey.exists(), "private key not written");
+        assert!(pubkey.exists(), "public key not written");
+    }
+
+    #[test]
+    fn ensure_keypair_at_noop_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let privkey = dir.path().join("id_ed25519");
+        std::fs::write(&privkey, "fake key bytes").unwrap();
+        let mtime_before = std::fs::metadata(&privkey).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        ensure_keypair_at(&privkey).expect("noop");
+        let mtime_after = std::fs::metadata(&privkey).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "file was overwritten");
+        // Body untouched.
+        let body = std::fs::read_to_string(&privkey).unwrap();
+        assert_eq!(body, "fake key bytes");
     }
 
     #[test]
