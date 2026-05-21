@@ -96,6 +96,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # (CI sandboxes, ultra-minimal containers).
 whoami = "1"
 
+# Bastion v2 PR 3: `isd ssh trust` fingerprints the controller CA pubkey
+# (SHA256, OpenSSH format) before recording it in trusted_hosts.toml so
+# the operator can spot a CA swap. `ssh-key` is already pinned via the
+# workspace for the controller; we reuse the same version here.
+ssh-key.workspace = true
+
 # Track G Phase 5: backup/restore pipeline.
 # `age` does the passphrase encryption, `aws-sdk-s3` + `aws-config` cover the
 # S3-API destination (works against AWS, R2, MinIO, B2, Wasabi via custom

@@ -3438,6 +3438,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "similar",
+ "ssh-key",
  "tempfile",
  "tokio",
  "tokio-rustls",

@@ -33,6 +33,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
+pub mod trust;
+pub mod trusted_hosts;
+
 /// CLI flags for `isd ssh`.
 #[derive(Debug, Args)]
 pub struct SshArgs {
