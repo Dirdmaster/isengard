@@ -29,6 +29,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ),
     ("Setup", &["init", "uninit", "upgrade", "context", "update"]),
     ("Backup", &["backup", "restore"]),
+    ("Access", &["ssh"]),
     ("Editor", &["lsp", "mcp"]),
 ];
 
