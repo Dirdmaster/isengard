@@ -1,5 +1,9 @@
 //! `isd configure` operator surface (controller-wide configuration).
 //!
+//! Bare `isd configure` (no sub-verb) enters an interactive setup
+//! wizard that walks every schema key in order. `isd configure setup`
+//! is an explicit alias for the same wizard.
+//!
 //! Five sub-verbs:
 //!
 //!  - `isd configure get <key> [--show-secret]`: print one key.
@@ -14,7 +18,7 @@
 //!  - `isd configure schema`: print the static schema (key, type,
 //!    default, description).
 //!
-//! All five verbs hit the dashboard's `/api/v1/config*` routes through
+//! All verbs hit the dashboard's `/api/v1/config*` routes through
 //! a [`Session`] (same pattern as `secret.rs` and `ssh/mod.rs`).
 //!
 //! There is no rotation verb: operators just `set` again. See the
@@ -53,11 +57,16 @@ pub enum KeyType {
 }
 
 /// CLI flags for `isd configure`.
+///
+/// `command` is optional: bare `isd configure` dispatches to the
+/// interactive wizard (`run_wizard`). Same pattern as [`SshArgs`] from
+/// PR #237 (picker-by-default).
 #[derive(Debug, Args)]
 pub struct ConfigureArgs {
-    /// Resolved sub-verb.
+    /// Resolved sub-verb. `None` means bare `isd configure`: open the
+    /// interactive wizard.
     #[command(subcommand)]
-    pub cmd: ConfigureCommand,
+    pub command: Option<ConfigureCommand>,
 }
 
 /// Sub-verbs under `isd configure`.
@@ -74,6 +83,9 @@ pub enum ConfigureCommand {
     List(ListArgs),
     /// Print the schema (key, type, default, description).
     Schema,
+    /// Run the interactive setup wizard. Explicit alias for bare
+    /// `isd configure`.
+    Setup,
 }
 
 /// CLI flags for `isd configure get`.
@@ -179,12 +191,13 @@ struct PutBody {
 pub async fn run(args: ConfigureArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let base = session.require_controller()?.to_owned();
-    match args.cmd {
-        ConfigureCommand::Get(a) => run_get(&session, &base, a).await,
-        ConfigureCommand::Set(a) => run_set(&session, &base, a).await,
-        ConfigureCommand::Unset(a) => run_unset(&session, &base, a).await,
-        ConfigureCommand::List(a) => run_list(&session, &base, a).await,
-        ConfigureCommand::Schema => run_schema(&session, &base).await,
+    match args.command {
+        None | Some(ConfigureCommand::Setup) => run_wizard(&session, &base).await,
+        Some(ConfigureCommand::Get(a)) => run_get(&session, &base, a).await,
+        Some(ConfigureCommand::Set(a)) => run_set(&session, &base, a).await,
+        Some(ConfigureCommand::Unset(a)) => run_unset(&session, &base, a).await,
+        Some(ConfigureCommand::List(a)) => run_list(&session, &base, a).await,
+        Some(ConfigureCommand::Schema) => run_schema(&session, &base).await,
     }
 }
 
@@ -256,25 +269,30 @@ async fn run_set(session: &Session, base: &str, args: SetArgs) -> Result<()> {
     //    Int and bool keys parse the input so the controller validates
     //    against the right JSON type.
     let value_json = encode_value(entry.map(|e| e.ty), &value_str)?;
-    let url = format!("{base}/api/v1/config/{}", args.key);
+    put_value(session, base, &args.key, value_json).await?;
+    match entry.map(|e| e.ty) {
+        Some(KeyType::Secret) => println!("Set {} (secret; value not echoed)", args.key),
+        _ => println!("Set {} = {}", args.key, value_str),
+    }
+    Ok(())
+}
+
+/// `PUT /api/v1/config/{key}` shared helper. Returns the parsed error
+/// envelope on non-2xx so callers can surface the controller's hint.
+async fn put_value(session: &Session, base: &str, key: &str, value: Value) -> Result<()> {
+    let url = format!("{base}/api/v1/config/{key}");
     let resp = session
         .client
         .put(&url)
-        .json(&PutBody { value: value_json })
+        .json(&PutBody { value })
         .send()
         .await
         .with_context(|| format!("PUT {url}"))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        // The controller carries did-you-mean / type-mismatch detail in
-        // the body; surface it verbatim so the operator sees the hint.
         let detail = parse_error_message(&body, &body);
-        return Err(anyhow!("{}: {}", args.key, detail));
-    }
-    match entry.map(|e| e.ty) {
-        Some(KeyType::Secret) => println!("Set {} (secret; value not echoed)", args.key),
-        _ => println!("Set {} = {}", args.key, value_str),
+        return Err(anyhow!("{key}: {detail}"));
     }
     Ok(())
 }
@@ -365,8 +383,20 @@ async fn run_unset(session: &Session, base: &str, args: UnsetArgs) -> Result<()>
 
 /// `GET /api/v1/config` then render the snapshot as a table.
 async fn run_list(session: &Session, base: &str, args: ListArgs) -> Result<()> {
+    let rows = fetch_list(session, base, args.show_secrets).await?;
+    if rows.is_empty() {
+        println!("No config keys.");
+        return Ok(());
+    }
+    println!("{}", render_list_table(&rows));
+    Ok(())
+}
+
+/// `GET /api/v1/config` shared helper. `list` and the wizard both need
+/// the current snapshot keyed by `key`.
+async fn fetch_list(session: &Session, base: &str, show_secrets: bool) -> Result<Vec<ListRow>> {
     let mut url = format!("{base}/api/v1/config");
-    if args.show_secrets {
+    if show_secrets {
         url.push_str("?show_secrets=1");
     }
     let resp = session
@@ -376,12 +406,7 @@ async fn run_list(session: &Session, base: &str, args: ListArgs) -> Result<()> {
         .await
         .with_context(|| format!("GET {url}"))?;
     let rows: Vec<ListRow> = resp.error_for_status()?.json().await?;
-    if rows.is_empty() {
-        println!("No config keys.");
-        return Ok(());
-    }
-    println!("{}", render_list_table(&rows));
-    Ok(())
+    Ok(rows)
 }
 
 /// Build the `KEY / TYPE / VALUE / SOURCE` table. Pulled out so the
@@ -446,6 +471,165 @@ async fn fetch_schema(session: &Session, base: &str) -> Result<Vec<SchemaEntry>>
     Ok(entries)
 }
 
+/// Interactive setup wizard. Walks every schema key in order, shows
+/// the current state, and prompts to update.
+///
+/// Modeled on the Hermes config flow: one key at a time, Confirm-then-
+/// Value, secret-aware redaction. Ctrl-C / Esc exits cleanly with a
+/// summary of what was already updated.
+async fn run_wizard(session: &Session, base: &str) -> Result<()> {
+    let schema = fetch_schema(session, base).await?;
+    let list = fetch_list(session, base, false).await.unwrap_or_default();
+
+    let total = schema.len();
+    println!("isd configure: walking {total} keys.");
+
+    let mut updated: usize = 0;
+    let mut skipped: usize = 0;
+
+    for (idx, entry) in schema.iter().enumerate() {
+        let i = idx + 1;
+        let current = list.iter().find(|r| r.key == entry.key);
+        let source = current.map(|r| r.source.as_str()).unwrap_or("unset");
+
+        println!();
+        println!("[{i}/{total}] {} ({})", entry.key, key_type_label(entry.ty));
+        println!("  {}", entry.doc);
+        println!("  Current: {}", wizard_current_display(entry, current));
+
+        let prompt_outcome = prompt_for_update(entry, source);
+        let should_update = match prompt_outcome {
+            Ok(b) => b,
+            Err(WizardExit::Aborted) => {
+                println!();
+                println!("Wizard aborted. {updated} keys updated, {skipped} skipped.");
+                return Ok(());
+            }
+        };
+        if !should_update {
+            skipped += 1;
+            continue;
+        }
+
+        let value_outcome = prompt_for_value(entry);
+        let value_json = match value_outcome {
+            Ok(v) => v,
+            Err(WizardExit::Aborted) => {
+                println!();
+                println!("Wizard aborted. {updated} keys updated, {skipped} skipped.");
+                return Ok(());
+            }
+        };
+
+        match put_value(session, base, &entry.key, value_json.clone()).await {
+            Ok(()) => {
+                updated += 1;
+                if entry.ty == KeyType::Secret {
+                    println!("Set {} (secret; value not echoed)", entry.key);
+                } else {
+                    println!("Set {} = {}", entry.key, json_to_display(&value_json));
+                }
+            }
+            Err(e) => {
+                // Surface the controller's hint, but keep walking so a
+                // single rejected key does not abort the wizard.
+                println!("Skipped {}: {e}", entry.key);
+                skipped += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("Done. {updated} keys updated, {skipped} skipped.");
+    Ok(())
+}
+
+/// Sentinel for wizard prompts: differentiate "operator said no, move
+/// on" (returned as `Ok(false)` in the Confirm path) from "operator
+/// hit Ctrl-C / Esc, exit the wizard".
+enum WizardExit {
+    /// Operator hit Ctrl-C or Esc; unwind the wizard cleanly.
+    Aborted,
+}
+
+/// Render the "Current: ..." line for a schema entry. Secrets are
+/// hidden by source; the wizard never re-fetches with `show_secrets=1`.
+fn wizard_current_display(entry: &SchemaEntry, current: Option<&ListRow>) -> String {
+    let source = current.map(|r| r.source.as_str()).unwrap_or("unset");
+    match (entry.ty, source) {
+        (KeyType::Secret, "set") => "<set, hidden>".to_string(),
+        (KeyType::Secret, _) => "<unset>".to_string(),
+        (_, "unset") => "<unset>".to_string(),
+        _ => match current.map(|r| &r.value) {
+            Some(v) => {
+                let rendered = json_to_display(v);
+                if source == "default" {
+                    format!("{rendered} (default)")
+                } else {
+                    rendered
+                }
+            }
+            None => "<unset>".to_string(),
+        },
+    }
+}
+
+/// Confirm prompt: should we update this key? Default depends on the
+/// current source (set / default / unset).
+fn prompt_for_update(_entry: &SchemaEntry, source: &str) -> Result<bool, WizardExit> {
+    let (message, default) = match source {
+        "set" => ("Update this?", false),
+        "default" => ("Override the default?", false),
+        _ => ("Set this now?", true),
+    };
+    match inquire::Confirm::new(message)
+        .with_default(default)
+        .prompt()
+    {
+        Ok(v) => Ok(v),
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => Err(WizardExit::Aborted),
+        Err(e) => {
+            println!("prompt error: {e}");
+            Err(WizardExit::Aborted)
+        }
+    }
+}
+
+/// Type-aware value prompt. Returns the encoded JSON value ready for
+/// the PUT body.
+fn prompt_for_value(entry: &SchemaEntry) -> Result<Value, WizardExit> {
+    loop {
+        let attempt: Result<Value, inquire::InquireError> = match entry.ty {
+            KeyType::Secret => {
+                let r = inquire::Password::new("Value:")
+                    .with_display_mode(inquire::PasswordDisplayMode::Masked)
+                    .without_confirmation()
+                    .prompt();
+                r.map(Value::String)
+            }
+            KeyType::String => inquire::Text::new("Value:").prompt().map(Value::String),
+            KeyType::Int => inquire::CustomType::<i64>::new("Value:")
+                .prompt()
+                .map(Value::from),
+            KeyType::Bool => inquire::Confirm::new("Value:").prompt().map(Value::Bool),
+        };
+        match attempt {
+            Ok(Value::String(s)) if s.is_empty() => {
+                println!("Empty value rejected. Try again, or Ctrl-C to abort.");
+                continue;
+            }
+            Ok(v) => return Ok(v),
+            Err(inquire::InquireError::OperationCanceled)
+            | Err(inquire::InquireError::OperationInterrupted) => return Err(WizardExit::Aborted),
+            Err(e) => {
+                println!("prompt error: {e}");
+                return Err(WizardExit::Aborted);
+            }
+        }
+    }
+}
+
 /// Lower-snake-case label for a [`KeyType`]. Used in table rendering.
 fn key_type_label(ty: KeyType) -> &'static str {
     match ty {
@@ -488,6 +672,14 @@ mod tests {
     struct Wrap {
         #[command(subcommand)]
         c: ConfigureCommand,
+    }
+
+    /// Outer wrapper for [`ConfigureArgs`] (subcommand is optional, so
+    /// it parses bare `isd configure` without arguments).
+    #[derive(Parser, Debug)]
+    struct WrapArgs {
+        #[command(flatten)]
+        a: ConfigureArgs,
     }
 
     #[test]
@@ -765,5 +957,122 @@ mod tests {
             rendered.contains("https://example.com"),
             "rendered: {rendered}"
         );
+    }
+
+    #[test]
+    fn configure_bare_parses_as_none() {
+        // `isd configure` with no sub-verb must parse, with
+        // `command = None`. That is what dispatches to the wizard.
+        let w = WrapArgs::try_parse_from(["x"]).unwrap();
+        assert!(
+            w.a.command.is_none(),
+            "expected None, got {:?}",
+            w.a.command
+        );
+    }
+
+    #[test]
+    fn configure_setup_alias_parses() {
+        // `isd configure setup` must parse as the explicit Setup
+        // alias for the wizard.
+        let w = WrapArgs::try_parse_from(["x", "setup"]).unwrap();
+        assert!(matches!(w.a.command, Some(ConfigureCommand::Setup)));
+    }
+
+    #[test]
+    fn configure_args_get_still_parses() {
+        // Sanity: ConfigureArgs (the outer struct) still routes
+        // explicit verbs correctly after flipping `command` to optional.
+        let w = WrapArgs::try_parse_from(["x", "get", "acme.directory"]).unwrap();
+        match w.a.command {
+            Some(ConfigureCommand::Get(a)) => assert_eq!(a.key, "acme.directory"),
+            other => panic!("expected Some(Get), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wizard_current_display_redacts_set_secret() {
+        let entry = SchemaEntry {
+            key: "cloudflare.api_token".into(),
+            ty: KeyType::Secret,
+            default: None,
+            doc: "CF token".into(),
+        };
+        let row = ListRow {
+            key: "cloudflare.api_token".into(),
+            ty: KeyType::Secret,
+            value: Value::String("<redacted>".into()),
+            source: "set".into(),
+        };
+        assert_eq!(wizard_current_display(&entry, Some(&row)), "<set, hidden>");
+    }
+
+    #[test]
+    fn wizard_current_display_unset_secret() {
+        let entry = SchemaEntry {
+            key: "cloudflare.api_token".into(),
+            ty: KeyType::Secret,
+            default: None,
+            doc: "CF token".into(),
+        };
+        // No matching list row at all (defensive fallback).
+        assert_eq!(wizard_current_display(&entry, None), "<unset>");
+    }
+
+    #[test]
+    fn wizard_current_display_default_marks_default() {
+        let entry = SchemaEntry {
+            key: "acme.directory".into(),
+            ty: KeyType::String,
+            default: Some(Value::String("https://example.com".into())),
+            doc: "ACME dir".into(),
+        };
+        let row = ListRow {
+            key: "acme.directory".into(),
+            ty: KeyType::String,
+            value: Value::String("https://example.com".into()),
+            source: "default".into(),
+        };
+        assert_eq!(
+            wizard_current_display(&entry, Some(&row)),
+            "https://example.com (default)"
+        );
+    }
+
+    #[test]
+    fn wizard_current_display_set_string_value() {
+        let entry = SchemaEntry {
+            key: "routing.default_zone".into(),
+            ty: KeyType::String,
+            default: None,
+            doc: "Zone".into(),
+        };
+        let row = ListRow {
+            key: "routing.default_zone".into(),
+            ty: KeyType::String,
+            value: Value::String("weavers.engineering".into()),
+            source: "set".into(),
+        };
+        assert_eq!(
+            wizard_current_display(&entry, Some(&row)),
+            "weavers.engineering"
+        );
+    }
+
+    #[test]
+    fn wizard_current_display_unset_string_with_no_default() {
+        let entry = SchemaEntry {
+            key: "routing.default_zone".into(),
+            ty: KeyType::String,
+            default: None,
+            doc: "Zone".into(),
+        };
+        let row = ListRow {
+            key: "routing.default_zone".into(),
+            ty: KeyType::String,
+            value: Value::Null,
+            source: "unset".into(),
+        };
+        assert_eq!(wizard_current_display(&entry, Some(&row)), "<unset>");
     }
 }

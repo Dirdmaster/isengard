@@ -22,12 +22,27 @@ fn configure_help_lists_subcommands() {
         .output()
         .expect("run isd configure --help");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for verb in ["get", "set", "unset", "list", "schema"] {
+    for verb in ["get", "set", "unset", "list", "schema", "setup"] {
         assert!(
             stdout.contains(verb),
             "configure --help mentions {verb}: {stdout}"
         );
     }
+}
+
+#[test]
+fn configure_setup_help_succeeds() {
+    // `isd configure setup` is the explicit alias for the interactive
+    // wizard. `--help` must succeed (clap registers the verb).
+    let out = isd_bin()
+        .args(["configure", "setup", "--help"])
+        .output()
+        .expect("run isd configure setup --help");
+    assert!(
+        out.status.success(),
+        "setup --help should succeed, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
