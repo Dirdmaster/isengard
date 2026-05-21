@@ -51,6 +51,8 @@ pub enum ValueKind {
     Enum(&'static [&'static str]),
     /// Decimal integer in `1..=65535`.
     Port,
+    /// Unsigned 32-bit decimal integer (`0..=u32::MAX`).
+    U32,
     /// Absolute URL (must parse with a scheme).
     Url,
     /// RFC 3339 timestamp (e.g. `2026-05-20T12:00:00Z`).
@@ -316,6 +318,47 @@ the failure stage and the agent's recovery action.",
 Receivers verify the signature in the `X-Isengard-Signature` header.",
         value: ValueKind::String,
     },
+    // SSH bastion (`isengard.ssh.*`). Operator-controllable behavior for
+    // the SSH bastion. Runtime enforcement of these labels lands in a
+    // later phase; the vocabulary ships here so YAML diagnostics and LSP
+    // hover surface them while operators edit `agent.toml` / compose
+    // labels.
+    LabelSpec {
+        key: LabelKey::Literal("isengard.ssh.disabled"),
+        summary: "Skip SSH CA install on this host",
+        doc: "Set to `true` to skip installing the SSH CA on this host's \
+sshd. Same effect as the `ISENGARD_SSH_BASTION_DISABLED=1` environment \
+variable; the label form lets operators flip a single host through \
+compose without redeploying the agent. Defaults to `false`.",
+        value: ValueKind::Enum(&["true", "false"]),
+    },
+    LabelSpec {
+        key: LabelKey::Literal("isengard.ssh.principals"),
+        summary: "Override default cert principals for this host",
+        doc: "Comma-separated list of SSH principals to embed in certs \
+minted for this host. Defaults to `isengard`. Use this when the host's \
+authorized_principals file lists a non-default identity (e.g. \
+`admin,deploy`).",
+        value: ValueKind::StringList,
+    },
+    LabelSpec {
+        key: LabelKey::Literal("isengard.ssh.max_ttl_seconds"),
+        summary: "Per-host cap on minted SSH cert TTL",
+        doc: "Per-host override of the controller's `ISENGARD_SSH_CERT_MAX_TTL` \
+ceiling, in seconds. The controller's absolute 24h ceiling (86400) still \
+applies; this label can only tighten the cap, never raise it. Example: \
+`3600` for a one-hour cap on production hosts.",
+        value: ValueKind::U32,
+    },
+    LabelSpec {
+        key: LabelKey::Literal("isengard.ssh.allowed_users"),
+        summary: "Whitelist of SSH usernames allowed to dial this host",
+        doc: "Comma-separated whitelist of SSH usernames. When set, the \
+controller rejects mint requests whose principal is not in this list; \
+empty / unset means allow all. Example: `isengard,deploy` to gate the \
+host to two operator identities.",
+        value: ValueKind::StringList,
+    },
     // System plane.
     LabelSpec {
         key: LabelKey::Literal("io.isengard.role"),
@@ -436,5 +479,34 @@ mod tests {
         assert!(lookup("isengard.expose.web.unknown").is_none());
         // Empty name segment.
         assert!(lookup("isengard.expose..port").is_none());
+    }
+
+    #[test]
+    fn ssh_labels_registered() {
+        let disabled = lookup("isengard.ssh.disabled").expect("disabled");
+        assert!(matches!(disabled.value, ValueKind::Enum(_)));
+
+        let principals = lookup("isengard.ssh.principals").expect("principals");
+        assert!(matches!(principals.value, ValueKind::StringList));
+
+        let max_ttl = lookup("isengard.ssh.max_ttl_seconds").expect("max_ttl");
+        assert!(matches!(max_ttl.value, ValueKind::U32));
+
+        let allowed = lookup("isengard.ssh.allowed_users").expect("allowed_users");
+        assert!(matches!(allowed.value, ValueKind::StringList));
+    }
+
+    #[test]
+    fn ssh_labels_carry_hover_docs() {
+        for key in [
+            "isengard.ssh.disabled",
+            "isengard.ssh.principals",
+            "isengard.ssh.max_ttl_seconds",
+            "isengard.ssh.allowed_users",
+        ] {
+            let spec = lookup(key).unwrap_or_else(|| panic!("missing spec for {key}"));
+            assert!(!spec.summary.is_empty(), "{key} missing summary");
+            assert!(!spec.doc.is_empty(), "{key} missing doc");
+        }
     }
 }

@@ -105,6 +105,10 @@ fn validate_value(kind: ValueKind, value: &str) -> Option<String> {
             Ok(n) if (1..=65535).contains(&n) => None,
             _ => Some(format!("expected port in 1..=65535, got `{value}`")),
         },
+        ValueKind::U32 => match value.parse::<u32>() {
+            Ok(_) => None,
+            Err(_) => Some(format!("expected unsigned 32-bit integer, got `{value}`")),
+        },
         ValueKind::Url => {
             if url_is_well_formed(value) {
                 None
