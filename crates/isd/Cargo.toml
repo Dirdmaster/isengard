@@ -90,6 +90,12 @@ semver.workspace = true
 async-trait.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
+# Bastion v2: `whoami` resolves the operator's laptop user as the
+# default SSH principal (`$USER` everywhere they set themselves up).
+# Falls back to the `$USER` env var when `whoami` can't determine it
+# (CI sandboxes, ultra-minimal containers).
+whoami = "1"
+
 # Track G Phase 5: backup/restore pipeline.
 # `age` does the passphrase encryption, `aws-sdk-s3` + `aws-config` cover the
 # S3-API destination (works against AWS, R2, MinIO, B2, Wasabi via custom
