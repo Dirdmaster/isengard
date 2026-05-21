@@ -98,7 +98,9 @@ pub struct MintArgs {
     #[arg(long, default_value_t = 3600)]
     pub ttl: u64,
     /// Principal name baked into the cert (Unix username on the
-    /// agent host). Repeatable; default `isengard`.
+    /// target host). Repeatable. Defaults to the operator's laptop
+    /// username (`$USER`) via `default_user()` so `isd ssh host`
+    /// just works against the operator's account on every host.
     #[arg(long = "principal")]
     pub principals: Vec<String>,
     /// Free-form key-id baked into the cert. Surfaces in `auditd`
@@ -113,7 +115,7 @@ impl Default for MintArgs {
         Self {
             pubkey: None,
             ttl: 3600,
-            principals: Vec::new(),
+            principals: vec![default_user()],
             comment: None,
         }
     }
@@ -270,7 +272,7 @@ async fn run_mint(args: MintArgs, context: Option<&str>) -> Result<MintReceipt> 
     let pubkey_trimmed = pubkey.trim().to_string();
 
     let principals = if args.principals.is_empty() {
-        vec!["isengard".to_string()]
+        vec![default_user()]
     } else {
         args.principals.clone()
     };
@@ -422,12 +424,15 @@ async fn run_hosts(context: Option<&str>) -> Result<()> {
 }
 
 /// Render the host rows under `isd ssh hosts`. Empty input still
-/// prints the header so `wc -l` keeps a stable shape.
+/// prints the header so `wc -l` keeps a stable shape. The SSH USER /
+/// PRINCIPAL columns are filled from `default_user()` so the listing
+/// reflects how `isd ssh <host>` would actually dial.
 fn render_hosts_table(rows: &[HostRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
         .set_header(vec!["HOST", "SSH USER", "PRINCIPAL", "LAST SEEN"]);
+    let user = default_user();
     for row in rows {
         let last_seen = row
             .last_seen_at
@@ -435,8 +440,8 @@ fn render_hosts_table(rows: &[HostRow]) -> String {
             .unwrap_or_else(|| "-".into());
         t.add_row(vec![
             row.hostname.as_str(),
-            "isengard",
-            "isengard",
+            user.as_str(),
+            user.as_str(),
             last_seen.as_str(),
         ]);
     }
@@ -1070,11 +1075,11 @@ mod tests {
     }
 
     #[test]
-    fn mint_args_default_has_one_hour_ttl_and_no_pubkey_override() {
+    fn mint_args_default_has_one_hour_ttl_and_default_user_principal() {
         let a = MintArgs::default();
         assert_eq!(a.ttl, 3600);
         assert!(a.pubkey.is_none());
-        assert!(a.principals.is_empty());
+        assert_eq!(a.principals, vec![default_user()]);
         assert!(a.comment.is_none());
     }
 
