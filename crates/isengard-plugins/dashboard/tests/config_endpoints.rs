@@ -113,7 +113,10 @@ async fn put_string_then_get_round_trips() {
 
     let resp = app
         .clone()
-        .oneshot(put_req("routing.default_zone", json!("weavers.engineering")))
+        .oneshot(put_req(
+            "routing.default_zone",
+            json!("weavers.engineering"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -144,11 +147,7 @@ async fn put_secret_routes_to_secrets_store_and_get_returns_redacted() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Sanity: the secrets store actually has the value (proves routing).
-    let bytes = handles
-        .secrets
-        .fetch("cloudflare.api_token")
-        .await
-        .unwrap();
+    let bytes = handles.secrets.fetch("cloudflare.api_token").await.unwrap();
     assert_eq!(bytes, b"cf-secret-xyz");
 
     // GET without ?show_secret returns redacted placeholder.
@@ -242,7 +241,10 @@ async fn delete_set_key_returns_204_and_subsequent_get_returns_default_or_404() 
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_req("routing.default_zone", json!("weavers.engineering")))
+        .oneshot(put_req(
+            "routing.default_zone",
+            json!("weavers.engineering"),
+        ))
         .await
         .unwrap();
 
@@ -323,11 +325,7 @@ async fn list_returns_all_six_v01_keys_secrets_redacted_by_default() {
         .await
         .unwrap();
 
-    let resp = app
-        .clone()
-        .oneshot(get_req("/config"))
-        .await
-        .unwrap();
+    let resp = app.clone().oneshot(get_req("/config")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_to_json(resp).await;
     let arr = body.as_array().expect("list returns an array");
@@ -371,10 +369,7 @@ async fn schema_endpoint_returns_all_six_v01_keys() {
     let body = body_to_json(resp).await;
     let arr = body.as_array().expect("schema returns an array");
     assert_eq!(arr.len(), 6, "v0.1 schema declares six keys");
-    let keys: Vec<&str> = arr
-        .iter()
-        .filter_map(|e| e["key"].as_str())
-        .collect();
+    let keys: Vec<&str> = arr.iter().filter_map(|e| e["key"].as_str()).collect();
     assert!(keys.contains(&"cloudflare.api_token"));
     assert!(keys.contains(&"cloudflare.zone_id"));
     assert!(keys.contains(&"routing.default_zone"));

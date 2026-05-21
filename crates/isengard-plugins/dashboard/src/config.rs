@@ -245,11 +245,7 @@ async fn list_config(
 /// verbatim so the CLI can drive its help text + did-you-mean off the
 /// server's view.
 async fn config_schema(State(handles): State<Arc<ControllerHandles>>) -> Response {
-    let entries: Vec<SchemaEntry> = handles
-        .config_dispatcher()
-        .schema()
-        .entries()
-        .to_vec();
+    let entries: Vec<SchemaEntry> = handles.config_dispatcher().schema().entries().to_vec();
     JsonResp(entries).into_response()
 }
 
