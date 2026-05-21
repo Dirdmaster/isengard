@@ -98,7 +98,9 @@ pub struct MintArgs {
     #[arg(long, default_value_t = 3600)]
     pub ttl: u64,
     /// Principal name baked into the cert (Unix username on the
-    /// agent host). Repeatable; default `isengard`.
+    /// target host). Repeatable. Defaults to the operator's laptop
+    /// username (`$USER`) via `default_user()` so `isd ssh host`
+    /// just works against the operator's account on every host.
     #[arg(long = "principal")]
     pub principals: Vec<String>,
     /// Free-form key-id baked into the cert. Surfaces in `auditd`
@@ -113,7 +115,7 @@ impl Default for MintArgs {
         Self {
             pubkey: None,
             ttl: 3600,
-            principals: Vec::new(),
+            principals: vec![default_user()],
             comment: None,
         }
     }
@@ -198,19 +200,34 @@ pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
 /// the process with `ssh`'s exit code on success.
 async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
     let mut iter = tokens.into_iter();
-    let host = iter
+    let host_token = iter
         .next()
         .ok_or_else(|| anyhow!("isd ssh <host>: missing host argument"))?;
     let ssh_args: Vec<String> = iter.collect();
 
+    let (override_user, host) = parse_user_host(&host_token);
+    let default = default_user();
+    if default.is_empty() {
+        return Err(anyhow!(
+            "could not determine default user (whoami and $USER both empty); pass user@host explicitly"
+        ));
+    }
+    let ssh_user = override_user.clone().unwrap_or_else(|| default.clone());
+
+    ensure_local_keypair()?;
     let pubkey_path = default_pubkey_path()?;
     let cert_path = cert_path_for(&pubkey_path);
-    if cert_is_stale(&cert_path) {
-        let issued = run_mint(MintArgs::default(), context).await?;
+    let want_principals = effective_principals(override_user.as_deref(), &default);
+
+    if cert_is_stale(&cert_path) || !cert_covers_principals(&cert_path, &want_principals) {
+        let mint_args = MintArgs {
+            principals: want_principals.clone(),
+            ..MintArgs::default()
+        };
+        let issued = run_mint(mint_args, context).await?;
         print_mint_summary(&issued);
     }
 
-    let ssh_user = "isengard";
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg(format!("{ssh_user}@{host}"));
     for arg in &ssh_args {
@@ -223,6 +240,21 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// Return true when the cert at `cert_path` carries every principal in
+/// `want`. Used in `run_dial` to force a re-mint when the operator
+/// overrides the user with a name not already in the existing cert
+/// (e.g. cached cert covers `[dirdmaster]`, dial is `root@host`).
+fn cert_covers_principals(cert_path: &Path, want: &[String]) -> bool {
+    let Ok(raw) = ssh_keygen_dump(cert_path) else {
+        return false;
+    };
+    let Ok(parsed) = parse_keygen_dump(&raw) else {
+        return false;
+    };
+    want.iter()
+        .all(|w| parsed.principals.iter().any(|p| p == w))
+}
+
 /// Mint a fresh cert and write it next to the pubkey. Returns the
 /// issuance response so the caller can print a confirmation summary
 /// (or skip it, in the auto-mint path).
@@ -232,6 +264,7 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
 /// Returns `Err` on missing pubkey, controller-less context, HTTP
 /// failure, JSON decode failure, or write-to-disk failure.
 async fn run_mint(args: MintArgs, context: Option<&str>) -> Result<MintReceipt> {
+    ensure_local_keypair()?;
     let pubkey_path = match &args.pubkey {
         Some(p) => p.clone(),
         None => default_pubkey_path()?,
@@ -241,7 +274,7 @@ async fn run_mint(args: MintArgs, context: Option<&str>) -> Result<MintReceipt> 
     let pubkey_trimmed = pubkey.trim().to_string();
 
     let principals = if args.principals.is_empty() {
-        vec!["isengard".to_string()]
+        vec![default_user()]
     } else {
         args.principals.clone()
     };
@@ -393,12 +426,15 @@ async fn run_hosts(context: Option<&str>) -> Result<()> {
 }
 
 /// Render the host rows under `isd ssh hosts`. Empty input still
-/// prints the header so `wc -l` keeps a stable shape.
+/// prints the header so `wc -l` keeps a stable shape. The SSH USER /
+/// PRINCIPAL columns are filled from `default_user()` so the listing
+/// reflects how `isd ssh <host>` would actually dial.
 fn render_hosts_table(rows: &[HostRow]) -> String {
     let mut t = Table::new();
     t.load_preset(NOTHING)
         .set_content_arrangement(ContentArrangement::Disabled)
         .set_header(vec!["HOST", "SSH USER", "PRINCIPAL", "LAST SEEN"]);
+    let user = default_user();
     for row in rows {
         let last_seen = row
             .last_seen_at
@@ -406,8 +442,8 @@ fn render_hosts_table(rows: &[HostRow]) -> String {
             .unwrap_or_else(|| "-".into());
         t.add_row(vec![
             row.hostname.as_str(),
-            "isengard",
-            "isengard",
+            user.as_str(),
+            user.as_str(),
             last_seen.as_str(),
         ]);
     }
@@ -575,6 +611,106 @@ fn shorten_fingerprint(s: &str) -> String {
         format!("SHA256:{short}...")
     } else {
         format!("SHA256:{short}")
+    }
+}
+
+/// Generate an ed25519 keypair at `privkey_path` if it does not exist.
+/// No-op if the file is already present: never clobbers an existing
+/// key. The pubkey is written by `ssh-keygen` to `<privkey_path>.pub`.
+///
+/// # Errors
+///
+/// Returns `Err` when `mkdir -p` of the parent directory fails, when
+/// `ssh-keygen` cannot be spawned, or when `ssh-keygen` exits non-zero.
+fn ensure_keypair_at(privkey_path: &Path) -> Result<()> {
+    if privkey_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = privkey_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let comment = format!("operator@{} (isd-generated)", hostname_string());
+    let status = std::process::Command::new("ssh-keygen")
+        .arg("-t")
+        .arg("ed25519")
+        .arg("-N")
+        .arg("")
+        .arg("-f")
+        .arg(privkey_path)
+        .arg("-C")
+        .arg(&comment)
+        .status()
+        .context("spawning ssh-keygen for bootstrap")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "ssh-keygen -t ed25519 -f {} -> {}",
+            privkey_path.display(),
+            status
+        ));
+    }
+    Ok(())
+}
+
+/// Ensure `~/.ssh/id_ed25519` exists, generating one when missing.
+/// Called at the top of `run_dial` and `run_mint` so a fresh laptop
+/// dialing the first time auto-bootstraps its keypair before the mint
+/// HTTP call tries to read the pubkey.
+fn ensure_local_keypair() -> Result<()> {
+    let home = dirs::home_dir().context("home dir not found")?;
+    let privkey = home.join(".ssh").join("id_ed25519");
+    ensure_keypair_at(&privkey)
+}
+
+/// Default Unix user for the operator's laptop. Tries
+/// `whoami::username()` first, falls back to the `$USER` env var, then
+/// to an empty string. Callers in the dial/mint paths fail loudly when
+/// the result is empty so the operator gets an actionable error
+/// instead of a `ssh @host` invocation.
+fn default_user() -> String {
+    let w = whoami::username();
+    if !w.is_empty() {
+        return w;
+    }
+    std::env::var("USER").unwrap_or_default()
+}
+
+/// Resolve the principal list for a mint call. Always includes the
+/// default user; when the operator dialed `user@host`, the override is
+/// appended (deduped against the default and any empty value). One
+/// cert minted with `[default, override]` covers both `isd ssh host`
+/// and `isd ssh override@host` during the TTL window. Audit identity
+/// lives in `key_id`, not in the principal list, so multi-principal
+/// certs do not blur attribution.
+fn effective_principals(override_user: Option<&str>, default: &str) -> Vec<String> {
+    let mut out = vec![default.to_string()];
+    if let Some(o) = override_user
+        && !o.is_empty()
+        && o != default
+    {
+        out.push(o.to_string());
+    }
+    out
+}
+
+/// Split a `user@host` token into `(Some(user), host)`. A bare `host`
+/// returns `(None, host)`. An empty user (`@host`) is also reported as
+/// `None` so the dial path falls back to the default user instead of
+/// shelling out `ssh @host` with no principal.
+///
+/// The last `@` is the splitter: this matches what OpenSSH does and
+/// tolerates email-shaped principals correctly.
+fn parse_user_host(token: &str) -> (Option<String>, String) {
+    if let Some(idx) = token.rfind('@') {
+        let user = &token[..idx];
+        let host = &token[idx + 1..];
+        if user.is_empty() {
+            (None, host.to_string())
+        } else {
+            (Some(user.to_string()), host.to_string())
+        }
+    } else {
+        (None, token.to_string())
     }
 }
 
@@ -838,6 +974,121 @@ fn parse_keygen_timestamp(s: &str) -> Result<DateTime<Utc>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_user_host_user_at_host() {
+        assert_eq!(
+            parse_user_host("root@edge-1"),
+            (Some("root".into()), "edge-1".into())
+        );
+    }
+
+    #[test]
+    fn parse_user_host_bare_host() {
+        assert_eq!(parse_user_host("edge-1"), (None, "edge-1".into()));
+    }
+
+    #[test]
+    fn parse_user_host_dotted_host() {
+        assert_eq!(
+            parse_user_host("u@a.b.c"),
+            (Some("u".into()), "a.b.c".into())
+        );
+    }
+
+    #[test]
+    fn parse_user_host_ipv4() {
+        assert_eq!(
+            parse_user_host("u@1.2.3.4"),
+            (Some("u".into()), "1.2.3.4".into())
+        );
+    }
+
+    #[test]
+    fn effective_principals_no_override_returns_default() {
+        let p = effective_principals(None, "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    #[test]
+    fn effective_principals_with_override_returns_both() {
+        let p = effective_principals(Some("root"), "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string(), "root".to_string()]);
+    }
+
+    #[test]
+    fn effective_principals_dedup_when_override_matches_default() {
+        let p = effective_principals(Some("dirdmaster"), "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    #[test]
+    fn effective_principals_drops_empty_override() {
+        let p = effective_principals(Some(""), "dirdmaster");
+        assert_eq!(p, vec!["dirdmaster".to_string()]);
+    }
+
+    /// Skip ssh-keygen-driven tests when the binary is absent so CI
+    /// envs without it (sandboxed builders) pass cleanly. The function
+    /// is still exercised on the operator's laptop where ssh-keygen
+    /// always exists.
+    fn ssh_keygen_available() -> bool {
+        which::which("ssh-keygen").is_ok()
+    }
+
+    #[test]
+    fn ensure_keypair_at_generates_when_missing() {
+        if !ssh_keygen_available() {
+            eprintln!("skip: ssh-keygen not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let privkey = dir.path().join("id_ed25519");
+        let pubkey = dir.path().join("id_ed25519.pub");
+        ensure_keypair_at(&privkey).expect("generate");
+        assert!(privkey.exists(), "private key not written");
+        assert!(pubkey.exists(), "public key not written");
+    }
+
+    #[test]
+    fn ensure_keypair_at_noop_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let privkey = dir.path().join("id_ed25519");
+        std::fs::write(&privkey, "fake key bytes").unwrap();
+        let mtime_before = std::fs::metadata(&privkey).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        ensure_keypair_at(&privkey).expect("noop");
+        let mtime_after = std::fs::metadata(&privkey).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "file was overwritten");
+        // Body untouched.
+        let body = std::fs::read_to_string(&privkey).unwrap();
+        assert_eq!(body, "fake key bytes");
+    }
+
+    #[test]
+    fn cert_covers_principals_returns_false_when_cert_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope-cert.pub");
+        assert!(!cert_covers_principals(&path, &["root".into()]));
+    }
+
+    #[test]
+    fn default_user_yields_non_empty_in_a_normal_env() {
+        // Exact value depends on the env, but every reasonable
+        // dev/CI host has either `whoami::username()` or `$USER` set.
+        let u = default_user();
+        assert!(!u.is_empty(), "default_user returned empty");
+    }
+
+    #[test]
+    fn parse_user_host_empty_user_treated_as_none() {
+        // `@host` form: last-@ splitter yields user="". The function
+        // reports that as `None` so the caller substitutes the default
+        // user instead of attempting to ssh with an empty username.
+        let (u, h) = parse_user_host("@host");
+        assert_eq!(h, "host");
+        assert!(u.is_none());
+    }
+
     fn fixture_valid() -> String {
         // Minted with `ssh-keygen -L -f`. Stable across OpenSSH
         // releases: every line we parse is canonical OpenSSH output.
@@ -911,11 +1162,11 @@ mod tests {
     }
 
     #[test]
-    fn mint_args_default_has_one_hour_ttl_and_no_pubkey_override() {
+    fn mint_args_default_has_one_hour_ttl_and_default_user_principal() {
         let a = MintArgs::default();
         assert_eq!(a.ttl, 3600);
         assert!(a.pubkey.is_none());
-        assert!(a.principals.is_empty());
+        assert_eq!(a.principals, vec![default_user()]);
         assert!(a.comment.is_none());
     }
 
