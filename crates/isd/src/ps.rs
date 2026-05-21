@@ -20,7 +20,12 @@ const ID_DISPLAY_WIDTH: usize = 12;
 /// CLI flags for `isd ps`.
 #[derive(Debug, Args, Default)]
 pub struct PsArgs {
-    /// Show all containers, not just running.
+    /// Show every container, including stopped workloads and healthy
+    /// Isengard infrastructure (controller, agent). By default `isd ps`
+    /// hides healthy infrastructure to keep the table focused on the
+    /// operator's own workloads; errored or stopped infrastructure
+    /// still surfaces because that is the case the operator needs to
+    /// see.
     #[arg(short = 'a', long)]
     pub all: bool,
 
@@ -35,10 +40,6 @@ pub struct PsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
-
-    /// Show system containers (io.isengard.role=controller|agent). Hidden by default.
-    #[arg(long)]
-    pub all_system: bool,
 
     /// Force flat output (no per-host grouping). Default groups when
     /// the controller has more than one enrolled host.
@@ -66,24 +67,122 @@ pub async fn run(args: PsArgs, context: Option<&str>) -> Result<()> {
     run_docker_backend(args, docker_uri, context).await
 }
 
-/// Protection filter for the docker-direct path. Drops any
-/// `ContainerSummary` whose `io.isengard.role` label is in the protected
-/// set when `all_system` is false. With `all_system=true` returns the
-/// input unchanged so `--all-system` shows everything.
-pub(crate) fn filter_system(
+/// Returns `true` when a docker status string reads as a healthy
+/// running container.
+///
+/// Docker's status field is a human string. The shapes we treat as
+/// healthy:
+///
+/// - `Up <duration>` (running, no healthcheck)
+/// - `Up <duration> (healthy)` (running, passing healthcheck)
+///
+/// Anything else (`Exited`, `Restarting`, `Dead`, `Created`, `Paused`,
+/// or `Up <duration> (unhealthy)` / `(starting)`) is treated as not
+/// healthy so the operator still sees infrastructure that needs
+/// attention.
+fn is_healthy_status(status: &str) -> bool {
+    let trimmed = status.trim();
+    if !trimmed.starts_with("Up ") && trimmed != "Up" {
+        return false;
+    }
+    // `Up <duration> (<healthcheck-state>)`: only `(healthy)` counts as
+    // healthy. `(unhealthy)`, `(starting)`, etc. are not.
+    if let Some(paren) = trimmed.rfind('(') {
+        let tail = &trimmed[paren..];
+        return tail == "(healthy)";
+    }
+    true
+}
+
+/// Container names that identify Isengard infrastructure in the wild.
+///
+/// The current agent compose recipe does NOT stamp
+/// `io.isengard.role=agent` on the runtime container (it inherits only
+/// the `com.docker.compose.*` labels), so a pure-label check misses the
+/// very container the operator wants hidden. Until the recipe is
+/// updated to apply the role label, fall back to the canonical
+/// container names. `iso-*` covers pre-rename fleets; `isd-*` covers
+/// post-rename fleets (#218); both can coexist during a partial
+/// migration.
+const PROTECTED_NAMES: &[&str] = &["isd-controller", "isd-agent", "iso-controller", "iso-agent"];
+
+/// Compose service values that identify Isengard infrastructure when
+/// they sit inside the `isengard` compose project. The agent compose
+/// recipe stamps `com.docker.compose.project=isengard` +
+/// `com.docker.compose.service=agent` (or `controller`) on the
+/// container; this is a more durable signal than the runtime name when
+/// the operator renamed the container.
+/// Label key carrying the compose project name. Set by docker compose
+/// on every container it manages.
+const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+/// Label key carrying the compose service name (the key under
+/// `services:` in the compose file).
+const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+/// Compose project value that identifies the Isengard control-plane
+/// stack (controller + agent share this project).
+const COMPOSE_PROJECT_VALUE: &str = "isengard";
+/// Compose service values that identify Isengard infrastructure inside
+/// the `isengard` project. Matched against
+/// `com.docker.compose.service` after the project name matches
+/// [`COMPOSE_PROJECT_VALUE`].
+const COMPOSE_SERVICE_VALUES_PROTECTED: &[&str] = &["controller", "agent"];
+
+/// Returns `true` when the container is part of the protected Isengard
+/// infrastructure set (controller / agent).
+///
+/// Detection is layered so the filter catches infrastructure across
+/// every shape it appears in the wild:
+///
+/// 1. The canonical `io.isengard.role=controller|agent` label. Future
+///    infrastructure roles added to
+///    [`isd_runtime::discovery_labels::ROLE_VALUES_PROTECTED`]
+///    auto-qualify here without touching this function.
+/// 2. The `com.docker.compose.project=isengard` +
+///    `com.docker.compose.service=controller|agent` label pair the
+///    current compose recipe stamps. Covers fleets whose agent
+///    container predates the role-label stamping.
+/// 3. The canonical container names (`isd-controller`, `isd-agent`,
+///    `iso-controller`, `iso-agent`). Covers pre-rename + post-rename
+///    fleets during a partial migration, and any case where the
+///    operator renamed the compose service but kept the container
+///    name.
+fn is_protected(c: &isd_runtime::ContainerSummary) -> bool {
+    if let Some(role) = c.labels.get(ROLE_LABEL) {
+        if is_protected_label_value(role) {
+            return true;
+        }
+    }
+    let project = c.labels.get(COMPOSE_PROJECT_LABEL).map(String::as_str);
+    let service = c.labels.get(COMPOSE_SERVICE_LABEL).map(String::as_str);
+    if project == Some(COMPOSE_PROJECT_VALUE)
+        && service
+            .map(|s| COMPOSE_SERVICE_VALUES_PROTECTED.contains(&s))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    PROTECTED_NAMES.contains(&c.names.as_str())
+}
+
+/// Visibility filter for the docker-direct path.
+///
+/// Default (`all = false`): hide healthy Isengard infrastructure
+/// (controller / agent). An errored or stopped infrastructure container
+/// still surfaces because that is exactly the case the operator wants
+/// to see.
+///
+/// With `all = true`: return the input unchanged so `-a` / `--all`
+/// shows everything (every workload plus every infrastructure row,
+/// healthy or not).
+pub(crate) fn filter_visible(
     rows: Vec<isd_runtime::ContainerSummary>,
-    all_system: bool,
+    all: bool,
 ) -> Vec<isd_runtime::ContainerSummary> {
-    if all_system {
+    if all {
         return rows;
     }
     rows.into_iter()
-        .filter(|c| {
-            c.labels
-                .get(ROLE_LABEL)
-                .map(|role| !is_protected_label_value(role))
-                .unwrap_or(true)
-        })
+        .filter(|c| !(is_protected(c) && is_healthy_status(&c.status)))
         .collect()
 }
 
@@ -167,17 +266,24 @@ async fn run_docker_backend(args: PsArgs, docker_uri: String, context: Option<&s
         .await
         .with_context(|| format!("opening docker backend at {docker_uri}"))?;
 
+    // Always query docker with `all = true`. We need every container in
+    // the response so a stopped or errored protected container (the
+    // exact case the operator wants to see) surfaces even when the
+    // default `isd ps` is hiding healthy infrastructure. `filter_visible`
+    // below applies the operator-facing default of hiding healthy
+    // infrastructure when `--all` is not set.
     let containers = backend
-        .list_containers(args.all)
+        .list_containers(true)
         .await
         .context("listing containers")?;
 
-    // Hide system containers (io.isengard.role=controller|agent)
-    // unless `--all-system`. Applied BEFORE index-cache write + render so
-    // the `#` column is dense (0..N) over the visible rows and a
-    // downstream `isd stop <#>` never targets a system container by
-    // index.
-    let containers = filter_system(containers, args.all_system);
+    // Hide healthy Isengard infrastructure (io.isengard.role=controller
+    // |agent in a running / Up state) unless `--all` is set. Applied
+    // BEFORE index-cache write + render so the `#` column is dense
+    // (0..N) over the visible rows and a downstream `isd stop <#>`
+    // never targets a hidden infrastructure container by index. Errored
+    // or stopped infrastructure stays visible without `--all`.
+    let containers = filter_visible(containers, args.all);
 
     // JSON output: the raw DTO list, no index cache write (the `#`
     // column is a TTY affordance, not part of the JSON contract).
@@ -257,9 +363,10 @@ mod tests {
         ]
     }
 
-    /// Helper for filter tests: build a `ContainerSummary` with
-    /// a given name and an optional `io.isengard.role` label value.
-    fn make_row(name: &str, role: Option<&str>) -> isd_runtime::ContainerSummary {
+    /// Helper for filter tests: build a `ContainerSummary` with a
+    /// given name, an optional `io.isengard.role` label value, and a
+    /// docker-style status string.
+    fn make_row(name: &str, role: Option<&str>, status: &str) -> isd_runtime::ContainerSummary {
         let mut labels = HashMap::new();
         if let Some(r) = role {
             labels.insert(ROLE_LABEL.to_string(), r.to_string());
@@ -267,7 +374,7 @@ mod tests {
         isd_runtime::ContainerSummary {
             id: format!("{name}-id"),
             image: "test:latest".into(),
-            status: "Up 1m".into(),
+            status: status.into(),
             ports: String::new(),
             private_ports: Vec::new(),
             names: name.into(),
@@ -275,24 +382,44 @@ mod tests {
         }
     }
 
-    /// `isd ps` filters out containers labelled
-    /// `io.isengard.role=controller|agent` unless `--all-system` is set.
-    /// The index column re-numbers over the visible rows so
-    /// `isd stop <#>` never targets a system container by index.
+    /// `is_healthy_status` accepts the docker shapes that mean
+    /// "container is running" and rejects everything else, including
+    /// the `Up ... (unhealthy)` and `Up ... (starting)` healthcheck
+    /// variants the operator needs to see.
     #[test]
-    fn ps_hides_system_containers_by_default() {
+    fn healthy_status_matrix() {
+        assert!(is_healthy_status("Up 2 hours"));
+        assert!(is_healthy_status("Up 5 seconds"));
+        assert!(is_healthy_status("Up About a minute (healthy)"));
+        assert!(is_healthy_status("Up"));
+        assert!(!is_healthy_status("Up 3 minutes (unhealthy)"));
+        assert!(!is_healthy_status("Up 1 second (health: starting)"));
+        assert!(!is_healthy_status("Exited (0) 12 minutes ago"));
+        assert!(!is_healthy_status("Restarting (1) 4 seconds ago"));
+        assert!(!is_healthy_status("Created"));
+        assert!(!is_healthy_status("Dead"));
+        assert!(!is_healthy_status("Paused"));
+        assert!(!is_healthy_status(""));
+    }
+
+    /// `isd ps` (default, no `--all`) hides healthy Isengard
+    /// infrastructure (controller / agent in an `Up` state) but keeps
+    /// errored infrastructure visible because that is the case the
+    /// operator needs to see. Workload rows pass through regardless of
+    /// status so the table preserves docker-style visibility for the
+    /// operator's own containers.
+    #[test]
+    fn ps_hides_healthy_protected_but_keeps_errored_and_workloads() {
         let rows = vec![
-            make_row("isd-controller", Some("controller")),
-            make_row("bazarr", None),
-            make_row("isd-agent", Some("agent")),
-            make_row("plex", None),
+            make_row("isd-controller", Some("controller"), "Up 2 hours"),
+            make_row("isd-agent", Some("agent"), "Exited (1) 4 seconds ago"),
+            make_row("bazarr", None, "Up 10 minutes"),
         ];
-        let filtered = filter_system(rows, false);
+        let filtered = filter_visible(rows, false);
         let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
-        assert_eq!(names, vec!["bazarr", "plex"]);
-        // Build the display rows + index cache rows. The `#` column is
-        // the render-order index of the *visible* rows, so it is dense
-        // (0..N) over the user-visible set.
+        assert_eq!(names, vec!["isd-agent", "bazarr"]);
+        // The `#` column is dense (0..N) over the visible rows so
+        // downstream `isd stop <#>` never targets a hidden row by index.
         let display = build_docker_rows(&filtered);
         assert_eq!(display.len(), 2);
         assert_eq!(display[0][0], "0");
@@ -303,19 +430,169 @@ mod tests {
         assert_eq!(index_rows[1].index, 1);
     }
 
-    /// `--all-system` returns everything unfiltered so the
-    /// operator can still see the controller/agent rows when they ask.
+    /// `--all` returns everything unfiltered: every workload row plus
+    /// every infrastructure row, healthy or not. Restores the pre-filter
+    /// behavior for operators who want the full list.
     #[test]
-    fn ps_all_system_shows_everything() {
+    fn ps_all_shows_everything() {
         let rows = vec![
-            make_row("isd-controller", Some("controller")),
-            make_row("bazarr", None),
-            make_row("isd-agent", Some("agent")),
+            make_row("isd-controller", Some("controller"), "Up 2 hours"),
+            make_row("bazarr", None, "Up 10 minutes"),
+            make_row("isd-agent", Some("agent"), "Up 2 hours (healthy)"),
         ];
-        let filtered = filter_system(rows, true);
+        let filtered = filter_visible(rows, true);
         assert_eq!(filtered.len(), 3);
         let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
         assert_eq!(names, vec!["isd-controller", "bazarr", "isd-agent"]);
+    }
+
+    /// A healthy protected container with the `(healthy)` healthcheck
+    /// suffix is still hidden by default. The healthcheck does not
+    /// change visibility, it only confirms what `Up <duration>` already
+    /// implies.
+    #[test]
+    fn ps_hides_healthy_protected_with_healthcheck() {
+        let rows = vec![
+            make_row("isd-controller", Some("controller"), "Up 2 hours (healthy)"),
+            make_row("bazarr", None, "Up 10 minutes"),
+        ];
+        let filtered = filter_visible(rows, false);
+        let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
+        assert_eq!(names, vec!["bazarr"]);
+    }
+
+    /// An `Up ... (unhealthy)` protected container is visible by
+    /// default. This is the failure case the operator most needs to
+    /// see: the container is technically up but the healthcheck is
+    /// failing.
+    #[test]
+    fn ps_keeps_unhealthy_protected_visible() {
+        let rows = vec![
+            make_row("isd-agent", Some("agent"), "Up 3 minutes (unhealthy)"),
+            make_row("bazarr", None, "Up 10 minutes"),
+        ];
+        let filtered = filter_visible(rows, false);
+        let names: Vec<&str> = filtered.iter().map(|r| r.names.as_str()).collect();
+        assert_eq!(names, vec!["isd-agent", "bazarr"]);
+    }
+
+    /// The three-row demo case the spec calls out: a healthy protected
+    /// row, an erroring protected row, and a normal workload. Default
+    /// filter keeps two rows (erroring protected + workload); `--all`
+    /// keeps all three.
+    #[test]
+    fn ps_three_row_demo_case() {
+        let rows = vec![
+            make_row("isd-controller", Some("controller"), "Up 2 hours"),
+            make_row("isd-agent", Some("agent"), "Exited (1) 4 seconds ago"),
+            make_row("bazarr", None, "Up 10 minutes"),
+        ];
+        // Default: two rows visible.
+        let default = filter_visible(rows.clone(), false);
+        assert_eq!(default.len(), 2);
+        let default_names: Vec<&str> = default.iter().map(|r| r.names.as_str()).collect();
+        assert_eq!(default_names, vec!["isd-agent", "bazarr"]);
+        // `--all`: all three rows visible.
+        let all = filter_visible(rows, true);
+        assert_eq!(all.len(), 3);
+        let all_names: Vec<&str> = all.iter().map(|r| r.names.as_str()).collect();
+        assert_eq!(all_names, vec!["isd-controller", "isd-agent", "bazarr"]);
+    }
+
+    /// `is_protected` catches the agent container even when the runtime
+    /// only carries the compose labels (current shape on lausanne, where
+    /// the `io.isengard.role=agent` stamp is missing). Without this
+    /// fallback the very container the operator complained about would
+    /// still leak through the default filter.
+    #[test]
+    fn protected_detects_compose_labels() {
+        let mut labels = HashMap::new();
+        labels.insert(COMPOSE_PROJECT_LABEL.to_string(), "isengard".to_string());
+        labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "agent".to_string());
+        let c = isd_runtime::ContainerSummary {
+            id: "agent-id".into(),
+            image: "ghcr.io/weavers-engineering/isengard-agent:next".into(),
+            status: "Up 36 hours".into(),
+            ports: String::new(),
+            private_ports: Vec::new(),
+            names: "compose-only-agent".into(),
+            labels,
+        };
+        assert!(is_protected(&c));
+    }
+
+    /// `is_protected` falls through to the canonical container names
+    /// when neither the role label nor the compose labels are present.
+    /// Covers pre-rename fleets that still use `iso-*` names and
+    /// post-rename fleets on `isd-*`.
+    #[test]
+    fn protected_detects_canonical_names() {
+        for name in ["isd-controller", "isd-agent", "iso-controller", "iso-agent"] {
+            let c = isd_runtime::ContainerSummary {
+                id: format!("{name}-id"),
+                image: "test:latest".into(),
+                status: "Up 1m".into(),
+                ports: String::new(),
+                private_ports: Vec::new(),
+                names: name.into(),
+                labels: HashMap::new(),
+            };
+            assert!(is_protected(&c), "expected {name} to be protected");
+        }
+    }
+
+    /// A wildly different compose project / service combination does
+    /// NOT match the protected predicate. Guard against accidentally
+    /// hiding workloads whose compose service name happens to be
+    /// `agent` outside the `isengard` project.
+    #[test]
+    fn protected_ignores_unrelated_compose_service() {
+        let mut labels = HashMap::new();
+        labels.insert(COMPOSE_PROJECT_LABEL.to_string(), "media-stack".to_string());
+        labels.insert(COMPOSE_SERVICE_LABEL.to_string(), "agent".to_string());
+        let c = isd_runtime::ContainerSummary {
+            id: "id".into(),
+            image: "test:latest".into(),
+            status: "Up 1m".into(),
+            ports: String::new(),
+            private_ports: Vec::new(),
+            names: "media-agent".into(),
+            labels,
+        };
+        assert!(!is_protected(&c));
+    }
+
+    /// `isd ps --help` documents the `-a` / `--all` flag and explains
+    /// the healthy-infrastructure hiding behavior so the operator can
+    /// discover the override without reading the source.
+    #[test]
+    fn ps_help_surface_documents_all_flag() {
+        // `PsArgs` is a clap `Args` (not a `Parser`), so it has no
+        // standalone `command()`. Augment a fresh `clap::Command` with
+        // the `PsArgs` shape to render its help text in isolation.
+        let mut cmd = <PsArgs as clap::Args>::augment_args(clap::Command::new("ps"));
+        let rendered = cmd.render_help().to_string();
+        assert!(
+            rendered.contains("--all"),
+            "help should advertise --all: rendered={rendered}"
+        );
+        assert!(
+            rendered.contains("-a"),
+            "help should advertise the short -a alias: rendered={rendered}"
+        );
+        // The behavior callout is what the operator needs to recognise:
+        // healthy infrastructure is hidden by default, errored stays
+        // visible. The exact wording lives in the doc comment on the
+        // field; the test only checks the load-bearing keywords.
+        let lower = rendered.to_lowercase();
+        assert!(
+            lower.contains("infrastructure"),
+            "help should mention infrastructure: rendered={rendered}"
+        );
+        assert!(
+            lower.contains("healthy"),
+            "help should mention the healthy gate: rendered={rendered}"
+        );
     }
 
     #[test]
