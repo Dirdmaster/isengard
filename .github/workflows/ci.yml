@@ -3,21 +3,7 @@ name: CI
 on:
   push:
     branches: [main, next, "feat/**"]
-    paths-ignore:
-      - "docs/**"
-      - "design/**"
-      - "www/**"
-      - "**/*.md"
-      - ".vscode/**"
-      - ".gitignore"
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "design/**"
-      - "www/**"
-      - "**/*.md"
-      - ".vscode/**"
-      - ".gitignore"
 
 env:
   CARGO_TERM_COLOR: always
