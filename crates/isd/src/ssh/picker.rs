@@ -103,11 +103,7 @@ pub fn fzf_available() -> bool {
 pub async fn pick_with_fzf(rows: &[PickerRow]) -> Result<Option<String>> {
     use tokio::io::AsyncWriteExt;
 
-    let input: String = rows
-        .iter()
-        .map(render_row)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let input: String = rows.iter().map(render_row).collect::<Vec<_>>().join("\n");
     let mut child = tokio::process::Command::new("fzf")
         .arg("--prompt=host: ")
         .arg("--height=40%")
@@ -131,7 +127,9 @@ pub async fn pick_with_fzf(rows: &[PickerRow]) -> Result<Option<String>> {
         // operator did not pick a host"; surface as Ok(None).
         return Ok(None);
     }
-    let line = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+    let line = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     Ok(parse_selected_line(&line))
 }
 
