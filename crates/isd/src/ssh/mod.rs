@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
+pub mod picker;
 pub mod trust;
 pub mod trusted_hosts;
 
