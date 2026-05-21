@@ -44,9 +44,11 @@ hosting = "github"
 # Skip the auto-updater bundle. `isd` doesn't ship an in-place updater;
 # Homebrew + curl + docker tags handle updates externally.
 install-updater = false
-# Run `dist plan` on PRs (no real artifact builds); real builds happen
-# on tag push only.
-pr-run-mode = "plan"
+# Don't run the Release workflow on PRs. dist-workspace.toml changes
+# rarely (once per release), CI on each PR sat in the runner queue
+# for hours and never produced actionable signal anyway. The real
+# release runs on tag-push, which is when correctness matters.
+pr-run-mode = "skip"
 # Homebrew tap repo (separate, lives at Weavers-Engineering/homebrew-isengard).
 # Requires a HOMEBREW_TAP_TOKEN secret on the Isengard repo with
 # `contents: write` on the tap. Without it the homebrew job no-ops.
