@@ -12,6 +12,11 @@ description = "Language server for Isengard stack.toml / isengard.toml / compose
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+# `isengard-manifest::parse_stack_manifest` / `parse_fleet_manifest`
+# drive the diagnostic surface for stack.toml / isengard.toml. The
+# `ManifestError::Toml { span, .. }` shape is what gives us file:line
+# precision on the LSP side.
+isengard-manifest.workspace = true
 marked-yaml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,4 +26,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 futures = "0.3"
+futures-util.workspace = true
 tower = { version = "0.5", features = ["util"] }

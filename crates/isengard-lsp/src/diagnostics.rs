@@ -1,19 +1,21 @@
-//! Diagnostics pipeline. Reads a [`Document`] from the store, walks the
-//! YAML for labels, validates each value against the registry, and emits
-//! LSP `Diagnostic` values the server can publish.
+//! Diagnostics pipeline. Reads a [`Document`] from the store, dispatches
+//! to the right validator (YAML labels for `compose.yaml`, TOML parse +
+//! structural checks for `stack.toml` / `isengard.toml`), and emits LSP
+//! [`Diagnostic`] values the server can publish.
 //!
 //! Source string for every diagnostic: `"isengard"`. Severity is
 //! [`DiagnosticSeverity::ERROR`] for shape violations (unknown label key,
 //! wrong enum variant, port out of range, malformed URL, malformed
-//! RFC 3339 timestamp). Later phases layer warnings on top via the live
-//! controller cache.
+//! RFC 3339 timestamp, TOML parse error, missing required field). Later
+//! phases layer warnings on top via the live controller cache.
 
 use chrono::DateTime;
 use marked_yaml::types::Span;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
 use crate::document::{DocKind, Document};
 use crate::registry::{ValueKind, lookup};
+use crate::toml_diagnostics;
 use crate::yaml::{LabelEntry, find_labels};
 
 /// Source string used in every diagnostic the LSP publishes.
@@ -21,14 +23,27 @@ pub const SOURCE: &str = "isengard";
 
 /// Run every static check we know for `doc` and return the diagnostics.
 ///
-/// `Other`-kind documents (anything that is not a compose file) come back
-/// with an empty list. Documents whose YAML fails to parse return a single
-/// diagnostic pointing at line 1; we keep parse-error coverage minimal in
-/// Phase 3, with finer YAML span info layered in once we need it.
-pub fn diagnose(doc: &Document) -> Vec<Diagnostic> {
-    if doc.kind != DocKind::Compose {
-        return Vec::new();
+/// Dispatches by [`DocKind`]:
+///
+/// - [`DocKind::Compose`]: walk YAML labels against the registry.
+/// - [`DocKind::StackToml`] / [`DocKind::FleetToml`]: feed the document
+///   text through the `isengard-manifest` parser; convert
+///   `ManifestError` to a single diagnostic, pinned at the byte span
+///   when the underlying TOML error reported one.
+/// - [`DocKind::Other`]: empty list.
+pub fn diagnose(uri: &Url, doc: &Document) -> Vec<Diagnostic> {
+    match doc.kind {
+        DocKind::Compose => diagnose_compose(doc),
+        DocKind::StackToml | DocKind::FleetToml => toml_diagnostics::diagnose(uri, doc),
+        DocKind::Other => Vec::new(),
     }
+}
+
+/// YAML-label validation for a [`DocKind::Compose`] document. Documents
+/// whose YAML fails to parse return a single diagnostic pointing at line
+/// 1; we keep parse-error coverage minimal in Phase 3, with finer YAML
+/// span info layered in once we need it.
+fn diagnose_compose(doc: &Document) -> Vec<Diagnostic> {
     let entries = match find_labels(&doc.text) {
         Ok(e) => e,
         Err(err) => {
@@ -197,6 +212,10 @@ mod tests {
         }
     }
 
+    fn compose_uri() -> Url {
+        Url::parse("file:///workspace/compose.yaml").unwrap()
+    }
+
     #[test]
     fn clean_compose_has_no_diagnostics() {
         let d = doc(r#"
@@ -208,7 +227,7 @@ services:
       isengard.expose: plex.vallee.casa
       isengard.expose.port: "8080"
 "#);
-        assert!(diagnose(&d).is_empty());
+        assert!(diagnose(&compose_uri(), &d).is_empty());
     }
 
     #[test]
@@ -219,7 +238,7 @@ services:
     labels:
       isengard.fake: nope
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("unknown isengard label"));
     }
@@ -232,7 +251,7 @@ services:
     labels:
       isengard.policy.gate: maybe
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("expected one of"));
     }
@@ -245,7 +264,7 @@ services:
     labels:
       isengard.expose.port: "70000"
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("port in 1..=65535"));
     }
@@ -258,7 +277,7 @@ services:
     labels:
       isengard.expose.port: eighty
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
     }
 
@@ -270,7 +289,7 @@ services:
     labels:
       isengard.policy.paused_until: tomorrow
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("RFC 3339"));
     }
@@ -283,7 +302,7 @@ services:
     labels:
       isengard.hooks.post_deploy: not-a-url
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("URL"));
     }
@@ -297,7 +316,7 @@ services:
       com.example.team: platform
       traefik.enable: "true"
 "#);
-        assert!(diagnose(&d).is_empty());
+        assert!(diagnose(&compose_uri(), &d).is_empty());
     }
 
     #[test]
@@ -310,7 +329,7 @@ services:
       isengard.expose.web.port: "32400"
       isengard.expose.api.tls: badmode
 "#);
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("expected one of"));
     }
@@ -318,7 +337,7 @@ services:
     #[test]
     fn parse_error_emits_single_diagnostic() {
         let d = doc("services:\n  web: { broken\n");
-        let diags = diagnose(&d);
+        let diags = diagnose(&compose_uri(), &d);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("failed to parse"));
     }
@@ -330,6 +349,6 @@ services:
             kind: DocKind::Other,
             version: 1,
         };
-        assert!(diagnose(&d).is_empty());
+        assert!(diagnose(&compose_uri(), &d).is_empty());
     }
 }

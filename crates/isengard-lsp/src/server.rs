@@ -44,7 +44,7 @@ impl Backend {
             docs.get(&uri).cloned()
         };
         let Some(doc) = doc else { return };
-        let diags = diagnose(&doc);
+        let diags = diagnose(&uri, &doc);
         self.client
             .publish_diagnostics(uri, diags, Some(doc.version))
             .await;
