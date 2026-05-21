@@ -1,0 +1,30 @@
+# Nextest configuration for the Isengard workspace.
+#
+# The big knob here is `terminate-after`. Without it, a hung test
+# (deadlocked tokio mutex, infinite loop, sleeping on a future that
+# never resolves) sits forever in CI and burns runner minutes until
+# the workflow's wall-clock kills it. On 2026-05-21 we lost two
+# hours of CI time on PR #202 to exactly this pattern.
+#
+# `slow-timeout.period = 90s` is the WARNING threshold: nextest
+# prints `[SLOW]` next to a test that runs longer. `terminate-after = 4`
+# means after the test has been over the threshold for 4 consecutive
+# checks (4 * 90s = 6 minutes), nextest kills it and reports a
+# failure. Worst-case per-test budget: ~6 minutes, not infinity.
+#
+# Most Isengard tests run in well under a second; the legitimate
+# slow ones (fingerprint_enroll, LSP integration, backup roundtrip)
+# come in around 5-30s. 90s gives enough headroom that we do not
+# warn-spam those, while still bounding a real hang.
+
+[profile.default]
+slow-timeout = { period = "90s", terminate-after = 4 }
+
+# CI profile inherits the timeouts but adds retry semantics: flaky
+# tests (especially anything network-y) get one retry before failing
+# the run. Cuts down on spurious red-CI churn without hiding real
+# regressions.
+[profile.ci]
+slow-timeout = { period = "90s", terminate-after = 4 }
+retries = 1
+fail-fast = false
