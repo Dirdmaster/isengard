@@ -42,6 +42,7 @@ use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
 
 use crate::acme::WildcardCertStore;
+use crate::config::{ConfigDispatcher, ConfigValue};
 
 /// Per-host generation tracking. Only increments when the input hash
 /// actually changes.
@@ -83,6 +84,13 @@ pub struct RoutingPusher {
     /// build so each push includes the current cert material. Optional
     /// so non-ACME deployments pay no cost.
     wildcard_certs: Option<Arc<WildcardCertStore>>,
+    /// Schema-driven config dispatcher. Used to look up `acme.contact_email`
+    /// (and other future routing-relevant keys) on every `build_for_host`
+    /// so operator-set values flow into `ProxySettings` without a restart.
+    /// Optional so test harnesses that build a pusher without a full
+    /// controller boot keep working; `None` falls back to the previous
+    /// hard-coded empty contact email.
+    config: Option<Arc<ConfigDispatcher>>,
 }
 
 impl RoutingPusher {
@@ -93,6 +101,7 @@ impl RoutingPusher {
             by_host: Mutex::new(HashMap::new()),
             senders: Mutex::new(Senders::default()),
             wildcard_certs: None,
+            config: None,
         }
     }
 
@@ -102,6 +111,17 @@ impl RoutingPusher {
     /// enabled.
     pub fn with_wildcard_certs(mut self, store: Arc<WildcardCertStore>) -> Self {
         self.wildcard_certs = Some(store);
+        self
+    }
+
+    /// Attaches the `isd configure` dispatcher so per-host `ProxyConfig`
+    /// builds can pull `acme.contact_email` (and other future routing
+    /// keys) without a restart.
+    ///
+    /// [`crate::run_controller`] calls this after the dispatcher has
+    /// booted alongside the secrets and settings stores.
+    pub fn with_config_dispatcher(mut self, dispatcher: Arc<ConfigDispatcher>) -> Self {
+        self.config = Some(dispatcher);
         self
     }
 
@@ -121,12 +141,15 @@ impl RoutingPusher {
         };
 
         let hash = hash_rules_and_wildcards(&self.inv, &rules, &wildcards).await?;
-        let mut guard = self.by_host.lock().await;
-        let entry = guard.entry(host_id).or_default();
-        if entry.last_hash != hash {
-            entry.generation += 1;
-            entry.last_hash = hash;
-        }
+        let generation = {
+            let mut guard = self.by_host.lock().await;
+            let entry = guard.entry(host_id).or_default();
+            if entry.last_hash != hash {
+                entry.generation += 1;
+                entry.last_hash = hash;
+            }
+            entry.generation
+        };
 
         let proto_wildcards: Vec<ProtoWildcardCert> = wildcards
             .iter()
@@ -137,18 +160,60 @@ impl RoutingPusher {
             })
             .collect();
 
+        // `acme.contact_email` is operator-settable via `isd configure`.
+        // Pull it through the dispatcher so a value written by the
+        // operator reaches every connected agent without a restart. The
+        // previous behaviour was `String::new()`, which silently disabled
+        // some ACME flows; preserve that fallback when the dispatcher is
+        // absent (tests) or the key is unset.
+        let contact_email = self.resolve_acme_contact_email().await;
+
         Ok(ProxyConfig {
             host_id: host_id.to_string(),
-            generation: entry.generation,
+            generation,
             rules: rules.into_iter().map(to_proto).collect(),
             settings: Some(ProxySettings {
                 http_port: 8080,
                 https_port: 8443,
-                acme_contact_email: String::new(),
+                acme_contact_email: contact_email,
                 log_sample_rate: 0.0,
             }),
             wildcard_certs: proto_wildcards,
         })
+    }
+
+    /// Resolves the current `acme.contact_email` value from the
+    /// dispatcher.
+    ///
+    /// Returns `Set` / `Default` string values as-is; any other shape,
+    /// missing dispatcher, or backing-store failure falls back to the
+    /// historical empty string so a misconfigured dispatcher does not
+    /// stall the push pipeline. Non-string values and lookup failures
+    /// are logged at `warn` to surface during operator triage.
+    async fn resolve_acme_contact_email(&self) -> String {
+        let Some(dispatcher) = self.config.as_ref() else {
+            return String::new();
+        };
+        match dispatcher.get("acme.contact_email").await {
+            Ok(Some(ConfigValue::Set(v))) | Ok(Some(ConfigValue::Default(v))) => match v {
+                serde_json::Value::String(s) => s,
+                other => {
+                    tracing::warn!(
+                        value = %other,
+                        "acme.contact_email is not a string; using empty fallback"
+                    );
+                    String::new()
+                }
+            },
+            Ok(None) => String::new(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "acme.contact_email lookup failed; using empty fallback"
+                );
+                String::new()
+            }
+        }
     }
 
     /// Registers the Sync outbound sender for `host`.

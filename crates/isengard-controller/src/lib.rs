@@ -327,8 +327,23 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         }
     }
 
+    // `isd configure` dispatcher. Wraps the inventory's `settings`
+    // table behind a SettingStore and pairs it with the existing
+    // SecretsStore; the static schema routes per-key writes to the
+    // right backing store. Built here (rather than later) so the
+    // routing pusher can read `acme.contact_email` from it on every
+    // `build_for_host`.
+    let setting_store = Arc::new(isengard_storage::SettingStore::new(inventory.clone()));
+    let config_dispatcher = Arc::new(config::ConfigDispatcher::new(
+        config::Schema::v01(),
+        secrets_store.clone(),
+        setting_store,
+    ));
+
     let routing = Arc::new(
-        routing::RoutingPusher::new(inventory.clone()).with_wildcard_certs(wildcard_store.clone()),
+        routing::RoutingPusher::new(inventory.clone())
+            .with_wildcard_certs(wildcard_store.clone())
+            .with_config_dispatcher(config_dispatcher.clone()),
     );
     let policy_ingest = Arc::new(policy_ingest::PolicyLabelIngest::new(inventory.clone()));
     // Lifecycle-hook label ingest runs in parallel with policy_ingest.
@@ -366,17 +381,10 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
     let log_fanout = log_fanout::LogFanout::new();
     let compose_broker = Arc::new(compose_broker::ComposeBroker::new());
 
-    // `isd configure` dispatcher. Wraps the inventory's `settings`
-    // table behind a SettingStore and pairs it with the existing
-    // SecretsStore; the static schema routes per-key writes to the
-    // right backing store. PR 2 of the configure track adds the
-    // dashboard routes that hang off this handle.
-    let setting_store = Arc::new(isengard_storage::SettingStore::new(inventory.clone()));
-    let config_dispatcher = Arc::new(config::ConfigDispatcher::new(
-        config::Schema::v01(),
-        secrets_store.clone(),
-        setting_store,
-    ));
+    // `config_dispatcher` is built earlier (before the routing pusher)
+    // so the pusher can read `acme.contact_email` from it. The dashboard
+    // routes added in PR 2 of the configure track hang off the same
+    // handle that lives on `ControllerHandles`.
 
     let handles = Arc::new(ControllerHandles {
         inventory: inventory.clone(),
