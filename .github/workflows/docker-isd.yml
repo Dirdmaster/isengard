@@ -1,0 +1,89 @@
+name: Docker (isd)
+
+# v0.6.0 distribution: builds the `isd`-only docker image and pushes it
+# to `ghcr.io/weavers-engineering/isd`. Multi-arch (linux/amd64 +
+# linux/arm64) via QEMU + buildx.
+#
+# Separate from `.github/workflows/docker.yml`, which builds the daemon
+# images (`isengard-agent`, `isengard-controller`) on a scratch musl
+# base. The isd image is debian-slim-based so operators can shell in.
+#
+# Trigger: workflow_call from `release-daemon.yml` (orchestrated alongside
+# the daemon binaries) plus a `workflow_dispatch` for emergencies. Branch
+# pushes do NOT rebuild the image; the isd image is release-only.
+#
+# Spec: 3 Resources/Superpowers/specs/2026-05-21-isengard-v0.6.0-distribution-design.md
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version tag (e.g. v0.6.0)
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version tag (e.g. v0.6.0) for manual builds
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.version || github.ref }}
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          # Lowercase the owner; ghcr.io requires lowercase image refs and
+          # the org may be cased (Weavers-Engineering).
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/isd
+          # Tag matrix:
+          #   - the full vX.Y.Z (semver pattern {{version}})
+          #   - the major.minor floating tag (vX.Y)
+          #   - the major floating tag (vX)
+          #   - `latest` (only on tag pushes)
+          #   - the short SHA for debugging
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.version || github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version || github.ref_name }}
+            type=semver,pattern={{major}},value=${{ inputs.version || github.ref_name }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.isd
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=docker-isd
+          cache-to: type=gha,mode=max,scope=docker-isd
+          # Drives `ISENGARD_RELEASE_VERSION` in the Dockerfile so
+          # `isd --version` inside the image matches the release tag.
+          build-args: |
+            ISENGARD_RELEASE_VERSION=${{ inputs.version || github.ref_name }}

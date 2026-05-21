@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.86"
 license = "MIT"
@@ -200,23 +200,23 @@ tempfile = "3.14.0"
 wiremock = "0.6.2"
 
 # internal — path + version so cargo-deny doesn't flag these as wildcard deps
-isengard-core = { path = "crates/isengard-core", version = "0.1.0-alpha" }
-isengard-controller = { path = "crates/isengard-controller", version = "0.1.0-alpha" }
-isd-runtime = { path = "crates/isd-runtime", version = "0.1.0-alpha" }
-isengard-agent = { path = "crates/isengard-agent", version = "0.1.0-alpha" }
-isengard-manifest = { path = "crates/isengard-manifest", version = "0.1.0-alpha" }
-isengard-lsp = { path = "crates/isengard-lsp", version = "0.1.0-alpha" }
-isengard-mcp = { path = "crates/isengard-mcp", version = "0.1.0-alpha" }
-isengard-proto = { path = "crates/isengard-proto", version = "0.1.0-alpha" }
-isengard-storage = { path = "crates/isengard-storage", version = "0.1.0-alpha" }
-isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.1.0-alpha" }
-isengard-plugin-notifier = { path = "crates/isengard-plugins/notifier", version = "0.1.0-alpha" }
-isengard-plugin-webhooks = { path = "crates/isengard-plugins/webhooks", version = "0.1.0-alpha" }
-isengard-plugin-dashboard = { path = "crates/isengard-plugins/dashboard", version = "0.1.0-alpha" }
-isengard-plugin-backup = { path = "crates/isengard-plugins/backup", version = "0.1.0-alpha" }
-isengard-plugin-networking-none = { path = "crates/isengard-plugins/networking-none", version = "0.1.0-alpha" }
-isengard-plugin-networking-tailscale = { path = "crates/isengard-plugins/networking-tailscale", version = "0.1.0-alpha" }
-isengard-plugin-networking-cf-tunnel = { path = "crates/isengard-plugins/networking-cf-tunnel", version = "0.1.0-alpha" }
+isengard-core = { path = "crates/isengard-core", version = "0.6.0" }
+isengard-controller = { path = "crates/isengard-controller", version = "0.6.0" }
+isd-runtime = { path = "crates/isd-runtime", version = "0.6.0" }
+isengard-agent = { path = "crates/isengard-agent", version = "0.6.0" }
+isengard-manifest = { path = "crates/isengard-manifest", version = "0.6.0" }
+isengard-lsp = { path = "crates/isengard-lsp", version = "0.6.0" }
+isengard-mcp = { path = "crates/isengard-mcp", version = "0.6.0" }
+isengard-proto = { path = "crates/isengard-proto", version = "0.6.0" }
+isengard-storage = { path = "crates/isengard-storage", version = "0.6.0" }
+isengard-plugin-updater = { path = "crates/isengard-plugins/updater", version = "0.6.0" }
+isengard-plugin-notifier = { path = "crates/isengard-plugins/notifier", version = "0.6.0" }
+isengard-plugin-webhooks = { path = "crates/isengard-plugins/webhooks", version = "0.6.0" }
+isengard-plugin-dashboard = { path = "crates/isengard-plugins/dashboard", version = "0.6.0" }
+isengard-plugin-backup = { path = "crates/isengard-plugins/backup", version = "0.6.0" }
+isengard-plugin-networking-none = { path = "crates/isengard-plugins/networking-none", version = "0.6.0" }
+isengard-plugin-networking-tailscale = { path = "crates/isengard-plugins/networking-tailscale", version = "0.6.0" }
+isengard-plugin-networking-cf-tunnel = { path = "crates/isengard-plugins/networking-cf-tunnel", version = "0.6.0" }
 
 # external CLI lookup (used by tailscale adapter to verify `tailscale` binary)
 which = "6"
@@ -274,3 +274,8 @@ strip = true
 [profile.dev]
 opt-level = 0
 debug = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
