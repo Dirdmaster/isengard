@@ -419,13 +419,10 @@ async fn resolve_dial_token(token: &str, context: Option<&str>) -> Result<String
 /// Look up an integer index in the `isd ssh hosts` cache and return
 /// the dial target (or hostname fallback) for that row.
 fn resolve_index_to_dial(idx: usize) -> Result<String> {
-    let cache = crate::index_cache::read_for("ssh hosts")
-        .context("reading ssh hosts index cache")?;
-    let cache = cache.ok_or_else(|| {
-        anyhow!(
-            "no recent `isd ssh hosts` to resolve index {idx}; run it first"
-        )
-    })?;
+    let cache =
+        crate::index_cache::read_for("ssh hosts").context("reading ssh hosts index cache")?;
+    let cache = cache
+        .ok_or_else(|| anyhow!("no recent `isd ssh hosts` to resolve index {idx}; run it first"))?;
     if cache.is_stale() {
         eprintln!(
             "isd: ssh hosts index cache is {} seconds old; run `isd ssh hosts` to refresh",
@@ -804,8 +801,8 @@ fn resolve_agent_token(hosts: &[HostRow], token: &str) -> Result<String> {
     // Strip a leading `#` so `#3` and `3` both work.
     let bare = token.strip_prefix('#').unwrap_or(token);
     if let Ok(idx) = bare.parse::<usize>() {
-        let cache = crate::index_cache::read_for("ssh hosts")
-            .context("reading ssh hosts index cache")?;
+        let cache =
+            crate::index_cache::read_for("ssh hosts").context("reading ssh hosts index cache")?;
         let cache = cache.ok_or_else(|| {
             anyhow!(
                 "no recent `isd ssh hosts` to resolve index {idx}; run it first so \

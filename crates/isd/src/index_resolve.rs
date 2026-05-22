@@ -54,8 +54,7 @@ pub struct ResolvedTarget {
 /// when the cache exists but is unreadable. Stale-but-valid caches
 /// log a warning to stderr and proceed.
 pub fn resolve(args: &[String]) -> Result<Vec<ResolvedTarget>> {
-    let cache: Option<IndexCache> =
-        index_cache::read_for("ps").context("reading index cache")?;
+    let cache: Option<IndexCache> = index_cache::read_for("ps").context("reading index cache")?;
 
     let mut want_indices = false;
     for arg in args {
