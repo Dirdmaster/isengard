@@ -9,26 +9,30 @@
 //!    operator onboarded via `isd ssh trust`. Reported as
 //!    `HostClass::Trusted`, no last-seen data.
 //!
-//! Frontend: native ratatui fullscreen TUI on the alternate screen,
+//! Frontend: native ratatui inline TUI (no alt-screen takeover),
 //! fuzzy-matched via `nucleo-matcher`. The earlier fzf + inquire
 //! dance was removed because fzf opens `/dev/tty` with raw ioctls that
 //! bypass capture tools (cheese, asciinema's pty wrap). The native
 //! picker keeps all output inside crossterm so screen capture works
-//! and the visual language matches `isd configure`.
+//! and the visual language matches `isd configure`. Inline rendering
+//! reserves a small viewport at the bottom of the current shell and
+//! clears it silently on exit, so the surrounding shell flow stays
+//! visible (gh/gum aesthetic).
 
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
 
 use anyhow::{Context as _, Result};
 use crossterm::{
+    cursor,
     event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt as _;
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -143,42 +147,65 @@ fn row_line(row: &PickerRow) -> Line<'static> {
     ])
 }
 
-/// Picker public entry. Opens a fullscreen alternate-screen TUI, lets
-/// the operator filter + pick, returns the chosen hostname (or
-/// `Ok(None)` on Esc / Ctrl-C / empty filter dismiss).
+/// Compute the inline viewport height (rows) for `n_rows` source items.
+///
+/// Layout budget: filter input (3) + list (>=1) + footer (1) = 5 min.
+/// Cap at 14 so a long fleet does not eat the operator's scrollback.
+/// Floor at 5 so the picker is always usable even with zero rows
+/// (empty-list early-out happens upstream, but the floor keeps the
+/// math total).
+pub fn picker_height(n_rows: usize) -> u16 {
+    let raw = (n_rows as u16).saturating_add(4);
+    raw.clamp(5, 14)
+}
+
+/// Picker public entry. Opens an inline ratatui viewport at the bottom
+/// of the current shell, lets the operator filter + pick, returns the
+/// chosen hostname (or `Ok(None)` on Esc / Ctrl-C / empty filter
+/// dismiss). On exit the viewport is silently cleared so the next
+/// shell prompt or command output starts cleanly.
 ///
 /// # Errors
 ///
 /// Returns `Err` on terminal init/draw failure. Empty-list early-out
 /// is the caller's job (see `ssh::run_picker`).
 pub async fn pick(rows: Vec<PickerRow>) -> Result<Option<String>> {
-    // Install panic hook BEFORE entering the alternate screen so a
-    // panic between EnterAlternateScreen and the guard's construction
-    // still restores the terminal.
+    // Install panic hook BEFORE switching to raw mode so a panic
+    // between enable_raw_mode and the guard's construction still
+    // restores the terminal.
     install_panic_hook();
 
     enable_raw_mode().context("enabling raw mode")?;
-    let mut stdout_handle = stdout();
-    execute!(stdout_handle, EnterAlternateScreen).context("entering alternate screen")?;
+    let stdout_handle = stdout();
     let backend = CrosstermBackend::new(stdout_handle);
-    let mut terminal = Terminal::new(backend).context("creating terminal backend")?;
+    let height = picker_height(rows.len());
+    let opts = TerminalOptions {
+        viewport: Viewport::Inline(height),
+    };
+    let mut terminal =
+        Terminal::with_options(backend, opts).context("creating inline terminal backend")?;
     let _guard = TermGuard;
 
     let outcome = event_loop(&mut terminal, rows).await;
 
+    // Silent clear: wipe the inline viewport area so the shell prompt
+    // / subsequent command output starts on a clean line. The guard's
+    // Drop is the safety net for panics; this is the happy path.
+    let _ = terminal.clear();
     drop(terminal);
     outcome
 }
 
-/// RAII guard that disables raw mode and leaves the alternate screen
+/// RAII guard that disables raw mode and restores cursor visibility
 /// on drop. Stack-allocated so unwinding through the TUI still
-/// restores the terminal.
+/// restores the terminal. No alt-screen exit needed: inline rendering
+/// never entered one.
 struct TermGuard;
 
 impl Drop for TermGuard {
     fn drop(&mut self) {
         let mut out = stdout();
-        let _ = execute!(out, LeaveAlternateScreen);
+        let _ = execute!(out, cursor::Show);
         let _ = disable_raw_mode();
     }
 }
@@ -190,7 +217,7 @@ fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = stdout();
-        let _ = execute!(out, LeaveAlternateScreen);
+        let _ = execute!(out, cursor::Show);
         let _ = disable_raw_mode();
         previous(info);
     }));
@@ -527,6 +554,24 @@ mod tests {
         assert_eq!(st.list_state.selected(), None);
         // Selecting on an empty list returns None, doesn't panic.
         assert_eq!(st.selected_hostname(), None);
+    }
+
+    #[test]
+    fn picker_height_floor_at_five_rows() {
+        assert_eq!(picker_height(0), 5);
+        assert_eq!(picker_height(1), 5);
+    }
+
+    #[test]
+    fn picker_height_scales_with_row_count() {
+        // n+4 once we're past the floor: 5 rows + 4 = 9, well under cap.
+        assert_eq!(picker_height(5), 9);
+    }
+
+    #[test]
+    fn picker_height_caps_at_fourteen() {
+        assert_eq!(picker_height(50), 14);
+        assert_eq!(picker_height(1_000), 14);
     }
 
     #[test]
