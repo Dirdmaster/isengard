@@ -59,11 +59,18 @@ pub(crate) enum KeyType {
     Bool,
     /// Ordered list of non-empty UTF-8 strings.
     ///
-    /// Persisted on the wire as a JSON array. The TUI renders one row
-    /// per element with inline add/remove + a Cloudflare fetch action;
-    /// the `set` verb accepts a comma-separated string for parity with
-    /// the inline path (no array literal in shell).
+    /// Persisted on the wire as a JSON array. Reserved for future
+    /// operator-managed multi-value keys that do not need per-row
+    /// metadata; the CLI `set` verb accepts a comma-separated string.
     StringList,
+    /// Ordered list of zone entries: `{ name, wildcard }` per element.
+    ///
+    /// Persisted on the wire as a JSON array of objects. The TUI renders
+    /// one row per zone with a wildcard toggle; the `set` verb accepts
+    /// a comma-separated list of names where each name may be suffixed
+    /// with `*` to mark the wildcard intent
+    /// (e.g. `weavers.engineering*,vallee.casa`).
+    ZoneList,
 }
 
 /// CLI flags for `isd configure`.
@@ -203,6 +210,20 @@ pub(crate) struct Choice {
     pub(crate) value: String,
     /// Operator-facing label.
     pub(crate) label: String,
+}
+
+/// One row in a [`KeyType::ZoneList`] value.
+///
+/// Mirrors the controller's `Zone` over the wire (`{ name, wildcard }`).
+/// Declared locally so the `isd` crate stays clean of the controller's
+/// sqlx / secrets dependencies; the wire shape is the source of truth.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct Zone {
+    /// Apex zone name (e.g. `weavers.engineering`).
+    pub(crate) name: String,
+    /// Operator intent: request wildcard cert for this zone.
+    #[serde(default)]
+    pub(crate) wildcard: bool,
 }
 
 /// PUT body for `/api/v1/config/{key}`.
@@ -395,6 +416,30 @@ fn encode_value(ty: Option<KeyType>, raw: &str) -> Result<Value> {
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(|s| Value::String(s.to_string()))
+                .collect();
+            Ok(Value::Array(items))
+        }
+        Some(KeyType::ZoneList) => {
+            // Comma-separated zone names. A trailing `*` on a name marks
+            // the wildcard intent: `weavers.engineering*,vallee.casa`
+            // means wildcard=true for the first, false for the second.
+            // The TUI is the richer surface; this is a minimal inline
+            // shape so `isd configure set routing.zones ...` still works.
+            let items: Vec<Value> = raw
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let (name, wildcard) = if let Some(stripped) = s.strip_suffix('*') {
+                        (stripped.trim().to_string(), true)
+                    } else {
+                        (s.to_string(), false)
+                    };
+                    serde_json::json!({
+                        "name": name,
+                        "wildcard": wildcard,
+                    })
+                })
                 .collect();
             Ok(Value::Array(items))
         }
@@ -611,7 +656,11 @@ pub(crate) fn menu_value_display(entry: &SchemaEntry, current: Option<&ListRow>)
         (_, "unset") => "<unset>".to_string(),
         _ => match current.map(|r| &r.value) {
             Some(v) => {
-                let rendered = json_to_display(v);
+                let rendered = if entry.ty == KeyType::ZoneList {
+                    zone_list_display(v)
+                } else {
+                    json_to_display(v)
+                };
                 if source == "default" {
                     format!("(default) {rendered}")
                 } else {
@@ -623,6 +672,34 @@ pub(crate) fn menu_value_display(entry: &SchemaEntry, current: Option<&ListRow>)
     }
 }
 
+/// Render a [`KeyType::ZoneList`] JSON value as a compact, operator-readable
+/// line: `weavers.engineering*, vallee.casa` where `*` marks the wildcard
+/// intent. Falls back to [`json_to_display`] when the shape drifts.
+pub(crate) fn zone_list_display(v: &Value) -> String {
+    let Some(items) = v.as_array() else {
+        return json_to_display(v);
+    };
+    if items.is_empty() {
+        return "(empty)".to_string();
+    }
+    let parts: Vec<String> = items
+        .iter()
+        .map(|item| {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("(?)");
+            let wildcard = item
+                .get("wildcard")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if wildcard {
+                format!("{name}*")
+            } else {
+                name.to_string()
+            }
+        })
+        .collect();
+    parts.join(", ")
+}
+
 /// Lower-snake-case label for a [`KeyType`]. Used in table rendering.
 pub(crate) fn key_type_label(ty: KeyType) -> &'static str {
     match ty {
@@ -631,6 +708,7 @@ pub(crate) fn key_type_label(ty: KeyType) -> &'static str {
         KeyType::Int => "int",
         KeyType::Bool => "bool",
         KeyType::StringList => "string_list",
+        KeyType::ZoneList => "zone_list",
     }
 }
 
@@ -907,6 +985,61 @@ mod tests {
     #[test]
     fn key_type_label_renders_string_list() {
         assert_eq!(key_type_label(KeyType::StringList), "string_list");
+    }
+
+    #[test]
+    fn key_type_label_renders_zone_list() {
+        assert_eq!(key_type_label(KeyType::ZoneList), "zone_list");
+    }
+
+    #[test]
+    fn encode_value_parses_comma_separated_for_zone_list() {
+        let v = encode_value(
+            Some(KeyType::ZoneList),
+            "weavers.engineering*, vallee.casa,another.dev*",
+        )
+        .unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                serde_json::json!({"name": "weavers.engineering", "wildcard": true}),
+                serde_json::json!({"name": "vallee.casa", "wildcard": false}),
+                serde_json::json!({"name": "another.dev", "wildcard": true}),
+            ])
+        );
+    }
+
+    #[test]
+    fn encode_value_drops_empty_tokens_for_zone_list() {
+        let v = encode_value(Some(KeyType::ZoneList), "a.com,,b.com*,").unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                serde_json::json!({"name": "a.com", "wildcard": false}),
+                serde_json::json!({"name": "b.com", "wildcard": true}),
+            ])
+        );
+    }
+
+    #[test]
+    fn zone_list_display_marks_wildcard_entries() {
+        let v = serde_json::json!([
+            {"name": "weavers.engineering", "wildcard": true},
+            {"name": "vallee.casa", "wildcard": false},
+        ]);
+        assert_eq!(zone_list_display(&v), "weavers.engineering*, vallee.casa");
+    }
+
+    #[test]
+    fn zone_list_display_handles_empty_array() {
+        let v = serde_json::json!([]);
+        assert_eq!(zone_list_display(&v), "(empty)");
+    }
+
+    #[test]
+    fn zone_list_display_falls_back_for_non_array() {
+        let v = serde_json::json!("scalar");
+        assert_eq!(zone_list_display(&v), "scalar");
     }
 
     #[test]
