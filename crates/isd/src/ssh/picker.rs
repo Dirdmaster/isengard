@@ -23,11 +23,16 @@
 //! the unified renderer (rounded corners, vertical separators between
 //! columns, ALL CAPS dim headers, one header rule, `#` dim, NAME bold,
 //! DIAL TARGET cyan, LAST SEEN dim). The selected row is painted with
-//! a cyan background and black foreground inside the renderer. The
-//! filter input sits BELOW the table as a `> <query>` line (fzf
-//! default layout). The intent: an operator who knows `isd ssh hosts`
-//! recognises the picker at a glance and the columns line up so the
-//! `#` they read off the listing matches the `#` in the picker.
+//! a cyan background and black foreground inside the renderer; the
+//! highlight stops at the box's rightmost `│`. The filter input is
+//! folded INSIDE the box as a full-width footer row under a
+//! `┴`-joined divider, so the whole picker reads as one rounded
+//! widget instead of "table + loose line below". Empty query shows
+//! a muted italic `filter hosts...` placeholder; as soon as the
+//! operator types, the placeholder vanishes. Intent: an operator who
+//! knows `isd ssh hosts` recognises the picker at a glance and the
+//! columns line up so the `#` they read off the listing matches the
+//! `#` in the picker.
 
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
@@ -42,15 +47,10 @@ use crossterm::{
 use futures_util::StreamExt as _;
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::{
-    Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::{Line, Span, Text},
-    widgets::Paragraph,
+    Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, text::Text, widgets::Paragraph,
 };
 
-use crate::render::{Align, CellStyle, Column, Table as RenderTable, render_to_lines};
+use crate::render::{Align, CellStyle, Column, InputRow, Table as RenderTable, render_to_lines};
 
 /// Source bucket for a picker row. The picker prints the bucket label
 /// in square brackets so the operator can tell at a glance which hosts
@@ -204,10 +204,13 @@ fn relative_time(rfc3339: Option<&str>) -> String {
 /// Compute the inline viewport height (rows) for `n_rows` source items.
 ///
 /// Layout budget for the boxed picker: top border (1) + header (1) +
-/// header rule (1) + N data rows + bottom border (1) + filter line (1)
-/// = N + 6. Cap at 18 so a long fleet does not eat the operator's
-/// scrollback. Floor at 8 so the picker still has a parseable shape
-/// (chrome + at least two data slots) with an empty / tiny fleet.
+/// header rule (1) + N data rows + divider (1) + input row (1) +
+/// bottom border (1) = N + 6. The input row sits INSIDE the box,
+/// under a `┴`-joined divider, so the whole picker reads as one
+/// rounded widget. Cap at 18 so a long fleet does not eat the
+/// operator's scrollback. Floor at 8 so the picker still has a
+/// parseable shape (chrome + at least two data slots) with an empty
+/// / tiny fleet.
 pub fn picker_height(n_rows: usize) -> u16 {
     let raw = (n_rows as u16).saturating_add(6);
     raw.clamp(8, 18)
@@ -429,45 +432,31 @@ fn handle_key(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
     }
 }
 
-/// Render the picker frame. The viewport is split into the boxed
-/// hosts table on top and a single `> <query>` filter line at the
-/// bottom: fzf default layout. The table is built via the shared
-/// `crate::render::render_to_lines` so the chrome (rounded corners,
-/// vertical separators, ALL-CAPS dim headers, one header rule) and
-/// per-column styling (`#` dim, NAME bold, DIAL TARGET cyan, LAST
-/// SEEN dim) match `isd ssh hosts` exactly. The selected row is
-/// painted with a cyan background + black foreground inside the
-/// renderer so the highlight survives the same ratatui paint pass.
+/// Render the picker frame. The whole inline viewport is one boxed
+/// widget: the hosts table chrome (rounded corners, vertical
+/// separators, ALL-CAPS dim headers, header rule) plus a `┴`-joined
+/// divider and a full-width `> <query>` input row folded INSIDE the
+/// box. Built via the shared `crate::render::render_to_lines` so per-
+/// column styling (`#` dim, NAME bold, DIAL TARGET cyan, LAST SEEN
+/// dim) matches `isd ssh hosts` exactly and the selected row is
+/// painted with a cyan background + black foreground (highlight
+/// clipped at the box's right edge).
 fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
     let area = f.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // boxed hosts table
-            Constraint::Length(1), // filter input at the bottom
-        ])
-        .split(area);
 
-    // Build the table from the currently visible rows. The highlight
-    // index is the picker's `selected` cursor: when the filter
-    // excludes everything (`selected == None`), no row is painted.
     let table = picker_table(&state.visible);
-    let lines = render_to_lines(&table, chunks[0].width as usize, state.selected);
-    let table_paragraph = Paragraph::new(Text::from(lines));
-    f.render_widget(table_paragraph, chunks[0]);
+    let input = InputRow {
+        query: &state.filter,
+        placeholder: "filter hosts...",
+        prompt: "> ",
+    };
+    let (lines, cursor) = render_to_lines(&table, area.width as usize, state.selected, Some(input));
+    let paragraph = Paragraph::new(Text::from(lines));
+    f.render_widget(paragraph, area);
 
-    // Filter line at the bottom. Yellow `>` prompt + raw query text;
-    // ratatui draws the terminal cursor at the end of this line so
-    // the operator sees a familiar input affordance.
-    let prompt = Span::styled("> ", Style::default().fg(Color::Yellow));
-    let query = Span::raw(state.filter.clone());
-    let filter_line = Paragraph::new(Line::from(vec![prompt, query]));
-    f.render_widget(filter_line, chunks[1]);
-
-    // Position the visible cursor at the end of the filter line.
-    // `2` accounts for the "> " prompt prefix.
-    let cursor_x = chunks[1].x + 2 + state.filter.chars().count() as u16;
-    f.set_cursor_position((cursor_x, chunks[1].y));
+    if let Some((row, col)) = cursor {
+        f.set_cursor_position((area.x + col, area.y + row));
+    }
 }
 
 #[cfg(test)]
@@ -645,17 +634,29 @@ mod tests {
             isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
         ];
         let table = picker_table(&rows);
-        let lines = render_to_lines(&table, 80, Some(1));
+        let (lines, _) = render_to_lines(&table, 80, Some(1), None);
         // Expected line layout: top border + header + header rule +
         // row 0 + row 1 + bottom border. Selected (row 1) is at idx 4.
         let selected = &lines[4];
-        assert!(
-            selected
-                .spans
-                .iter()
-                .all(|s| s.style.bg == Some(Color::Cyan)),
-            "every span on the selected row carries the highlight bg"
-        );
+        // Every interior span carries the highlight bg; the trailing
+        // right-edge `│` keeps the dim border style (no bleed past
+        // the box).
+        let n = selected.spans.len();
+        for (idx, span) in selected.spans.iter().enumerate() {
+            if idx + 1 == n {
+                assert_ne!(
+                    span.style.bg,
+                    Some(Color::Cyan),
+                    "right-edge `│` should not carry the highlight bg"
+                );
+            } else {
+                assert_eq!(
+                    span.style.bg,
+                    Some(Color::Cyan),
+                    "interior span missing highlight bg at idx {idx}"
+                );
+            }
+        }
         // Sanity: the un-selected row keeps its native styling, no
         // cyan background bleed.
         let other = &lines[3];
@@ -666,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_places_filter_at_the_bottom_with_query_visible() {
+    fn draw_folds_filter_into_the_box_with_query_visible() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(80, 12);
@@ -680,26 +681,79 @@ mod tests {
         st.refresh();
         terminal.draw(|f| draw(f, &mut st)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        // The bottom row of the viewport carries the filter prompt
-        // and the live query text. fzf-style: query lives below the
-        // table, never above.
-        let last_line: String = (0..80).map(|x| buf[(x, 11)].symbol()).collect();
-        assert!(
-            last_line.starts_with("> lau"),
-            "filter line must sit at the bottom: {last_line:?}"
-        );
         // Top of the viewport carries the boxed table's top border.
         let first_line: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(
             first_line.starts_with('╭'),
             "table top border at the top of the viewport: {first_line:?}"
         );
+        // After filtering to "lau" only `lausanne` matches: one data
+        // row. Layout: top(0) header(1) rule(2) row0(3) divider(4)
+        // input(5) bottom(6). Lines below are blank viewport tail.
+        let input_line: String = (0..80).map(|x| buf[(x, 5)].symbol()).collect();
+        assert!(
+            input_line.contains("> lau"),
+            "input row inside the box carries `> lau`: {input_line:?}"
+        );
+        assert!(
+            input_line.starts_with('│') && input_line.trim_end().ends_with('│'),
+            "input row is wrapped by the box's outer borders: {input_line:?}"
+        );
+        let bottom_line: String = (0..80).map(|x| buf[(x, 6)].symbol()).collect();
+        assert!(
+            bottom_line.starts_with('╰'),
+            "bottom border sits under the input row: {bottom_line:?}"
+        );
+        // Divider at y=4 (just above the input row) closes the inner
+        // columns with `┴` and joins the box edges with `├`/`┤`.
+        let divider_line: String = (0..80).map(|x| buf[(x, 4)].symbol()).collect();
+        assert!(
+            divider_line.starts_with('├'),
+            "divider above the input row starts with ├: {divider_line:?}"
+        );
+        assert!(
+            divider_line.contains('┴'),
+            "divider closes the inner columns with ┴: {divider_line:?}"
+        );
+    }
+
+    #[test]
+    fn draw_empty_filter_shows_italic_placeholder() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::{Color, Modifier};
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let rows = vec![
+            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
+            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+        ];
+        let mut st = PickerState::new(rows);
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let input_line: String = (0..80).map(|x| buf[(x, 6)].symbol()).collect();
+        assert!(
+            input_line.contains("filter hosts..."),
+            "empty query shows placeholder: {input_line:?}"
+        );
+        // The placeholder cell on the input row carries italic + DarkGray.
+        // Sample a column inside the placeholder text.
+        let sample = &buf[(6u16, 6u16)];
+        assert!(
+            sample.style().add_modifier.contains(Modifier::ITALIC),
+            "placeholder cell is italic"
+        );
+        assert_eq!(
+            sample.style().fg,
+            Some(Color::DarkGray),
+            "placeholder cell is DarkGray"
+        );
     }
 
     #[test]
     fn picker_table_with_empty_visible_shows_only_chrome() {
         let table = picker_table(&[]);
-        let lines = render_to_lines(&table, 80, None);
+        let (lines, _) = render_to_lines(&table, 80, None, None);
         // Top border, header, header rule, bottom border = 4 lines.
         assert_eq!(lines.len(), 4);
         assert!(lines[0].to_string().starts_with('╭'));
