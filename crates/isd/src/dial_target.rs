@@ -20,11 +20,6 @@
 //!    dials the operator-visible address instead of the agent's
 //!    reported container hash.
 
-// The lookup helpers below land in the same PR but in a later commit
-// (CLI dial path). Silence the dead-code warning until the dial path
-// imports them so the in-progress build stays clean.
-#![allow(dead_code)]
-
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::json;
