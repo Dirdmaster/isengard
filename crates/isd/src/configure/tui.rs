@@ -44,7 +44,7 @@ use ratatui::{
 use serde_json::Value;
 
 use super::{
-    KeyType, ListRow, SchemaEntry, fetch_list, fetch_schema, fetch_zones_from_cloudflare,
+    KeyType, ListRow, SchemaEntry, Zone, fetch_list, fetch_schema, fetch_zones_from_cloudflare,
     group_by_category, json_to_display, key_label, key_type_label, menu_value_display, put_value,
 };
 use crate::session::Session;
@@ -246,11 +246,11 @@ impl Modal {
                 KeyType::Secret => Mode::Secret,
                 KeyType::Int => Mode::Int,
                 KeyType::String => Mode::String,
-                // StringList editing goes through `ZonesModal`, not the
-                // generic key editor. If we ever land here it means the
-                // dispatcher misrouted; fall back to plain string input so
-                // the operator can still escape with Esc.
-                KeyType::StringList => Mode::String,
+                // StringList / ZoneList editing goes through `ZonesModal`,
+                // not the generic key editor. If we ever land here it
+                // means the dispatcher misrouted; fall back to plain
+                // string input so the operator can still escape with Esc.
+                KeyType::StringList | KeyType::ZoneList => Mode::String,
             }
         };
         // Seed the buffer with the current value when sensible so the
@@ -303,7 +303,7 @@ enum Mode {
 
 /// One of the two modal editors the TUI knows how to drive. Most schema
 /// keys go through the generic single-value [`Modal`]; the
-/// `routing.zones` StringList key gets its own list editor.
+/// `routing.zones` ZoneList key gets its own list editor.
 pub(crate) enum ModalKind {
     /// Generic single-value editor (string / secret / int / bool /
     /// choices).
@@ -313,27 +313,64 @@ pub(crate) enum ModalKind {
     Zones(ZonesModal),
 }
 
+/// What the inline name-input step is currently feeding: a brand-new row
+/// or an existing row's rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddTarget {
+    /// Appending a new row; the index is set after the wildcard confirm.
+    New,
+    /// Editing an existing row at row index `idx`. The name is replaced,
+    /// then the wildcard confirm step lets the operator update the flag.
+    Edit {
+        /// Index into [`ZonesModal::zones`] of the row being edited.
+        idx: usize,
+    },
+}
+
+/// Two-stage input state when the operator is adding or editing a row.
+struct ZoneEditStep {
+    /// What this edit step is feeding (new row vs in-place edit).
+    target: AddTarget,
+    /// Current text buffer.
+    buffer: String,
+    /// Cursor in chars.
+    cursor: usize,
+}
+
+/// Wildcard Yes/No confirm shown after the name input is accepted. The
+/// `idx` field always refers to a real row in the list (we push the new
+/// row first, then ask).
+struct WildcardConfirm {
+    /// Row currently being confirmed.
+    idx: usize,
+    /// Highlighted button: 0 = Yes, 1 = No.
+    action_idx: usize,
+}
+
 /// State for the `routing.zones` list editor.
 ///
 /// The editor renders the current zones as a vertical list and exposes:
 ///
-///  * `a` / `i`: open the inline input to add a new zone.
+///  * `a` / `i`: add a new zone (name input, then wildcard Yes/No).
+///  * `e` / `Enter`: edit the selected row (name input, then wildcard).
+///  * `w` / `Space`: toggle wildcard on the selected row.
 ///  * `d` / `x`: remove the selected zone.
-///  * `F`: trigger a Cloudflare fetch; the response opens a confirmation
-///    overlay with `[Merge] [Replace] [Cancel]`.
-///  * `Enter`: PUT the current list to `/api/v1/config/routing.zones`.
+///  * `F`: trigger a Cloudflare fetch; new entries default to
+///    `wildcard: true` on merge/replace.
+///  * `s` / `Ctrl-S`: PUT the current list to `/api/v1/config/routing.zones`.
 ///  * `Esc`: cancel without writing.
 pub(crate) struct ZonesModal {
     /// Working zone list. Mutates as the operator adds/removes/merges.
-    zones: Vec<String>,
-    /// Selection state for the list (highlights the row that `d` /`x`
+    zones: Vec<Zone>,
+    /// Selection state for the list (highlights the row that `d` / `x`
     /// removes).
     list_state: ListState,
     /// Inline input mode flag. `Some` when the operator pressed `a` /
-    /// `i`; carries the in-progress text.
-    add_buffer: Option<String>,
-    /// Cursor index into [`Self::add_buffer`] (chars).
-    add_cursor: usize,
+    /// `i` / `e` / Enter; carries the in-progress text.
+    add_buffer: Option<ZoneEditStep>,
+    /// Wildcard Yes/No confirm step. Shown after the name input is
+    /// committed.
+    wildcard_confirm: Option<WildcardConfirm>,
     /// Confirmation overlay state. `Some` after a successful Cloudflare
     /// fetch; carries the zones the server returned plus the highlight
     /// among `[Merge] [Replace] [Cancel]`.
@@ -344,7 +381,7 @@ pub(crate) struct ZonesModal {
 
 /// Confirmation overlay shown after a successful Cloudflare fetch.
 struct FetchConfirm {
-    /// Zones the server returned. Read-only inside this overlay.
+    /// Zone names the server returned. Read-only inside this overlay.
     fetched: Vec<String>,
     /// Currently highlighted action: 0 = Merge, 1 = Replace, 2 = Cancel.
     action_idx: usize,
@@ -362,7 +399,7 @@ impl ZonesModal {
             zones,
             list_state,
             add_buffer: None,
-            add_cursor: 0,
+            wildcard_confirm: None,
             fetch_confirm: None,
             error: None,
         }
@@ -689,8 +726,16 @@ async fn handle_zones_modal_key(
     ) {
         return handle_zones_fetch_confirm_key(app, session, base, key).await;
     }
-    // Inline add buffer is a stricter text-input mode; only Esc / Enter
-    // / printable chars touch it.
+    // Wildcard Yes/No confirm overrides regular keys: it appears right
+    // after the operator commits a zone name.
+    if matches!(
+        app.modal.as_ref(),
+        Some(ModalKind::Zones(z)) if z.wildcard_confirm.is_some()
+    ) {
+        return Ok(handle_zones_wildcard_confirm_key(app, key));
+    }
+    // Inline add/edit buffer is a stricter text-input mode; only Esc /
+    // Enter / printable chars touch it.
     if matches!(
         app.modal.as_ref(),
         Some(ModalKind::Zones(z)) if z.add_buffer.is_some()
@@ -701,33 +746,33 @@ async fn handle_zones_modal_key(
     let Some(ModalKind::Zones(zones_modal)) = app.modal.as_mut() else {
         return Ok(ModalControl::Close);
     };
-    match key.code {
-        KeyCode::Esc => return Ok(ModalControl::Close),
-        KeyCode::Enter => {
-            let payload: Vec<Value> = zones_modal
-                .zones
-                .iter()
-                .map(|s| Value::String(s.clone()))
-                .collect();
-            app.busy = true;
-            app.status = "Saving zones...".to_string();
-            let result = put_value(session, base, "routing.zones", Value::Array(payload)).await;
-            app.busy = false;
-            match result {
-                Ok(()) => {
-                    app.updated += 1;
-                    app.status = "Set routing.zones".to_string();
-                    refresh_list(app, session, base).await;
-                    return Ok(ModalControl::Close);
+    // Save shortcut: `s` or `Ctrl-S`.
+    let is_save_shortcut = matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
+        || (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S')));
+    if is_save_shortcut {
+        let payload = zones_to_payload(&zones_modal.zones);
+        app.busy = true;
+        app.status = "Saving zones...".to_string();
+        let result = put_value(session, base, "routing.zones", payload).await;
+        app.busy = false;
+        match result {
+            Ok(()) => {
+                app.updated += 1;
+                app.status = "Set routing.zones".to_string();
+                refresh_list(app, session, base).await;
+                return Ok(ModalControl::Close);
+            }
+            Err(e) => {
+                if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                    z.error = Some(format!("{e}"));
                 }
-                Err(e) => {
-                    if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
-                        z.error = Some(format!("{e}"));
-                    }
-                    return Ok(ModalControl::Stay);
-                }
+                return Ok(ModalControl::Stay);
             }
         }
+    }
+    match key.code {
+        KeyCode::Esc => return Ok(ModalControl::Close),
         KeyCode::Up => {
             zones_step_selection(zones_modal, -1);
         }
@@ -735,9 +780,33 @@ async fn handle_zones_modal_key(
             zones_step_selection(zones_modal, 1);
         }
         KeyCode::Char('a') | KeyCode::Char('i') => {
-            zones_modal.add_buffer = Some(String::new());
-            zones_modal.add_cursor = 0;
+            zones_modal.add_buffer = Some(ZoneEditStep {
+                target: AddTarget::New,
+                buffer: String::new(),
+                cursor: 0,
+            });
             zones_modal.error = None;
+        }
+        KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Enter => {
+            if let Some(idx) = zones_modal.list_state.selected() {
+                if let Some(zone) = zones_modal.zones.get(idx) {
+                    let buf = zone.name.clone();
+                    let cursor = buf.chars().count();
+                    zones_modal.add_buffer = Some(ZoneEditStep {
+                        target: AddTarget::Edit { idx },
+                        buffer: buf,
+                        cursor,
+                    });
+                    zones_modal.error = None;
+                }
+            }
+        }
+        KeyCode::Char('w') | KeyCode::Char('W') | KeyCode::Char(' ') => {
+            if let Some(idx) = zones_modal.list_state.selected() {
+                if let Some(zone) = zones_modal.zones.get_mut(idx) {
+                    zone.wildcard = !zone.wildcard;
+                }
+            }
         }
         KeyCode::Char('d') | KeyCode::Char('x') => {
             if let Some(idx) = zones_modal.list_state.selected() {
@@ -785,7 +854,7 @@ async fn handle_zones_modal_key(
     Ok(ModalControl::Stay)
 }
 
-/// Handle a key press while the inline "add zone" text input is active.
+/// Handle a key press while the inline "name" text input is active.
 ///
 /// Pulled into a sync helper because it does not need to await: keeps
 /// the event loop's main async path readable.
@@ -793,51 +862,148 @@ fn handle_zones_add_buffer_key(app: &mut AppState, key: KeyEvent) -> ModalContro
     let Some(ModalKind::Zones(z)) = app.modal.as_mut() else {
         return ModalControl::Close;
     };
-    let Some(buf) = z.add_buffer.as_mut() else {
+    let Some(step) = z.add_buffer.as_mut() else {
         return ModalControl::Stay;
     };
     match key.code {
         KeyCode::Esc => {
             z.add_buffer = None;
-            z.add_cursor = 0;
         }
         KeyCode::Enter => {
-            let candidate = buf.trim().to_string();
-            if !candidate.is_empty() && !z.zones.iter().any(|s| s == &candidate) {
-                z.zones.push(candidate);
-                // Highlight the newly added row.
-                z.list_state.select(Some(z.zones.len() - 1));
-            }
+            let candidate = step.buffer.trim().to_string();
+            let target = step.target;
+            // Drop the borrow on `add_buffer` before mutating `zones`.
             z.add_buffer = None;
-            z.add_cursor = 0;
+            if candidate.is_empty() {
+                // Empty name cancels the step silently.
+                return ModalControl::Stay;
+            }
+            match target {
+                AddTarget::New => {
+                    // Reject duplicates (case-sensitive; the controller
+                    // does not dedupe).
+                    if z.zones.iter().any(|zone| zone.name == candidate) {
+                        z.error = Some(format!("zone {candidate} already in list"));
+                        return ModalControl::Stay;
+                    }
+                    // Push the row first with wildcard=false; the confirm
+                    // step updates the flag if the operator picks Yes.
+                    z.zones.push(Zone {
+                        name: candidate,
+                        wildcard: false,
+                    });
+                    let new_idx = z.zones.len() - 1;
+                    z.list_state.select(Some(new_idx));
+                    z.wildcard_confirm = Some(WildcardConfirm {
+                        idx: new_idx,
+                        action_idx: 0,
+                    });
+                }
+                AddTarget::Edit { idx } => {
+                    // Refuse renames that collide with another row.
+                    let collision = z
+                        .zones
+                        .iter()
+                        .enumerate()
+                        .any(|(i, other)| i != idx && other.name == candidate);
+                    if collision {
+                        z.error = Some(format!("zone {candidate} already in list"));
+                        return ModalControl::Stay;
+                    }
+                    let current_wildcard = z.zones.get(idx).map(|zone| zone.wildcard);
+                    let Some(current_wildcard) = current_wildcard else {
+                        return ModalControl::Stay;
+                    };
+                    if let Some(zone) = z.zones.get_mut(idx) {
+                        zone.name = candidate;
+                    }
+                    z.list_state.select(Some(idx));
+                    z.wildcard_confirm = Some(WildcardConfirm {
+                        idx,
+                        // Pre-select the current wildcard state so the
+                        // default Enter keeps it unchanged.
+                        action_idx: if current_wildcard { 0 } else { 1 },
+                    });
+                }
+            }
         }
-        KeyCode::Backspace if z.add_cursor > 0 => {
-            let mut chars: Vec<char> = buf.chars().collect();
-            let i = z.add_cursor - 1;
+        KeyCode::Backspace if step.cursor > 0 => {
+            let mut chars: Vec<char> = step.buffer.chars().collect();
+            let i = step.cursor - 1;
             if i < chars.len() {
                 chars.remove(i);
             }
-            *buf = chars.into_iter().collect();
-            z.add_cursor -= 1;
+            step.buffer = chars.into_iter().collect();
+            step.cursor -= 1;
         }
-        KeyCode::Left if z.add_cursor > 0 => {
-            z.add_cursor -= 1;
+        KeyCode::Left if step.cursor > 0 => {
+            step.cursor -= 1;
         }
-        KeyCode::Right if z.add_cursor < buf.chars().count() => {
-            z.add_cursor += 1;
+        KeyCode::Right if step.cursor < step.buffer.chars().count() => {
+            step.cursor += 1;
         }
-        KeyCode::Home => z.add_cursor = 0,
-        KeyCode::End => z.add_cursor = buf.chars().count(),
+        KeyCode::Home => step.cursor = 0,
+        KeyCode::End => step.cursor = step.buffer.chars().count(),
         // Drop control modifiers; accept printable ASCII + common
         // hostname characters (letters, digits, dot, dash). The
         // controller validates the final value, this is just a UX
         // filter so a stray `Ctrl+R` does not corrupt the buffer.
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let mut chars: Vec<char> = buf.chars().collect();
-            let i = z.add_cursor.min(chars.len());
+            let mut chars: Vec<char> = step.buffer.chars().collect();
+            let i = step.cursor.min(chars.len());
             chars.insert(i, ch);
-            *buf = chars.into_iter().collect();
-            z.add_cursor = i + 1;
+            step.buffer = chars.into_iter().collect();
+            step.cursor = i + 1;
+        }
+        _ => {}
+    }
+    ModalControl::Stay
+}
+
+/// Handle a key press while the wildcard Yes/No confirm overlay is
+/// active. Yes / No commit the choice to the targeted row, Esc rolls
+/// back the most-recent add (when the row was just appended).
+fn handle_zones_wildcard_confirm_key(app: &mut AppState, key: KeyEvent) -> ModalControl {
+    let Some(ModalKind::Zones(z)) = app.modal.as_mut() else {
+        return ModalControl::Close;
+    };
+    let Some(confirm) = z.wildcard_confirm.as_mut() else {
+        return ModalControl::Stay;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            // Roll back the wildcard step. We do not pop the row: the
+            // operator has already committed the name. The confirm just
+            // closes without flipping the wildcard.
+            z.wildcard_confirm = None;
+        }
+        KeyCode::Left | KeyCode::Up => {
+            confirm.action_idx = (confirm.action_idx + 1) % 2;
+        }
+        KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+            confirm.action_idx = (confirm.action_idx + 1) % 2;
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let idx = confirm.idx;
+            if let Some(zone) = z.zones.get_mut(idx) {
+                zone.wildcard = true;
+            }
+            z.wildcard_confirm = None;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            let idx = confirm.idx;
+            if let Some(zone) = z.zones.get_mut(idx) {
+                zone.wildcard = false;
+            }
+            z.wildcard_confirm = None;
+        }
+        KeyCode::Enter => {
+            let idx = confirm.idx;
+            let yes = confirm.action_idx == 0;
+            if let Some(zone) = z.zones.get_mut(idx) {
+                zone.wildcard = yes;
+            }
+            z.wildcard_confirm = None;
         }
         _ => {}
     }
@@ -887,12 +1053,8 @@ async fn handle_zones_fetch_confirm_key(
                     return Ok(ModalControl::Stay);
                 };
                 let resolved = match fc.action_idx {
-                    0 => merge_zones(&z.zones, &fc.fetched),
-                    1 => {
-                        // Replace = exactly the fetched list, deduped
-                        // and sorted for stable wire shape.
-                        merge_zones(&[], &fc.fetched)
-                    }
+                    0 => merge_zones_with_wildcard_default(&z.zones, &fc.fetched),
+                    1 => replace_zones_with_wildcard_default(&fc.fetched),
                     _ => Vec::new(),
                 };
                 (fc.action_idx, resolved)
@@ -904,13 +1066,7 @@ async fn handle_zones_fetch_confirm_key(
                 }
                 return Ok(ModalControl::Stay);
             }
-            let payload = Value::Array(
-                resolved
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect::<Vec<_>>(),
-            );
+            let payload = zones_to_payload(&resolved);
             app.busy = true;
             app.status = "Writing zones...".to_string();
             let result = put_value(session, base, "routing.zones", payload).await;
@@ -1309,7 +1465,14 @@ fn draw_zones_modal(f: &mut ratatui::Frame<'_>, app: &AppState, zones: &ZonesMod
         layout[0],
     );
 
-    // Zone list.
+    // Zone list. Each row prints the name plus a marker / label so the
+    // operator can see the wildcard intent at a glance.
+    let max_name = zones
+        .zones
+        .iter()
+        .map(|z| z.name.chars().count())
+        .max()
+        .unwrap_or(0);
     let items: Vec<ListItem> = if zones.zones.is_empty() {
         vec![ListItem::new(Span::styled(
             "(no zones yet)",
@@ -1319,7 +1482,7 @@ fn draw_zones_modal(f: &mut ratatui::Frame<'_>, app: &AppState, zones: &ZonesMod
         zones
             .zones
             .iter()
-            .map(|z| ListItem::new(z.as_str()))
+            .map(|z| ListItem::new(zone_row_label(z, max_name)))
             .collect()
     };
     let zone_block = Block::default().borders(Borders::ALL).title(" Zones ");
@@ -1332,13 +1495,17 @@ fn draw_zones_modal(f: &mut ratatui::Frame<'_>, app: &AppState, zones: &ZonesMod
     let mut state = zones.list_state.clone();
     f.render_stateful_widget(zone_list, layout[1], &mut state);
 
-    // Inline add input.
-    if let Some(buf) = zones.add_buffer.as_ref() {
-        let add_block = Block::default().borders(Borders::ALL).title(" Add zone ");
-        let para = Paragraph::new(buf.as_str()).block(add_block);
+    // Inline name input (shared by add and edit).
+    if let Some(step) = zones.add_buffer.as_ref() {
+        let title = match step.target {
+            AddTarget::New => " Add zone ",
+            AddTarget::Edit { .. } => " Edit zone ",
+        };
+        let add_block = Block::default().borders(Borders::ALL).title(title);
+        let para = Paragraph::new(step.buffer.as_str()).block(add_block);
         f.render_widget(para, layout[2]);
         let inner_add = Block::default().borders(Borders::ALL).inner(layout[2]);
-        let col = inner_add.x + zones.add_cursor as u16;
+        let col = inner_add.x + step.cursor as u16;
         let row = inner_add.y;
         f.set_cursor_position((col, row));
     }
@@ -1351,21 +1518,98 @@ fn draw_zones_modal(f: &mut ratatui::Frame<'_>, app: &AppState, zones: &ZonesMod
     }
 
     let hint = if zones.add_buffer.is_some() {
-        "[Enter] add  *  [Esc] cancel input"
+        "[Enter] confirm  *  [Esc] cancel input"
+    } else if zones.wildcard_confirm.is_some() {
+        "[y/n] wildcard  *  [Enter] confirm  *  [Esc] keep current"
     } else if cf_token_set {
-        "[a] add  *  [d] remove  *  [F] fetch CF  *  [Enter] save  *  [Esc] cancel"
+        "[a] add  [e] edit  [w] toggle wildcard  [d] remove  [F] fetch CF  [s] save  [Esc] cancel"
     } else {
-        "[a] add  *  [d] remove  *  [Enter] save  *  [Esc] cancel"
+        "[a] add  [e] edit  [w] toggle wildcard  [d] remove  [s] save  [Esc] cancel"
     };
     f.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
         layout[4],
     );
 
+    // Wildcard Yes/No overlay (after name commit).
+    if let Some(wc) = zones.wildcard_confirm.as_ref() {
+        let zone_name = zones
+            .zones
+            .get(wc.idx)
+            .map(|z| z.name.as_str())
+            .unwrap_or("(?)");
+        draw_zones_wildcard_confirm(f, zone_name, wc.action_idx);
+    }
+
     // Fetch-confirmation overlay sits over the editor.
     if let Some(fc) = zones.fetch_confirm.as_ref() {
         draw_zones_fetch_confirm(f, fc);
     }
+}
+
+/// Render one zone row in the editor list: `<name padded>  *  wildcard`
+/// when wildcard is on, `<name padded>     per-host` otherwise.
+fn zone_row_label(zone: &Zone, max_name: usize) -> String {
+    let padded = format!("{name:<width$}", name = zone.name, width = max_name);
+    if zone.wildcard {
+        format!("{padded}   *  wildcard")
+    } else {
+        format!("{padded}      per-host")
+    }
+}
+
+/// Render the wildcard Yes/No confirm overlay.
+fn draw_zones_wildcard_confirm(f: &mut ratatui::Frame<'_>, zone_name: &str, action_idx: usize) {
+    let area = centered_rect(50, 30, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " Wildcard cert? ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // prompt
+            Constraint::Min(1),    // spacer
+            Constraint::Length(1), // actions
+        ])
+        .split(inner);
+    let prompt = format!(
+        "Issue a wildcard cert for *.{zone_name}?\nPR D wires the DNS-01 solver to this flag."
+    );
+    f.render_widget(
+        Paragraph::new(prompt)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::Gray)),
+        layout[0],
+    );
+    let labels = ["[Yes]", "[No]"];
+    let mut spans: Vec<Span<'_>> = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        let style = if i == action_idx {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(*label, style));
+        if i + 1 < labels.len() {
+            spans.push(Span::raw("  "));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        layout[2],
+    );
 }
 
 /// Render the post-fetch confirmation overlay on top of the zones
@@ -1520,17 +1764,17 @@ pub(crate) fn format_value(entry: &SchemaEntry, current: Option<&ListRow>) -> St
 ///
 /// Routing rules:
 ///
-///  * `routing.zones` (StringList) → [`ModalKind::Zones`].
+///  * `routing.zones` (ZoneList) → [`ModalKind::Zones`].
 ///  * `routing.default_zone` when `routing.zones` is non-empty → key
-///    modal with the zones promoted into `entry.choices` so the picker
-///    renders a select widget.
+///    modal with the zone names promoted into `entry.choices` so the
+///    picker renders a select widget.
 ///  * Anything else → generic [`ModalKind::Key`].
 pub(crate) fn open_modal_for(
     entry: SchemaEntry,
     list: &[ListRow],
     current: Option<&ListRow>,
 ) -> ModalKind {
-    if entry.key == "routing.zones" || entry.ty == KeyType::StringList {
+    if entry.key == "routing.zones" || matches!(entry.ty, KeyType::ZoneList | KeyType::StringList) {
         let zones_row = list.iter().find(|r| r.key == "routing.zones");
         return ModalKind::Zones(ZonesModal::new(zones_row));
     }
@@ -1543,8 +1787,8 @@ pub(crate) fn open_modal_for(
                 zones
                     .into_iter()
                     .map(|z| super::Choice {
-                        value: z.clone(),
-                        label: z,
+                        value: z.name.clone(),
+                        label: z.name,
                     })
                     .collect(),
             );
@@ -1564,29 +1808,95 @@ pub(crate) fn cloudflare_token_is_set(list: &[ListRow]) -> bool {
         .any(|r| r.key == "cloudflare.api_token" && r.source == "set")
 }
 
-/// Combine `current` and `fetched` into a stable, deduped, sorted
-/// list. Used by both the Merge and Replace branches of the fetch
-/// confirmation overlay (Replace passes an empty `current`).
-pub(crate) fn merge_zones(current: &[String], fetched: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = current.iter().chain(fetched.iter()).cloned().collect();
-    out.sort();
-    out.dedup();
+/// Merge `current` zone entries with `fetched` zone names. Existing
+/// entries keep their wildcard flag verbatim; new entries (names that
+/// did not appear in `current`) default to `wildcard: true` because the
+/// operator just asked the TUI to import Cloudflare zones, and the
+/// dominant intent is a wildcard cert per zone. The result is sorted by
+/// name for a stable wire shape.
+pub(crate) fn merge_zones_with_wildcard_default(current: &[Zone], fetched: &[String]) -> Vec<Zone> {
+    let mut out: Vec<Zone> = current.to_vec();
+    let known: std::collections::HashSet<String> = out.iter().map(|z| z.name.clone()).collect();
+    for name in fetched {
+        if !known.contains(name) {
+            out.push(Zone {
+                name: name.clone(),
+                wildcard: true,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Build a fresh zone list from `fetched`, defaulting every entry to
+/// `wildcard: true`. Used by the Replace branch of the fetch overlay.
+pub(crate) fn replace_zones_with_wildcard_default(fetched: &[String]) -> Vec<Zone> {
+    let mut out: Vec<Zone> = fetched
+        .iter()
+        .map(|name| Zone {
+            name: name.clone(),
+            wildcard: true,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    // Replace dedupes too so a duplicate from upstream does not bleed
+    // through.
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// Encode a `&[Zone]` into the JSON array shape the controller expects.
+pub(crate) fn zones_to_payload(zones: &[Zone]) -> Value {
+    let arr: Vec<Value> = zones
+        .iter()
+        .map(|z| {
+            serde_json::json!({
+                "name": z.name,
+                "wildcard": z.wildcard,
+            })
+        })
+        .collect();
+    Value::Array(arr)
 }
 
 /// Extract the zone list out of a `routing.zones` list row. Returns
 /// the empty vector when the row is missing, unset, or carries the
-/// wrong JSON shape (the controller validates incoming writes; a stray
-/// row here means the wire shape drifted and we surface a clean
-/// fallback).
-pub(crate) fn zones_from_list_row(row: Option<&ListRow>) -> Vec<String> {
-    match row.map(|r| &r.value) {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+/// wrong JSON shape. Accepts both the new ZoneList shape (array of
+/// `{ name, wildcard }` objects) and the legacy StringList shape
+/// (array of plain strings) so a controller that just rolled out the
+/// migration on read still renders cleanly.
+pub(crate) fn zones_from_list_row(row: Option<&ListRow>) -> Vec<Zone> {
+    let Some(Value::Array(items)) = row.map(|r| &r.value) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::String(s) if !s.is_empty() => out.push(Zone {
+                name: s.clone(),
+                wildcard: false,
+            }),
+            Value::Object(obj) => {
+                let Some(name) = obj.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let wildcard = obj
+                    .get("wildcard")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                out.push(Zone {
+                    name: name.to_string(),
+                    wildcard,
+                });
+            }
+            _ => {}
+        }
     }
+    out
 }
 
 #[cfg(test)]
@@ -1857,10 +2167,18 @@ mod tests {
             key: "routing.zones".into(),
             display_name: "DNS zones".into(),
             category: "Routing".into(),
-            ty: KeyType::StringList,
+            ty: KeyType::ZoneList,
             default: None,
             doc: "DNS zones you manage.".into(),
             choices: None,
+        }
+    }
+
+    /// Helper for building Zone fixtures inside tests.
+    fn z(name: &str, wildcard: bool) -> Zone {
+        Zone {
+            name: name.to_string(),
+            wildcard,
         }
     }
 
@@ -1898,29 +2216,52 @@ mod tests {
     }
 
     #[test]
-    fn merge_zones_dedups_and_sorts() {
-        let current = vec!["vallee.casa".to_string(), "weavers.engineering".to_string()];
+    fn merge_zones_with_wildcard_default_preserves_current_and_marks_new() {
+        let current = vec![z("vallee.casa", false), z("weavers.engineering", true)];
         let fetched = vec!["weavers.engineering".to_string(), "another.dev".to_string()];
+        let out = merge_zones_with_wildcard_default(&current, &fetched);
         assert_eq!(
-            merge_zones(&current, &fetched),
+            out,
             vec![
-                "another.dev".to_string(),
-                "vallee.casa".to_string(),
-                "weavers.engineering".to_string(),
+                z("another.dev", true),
+                z("vallee.casa", false),
+                z("weavers.engineering", true),
             ]
         );
     }
 
     #[test]
-    fn merge_zones_replace_with_empty_current_returns_sorted_fetched() {
+    fn merge_zones_with_wildcard_default_keeps_existing_wildcard_false() {
+        // The operator already disabled wildcard for vallee.casa, and a
+        // CF refetch returns it again. Their disable should win.
+        let current = vec![z("vallee.casa", false)];
+        let fetched = vec!["vallee.casa".to_string()];
+        let out = merge_zones_with_wildcard_default(&current, &fetched);
+        assert_eq!(out, vec![z("vallee.casa", false)]);
+    }
+
+    #[test]
+    fn replace_zones_with_wildcard_default_returns_sorted_fetched_true() {
         let fetched = vec![
             "b.com".to_string(),
             "a.com".to_string(),
             "b.com".to_string(),
         ];
+        let out = replace_zones_with_wildcard_default(&fetched);
+        // Dedup keeps a single b.com entry.
+        assert_eq!(out, vec![z("a.com", true), z("b.com", true)]);
+    }
+
+    #[test]
+    fn zones_to_payload_round_trips_through_schema_validate() {
+        let zones = vec![z("a.com", true), z("b.com", false)];
+        let v = zones_to_payload(&zones);
         assert_eq!(
-            merge_zones(&[], &fetched),
-            vec!["a.com".to_string(), "b.com".to_string()]
+            v,
+            json!([
+                {"name": "a.com", "wildcard": true},
+                {"name": "b.com", "wildcard": false},
+            ])
         );
     }
 
@@ -1929,7 +2270,7 @@ mod tests {
         assert!(zones_from_list_row(None).is_empty());
         let unset = ListRow {
             key: "routing.zones".into(),
-            ty: KeyType::StringList,
+            ty: KeyType::ZoneList,
             value: Value::Null,
             source: "unset".into(),
         };
@@ -1937,16 +2278,35 @@ mod tests {
     }
 
     #[test]
-    fn zones_from_list_row_parses_string_array() {
+    fn zones_from_list_row_parses_zone_object_array() {
         let row = ListRow {
             key: "routing.zones".into(),
-            ty: KeyType::StringList,
+            ty: KeyType::ZoneList,
+            value: json!([
+                {"name": "a.com", "wildcard": true},
+                {"name": "b.com", "wildcard": false},
+            ]),
+            source: "set".into(),
+        };
+        assert_eq!(
+            zones_from_list_row(Some(&row)),
+            vec![z("a.com", true), z("b.com", false)]
+        );
+    }
+
+    #[test]
+    fn zones_from_list_row_accepts_legacy_string_array() {
+        // Defense in depth: if the controller hasn't auto-migrated yet,
+        // the TUI still renders cleanly with wildcard=false defaults.
+        let row = ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::ZoneList,
             value: json!(["a.com", "b.com"]),
             source: "set".into(),
         };
         assert_eq!(
             zones_from_list_row(Some(&row)),
-            vec!["a.com".to_string(), "b.com".to_string()]
+            vec![z("a.com", false), z("b.com", false)]
         );
     }
 
@@ -1955,26 +2315,32 @@ mod tests {
         let entry = routing_zones_entry();
         let list = vec![ListRow {
             key: "routing.zones".into(),
-            ty: KeyType::StringList,
-            value: json!(["one.dev", "two.dev"]),
+            ty: KeyType::ZoneList,
+            value: json!([
+                {"name": "one.dev", "wildcard": true},
+                {"name": "two.dev", "wildcard": false},
+            ]),
             source: "set".into(),
         }];
         let kind = open_modal_for(entry, &list, list.first());
         match kind {
-            ModalKind::Zones(z) => {
-                assert_eq!(z.zones, vec!["one.dev".to_string(), "two.dev".to_string()]);
+            ModalKind::Zones(zm) => {
+                assert_eq!(zm.zones, vec![z("one.dev", true), z("two.dev", false)]);
             }
             _ => panic!("expected ModalKind::Zones"),
         }
     }
 
     #[test]
-    fn open_modal_for_default_zone_promotes_zones_to_choices() {
+    fn open_modal_for_default_zone_promotes_zone_names_to_choices() {
         let entry = default_zone_entry();
         let list = vec![ListRow {
             key: "routing.zones".into(),
-            ty: KeyType::StringList,
-            value: json!(["one.dev", "two.dev"]),
+            ty: KeyType::ZoneList,
+            value: json!([
+                {"name": "one.dev", "wildcard": true},
+                {"name": "two.dev", "wildcard": false},
+            ]),
             source: "set".into(),
         }];
         let kind = open_modal_for(entry, &list, None);
@@ -2010,12 +2376,19 @@ mod tests {
     fn zones_modal_seeds_from_current_row() {
         let row = ListRow {
             key: "routing.zones".into(),
-            ty: KeyType::StringList,
-            value: json!(["a.com", "b.com", "c.com"]),
+            ty: KeyType::ZoneList,
+            value: json!([
+                {"name": "a.com", "wildcard": true},
+                {"name": "b.com", "wildcard": false},
+                {"name": "c.com", "wildcard": false},
+            ]),
             source: "set".into(),
         };
         let modal = ZonesModal::new(Some(&row));
-        assert_eq!(modal.zones, vec!["a.com", "b.com", "c.com"]);
+        assert_eq!(
+            modal.zones,
+            vec![z("a.com", true), z("b.com", false), z("c.com", false)]
+        );
         assert_eq!(modal.list_state.selected(), Some(0));
     }
 
@@ -2030,8 +2403,12 @@ mod tests {
     fn zones_step_selection_wraps_around() {
         let row = ListRow {
             key: "routing.zones".into(),
-            ty: KeyType::StringList,
-            value: json!(["a", "b", "c"]),
+            ty: KeyType::ZoneList,
+            value: json!([
+                {"name": "a", "wildcard": false},
+                {"name": "b", "wildcard": false},
+                {"name": "c", "wildcard": false},
+            ]),
             source: "set".into(),
         };
         let mut modal = ZonesModal::new(Some(&row));
@@ -2043,8 +2420,20 @@ mod tests {
     }
 
     #[test]
+    fn zone_row_label_marks_wildcard_with_star() {
+        let yes = zone_row_label(&z("weavers.engineering", true), 19);
+        assert!(yes.contains("weavers.engineering"), "label: {yes}");
+        assert!(yes.contains('*'), "label: {yes}");
+        assert!(yes.contains("wildcard"), "label: {yes}");
+        let no = zone_row_label(&z("vallee.casa", false), 19);
+        assert!(no.contains("vallee.casa"), "label: {no}");
+        assert!(no.contains("per-host"), "label: {no}");
+        assert!(!no.contains('*'), "label: {no}");
+    }
+
+    #[test]
     fn draw_zones_modal_renders_list_and_hint() {
-        let backend = TestBackend::new(100, 30);
+        let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let entries = vec![routing_zones_entry()];
         let list = vec![
@@ -2056,8 +2445,11 @@ mod tests {
             },
             ListRow {
                 key: "routing.zones".into(),
-                ty: KeyType::StringList,
-                value: json!(["weavers.engineering", "vallee.casa"]),
+                ty: KeyType::ZoneList,
+                value: json!([
+                    {"name": "weavers.engineering", "wildcard": true},
+                    {"name": "vallee.casa", "wildcard": false},
+                ]),
                 source: "set".into(),
             },
         ];
@@ -2071,9 +2463,35 @@ mod tests {
             "rendered: {rendered}"
         );
         assert!(rendered.contains("vallee.casa"), "rendered: {rendered}");
+        // Wildcard marker for the first zone.
+        assert!(rendered.contains("wildcard"), "rendered: {rendered}");
+        // Per-host label for the second zone.
+        assert!(rendered.contains("per-host"), "rendered: {rendered}");
         // Fetch hint is enabled because the CF token is set in the
         // fixture above.
         assert!(rendered.contains("[F] fetch CF"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn draw_zones_modal_shows_wildcard_confirm_overlay() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let entries = vec![routing_zones_entry()];
+        let mut app = AppState::new(entries, Vec::new());
+        let mut zones_modal = ZonesModal::new(None);
+        zones_modal.zones.push(z("just-added.dev", false));
+        zones_modal.list_state.select(Some(0));
+        zones_modal.wildcard_confirm = Some(WildcardConfirm {
+            idx: 0,
+            action_idx: 0,
+        });
+        app.modal = Some(ModalKind::Zones(zones_modal));
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let rendered = buffer_to_string(&terminal.backend().buffer().clone());
+        assert!(rendered.contains("Wildcard cert?"), "rendered: {rendered}");
+        assert!(rendered.contains("just-added.dev"), "rendered: {rendered}");
+        assert!(rendered.contains("[Yes]"), "rendered: {rendered}");
+        assert!(rendered.contains("[No]"), "rendered: {rendered}");
     }
 
     #[test]
