@@ -299,7 +299,11 @@ async fn patch_host(
 
     if let Some(target) = body.dial_target.as_deref() {
         // Empty string clears the column. Anything else sets it.
-        let store = if target.is_empty() { None } else { Some(target) };
+        let store = if target.is_empty() {
+            None
+        } else {
+            Some(target)
+        };
         match handles.inventory.set_host_dial_target(host_id, store).await {
             Ok(true) => {}
             Ok(false) => return json_err(StatusCode::NOT_FOUND, "host not found"),

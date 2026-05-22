@@ -390,8 +390,7 @@ async fn resolve_dial_token(token: &str, context: Option<&str>) -> Result<String
         return Ok(token.to_string());
     };
     let (override_user, host) = parse_user_host(token);
-    let lookup = match dial_target::lookup_dial_target(&session.client, controller_url, &host)
-        .await
+    let lookup = match dial_target::lookup_dial_target(&session.client, controller_url, &host).await
     {
         Ok(opt) => opt,
         Err(_) => return Ok(token.to_string()),
@@ -744,7 +743,10 @@ async fn run_hosts_set(args: HostsSetArgs, context: Option<&str>) -> Result<()> 
             "set dial_target on {} ({}) -> {}",
             patched.hostname,
             patched.id,
-            patched.dial_target.as_deref().unwrap_or(target_value.as_str())
+            patched
+                .dial_target
+                .as_deref()
+                .unwrap_or(target_value.as_str())
         );
     }
     Ok(())
@@ -790,9 +792,7 @@ fn resolve_agent_token(hosts: &[HostRow], token: &str) -> Result<String> {
     }
     let host = hosts
         .iter()
-        .find(|h| {
-            h.hostname == token || h.id == token || h.dial_target.as_deref() == Some(token)
-        })
+        .find(|h| h.hostname == token || h.id == token || h.dial_target.as_deref() == Some(token))
         .ok_or_else(|| {
             anyhow!(
                 "no host matched {token:?}; pass a hostname, the host id, the existing \
@@ -830,10 +830,7 @@ fn build_hosts_row_cells(rows: &[HostRow]) -> Vec<Vec<String>> {
                 .last_seen_at
                 .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
                 .unwrap_or_else(|| "-".into());
-            let dial = row
-                .dial_target
-                .clone()
-                .unwrap_or_else(|| "(unset)".into());
+            let dial = row.dial_target.clone().unwrap_or_else(|| "(unset)".into());
             vec![i.to_string(), row.hostname.clone(), dial, last_seen]
         })
         .collect()
@@ -1840,15 +1837,9 @@ mod tests {
             #[command(subcommand)]
             cmd: SshCommand,
         }
-        let parsed = Wrap::try_parse_from([
-            "wrap",
-            "hosts",
-            "set",
-            "edge-1",
-            "--dial",
-            "op@10.0.0.7",
-        ])
-        .expect("parses");
+        let parsed =
+            Wrap::try_parse_from(["wrap", "hosts", "set", "edge-1", "--dial", "op@10.0.0.7"])
+                .expect("parses");
         match parsed.cmd {
             SshCommand::Hosts(HostsArgs {
                 command: Some(HostsCommand::Set(args)),
@@ -1916,10 +1907,7 @@ mod tests {
             ],
         };
         crate::index_cache::write(&cache).unwrap();
-        assert_eq!(
-            resolve_index_to_dial(0).unwrap(),
-            "dirdmaster@10.17.0.125"
-        );
+        assert_eq!(resolve_index_to_dial(0).unwrap(), "dirdmaster@10.17.0.125");
         assert_eq!(resolve_index_to_dial(1).unwrap(), "edge-2");
         let err = resolve_index_to_dial(9).unwrap_err();
         assert!(format!("{err}").contains("out of range"));

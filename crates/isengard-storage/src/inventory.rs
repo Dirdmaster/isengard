@@ -241,11 +241,7 @@ impl Inventory {
     /// Pass `Some(target)` to set; pass `None` to clear (back to the
     /// "(unset)" display in `isd ssh hosts`). Returns whether a row
     /// was actually updated (false when the host does not exist).
-    pub async fn set_host_dial_target(
-        &self,
-        id: HostId,
-        target: Option<&str>,
-    ) -> Result<bool> {
+    pub async fn set_host_dial_target(&self, id: HostId, target: Option<&str>) -> Result<bool> {
         let id_bytes: &[u8] = &id.to_bytes();
         let result = sqlx::query("UPDATE hosts SET dial_target = ? WHERE id = ?")
             .bind(target)

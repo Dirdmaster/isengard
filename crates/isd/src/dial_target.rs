@@ -53,10 +53,7 @@ pub(crate) struct HostDtoSubset {
 /// controller (same value `Session::require_controller` returns).
 /// `docker_uri` is the operator's docker context URL (e.g.
 /// `ssh://dirdmaster@10.17.0.125`).
-pub async fn patch_latest_host_dial_target_best_effort(
-    controller_url: &str,
-    docker_uri: &str,
-) {
+pub async fn patch_latest_host_dial_target_best_effort(controller_url: &str, docker_uri: &str) {
     let Some(target) = docker_context::dial_target_from_docker_uri(docker_uri) else {
         // Non-SSH docker context: no operator-typeable target to
         // capture. Leave the row's dial_target as-is.
@@ -156,10 +153,7 @@ pub async fn lookup_dial_target(
 /// `id` matches `token` exactly, and return its `dial_target` (when
 /// set). Pure to keep the host-list filtering policy unit-testable
 /// without an HTTP fixture.
-pub(crate) fn find_dial_target_for_token(
-    hosts: &[HostDtoSubset],
-    token: &str,
-) -> Option<String> {
+pub(crate) fn find_dial_target_for_token(hosts: &[HostDtoSubset], token: &str) -> Option<String> {
     for h in hosts {
         if h.hostname == token || h.id == token || h.dial_target.as_deref() == Some(token) {
             return h.dial_target.clone();

@@ -148,7 +148,10 @@ async fn patch_host_empty_dial_target_clears() {
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        parsed.get("dial_target").map(|v| v.is_null()).unwrap_or(true),
+        parsed
+            .get("dial_target")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
         "dial_target should be null after empty-string clear: {parsed}"
     );
 }
