@@ -30,10 +30,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use crate::session::Session;
 
 mod tui;
@@ -487,7 +487,7 @@ async fn run_list(session: &Session, base: &str, args: ListArgs) -> Result<()> {
         println!("No config keys.");
         return Ok(());
     }
-    println!("{}", render_list_table(&rows));
+    print_list_table(&rows);
     Ok(())
 }
 
@@ -512,52 +512,102 @@ pub(crate) async fn fetch_list(
     Ok(rows)
 }
 
-/// Build the `KEY / TYPE / VALUE / SOURCE` table. Pulled out so the
-/// formatter stays testable without an HTTP stub.
-fn render_list_table(rows: &[ListRow]) -> Table {
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["KEY", "TYPE", "VALUE", "SOURCE"]);
-    for r in rows {
-        table.add_row(vec![
-            r.key.clone(),
-            key_type_label(r.ty).to_string(),
-            json_to_display(&r.value),
-            r.source.clone(),
-        ]);
+/// Column layout for `isd configure list`. Columns in spec order:
+/// `KEY`, `TYPE`, `VALUE`, `SOURCE`.
+fn list_columns() -> Vec<Column> {
+    vec![
+        Column::new("KEY", Align::Left, CellStyle::Emphasis, 7, 12),
+        Column::new("TYPE", Align::Left, CellStyle::Plain, 4, 6),
+        Column::new("VALUE", Align::Left, CellStyle::Plain, 1, 12),
+        Column::new("SOURCE", Align::Left, CellStyle::Dim, 5, 6),
+    ]
+}
+
+/// Build the row matrix for `isd configure list`.
+fn build_list_row_cells(rows: &[ListRow]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|r| {
+            vec![
+                r.key.clone(),
+                key_type_label(r.ty).to_string(),
+                json_to_display(&r.value),
+                r.source.clone(),
+            ]
+        })
+        .collect()
+}
+
+/// Render `isd configure list` to stdout: boxed table on a TTY, tab-
+/// separated plain text on a pipe.
+fn print_list_table(rows: &[ListRow]) {
+    let table = Table {
+        columns: list_columns(),
+        rows: build_list_row_cells(rows),
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        let color = console::colors_enabled();
+        println!("{}", render(&table, width, color));
+    } else {
+        println!("{}", render_plain(&table));
     }
-    table
 }
 
 /// `GET /api/v1/config/schema` then render `KEY / TYPE / DEFAULT / DESCRIPTION`.
 async fn run_schema(session: &Session, base: &str) -> Result<()> {
     let entries = fetch_schema(session, base).await?;
-    println!("{}", render_schema_table(&entries));
+    print_schema_table(&entries);
     Ok(())
 }
 
-/// Build the schema table. Pulled out so the formatter stays testable.
-fn render_schema_table(entries: &[SchemaEntry]) -> Table {
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["KEY", "TYPE", "DEFAULT", "DESCRIPTION"]);
-    for e in entries {
-        let default = match &e.default {
-            Some(v) => json_to_display(v),
-            None => "(none)".to_string(),
-        };
-        table.add_row(vec![
-            e.key.clone(),
-            key_type_label(e.ty).to_string(),
-            default,
-            e.doc.clone(),
-        ]);
+/// Column layout for `isd configure schema`. Columns in spec order:
+/// `KEY`, `TYPE`, `DEFAULT`, `DESCRIPTION`. DESCRIPTION is the longest
+/// column and the safest to truncate when the terminal is narrow.
+fn schema_columns() -> Vec<Column> {
+    vec![
+        Column::new("KEY", Align::Left, CellStyle::Emphasis, 7, 12),
+        Column::new("TYPE", Align::Left, CellStyle::Plain, 5, 6),
+        Column::new("DEFAULT", Align::Left, CellStyle::Plain, 4, 8),
+        Column::new("DESCRIPTION", Align::Left, CellStyle::Plain, 1, 16),
+    ]
+}
+
+/// Build the row matrix for `isd configure schema`. A missing default
+/// renders as the literal `(none)` so the column never collapses.
+fn build_schema_row_cells(entries: &[SchemaEntry]) -> Vec<Vec<String>> {
+    entries
+        .iter()
+        .map(|e| {
+            let default = match &e.default {
+                Some(v) => json_to_display(v),
+                None => "(none)".to_string(),
+            };
+            vec![
+                e.key.clone(),
+                key_type_label(e.ty).to_string(),
+                default,
+                e.doc.clone(),
+            ]
+        })
+        .collect()
+}
+
+/// Render `isd configure schema` to stdout: boxed table on a TTY,
+/// tab-separated plain text on a pipe.
+fn print_schema_table(entries: &[SchemaEntry]) {
+    let table = Table {
+        columns: schema_columns(),
+        rows: build_schema_row_cells(entries),
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        let color = console::colors_enabled();
+        println!("{}", render(&table, width, color));
+    } else {
+        println!("{}", render_plain(&table));
     }
-    table
 }
 
 /// `POST /api/v1/config/zones/cloudflare-fetch` shared helper. Returns
@@ -1061,6 +1111,9 @@ mod tests {
         assert_eq!(parse_error_message("not-json", "fallback"), "fallback");
     }
 
+    /// `isd configure list` renders through the unified boxed renderer.
+    /// The non-TTY decay path emits ALL CAPS headers in spec order and
+    /// every row's text.
     #[test]
     fn render_list_table_includes_header_and_rows() {
         let rows = vec![
@@ -1077,19 +1130,36 @@ mod tests {
                 source: "set".into(),
             },
         ];
-        let rendered = render_list_table(&rows).to_string();
-        assert!(rendered.contains("KEY"), "rendered: {rendered}");
-        assert!(rendered.contains("TYPE"), "rendered: {rendered}");
-        assert!(rendered.contains("VALUE"), "rendered: {rendered}");
-        assert!(rendered.contains("SOURCE"), "rendered: {rendered}");
-        assert!(rendered.contains("acme.directory"), "rendered: {rendered}");
-        assert!(
-            rendered.contains("https://example.com"),
-            "rendered: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"), "rendered: {rendered}");
+        let table = Table {
+            columns: list_columns(),
+            rows: build_list_row_cells(&rows),
+        };
+        let plain = render_plain(&table);
+        let header = plain.lines().next().unwrap();
+        assert_eq!(header, "KEY\tTYPE\tVALUE\tSOURCE");
+        assert!(plain.contains("acme.directory"), "plain: {plain}");
+        assert!(plain.contains("https://example.com"), "plain: {plain}");
+        assert!(plain.contains("<redacted>"), "plain: {plain}");
+        // Boxed render carries the rounded-corner glyphs.
+        let boxed = render(&table, 200, false);
+        assert!(boxed.contains('╭'));
+        assert!(boxed.contains("KEY"));
     }
 
+    /// Empty input still renders the spec headers so pipeline consumers
+    /// (`cut -f`) keep a stable shape.
+    #[test]
+    fn render_list_table_renders_header_on_empty_input() {
+        let table = Table {
+            columns: list_columns(),
+            rows: build_list_row_cells(&[]),
+        };
+        let plain = render_plain(&table);
+        assert_eq!(plain.lines().next().unwrap(), "KEY\tTYPE\tVALUE\tSOURCE");
+    }
+
+    /// `isd configure schema` renders through the unified boxed
+    /// renderer; missing defaults fall back to `(none)`.
     #[test]
     fn render_schema_table_renders_none_for_missing_default() {
         let entries = vec![
@@ -1112,13 +1182,31 @@ mod tests {
                 choices: None,
             },
         ];
-        let rendered = render_schema_table(&entries).to_string();
-        assert!(rendered.contains("DEFAULT"), "rendered: {rendered}");
-        assert!(rendered.contains("DESCRIPTION"), "rendered: {rendered}");
-        assert!(rendered.contains("(none)"), "rendered: {rendered}");
-        assert!(
-            rendered.contains("https://example.com"),
-            "rendered: {rendered}"
+        let table = Table {
+            columns: schema_columns(),
+            rows: build_schema_row_cells(&entries),
+        };
+        let plain = render_plain(&table);
+        let header = plain.lines().next().unwrap();
+        assert_eq!(header, "KEY\tTYPE\tDEFAULT\tDESCRIPTION");
+        assert!(plain.contains("(none)"), "plain: {plain}");
+        assert!(plain.contains("https://example.com"), "plain: {plain}");
+        // Boxed render carries the rounded-corner glyphs.
+        let boxed = render(&table, 200, false);
+        assert!(boxed.contains('╭'));
+    }
+
+    /// Empty schema still renders the spec headers.
+    #[test]
+    fn render_schema_table_renders_header_on_empty_input() {
+        let table = Table {
+            columns: schema_columns(),
+            rows: build_schema_row_cells(&[]),
+        };
+        let plain = render_plain(&table);
+        assert_eq!(
+            plain.lines().next().unwrap(),
+            "KEY\tTYPE\tDEFAULT\tDESCRIPTION"
         );
     }
 

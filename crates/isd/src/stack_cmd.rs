@@ -18,12 +18,12 @@
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::compose_cmd::{DeployArgs, DiffArgs, EditArgs};
 use crate::manifest_cmd::ManifestCommand;
+use crate::render::{Align, CellStyle, Column, StatusColor, Table, render, render_plain};
 use crate::session::Session;
 
 /// CLI flags for `isd stack`.
@@ -192,8 +192,7 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&rows)?);
         }
         crate::output::Format::Table => {
-            let out = render_ls_table(&rows);
-            println!("{}", out.trim_end());
+            print_ls_table(&rows);
         }
     }
     Ok(())
@@ -230,8 +229,7 @@ async fn run_ps(args: PsArgs, context: Option<&str>) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&services)?);
         }
         crate::output::Format::Table => {
-            let out = render_ps_table(&services);
-            println!("{}", out.trim_end());
+            print_ps_table(&services);
         }
     }
     Ok(())
@@ -316,48 +314,144 @@ pub fn aggregate_state(services: &[&ServiceApiRow]) -> StackAggregateState {
     }
 }
 
-/// Render `stack ls` rows as a comfy-table.
-fn render_ls_table(rows: &[StackLsRow]) -> String {
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec![
-            "NAME",
-            "SERVICES",
-            "HOSTS",
-            "STATE",
-            "SOURCE",
-            "DISCOVERED",
-        ]);
-    for row in rows {
-        t.add_row(vec![
-            row.name.clone(),
-            row.services.to_string(),
-            row.hosts.to_string(),
-            row.state.as_str().to_string(),
-            row.source.clone(),
-            row.discovered_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        ]);
-    }
-    t.to_string()
+/// Column layout for `isd stack ls`. Columns in spec order:
+/// `NAME`, `SERVICES`, `HOSTS`, `STATE`, `SOURCE`, `DISCOVERED`.
+fn ls_columns() -> Vec<Column> {
+    vec![
+        Column::new("NAME", Align::Left, CellStyle::Emphasis, 8, 6),
+        Column::new("SERVICES", Align::Right, CellStyle::Plain, 5, 4),
+        Column::new("HOSTS", Align::Right, CellStyle::Plain, 5, 4),
+        Column::new("STATE", Align::Left, CellStyle::Plain, 7, 8),
+        Column::new("SOURCE", Align::Left, CellStyle::Plain, 3, 6),
+        Column::new("DISCOVERED", Align::Left, CellStyle::Plain, 1, 20),
+    ]
 }
 
-/// Render `stack ps` service rows as a comfy-table.
-fn render_ps_table(services: &[ServiceApiRow]) -> String {
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["SERVICE", "HOST", "STATE", "IMAGE", "LAST SEEN"]);
-    for s in services {
-        t.add_row(vec![
-            s.name.clone(),
-            s.hostname.clone().unwrap_or_else(|| s.host_id.clone()),
-            s.state.clone(),
-            s.image.clone(),
-            s.last_seen_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        ]);
+/// Classify a stack-aggregate or service-state string into a STATE
+/// color bucket. Independent of `render::classify_status`, which keys
+/// off docker's "Up ..." strings.
+///
+///   - `running`                        -> green
+///   - `pending`, `restarting`,
+///     `pulling`, `creating`, `starting` -> yellow
+///   - `failed`, `degraded`, `dead`,
+///     `unhealthy`                       -> red
+///   - everything else (`stopped`,
+///     `exited`, `paused`, `unknown`, "") -> grey
+fn classify_stack_state(s: &str) -> StatusColor {
+    match s {
+        "running" => StatusColor::Green,
+        "pending" | "restarting" | "pulling" | "creating" | "starting" => StatusColor::Yellow,
+        "failed" | "degraded" | "dead" | "unhealthy" => StatusColor::Red,
+        _ => StatusColor::Grey,
     }
-    t.to_string()
+}
+
+/// Wrap `text` in ANSI styling matching its [`StatusColor`] bucket
+/// when `color` is true. Otherwise pass through. Used to pre-color
+/// `STATE` cells before they reach the renderer: the column itself
+/// is declared [`CellStyle::Plain`] so the renderer does not run a
+/// (docker-shape) classifier over the plain stack-state vocabulary.
+fn color_state_text(text: &str, color: bool) -> String {
+    if !color {
+        return text.to_string();
+    }
+    let mk = || console::Style::new().force_styling(true);
+    let styled = match classify_stack_state(text) {
+        StatusColor::Green => mk().green(),
+        StatusColor::Yellow => mk().yellow(),
+        StatusColor::Red => mk().red(),
+        StatusColor::Grey => mk().dim(),
+    };
+    styled.apply_to(text).to_string()
+}
+
+/// Build the row matrix for `isd stack ls`. STATE cells are colored
+/// per [`classify_stack_state`] when `color` is true.
+pub fn build_ls_row_cells(rows: &[StackLsRow], color: bool) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| {
+            vec![
+                row.name.clone(),
+                row.services.to_string(),
+                row.hosts.to_string(),
+                color_state_text(row.state.as_str(), color),
+                row.source.clone(),
+                row.discovered_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            ]
+        })
+        .collect()
+}
+
+/// Render `stack ls` to stdout: boxed table on a TTY (with colored
+/// STATE), tab-separated plain on a pipe.
+fn print_ls_table(rows: &[StackLsRow]) {
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        let color = console::colors_enabled();
+        let table = Table {
+            columns: ls_columns(),
+            rows: build_ls_row_cells(rows, color),
+        };
+        println!("{}", render(&table, width, color));
+    } else {
+        let table = Table {
+            columns: ls_columns(),
+            rows: build_ls_row_cells(rows, false),
+        };
+        println!("{}", render_plain(&table));
+    }
+}
+
+/// Column layout for `isd stack ps <name>`. Columns in spec order:
+/// `SERVICE`, `HOST`, `STATE`, `IMAGE`, `LAST SEEN`.
+fn ps_columns() -> Vec<Column> {
+    vec![
+        Column::new("SERVICE", Align::Left, CellStyle::Emphasis, 8, 6),
+        Column::new("HOST", Align::Left, CellStyle::Plain, 5, 6),
+        Column::new("STATE", Align::Left, CellStyle::Plain, 7, 8),
+        Column::new("IMAGE", Align::Left, CellStyle::Plain, 1, 13),
+        Column::new("LAST SEEN", Align::Left, CellStyle::Plain, 2, 20),
+    ]
+}
+
+/// Build the row matrix for `isd stack ps`. STATE cells are colored
+/// per [`classify_stack_state`] when `color` is true.
+pub fn build_ps_row_cells(services: &[ServiceApiRow], color: bool) -> Vec<Vec<String>> {
+    services
+        .iter()
+        .map(|s| {
+            vec![
+                s.name.clone(),
+                s.hostname.clone().unwrap_or_else(|| s.host_id.clone()),
+                color_state_text(&s.state, color),
+                s.image.clone(),
+                s.last_seen_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            ]
+        })
+        .collect()
+}
+
+/// Render `stack ps` to stdout: boxed table on a TTY (with colored
+/// STATE), tab-separated plain on a pipe.
+fn print_ps_table(services: &[ServiceApiRow]) {
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        let color = console::colors_enabled();
+        let table = Table {
+            columns: ps_columns(),
+            rows: build_ps_row_cells(services, color),
+        };
+        println!("{}", render(&table, width, color));
+    } else {
+        let table = Table {
+            columns: ps_columns(),
+            rows: build_ps_row_cells(services, false),
+        };
+        println!("{}", render_plain(&table));
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +525,9 @@ mod tests {
         assert!(matches!(aggregate_state(&[]), StackAggregateState::Stopped));
     }
 
+    /// `stack ls` rows render through the unified boxed renderer:
+    /// the plain (non-TTY) path emits ALL CAPS headers in spec order
+    /// plus every row's text.
     #[test]
     fn ls_table_contains_header_and_each_row() {
         let stacks = vec![stack("1", "alpha"), stack("2", "beta")];
@@ -439,30 +536,109 @@ mod tests {
             svc("web", "2", "h-b", "stopped"),
         ];
         let rows = build_ls_rows(&stacks, &services);
-        let t = render_ls_table(&rows);
-        assert!(t.contains("NAME"));
-        assert!(t.contains("SERVICES"));
-        assert!(t.contains("HOSTS"));
-        assert!(t.contains("STATE"));
+        let table = Table {
+            columns: ls_columns(),
+            rows: build_ls_row_cells(&rows, false),
+        };
+        let t = render_plain(&table);
+        // Headers in spec order on the first line.
+        let header = t.lines().next().unwrap();
+        assert_eq!(header, "NAME\tSERVICES\tHOSTS\tSTATE\tSOURCE\tDISCOVERED");
+        // Row values present.
         assert!(t.contains("alpha"));
         assert!(t.contains("beta"));
         assert!(t.contains("running"));
         assert!(t.contains("stopped"));
+        // Boxed-TTY render emits the rounded-corner glyphs.
+        let boxed = render(&table, 200, false);
+        assert!(boxed.contains('╭'));
+        assert!(boxed.contains('╰'));
     }
 
+    /// Empty input still renders the header row so pipeline consumers
+    /// (`wc -l`, `cut -f`) keep a stable shape.
+    #[test]
+    fn ls_table_renders_header_on_empty_input() {
+        let table = Table {
+            columns: ls_columns(),
+            rows: build_ls_row_cells(&[], false),
+        };
+        let t = render_plain(&table);
+        assert_eq!(
+            t.lines().next().unwrap(),
+            "NAME\tSERVICES\tHOSTS\tSTATE\tSOURCE\tDISCOVERED"
+        );
+    }
+
+    /// `stack ps` rows render through the unified boxed renderer:
+    /// headers in spec order, service / host / state values present.
     #[test]
     fn ps_table_renders_service_rows() {
         let services = vec![
             svc("web", "1", "iso-1", "running"),
             svc("worker", "1", "iso-2", "running"),
         ];
-        let t = render_ps_table(&services);
-        assert!(t.contains("SERVICE"));
-        assert!(t.contains("HOST"));
+        let table = Table {
+            columns: ps_columns(),
+            rows: build_ps_row_cells(&services, false),
+        };
+        let t = render_plain(&table);
+        let header = t.lines().next().unwrap();
+        assert_eq!(header, "SERVICE\tHOST\tSTATE\tIMAGE\tLAST SEEN");
         assert!(t.contains("web"));
         assert!(t.contains("worker"));
         assert!(t.contains("iso-1"));
         assert!(t.contains("iso-2"));
+        // Boxed render: rounded corners present.
+        let boxed = render(&table, 200, false);
+        assert!(boxed.contains('╭'));
+    }
+
+    /// Empty service list still renders the header row.
+    #[test]
+    fn ps_table_renders_header_on_empty_input() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: build_ps_row_cells(&[], false),
+        };
+        let t = render_plain(&table);
+        assert_eq!(
+            t.lines().next().unwrap(),
+            "SERVICE\tHOST\tSTATE\tIMAGE\tLAST SEEN"
+        );
+    }
+
+    /// STATE coloring maps the stack vocabulary to the renderer's
+    /// [`StatusColor`] buckets: green for running, yellow for mid-
+    /// transition states, red for failure shapes, grey for everything
+    /// else.
+    #[test]
+    fn classify_stack_state_buckets() {
+        assert_eq!(classify_stack_state("running"), StatusColor::Green);
+        assert_eq!(classify_stack_state("pending"), StatusColor::Yellow);
+        assert_eq!(classify_stack_state("restarting"), StatusColor::Yellow);
+        assert_eq!(classify_stack_state("failed"), StatusColor::Red);
+        assert_eq!(classify_stack_state("degraded"), StatusColor::Red);
+        assert_eq!(classify_stack_state("stopped"), StatusColor::Grey);
+        assert_eq!(classify_stack_state("unknown"), StatusColor::Grey);
+        assert_eq!(classify_stack_state(""), StatusColor::Grey);
+    }
+
+    /// STATE pre-coloring is a no-op when `color = false`, so the
+    /// non-TTY decay path emits clean tab-separated text.
+    #[test]
+    fn color_state_text_passthrough_when_color_disabled() {
+        assert_eq!(color_state_text("running", false), "running");
+        assert_eq!(color_state_text("failed", false), "failed");
+    }
+
+    /// STATE pre-coloring emits ANSI escape bytes when `color = true`.
+    #[test]
+    fn color_state_text_emits_ansi_when_color_enabled() {
+        let s = color_state_text("running", true);
+        assert!(s.contains('\u{1b}'), "expected ANSI: {s:?}");
+        // The visible width is unchanged: ANSI is zero-width.
+        assert_eq!(console::measure_text_width(&s), "running".len());
     }
 
     #[test]
