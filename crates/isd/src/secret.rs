@@ -541,7 +541,7 @@ fn read_value(from_file: Option<&std::path::Path>) -> Result<String> {
             .map(|s| s.trim_end_matches('\n').to_string()),
         None => {
             // Refuse to read from a TTY: prevents a fat-fingered
-            // `isd secret put cf_token` from blocking forever waiting
+            // `isd secret set cf_token` from blocking forever waiting
             // on the operator. They almost certainly meant to pipe.
             if std::io::stdin().is_terminal() {
                 return Err(anyhow!(

@@ -76,7 +76,7 @@ async fn dispatch(id: &str, context: Option<&str>) -> Result<()> {
     }
     Err(anyhow!(
         "unknown id {id:?}. Tried hosts, stacks, and containers; \
-         try `isd hosts list`, `isd stack ls`, or `isd ps` to see \
+         try `isd hosts ls`, `isd stack ls`, or `isd ps` to see \
          valid names."
     ))
 }

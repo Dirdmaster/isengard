@@ -104,7 +104,7 @@ pub struct ControllerHandles {
     pub compose_broker: Arc<compose_broker::ComposeBroker>,
     /// Isengard-managed encrypted secrets store (v0.3.6).
     ///
-    /// Operators write secrets via `isd secret put` or the installer's
+    /// Operators write secrets via `isd secret set` or the installer's
     /// bootstrap path; agents fetch over mTLS at container start and
     /// mount as tmpfs at `/run/secrets/<name>`. The store unlocks when
     /// the master key file (`ISENGARD_MASTER_KEY_FILE`, default
