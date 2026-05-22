@@ -419,10 +419,11 @@ async fn resolve_dial_token(token: &str, context: Option<&str>) -> Result<String
 /// Look up an integer index in the `isd ssh hosts` cache and return
 /// the dial target (or hostname fallback) for that row.
 fn resolve_index_to_dial(idx: usize) -> Result<String> {
-    let cache = crate::index_cache::read().context("reading ssh hosts index cache")?;
+    let cache = crate::index_cache::read_for("ssh hosts")
+        .context("reading ssh hosts index cache")?;
     let cache = cache.ok_or_else(|| {
         anyhow!(
-            "no index cache; run `isd ssh hosts` first so `isd ssh {idx}` can resolve the index"
+            "no recent `isd ssh hosts` to resolve index {idx}; run it first"
         )
     })?;
     if cache.is_stale() {
@@ -432,8 +433,10 @@ fn resolve_index_to_dial(idx: usize) -> Result<String> {
         );
     }
     let row = cache.rows.iter().find(|r| r.index == idx).ok_or_else(|| {
-        let max = cache.rows.iter().map(|r| r.index).max().unwrap_or(0);
-        anyhow!("index {idx} out of range; last `isd ssh hosts` had 0-{max}")
+        anyhow!(
+            "{}",
+            crate::index_cache::out_of_range_message(idx, "isd ssh hosts", cache.rows.len())
+        )
     })?;
     Ok(row.container_id.clone())
 }
@@ -801,16 +804,19 @@ fn resolve_agent_token(hosts: &[HostRow], token: &str) -> Result<String> {
     // Strip a leading `#` so `#3` and `3` both work.
     let bare = token.strip_prefix('#').unwrap_or(token);
     if let Ok(idx) = bare.parse::<usize>() {
-        let cache = crate::index_cache::read().context("reading ssh hosts index cache")?;
+        let cache = crate::index_cache::read_for("ssh hosts")
+            .context("reading ssh hosts index cache")?;
         let cache = cache.ok_or_else(|| {
             anyhow!(
-                "no index cache; run `isd ssh hosts` first so `isd ssh hosts set {token} ...` \
-                 can resolve a numeric selector"
+                "no recent `isd ssh hosts` to resolve index {idx}; run it first so \
+                 `isd ssh hosts set {token} ...` can resolve a numeric selector"
             )
         })?;
         let row = cache.rows.iter().find(|r| r.index == idx).ok_or_else(|| {
-            let max = cache.rows.iter().map(|r| r.index).max().unwrap_or(0);
-            anyhow!("index {idx} out of range; last `isd ssh hosts` had 0-{max}")
+            anyhow!(
+                "{}",
+                crate::index_cache::out_of_range_message(idx, "isd ssh hosts", cache.rows.len())
+            )
         })?;
         // The cache's `name` is the hostname; look it up in the host
         // list to recover the host id ULID for the PATCH route.
@@ -1980,9 +1986,8 @@ mod tests {
     fn resolve_index_to_dial_reads_from_cache() {
         let _lock = crate::index_cache::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("last-ps.json");
         unsafe {
-            std::env::set_var("ISD_INDEX_CACHE", &path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         let cache = IndexCache {
             captured_at: Utc::now(),
@@ -2007,6 +2012,45 @@ mod tests {
         assert_eq!(resolve_index_to_dial(1).unwrap(), "edge-2");
         let err = resolve_index_to_dial(9).unwrap_err();
         assert!(format!("{err}").contains("out of range"));
+        unsafe {
+            std::env::remove_var("ISD_INDEX_CACHE");
+        }
+    }
+
+    /// Regression test for the cross-command dial bug: writing a `ps`
+    /// cache MUST NOT leak into `isd ssh <N>` resolution. The dial
+    /// resolver looks only at the `ssh hosts` cache; an isolated `ps`
+    /// cache must yield the friendly "no recent ssh hosts" error, not
+    /// a long container hash.
+    #[test]
+    fn resolve_index_to_dial_ignores_ps_cache() {
+        let _lock = crate::index_cache::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
+        }
+        // Write ONLY a ps cache (no ssh hosts cache present).
+        let ps = IndexCache {
+            captured_at: Utc::now(),
+            command: "ps".into(),
+            rows: vec![IndexRow {
+                index: 0,
+                context: "lausanne".into(),
+                container_id: "deadbeefcafe1234567890abcdef".into(),
+                name: "web-proxy".into(),
+            }],
+        };
+        crate::index_cache::write(&ps).unwrap();
+        let err = resolve_index_to_dial(0).unwrap_err().to_string();
+        assert!(
+            err.contains("no recent `isd ssh hosts`"),
+            "should point at ssh hosts, not return a container hash: {err}"
+        );
+        // Belt-and-braces: the offending hash must NOT be the result.
+        assert!(
+            !err.contains("deadbeefcafe1234567890abcdef"),
+            "ps container id must not leak into ssh dial: {err}"
+        );
         unsafe {
             std::env::remove_var("ISD_INDEX_CACHE");
         }

@@ -1,15 +1,21 @@
-//! The `isd` index cache: `~/.cache/isengard/last-ps.json`.
+//! The `isd` index cache. Each list command that renders a `#` column
+//! writes its row set to its own file under `~/.cache/isengard/`:
 //!
-//! Any list command that renders a `#` column writes its row set here.
-//! Lifecycle commands read it back to resolve a bare integer
-//! argument (`isd stop 2`) to a container. This module owns the schema,
-//! the read/write, and the staleness check; it does not do resolution.
+//! - `last-ps.json`         (`isd ps`)
+//! - `last-ssh-hosts.json`  (`isd ssh hosts`)
+//! - `last-stack-ps.json`   (`isd stack ps`)
+//! - `last-stack-ls.json`   (`isd stack ls`)
 //!
-//! Currently only `write` is exercised; `read`, `age_secs`, `is_stale`,
-//! and `STALE_AFTER_SECS` are the API surface the resolver
-//! will call. They're covered by unit tests in this module but not yet
-//! by a consumer in `main.rs`, so `dead_code` is allowed module-wide
-//! until the resolver wires them in.
+//! Per-command files keep an `isd ssh 1` dial reading from the freshest
+//! `isd ssh hosts` render even after an `isd ps` ran in between. Before
+//! this split, every list command overwrote the same `last-ps.json` and
+//! a `ssh <N>` could pull a 64-char container hash instead of a dial
+//! target.
+//!
+//! Lifecycle commands read the matching cache back to resolve a bare
+//! integer argument (`isd stop 2`) to a container. This module owns the
+//! schema, the read/write, and the staleness check; it does not do
+//! resolution.
 //!
 //! Design: `3 Resources/Superpowers/specs/2026-05-15-isd-table-renderer-design.md`.
 
@@ -65,19 +71,38 @@ impl IndexCache {
     }
 }
 
-/// Path to the cache file. `~/.cache/isengard/last-ps.json` by default;
-/// overridable with `ISD_INDEX_CACHE` for tests.
-pub fn cache_path() -> Result<PathBuf> {
+/// Directory that holds every per-command index cache file.
+/// `~/.cache/isengard/` by default; overridable with `ISD_INDEX_CACHE`
+/// for tests (the env var now names a *directory*, not a file).
+pub fn cache_dir() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("ISD_INDEX_CACHE") {
         return Ok(PathBuf::from(p));
     }
     let base = dirs::cache_dir().context("could not resolve the user cache directory")?;
-    Ok(base.join("isengard").join("last-ps.json"))
+    Ok(base.join("isengard"))
 }
 
-/// Write the cache, creating the parent directory if needed.
+/// Filename slug for a given `command` string. Spaces become dashes so
+/// `ssh hosts` -> `ssh-hosts`. Callers should use the same string they
+/// stored in [`IndexCache::command`].
+fn slug_for(command: &str) -> String {
+    command.replace(' ', "-")
+}
+
+/// Path to the cache file for a given command. Examples:
+///
+/// - `cache_path_for("ps")`        -> `<dir>/last-ps.json`
+/// - `cache_path_for("ssh hosts")` -> `<dir>/last-ssh-hosts.json`
+/// - `cache_path_for("stack ps")`  -> `<dir>/last-stack-ps.json`
+pub fn cache_path_for(command: &str) -> Result<PathBuf> {
+    let slug = slug_for(command);
+    Ok(cache_dir()?.join(format!("last-{slug}.json")))
+}
+
+/// Write the cache to the file matching `cache.command`. Creates the
+/// parent directory if needed.
 pub fn write(cache: &IndexCache) -> Result<()> {
-    let path = cache_path()?;
+    let path = cache_path_for(&cache.command)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating index cache dir {}", parent.display()))?;
@@ -88,11 +113,37 @@ pub fn write(cache: &IndexCache) -> Result<()> {
     Ok(())
 }
 
-/// Read the cache. `Ok(None)` when the file does not exist (absence is
-/// not an error here; the caller decides what to do). `Err` on a
-/// present-but-unreadable or corrupt file.
-pub fn read() -> Result<Option<IndexCache>> {
-    let path = cache_path()?;
+/// Build the operator-facing out-of-range message used by every index
+/// resolver. Keeps the 0-indexed convention obvious:
+///
+/// - 1 row:  `index N out of range. Last 'isd X' had 1 row (index 0).`
+/// - N rows: `index N out of range. Last 'isd X' had K rows (indices 0..K-1).`
+///
+/// `command_hint` is the command-shaped string the operator can re-run,
+/// e.g. `"isd ps"` or `"isd ssh hosts"`. `row_count` is the size of the
+/// last render (NOT the bad index).
+pub fn out_of_range_message(idx: usize, command_hint: &str, row_count: usize) -> String {
+    if row_count == 0 {
+        return format!(
+            "index {idx} out of range. Last `{command_hint}` had 0 rows; run it first."
+        );
+    }
+    if row_count == 1 {
+        return format!(
+            "index {idx} out of range. Last `{command_hint}` had 1 row (index 0). Use `0` to pick the first row."
+        );
+    }
+    let last = row_count - 1;
+    format!(
+        "index {idx} out of range. Last `{command_hint}` had {row_count} rows (indices 0..{last})."
+    )
+}
+
+/// Read the cache for a specific command. `Ok(None)` when the file does
+/// not exist (absence is not an error here; the caller decides what to
+/// do). `Err` on a present-but-unreadable or corrupt file.
+pub fn read_for(command: &str) -> Result<Option<IndexCache>> {
+    let path = cache_path_for(command)?;
     match std::fs::read_to_string(&path) {
         Ok(body) => {
             let cache = serde_json::from_str(&body)
@@ -122,15 +173,16 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
-    /// Point the cache at a unique temp path for the duration of a test.
+    /// Point the cache *directory* at a unique temp dir for the
+    /// duration of a test. `ISD_INDEX_CACHE` names a directory now;
+    /// per-command files live inside it.
     /// SAFETY: matches the `ISD_CREDENTIALS_FILE` test pattern in
-    /// `ps.rs` / `manifest_cmd.rs`; each test uses a distinct path.
+    /// `ps.rs` / `manifest_cmd.rs`; each test uses a distinct dir.
     /// Callers must hold `test_env_lock()` for the duration.
-    fn with_temp_cache(name: &str) -> tempfile::TempDir {
+    fn with_temp_cache() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(name);
         unsafe {
-            std::env::set_var("ISD_INDEX_CACHE", &path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         dir
     }
@@ -159,10 +211,10 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let _lock = test_env_lock();
-        let _dir = with_temp_cache("rt.json");
+        let _dir = with_temp_cache();
         let cache = sample();
         write(&cache).unwrap();
-        let back = read().unwrap().expect("cache present after write");
+        let back = read_for("ps").unwrap().expect("cache present after write");
         assert_eq!(back.command, "ps");
         assert_eq!(back.rows.len(), 2);
         assert_eq!(back.rows[1].container_id, "7f8e9d0c1b2acafef00d");
@@ -170,10 +222,54 @@ mod tests {
     }
 
     #[test]
-    fn read_missing_file_is_ok_none() {
+    fn read_for_missing_file_is_ok_none() {
         let _lock = test_env_lock();
-        let _dir = with_temp_cache("does-not-exist.json");
-        assert!(read().unwrap().is_none());
+        let _dir = with_temp_cache();
+        assert!(read_for("ps").unwrap().is_none());
+    }
+
+    /// The core bug fix: writing one command's cache must NOT leak into
+    /// another command's cache. `isd ps` writes its rows; a later
+    /// `isd ssh <N>` must NOT see those rows under the `ssh hosts` key.
+    #[test]
+    fn read_for_returns_none_when_only_a_different_command_was_written() {
+        let _lock = test_env_lock();
+        let _dir = with_temp_cache();
+        let mut ps_cache = sample();
+        ps_cache.command = "ps".into();
+        write(&ps_cache).unwrap();
+
+        assert!(read_for("ps").unwrap().is_some());
+        assert!(
+            read_for("ssh hosts").unwrap().is_none(),
+            "ssh hosts cache must NOT pick up ps rows"
+        );
+    }
+
+    #[test]
+    fn cache_path_for_uses_command_slug() {
+        let _lock = test_env_lock();
+        let _dir = with_temp_cache();
+        let ps = cache_path_for("ps").unwrap();
+        let ssh = cache_path_for("ssh hosts").unwrap();
+        let stack_ps = cache_path_for("stack ps").unwrap();
+        let stack_ls = cache_path_for("stack ls").unwrap();
+        assert!(ps.ends_with("last-ps.json"), "got {}", ps.display());
+        assert!(
+            ssh.ends_with("last-ssh-hosts.json"),
+            "got {}",
+            ssh.display()
+        );
+        assert!(
+            stack_ps.ends_with("last-stack-ps.json"),
+            "got {}",
+            stack_ps.display()
+        );
+        assert!(
+            stack_ls.ends_with("last-stack-ls.json"),
+            "got {}",
+            stack_ls.display()
+        );
     }
 
     #[test]

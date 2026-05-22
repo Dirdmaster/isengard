@@ -123,9 +123,8 @@ mod tests {
 
     fn with_cache(rows: Vec<IndexRow>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("last-ps.json");
         unsafe {
-            std::env::set_var("ISD_INDEX_CACHE", &path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         let cache = IndexCache {
             captured_at: Utc::now(),
