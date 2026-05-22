@@ -22,14 +22,12 @@ pub struct ContextArgs {
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
     /// List docker contexts. `*` marks the current one.
-    #[command(alias = "list")]
     Ls,
     /// Set the current context (same effect as `docker context use <name>`).
     Use(UseArgs),
     /// Print one context's docker endpoint.
     Show(ShowArgs),
     /// Add a new docker context. Thin wrapper over `docker context create`.
-    #[command(alias = "create")]
     Add(CreateArgs),
     /// Remove a docker context. Thin wrapper over `docker context rm`.
     Rm(RmArgs),
@@ -201,7 +199,7 @@ mod tests {
             #[command(subcommand)]
             c: ContextCommand,
         }
-        let w = Wrap::try_parse_from(["x", "list"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "ls"]).unwrap();
         assert!(matches!(w.c, ContextCommand::Ls));
 
         let w = Wrap::try_parse_from(["x", "use", "lausanne"]).unwrap();
@@ -232,7 +230,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from([
             "x",
-            "create",
+            "add",
             "lausanne",
             "--docker",
             "ssh://user@host",

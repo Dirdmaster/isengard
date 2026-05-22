@@ -16,11 +16,10 @@ pub struct PlacementArgs {
     pub command: PlacementCommand,
 }
 
-/// Sub-verbs under `isd placement`. Canonical: `ls` (alias: `show`).
+/// Sub-verbs under `isd placement`.
 #[derive(Debug, Subcommand)]
 pub enum PlacementCommand {
     /// Print the placement grid (one row per replica).
-    #[command(alias = "show")]
     Ls(ShowArgs),
 }
 

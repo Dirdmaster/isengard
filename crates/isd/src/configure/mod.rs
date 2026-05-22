@@ -88,8 +88,7 @@ pub struct ConfigureArgs {
 
 /// Sub-verbs under `isd configure`. Canonical verbs follow the lexicon
 /// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
-/// `get` / `set` / `rm` / `ls` / `schema`. `unset` and `list` are kept
-/// as deprecated aliases for one minor version.
+/// `get` / `set` / `rm` / `ls` / `schema`.
 #[derive(Debug, Subcommand)]
 pub enum ConfigureCommand {
     /// Print one key's current value.
@@ -98,10 +97,8 @@ pub enum ConfigureCommand {
     /// `--stdin` or `--from-file` for secrets.
     Set(SetArgs),
     /// Remove a key. Falls back to the schema default if one exists.
-    #[command(alias = "unset")]
     Rm(RmArgs),
     /// Print every key with its current value (secrets redacted).
-    #[command(alias = "list")]
     Ls(LsArgs),
     /// Print the schema (key, type, default, description).
     Schema,
@@ -974,16 +971,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn configure_unset_alias_parses() {
-        // `unset` is a deprecated alias for `rm`. Still parses to Rm.
-        let w = Wrap::try_parse_from(["x", "unset", "acme.directory"]).unwrap();
-        match w.c {
-            ConfigureCommand::Rm(a) => assert_eq!(a.key.as_deref(), Some("acme.directory")),
-            other => panic!("expected Rm, got {other:?}"),
-        }
-    }
-
     /// Bare `isd configure rm` (no key) parses with `key = None` so
     /// the runtime can fall into the schema picker (lexicon spec).
     #[test]
@@ -996,20 +983,20 @@ mod tests {
     }
 
     #[test]
-    fn configure_list_parses_default() {
-        let w = Wrap::try_parse_from(["x", "list"]).unwrap();
+    fn configure_ls_parses_default() {
+        let w = Wrap::try_parse_from(["x", "ls"]).unwrap();
         match w.c {
             ConfigureCommand::Ls(a) => assert!(!a.show_secrets),
-            other => panic!("expected List, got {other:?}"),
+            other => panic!("expected Ls, got {other:?}"),
         }
     }
 
     #[test]
-    fn configure_list_with_show_secrets_parses() {
-        let w = Wrap::try_parse_from(["x", "list", "--show-secrets"]).unwrap();
+    fn configure_ls_with_show_secrets_parses() {
+        let w = Wrap::try_parse_from(["x", "ls", "--show-secrets"]).unwrap();
         match w.c {
             ConfigureCommand::Ls(a) => assert!(a.show_secrets),
-            other => panic!("expected List, got {other:?}"),
+            other => panic!("expected Ls, got {other:?}"),
         }
     }
 

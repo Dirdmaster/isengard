@@ -1,6 +1,5 @@
 //! `isd secret set` / `isd secret ls` / `isd secret rm` / `isd secret
-//! get` (v0.3.6 managed-secrets store). `put` and `list` are kept as
-//! deprecated aliases per the lexicon spec.
+//! get` (v0.3.6 managed-secrets store).
 //!
 //! Talks to the dashboard's `/api/v1/secrets[/<name>]` endpoints over
 //! the operator's TLS/SSH transport. The v0.7 CLI lexicon spec added
@@ -61,16 +60,12 @@ pub struct SecretArgs {
 
 /// Sub-verbs under `isd secret`. Canonical verbs follow the lexicon
 /// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
-/// `set` / `ls` / `rm` / `get`. `put` and `list` are kept as deprecated
-/// aliases for one minor version so muscle memory and scripts keep
-/// working.
+/// `set` / `ls` / `rm` / `get`.
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
     /// Upsert a secret value.
-    #[command(alias = "put")]
     Set(SetArgs),
     /// List secret names (never values).
-    #[command(alias = "list")]
     Ls(LsArgs),
     /// Print one secret's plaintext value to stdout (operator can pipe).
     Get(GetArgs),
@@ -78,7 +73,7 @@ pub enum SecretCommand {
     Rm(RmArgs),
 }
 
-/// CLI flags for `isd secret set` (alias: `put`).
+/// CLI flags for `isd secret set`.
 #[derive(Debug, Args)]
 pub struct SetArgs {
     /// Secret name.
@@ -118,7 +113,7 @@ pub struct RmArgs {
     pub scope: Scope,
 }
 
-/// CLI flags for `isd secret ls` (alias: `list`).
+/// CLI flags for `isd secret ls`.
 #[derive(Debug, Args)]
 pub struct LsArgs {
     /// List secrets in one context or every saved context.
@@ -798,7 +793,7 @@ mod tests {
             #[command(subcommand)]
             c: SecretCommand,
         }
-        let w = Wrap::try_parse_from(["x", "put", "cf_token"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "set", "cf_token"]).unwrap();
         match w.c {
             SecretCommand::Set(a) => {
                 assert_eq!(a.name, "cf_token");
@@ -816,7 +811,7 @@ mod tests {
             #[command(subcommand)]
             c: SecretCommand,
         }
-        let w = Wrap::try_parse_from(["x", "put", "cf_token", "--from-file", "/tmp/x"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "set", "cf_token", "--from-file", "/tmp/x"]).unwrap();
         match w.c {
             SecretCommand::Set(a) => assert_eq!(a.from_file.unwrap().to_str().unwrap(), "/tmp/x"),
             other => panic!("expected Put, got {other:?}"),
@@ -831,7 +826,7 @@ mod tests {
             #[command(subcommand)]
             c: SecretCommand,
         }
-        let w = Wrap::try_parse_from(["x", "put", "cf_token"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "set", "cf_token"]).unwrap();
         match w.c {
             SecretCommand::Set(a) => assert_eq!(a.scope, Scope::Context),
             other => panic!("expected Put, got {other:?}"),
@@ -846,7 +841,7 @@ mod tests {
             #[command(subcommand)]
             c: SecretCommand,
         }
-        let w = Wrap::try_parse_from(["x", "put", "cf_token", "--scope", "global"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "set", "cf_token", "--scope", "global"]).unwrap();
         match w.c {
             SecretCommand::Set(a) => assert_eq!(a.scope, Scope::Global),
             other => panic!("expected Put, got {other:?}"),
@@ -861,7 +856,7 @@ mod tests {
             #[command(subcommand)]
             c: SecretCommand,
         }
-        let w = Wrap::try_parse_from(["x", "list"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "ls"]).unwrap();
         match w.c {
             SecretCommand::Ls(a) => assert_eq!(a.scope, Scope::Context),
             other => panic!("expected List, got {other:?}"),
@@ -876,7 +871,7 @@ mod tests {
             #[command(subcommand)]
             c: SecretCommand,
         }
-        let w = Wrap::try_parse_from(["x", "list", "--scope", "global"]).unwrap();
+        let w = Wrap::try_parse_from(["x", "ls", "--scope", "global"]).unwrap();
         match w.c {
             SecretCommand::Ls(a) => assert_eq!(a.scope, Scope::Global),
             other => panic!("expected List, got {other:?}"),

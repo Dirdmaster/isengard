@@ -22,18 +22,13 @@ pub struct RouteArgs {
     pub command: RouteCommand,
 }
 
-/// Sub-verbs under `isd route`. Canonical verbs follow the lexicon
-/// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
-/// `ls` / `add` / `rm`. `list` and `create` are kept as deprecated
-/// aliases for one minor version.
+/// Sub-verbs under `isd route`.
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)] // AddArgs is large but only one is alive at a time
 pub enum RouteCommand {
     /// List routing rules.
-    #[command(alias = "list")]
     Ls,
     /// Add a routing rule.
-    #[command(alias = "create")]
     Add(CreateArgs),
     /// Delete a routing rule by id.
     Rm(RmArgs),
@@ -558,7 +553,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from([
             "x",
-            "create",
+            "add",
             "iso.vallee.casa",
             "--service",
             "isd-controller",
@@ -591,7 +586,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from([
             "x",
-            "create",
+            "add",
             "iso.vallee.casa",
             "--host-id",
             "01H000000000000000000000",
@@ -620,7 +615,7 @@ mod tests {
         }
         let res = Wrap::try_parse_from([
             "x",
-            "create",
+            "add",
             "iso.vallee.casa",
             "--host-id",
             "01H000000000000000000000",

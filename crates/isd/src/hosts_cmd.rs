@@ -17,11 +17,10 @@ pub struct HostsArgs {
     pub command: HostsCommand,
 }
 
-/// Sub-verbs under `isd hosts`. Canonical: `ls` (alias: `list`).
+/// Sub-verbs under `isd hosts`.
 #[derive(Debug, Subcommand)]
 pub enum HostsCommand {
     /// List enrolled hosts.
-    #[command(alias = "list")]
     Ls(LsArgs),
 }
 

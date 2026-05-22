@@ -22,7 +22,7 @@ fn configure_help_lists_subcommands() {
         .output()
         .expect("run isd configure --help");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for verb in ["get", "set", "unset", "list", "schema", "setup"] {
+    for verb in ["get", "set", "rm", "ls", "schema", "setup"] {
         assert!(
             stdout.contains(verb),
             "configure --help mentions {verb}: {stdout}"
@@ -97,25 +97,25 @@ fn configure_set_refuses_inline_value_with_stdin() {
 }
 
 #[test]
-fn configure_unset_help_takes_key() {
+fn configure_rm_help_takes_key() {
     let out = isd_bin()
-        .args(["configure", "unset", "--help"])
+        .args(["configure", "rm", "--help"])
         .output()
-        .expect("run isd configure unset --help");
+        .expect("run isd configure rm --help");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("<KEY>") || stdout.to_lowercase().contains("key"));
 }
 
 #[test]
-fn configure_list_help_mentions_show_secrets() {
+fn configure_ls_help_mentions_show_secrets() {
     let out = isd_bin()
-        .args(["configure", "list", "--help"])
+        .args(["configure", "ls", "--help"])
         .output()
-        .expect("run isd configure list --help");
+        .expect("run isd configure ls --help");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("--show-secrets"),
-        "list --help mentions --show-secrets: {stdout}"
+        "ls --help mentions --show-secrets: {stdout}"
     );
 }
 
