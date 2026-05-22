@@ -439,15 +439,15 @@ fn resolve_index_to_dial(idx: usize) -> Result<String> {
 }
 
 /// Interactive host picker. Fetches Isengard-enrolled hosts from the
-/// controller, merges with the local `trusted_hosts.toml`, then routes
-/// the selection through fzf (when on PATH) or `inquire::Select`. The
-/// picked hostname is fed back into `run_dial` so the cert refresh +
-/// `ssh` exec path stays in one place.
+/// controller, merges with the local `trusted_hosts.toml`, then opens
+/// the native ratatui picker. The picked hostname is fed back into
+/// `run_dial` so the cert refresh + `ssh` exec path stays in one
+/// place.
 ///
 /// # Errors
 ///
 /// Returns `Err` on HTTP failure, controller-less context, trusted
-/// store I/O failure, picker spawn failure, or when the picker returns
+/// store I/O failure, picker draw failure, or when the picker returns
 /// no selection (Esc / Ctrl-C / empty fleet).
 async fn run_picker(context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
@@ -472,6 +472,7 @@ async fn run_picker(context: Option<&str>) -> Result<()> {
             last_seen: h
                 .last_seen_at
                 .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            dial_target: h.dial_target,
         })
         .collect();
 
@@ -480,10 +481,19 @@ async fn run_picker(context: Option<&str>) -> Result<()> {
     let trusted: Vec<picker::PickerRow> = store
         .entries
         .into_iter()
-        .map(|t| picker::PickerRow {
-            hostname: t.hostname,
-            class: picker::HostClass::Trusted,
-            last_seen: None,
+        .map(|t| {
+            let dial_target = match (t.ssh_user.as_deref(), t.ssh_port) {
+                (Some(user), Some(port)) => Some(format!("{user}@{}:{port}", t.hostname)),
+                (Some(user), None) => Some(format!("{user}@{}", t.hostname)),
+                (None, Some(port)) => Some(format!("{}:{port}", t.hostname)),
+                (None, None) => None,
+            };
+            picker::PickerRow {
+                hostname: t.hostname,
+                class: picker::HostClass::Trusted,
+                last_seen: None,
+                dial_target,
+            }
         })
         .collect();
 
@@ -493,11 +503,7 @@ async fn run_picker(context: Option<&str>) -> Result<()> {
             "no hosts to pick from. enroll an agent or `isd ssh trust <host>`"
         ));
     }
-    let picked = if picker::fzf_available() {
-        picker::pick_with_fzf(&rows).await?
-    } else {
-        picker::pick_with_inquire(&rows)?
-    };
+    let picked = picker::pick(rows).await?;
     let host = picked.ok_or_else(|| anyhow!("no host selected"))?;
     Box::pin(run_dial(vec![host], context)).await
 }
