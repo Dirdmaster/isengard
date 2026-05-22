@@ -111,10 +111,15 @@ pub enum ConfigureCommand {
 }
 
 /// CLI flags for `isd configure get`.
+///
+/// `key` is optional: bare `isd configure get` opens a picker over the
+/// schema entries so the operator can pick a key to inspect (per the
+/// v0.7 CLI lexicon spec).
 #[derive(Debug, Args)]
 pub struct GetArgs {
     /// Schema key, e.g. `acme.directory` or `cloudflare.api_token`.
-    pub key: String,
+    /// Omit to open the picker.
+    pub key: Option<String>,
     /// Print secret-typed values in cleartext. Off by default.
     #[arg(long)]
     pub show_secret: bool,
@@ -137,11 +142,14 @@ pub struct SetArgs {
     pub from_file: Option<PathBuf>,
 }
 
-/// CLI flags for `isd configure unset`.
+/// CLI flags for `isd configure rm`.
+///
+/// `key` is optional: bare `isd configure rm` opens a picker over
+/// the schema entries (per the v0.7 CLI lexicon spec).
 #[derive(Debug, Args)]
 pub struct RmArgs {
-    /// Schema key.
-    pub key: String,
+    /// Schema key. Omit to open the picker.
+    pub key: Option<String>,
 }
 
 /// CLI flags for `isd configure list`.
@@ -263,9 +271,11 @@ pub async fn run(args: ConfigureArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
-/// `GET /api/v1/config/{key}` then render.
+/// `GET /api/v1/config/{key}` then render. When `args.key` is omitted,
+/// opens a picker over the schema so the operator can pick a key.
 async fn run_get(session: &Session, base: &str, args: GetArgs) -> Result<()> {
-    let mut url = format!("{base}/api/v1/config/{}", args.key);
+    let key = resolve_configure_key(session, base, args.key).await?;
+    let mut url = format!("{base}/api/v1/config/{}", key);
     if args.show_secret {
         url.push_str("?show_secret=1");
     }
@@ -280,7 +290,7 @@ async fn run_get(session: &Session, base: &str, args: GetArgs) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!(
             "{}: {}",
-            args.key,
+            key,
             parse_error_message(&body, "not found")
         ));
     }
@@ -291,6 +301,25 @@ async fn run_get(session: &Session, base: &str, args: GetArgs) -> Result<()> {
     let r: GetResponse = resp.json().await.context("decoding /config/{key} body")?;
     print_get_value(&r, args.show_secret);
     Ok(())
+}
+
+/// Resolve a `configure` key from the operator's positional or the
+/// interactive picker. The picker source is the schema, so the
+/// operator only sees keys the controller knows about.
+async fn resolve_configure_key(
+    session: &Session,
+    base: &str,
+    arg: Option<String>,
+) -> Result<String> {
+    crate::picker_or_arg::pick_or_arg(arg, || async {
+        let schema = fetch_schema(session, base).await?;
+        if schema.is_empty() {
+            return Err(anyhow!("no schema keys to pick from"));
+        }
+        let keys: Vec<String> = schema.into_iter().map(|e| e.key).collect();
+        crate::picker::pick(keys, "KEY", "filter keys...").await
+    })
+    .await
 }
 
 /// Render a single-key fetch. Pulled out so the formatter can be unit
@@ -452,9 +481,11 @@ fn encode_value(ty: Option<KeyType>, raw: &str) -> Result<Value> {
     }
 }
 
-/// `DELETE /api/v1/config/{key}` then render the outcome.
+/// `DELETE /api/v1/config/{key}` then render the outcome. When
+/// `args.key` is omitted, opens a picker over the schema.
 async fn run_rm(session: &Session, base: &str, args: RmArgs) -> Result<()> {
-    let url = format!("{base}/api/v1/config/{}", args.key);
+    let key = resolve_configure_key(session, base, args.key).await?;
+    let url = format!("{base}/api/v1/config/{}", key);
     let resp = session
         .client
         .delete(&url)
@@ -463,7 +494,7 @@ async fn run_rm(session: &Session, base: &str, args: RmArgs) -> Result<()> {
         .with_context(|| format!("DELETE {url}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
-        println!("{} was not set", args.key);
+        println!("{} was not set", key);
         return Ok(());
     }
     if !status.is_success() {
@@ -473,14 +504,14 @@ async fn run_rm(session: &Session, base: &str, args: RmArgs) -> Result<()> {
     // 204: row removed. Mention the default fallback if the schema has
     // one, so the operator sees what the next read will return.
     let schema = fetch_schema(session, base).await.unwrap_or_default();
-    let entry = schema.iter().find(|e| e.key == args.key);
+    let entry = schema.iter().find(|e| e.key == key);
     match entry.and_then(|e| e.default.clone()) {
         Some(default) => println!(
             "Removed {} (will fall back to default: {})",
-            args.key,
+            key,
             json_to_display(&default)
         ),
-        None => println!("Removed {}", args.key),
+        None => println!("Removed {}", key),
     }
     Ok(())
 }
@@ -814,9 +845,20 @@ mod tests {
         let w = Wrap::try_parse_from(["x", "get", "acme.directory"]).unwrap();
         match w.c {
             ConfigureCommand::Get(a) => {
-                assert_eq!(a.key, "acme.directory");
+                assert_eq!(a.key.as_deref(), Some("acme.directory"));
                 assert!(!a.show_secret);
             }
+            other => panic!("expected Get, got {other:?}"),
+        }
+    }
+
+    /// Bare `isd configure get` (no key) parses with `key = None` so
+    /// the runtime can fall into the schema picker (lexicon spec).
+    #[test]
+    fn configure_get_bare_parses_with_no_key() {
+        let w = Wrap::try_parse_from(["x", "get"]).unwrap();
+        match w.c {
+            ConfigureCommand::Get(a) => assert!(a.key.is_none()),
             other => panic!("expected Get, got {other:?}"),
         }
     }
@@ -933,10 +975,22 @@ mod tests {
     }
 
     #[test]
-    fn configure_unset_parses() {
+    fn configure_unset_alias_parses() {
+        // `unset` is a deprecated alias for `rm`. Still parses to Rm.
         let w = Wrap::try_parse_from(["x", "unset", "acme.directory"]).unwrap();
         match w.c {
-            ConfigureCommand::Rm(a) => assert_eq!(a.key, "acme.directory"),
+            ConfigureCommand::Rm(a) => assert_eq!(a.key.as_deref(), Some("acme.directory")),
+            other => panic!("expected Rm, got {other:?}"),
+        }
+    }
+
+    /// Bare `isd configure rm` (no key) parses with `key = None` so
+    /// the runtime can fall into the schema picker (lexicon spec).
+    #[test]
+    fn configure_rm_bare_parses_with_no_key() {
+        let w = Wrap::try_parse_from(["x", "rm"]).unwrap();
+        match w.c {
+            ConfigureCommand::Rm(a) => assert!(a.key.is_none()),
             other => panic!("expected Rm, got {other:?}"),
         }
     }
@@ -1241,7 +1295,7 @@ mod tests {
         // explicit verbs correctly after flipping `command` to optional.
         let w = WrapArgs::try_parse_from(["x", "get", "acme.directory"]).unwrap();
         match w.a.command {
-            Some(ConfigureCommand::Get(a)) => assert_eq!(a.key, "acme.directory"),
+            Some(ConfigureCommand::Get(a)) => assert_eq!(a.key.as_deref(), Some("acme.directory")),
             other => panic!("expected Some(Get), got {other:?}"),
         }
     }

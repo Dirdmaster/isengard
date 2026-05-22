@@ -45,6 +45,8 @@ mod logs;
 mod manifest_cmd;
 mod open_cmd;
 mod output;
+mod picker;
+mod picker_or_arg;
 mod placement_cmd;
 mod ps;
 mod render;

@@ -87,10 +87,16 @@ pub struct SetArgs {
 }
 
 /// CLI flags for `isd secret rm`.
+///
+/// `name` is optional: bare `isd secret rm` opens an interactive picker
+/// over the current context's secrets (per the v0.7 CLI lexicon spec,
+/// every list-or-pick verb falls back to the picker when no positional
+/// is supplied). On a non-TTY stdout the helper errors out with a
+/// clear message instead of hanging.
 #[derive(Debug, Args)]
 pub struct RmArgs {
-    /// Secret name to delete.
-    pub name: String,
+    /// Secret name to delete. Omit to open the picker.
+    pub name: Option<String>,
     /// Apply to one context or every saved context.
     #[arg(long, value_enum, default_value_t = Scope::Context)]
     pub scope: Scope,
@@ -385,17 +391,40 @@ pub(crate) fn classify_coverage(present_in: usize, reachable: usize) -> &'static
     }
 }
 
-/// Delete a secret in one context or across every saved context.
+/// Delete a secret in one context or across every saved context. When
+/// `args.name` is omitted, opens an interactive picker over the current
+/// context's secrets (lexicon spec: every command of shape
+/// `isd <ns> <verb> [<target>]` falls back to a picker).
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
+    let context_owned = context.map(str::to_owned);
+    let name = crate::picker_or_arg::pick_or_arg(args.name, || async {
+        pick_secret_name(context_owned.as_deref()).await
+    })
+    .await?;
     match args.scope {
         Scope::Context => {
             let session = Session::open(context).await?;
-            delete_secret(&session, &args.name).await?;
-            println!("Removed secret {:?}.", args.name);
+            delete_secret(&session, &name).await?;
+            println!("Removed secret {:?}.", name);
             Ok(())
         }
-        Scope::Global => run_rm_global(&args.name).await,
+        Scope::Global => run_rm_global(&name).await,
     }
+}
+
+/// Open the generic picker over the current context's secret names.
+/// Returns the picked name (or `None` on Esc / Ctrl-C). Empty list
+/// short-circuits with an actionable error.
+async fn pick_secret_name(context: Option<&str>) -> Result<Option<String>> {
+    let session = Session::open(context).await?;
+    let entries = list_secrets(&session).await?;
+    if entries.is_empty() {
+        return Err(anyhow!(
+            "no secrets stored in this context; nothing to pick from"
+        ));
+    }
+    let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+    crate::picker::pick(names, "NAME", "filter secrets...").await
 }
 
 /// Walk every saved context and DELETE the secret in each. Best-effort:
@@ -817,7 +846,28 @@ mod tests {
         match w.c {
             SecretCommand::Rm(a) => {
                 assert_eq!(a.scope, Scope::Global);
-                assert_eq!(a.name, "cf_token");
+                assert_eq!(a.name.as_deref(), Some("cf_token"));
+            }
+            other => panic!("expected Rm, got {other:?}"),
+        }
+    }
+
+    /// Bare `isd secret rm` (no name) parses with `name = None` so the
+    /// runtime can fall into the interactive picker per the v0.7
+    /// lexicon spec.
+    #[test]
+    fn rm_args_bare_parses_with_no_name() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: SecretCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "rm"]).unwrap();
+        match w.c {
+            SecretCommand::Rm(a) => {
+                assert!(a.name.is_none(), "expected None, got {:?}", a.name);
+                assert_eq!(a.scope, Scope::Context);
             }
             other => panic!("expected Rm, got {other:?}"),
         }
