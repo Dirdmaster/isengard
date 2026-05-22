@@ -67,6 +67,14 @@ ignore = [
     # prompt library.
     # https://rustsec.org/advisories/RUSTSEC-2025-0057
     "RUSTSEC-2025-0057",
+
+    # paste 1.0.15 is unmaintained (upstream archived; recommends pastey).
+    # Pulled in transitively via ratatui 0.28 (the `isd configure` TUI). It
+    # is a proc-macro helper for stringifying identifiers at compile time;
+    # no runtime surface. Revisit when ratatui drops the dep or we move to
+    # a version that uses pastey.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]
