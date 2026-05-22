@@ -118,6 +118,13 @@ aws-sdk-s3.workspace = true
 aws-config.workspace = true
 tokio-util = { workspace = true, features = ["io", "io-util"] }
 
+# `isd configure` (no sub-verb) opens a ratatui full TUI on the
+# alternate screen. crossterm 0.28 matches ratatui 0.28's pin. inquire
+# stays in the dep tree because the explicit verbs (set/get/list) still
+# use it for their one-shot prompts.
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 # Phase 0.15: integration test for `secret --scope global` spins up two
