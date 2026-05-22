@@ -37,6 +37,7 @@ mod host_name;
 mod hosts_cmd;
 mod index_cache;
 mod index_resolve;
+mod info_cmd;
 mod init_cmd;
 mod join_cmd;
 mod join_token_cmd;
@@ -132,6 +133,12 @@ enum Command {
     /// Inspect enrolled hosts.
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
+    /// Show detail for one resource (host, stack, or container).
+    /// Auto-detects the type from the id; opens a picker when no id
+    /// is supplied. `inspect` is kept as a clap alias for muscle
+    /// memory.
+    #[command(alias = "inspect")]
+    Info(info_cmd::InfoArgs),
     /// Self-update isd.
     Update(update_cmd::UpdateArgs),
     /// Deploy, diff, edit, inspect stacks.
@@ -222,6 +229,7 @@ async fn main() {
             )
             .await
         }
+        Command::Info(args) => info_cmd::run(args, cli.context.as_deref()).await,
         Command::Update(args) => update_cmd::run(args).await,
         Command::Stack(cmd) => {
             stack_cmd::run(
