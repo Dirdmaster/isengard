@@ -246,6 +246,11 @@ impl Modal {
                 KeyType::Secret => Mode::Secret,
                 KeyType::Int => Mode::Int,
                 KeyType::String => Mode::String,
+                // StringList editing goes through `ZonesModal`, not the
+                // generic key editor. If we ever land here it means the
+                // dispatcher misrouted; fall back to plain string input so
+                // the operator can still escape with Esc.
+                KeyType::StringList => Mode::String,
             }
         };
         // Seed the buffer with the current value when sensible so the

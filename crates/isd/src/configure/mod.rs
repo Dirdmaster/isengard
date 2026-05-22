@@ -57,6 +57,13 @@ pub(crate) enum KeyType {
     Int,
     /// Boolean.
     Bool,
+    /// Ordered list of non-empty UTF-8 strings.
+    ///
+    /// Persisted on the wire as a JSON array. The TUI renders one row
+    /// per element with inline add/remove + a Cloudflare fetch action;
+    /// the `set` verb accepts a comma-separated string for parity with
+    /// the inline path (no array literal in shell).
+    StringList,
 }
 
 /// CLI flags for `isd configure`.
@@ -378,6 +385,19 @@ fn encode_value(ty: Option<KeyType>, raw: &str) -> Result<Value> {
                 "expected boolean (true/false/yes/no/1/0/on/off), got {other:?}"
             )),
         },
+        Some(KeyType::StringList) => {
+            // Inline values for list-typed keys come from a CLI argument,
+            // so accept the conventional comma-separated form. Empty
+            // tokens are dropped so trailing commas do not crash the
+            // controller's element-non-empty check.
+            let items: Vec<Value> = raw
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| Value::String(s.to_string()))
+                .collect();
+            Ok(Value::Array(items))
+        }
         _ => Ok(Value::String(raw.to_string())),
     }
 }
@@ -573,6 +593,7 @@ pub(crate) fn key_type_label(ty: KeyType) -> &'static str {
         KeyType::Secret => "secret",
         KeyType::Int => "int",
         KeyType::Bool => "bool",
+        KeyType::StringList => "string_list",
     }
 }
 
@@ -819,6 +840,36 @@ mod tests {
             encode_value(Some(KeyType::Bool), "0").unwrap(),
             Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn encode_value_parses_comma_separated_for_string_list() {
+        let v = encode_value(Some(KeyType::StringList), "a.com, b.com,c.com").unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::String("a.com".into()),
+                Value::String("b.com".into()),
+                Value::String("c.com".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn encode_value_drops_empty_tokens_for_string_list() {
+        let v = encode_value(Some(KeyType::StringList), "a.com,,b.com,").unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::String("a.com".into()),
+                Value::String("b.com".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn key_type_label_renders_string_list() {
+        assert_eq!(key_type_label(KeyType::StringList), "string_list");
     }
 
     #[test]
