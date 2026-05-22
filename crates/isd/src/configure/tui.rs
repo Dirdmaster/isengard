@@ -1,18 +1,25 @@
-//! Full-screen ratatui TUI for `isd configure`.
+//! Inline ratatui TUI for `isd configure`.
 //!
 //! Replaces the inline inquire two-level menu from PR #245 with a real
-//! terminal application: alternate screen, raw mode, two-pane layout
-//! (categories on the left, keys on the right), modal editor on Enter.
+//! terminal application: raw mode, inline viewport at the bottom of
+//! the current shell, two-pane layout (categories on the left, keys
+//! on the right), modal editor on Enter.
 //!
 //! The TUI owns the terminal for the duration of the session and
 //! restores it cleanly on every exit path:
 //!
-//! * Normal exit (`q`, `Esc` from the main view) drops a [`TermGuard`]
-//!   that disables raw mode and leaves the alternate screen.
+//! * Normal exit (`q`, `Esc` from the main view) clears the inline
+//!   viewport silently and drops a [`TermGuard`] that disables raw
+//!   mode and restores cursor visibility.
 //! * Panics route through a panic hook installed in [`run`] that
 //!   performs the same restore before delegating to the previous hook.
 //! * Errors bubble out as `anyhow::Result`; the guard's `Drop` still
 //!   runs because it's stack-allocated.
+//!
+//! Inline rendering keeps the operator's previous shell output visible
+//! above the TUI. The exit summary "isd configure: N keys updated."
+//! is printed by the caller via plain `println!` after the terminal
+//! is dropped, landing on the line below the (now-cleared) viewport.
 //!
 //! HTTP calls are synchronous against the event loop: a "Loading..."
 //! status flag is set, the future is awaited inline, then the loop
@@ -25,16 +32,14 @@ use std::io::{Stdout, stdout};
 
 use anyhow::{Context as _, Result};
 use crossterm::{
-    event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers,
-    },
+    cursor,
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, size as terminal_size},
 };
 use futures_util::StreamExt as _;
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -60,42 +65,59 @@ use crate::session::Session;
 /// and never escape.
 pub(crate) async fn run(session: &Session, base: &str) -> Result<usize> {
     // Fetch once up-front: if the controller is unreachable, surface
-    // the error on the main screen instead of flashing an empty TUI.
+    // the error before grabbing the terminal instead of flashing an
+    // empty TUI.
     let schema = fetch_schema(session, base)
         .await
         .context("fetching schema for configure TUI")?;
     let list = fetch_list(session, base, false).await.unwrap_or_default();
 
-    // Install panic hook BEFORE entering the alternate screen so a
-    // panic between EnterAlternateScreen and the guard's construction
-    // still restores the terminal.
+    // Install panic hook BEFORE switching to raw mode so a panic
+    // between enable_raw_mode and the guard's construction still
+    // restores the terminal.
     install_panic_hook();
 
     enable_raw_mode().context("enabling raw mode")?;
-    let mut stdout_handle = stdout();
-    execute!(stdout_handle, EnterAlternateScreen, EnableMouseCapture)
-        .context("entering alternate screen")?;
+    let stdout_handle = stdout();
     let backend = CrosstermBackend::new(stdout_handle);
-    let mut terminal = Terminal::new(backend).context("creating terminal backend")?;
+    let term_rows = terminal_size().map(|(_, r)| r).unwrap_or(24);
+    let height = configure_height(term_rows);
+    let opts = TerminalOptions {
+        viewport: Viewport::Inline(height),
+    };
+    let mut terminal =
+        Terminal::with_options(backend, opts).context("creating inline terminal backend")?;
     let _guard = TermGuard;
 
     let mut app = AppState::new(schema, list);
     let outcome = event_loop(&mut terminal, &mut app, session, base).await;
 
-    // Explicit cleanup. _guard's Drop is a safety net for panic paths.
+    // Silent clear: wipe the inline viewport before returning so the
+    // caller's exit summary lands on a clean line. The guard's Drop
+    // is the safety net for panic paths.
+    let _ = terminal.clear();
     drop(terminal);
     outcome
 }
 
-/// RAII guard that disables raw mode and leaves the alternate screen
+/// Compute the inline viewport height (rows) for the configure TUI
+/// given the current terminal height. Leaves 4 rows of operator
+/// scrollback above and floors at 20 so the two-pane layout + modal
+/// stay usable on narrow shells.
+pub fn configure_height(term_rows: u16) -> u16 {
+    term_rows.saturating_sub(4).max(20)
+}
+
+/// RAII guard that disables raw mode and restores cursor visibility
 /// on drop. Stack-allocated so unwinding through the TUI still
-/// restores the terminal.
+/// restores the terminal. No alt-screen exit needed: inline rendering
+/// never entered one.
 struct TermGuard;
 
 impl Drop for TermGuard {
     fn drop(&mut self) {
         let mut out = stdout();
-        let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(out, cursor::Show);
         let _ = disable_raw_mode();
     }
 }
@@ -107,7 +129,7 @@ fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = stdout();
-        let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(out, cursor::Show);
         let _ = disable_raw_mode();
         previous(info);
     }));
@@ -1904,6 +1926,21 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn configure_height_leaves_four_rows_of_scrollback() {
+        // Comfortable terminal: 50 rows. Reserve 4 for scrollback.
+        assert_eq!(configure_height(50), 46);
+        assert_eq!(configure_height(24), 20);
+    }
+
+    #[test]
+    fn configure_height_floors_at_twenty() {
+        // Tiny shells (or no `terminal_size` answer) still get a
+        // usable two-pane layout.
+        assert_eq!(configure_height(10), 20);
+        assert_eq!(configure_height(0), 20);
+    }
 
     fn entries_fixture() -> Vec<SchemaEntry> {
         vec![
