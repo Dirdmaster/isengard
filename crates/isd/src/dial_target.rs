@@ -1,18 +1,20 @@
-//! Helpers for the host-row `dial_target` field.
+//! Helpers for the host-row `dial_target` field (and, as of the host
+//! name PR, the `hostname` field that ships in the same PATCH).
 //!
 //! `dial_target` is the address an operator types into `ssh` to reach
 //! a host. The CLI captures it at enroll time from the operator's
 //! active docker context URL and PATCHes it onto the host row;
 //! `isd ssh hosts set <agent> --dial <target>` overrides it later.
+//! The combined PATCH helper [`patch_host_fields`] also accepts a
+//! `hostname` so `isd init` / `isd join` can ship name + dial target
+//! in one round-trip (see `crate::host_name`).
 //!
 //! Two responsibilities live here:
 //!
-//! 1. Best-effort PATCH of the most recently enrolled host with the
-//!    operator's docker dial target. Called from `init_cmd` and
-//!    `join_cmd` after the agent appears in the host list. Failures
-//!    are logged + swallowed: the enrollment already succeeded; the
-//!    operator's worst case is `(unset)` in `isd ssh hosts` (which
-//!    they can fix with `isd ssh hosts set <agent> --dial <target>`).
+//! 1. PATCH helpers against `/api/v1/hosts/{id}` for the dial_target
+//!    and hostname fields. Used by the enroll flow (`init_cmd`,
+//!    `join_cmd`, via `crate::host_name`) and the operator-override
+//!    path (`isd ssh hosts set`).
 //!
 //! 2. Lookup of the dial target for a name token used by
 //!    `isd ssh <host>`: a bare hostname that maps to a host row with
@@ -23,8 +25,6 @@
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::json;
-
-use crate::docker_context;
 
 /// Subset of `HostDto` the dial-target helpers care about. Other
 /// fields on the wire are tolerated thanks to serde's default behavior.
@@ -41,74 +41,37 @@ pub(crate) struct HostDtoSubset {
     pub dial_target: Option<String>,
 }
 
-/// Send a PATCH against the most recently enrolled host row, writing
-/// the dial target derived from the operator's active docker context.
+/// PATCH /api/v1/hosts/{id} with any combination of patchable
+/// fields. Mirrors the dashboard's [`PatchHostRequest`] shape:
+/// `dial_target` is set when `Some(t)` (empty string clears, per the
+/// API contract) and `hostname` is set when `Some(n)` (the server
+/// rejects empty `hostname` with 400, so callers should filter empty
+/// values out before invoking).
 ///
-/// Best-effort: any failure (no SSH context, no controller URL,
-/// network error, no hosts on the controller) is reported on stderr
-/// and swallowed. Enrollment already succeeded; the operator can
-/// recover with `isd ssh hosts set <agent> --dial <target>`.
-///
-/// `controller_url` is the base URL the CLI uses to talk to the
-/// controller (same value `Session::require_controller` returns).
-/// `docker_uri` is the operator's docker context URL (e.g.
-/// `ssh://dirdmaster@10.17.0.125`).
-pub async fn patch_latest_host_dial_target_best_effort(controller_url: &str, docker_uri: &str) {
-    let Some(target) = docker_context::dial_target_from_docker_uri(docker_uri) else {
-        // Non-SSH docker context: no operator-typeable target to
-        // capture. Leave the row's dial_target as-is.
-        return;
-    };
-    if let Err(e) = patch_latest_host_dial_target(controller_url, &target).await {
-        eprintln!(
-            "isd: warning: could not record dial_target on the enrolled host: {e:#}. \
-             Run `isd ssh hosts set <agent> --dial {target}` to set it manually."
-        );
-    }
-}
-
-/// Fallible inner: GET /api/v1/hosts, pick the most recently enrolled
-/// row (the first in the list: the dashboard sorts by `last_seen_at
-/// DESC NULLS LAST, enrolled_at DESC`), PATCH its dial_target.
-async fn patch_latest_host_dial_target(controller_url: &str, target: &str) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("building HTTP client for dial_target PATCH")?;
-    let hosts_url = format!("{}/api/v1/hosts", controller_url.trim_end_matches('/'));
-    let hosts: Vec<HostDtoSubset> = client
-        .get(&hosts_url)
-        .send()
-        .await
-        .with_context(|| format!("GET {hosts_url}"))?
-        .error_for_status()
-        .context("listing hosts to record dial_target")?
-        .json()
-        .await
-        .context("decoding hosts JSON for dial_target PATCH")?;
-    let row = hosts
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("controller returned an empty hosts list"))?;
-    patch_host_dial_target(&client, controller_url, &row.id, target).await?;
-    Ok(())
-}
-
-/// PATCH /api/v1/hosts/{id} with `dial_target`. Returns the parsed
-/// response body on success.
-pub(crate) async fn patch_host_dial_target(
+/// Used by `isd init` / `isd join` to ship name + dial_target in a
+/// single request after enroll, and by `isd ssh hosts set` for the
+/// operator-driven override path.
+pub(crate) async fn patch_host_fields(
     client: &reqwest::Client,
     controller_url: &str,
     host_id: &str,
-    target: &str,
+    dial_target: Option<&str>,
+    hostname: Option<&str>,
 ) -> Result<HostDtoSubset> {
     let url = format!(
         "{}/api/v1/hosts/{host_id}",
         controller_url.trim_end_matches('/')
     );
-    let body = json!({ "dial_target": target });
+    let mut body = serde_json::Map::new();
+    if let Some(t) = dial_target {
+        body.insert("dial_target".to_string(), json!(t));
+    }
+    if let Some(n) = hostname {
+        body.insert("hostname".to_string(), json!(n));
+    }
     let resp = client
         .patch(&url)
-        .json(&body)
+        .json(&serde_json::Value::Object(body))
         .send()
         .await
         .with_context(|| format!("PATCH {url}"))?;

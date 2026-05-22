@@ -277,16 +277,25 @@ async fn force_update_stack(
 
 /// `PATCH` handler for host.
 ///
-/// Today the only patchable field is `dial_target`: the address an
-/// operator types into `ssh` to reach the host. `isd init` / `isd join`
-/// captures it from the operator's active docker context URL after
-/// enrollment; `isd ssh hosts set <agent> --dial <target>` overrides
-/// it.
+/// Two patchable fields today, both captured by the CLI at enroll
+/// time and overridable later:
 ///
-/// Behaviour:
-/// - `dial_target: null` (or field omitted): no-op, returns the row.
+/// - `dial_target`: the address an operator types into `ssh` to reach
+///   the host. Captured from the active docker context URL.
+/// - `hostname`: the operator-facing host name. Captured from the
+///   target docker daemon's `info.name` (or `--name <NAME>`) so the
+///   display label is not the agent's container hash.
+///
+/// Behaviour per field:
+/// - `<field>: null` (or omitted): no-op for that field.
 /// - `dial_target: ""`: clears the stored target.
-/// - `dial_target: "<value>"`: sets the stored target.
+/// - `hostname: ""`: rejected with 400 (hostname has no `(unset)`
+///   render fallback; an empty value would corrupt the display path).
+/// - `<field>: "<value>"`: sets the stored value.
+///
+/// When both fields are present in the same request, both apply (or
+/// neither, on validation failure: hostname empty-string check runs
+/// before any DB write).
 async fn patch_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
@@ -296,6 +305,17 @@ async fn patch_host(
         Ok(h) => h,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
     };
+
+    // Validate hostname up front so a request that carries both a
+    // valid dial_target and an empty hostname does not partial-apply.
+    if let Some(name) = body.hostname.as_deref()
+        && name.is_empty()
+    {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "hostname cannot be empty (omit the field to leave it unchanged)",
+        );
+    }
 
     if let Some(target) = body.dial_target.as_deref() {
         // Empty string clears the column. Anything else sets it.
@@ -311,6 +331,19 @@ async fn patch_host(
                 return json_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("set_host_dial_target: {e}"),
+                );
+            }
+        }
+    }
+
+    if let Some(name) = body.hostname.as_deref() {
+        match handles.inventory.set_host_hostname(host_id, name).await {
+            Ok(true) => {}
+            Ok(false) => return json_err(StatusCode::NOT_FOUND, "host not found"),
+            Err(e) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("set_host_hostname: {e}"),
                 );
             }
         }

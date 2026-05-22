@@ -208,6 +208,196 @@ async fn patch_host_unknown_id_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// Happy path: PATCH /hosts/{id} with a `hostname` body sets the
+/// stored value and the GET response (and the PATCH response) carries
+/// the new value. Mirrors `patch_host_sets_dial_target` for the
+/// sibling field.
+#[tokio::test]
+async fn patch_host_sets_hostname() {
+    let (app, handles) = setup_app().await;
+    let host_id = seed_host(&handles.inventory).await;
+
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/hosts/{host_id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"hostname":"lausanne"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed.get("hostname").and_then(|v| v.as_str()),
+        Some("lausanne")
+    );
+
+    // GET reflects the same value.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/hosts/{host_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed.get("hostname").and_then(|v| v.as_str()),
+        Some("lausanne")
+    );
+}
+
+/// Empty string hostname is rejected with 400. The column is part of
+/// the operator's display path and has no `(unset)` render fallback;
+/// callers that want to revert must re-PATCH with the original value.
+#[tokio::test]
+async fn patch_host_empty_hostname_returns_400() {
+    let (app, handles) = setup_app().await;
+    let host_id = seed_host(&handles.inventory).await;
+
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/hosts/{host_id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"hostname":""}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // The row should be untouched: GET still shows the seeded value.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/hosts/{host_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed.get("hostname").and_then(|v| v.as_str()),
+        Some("edge-1")
+    );
+}
+
+/// Omitting `hostname` from the body leaves the row unchanged, even
+/// when a `dial_target` field is set. Mirrors the dial_target no-op
+/// test for the sibling field.
+#[tokio::test]
+async fn patch_host_omitted_hostname_is_noop() {
+    let (app, handles) = setup_app().await;
+    let host_id = seed_host(&handles.inventory).await;
+
+    // Send a body that only sets dial_target; hostname stays.
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/hosts/{host_id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"dial_target":"op@host"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed.get("hostname").and_then(|v| v.as_str()),
+        Some("edge-1")
+    );
+}
+
+/// A single PATCH with both `hostname` and `dial_target` applies
+/// both. This is the shape the CLI sends after enroll so name +
+/// dial target ship in one request.
+#[tokio::test]
+async fn patch_host_sets_hostname_and_dial_target_together() {
+    let (app, handles) = setup_app().await;
+    let host_id = seed_host(&handles.inventory).await;
+
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/hosts/{host_id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"hostname":"lausanne","dial_target":"op@10.0.0.7"}"#,
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed.get("hostname").and_then(|v| v.as_str()),
+        Some("lausanne")
+    );
+    assert_eq!(
+        parsed.get("dial_target").and_then(|v| v.as_str()),
+        Some("op@10.0.0.7")
+    );
+}
+
+/// An empty hostname in a combined request fails up front (400)
+/// without applying the dial_target half. Guards against partial
+/// application: the validation check runs before any DB write.
+#[tokio::test]
+async fn patch_host_combined_request_with_empty_hostname_is_atomic() {
+    let (app, handles) = setup_app().await;
+    let host_id = seed_host(&handles.inventory).await;
+
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/hosts/{host_id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"hostname":"","dial_target":"would-leak@host"}"#,
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Neither field changed.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/hosts/{host_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed.get("hostname").and_then(|v| v.as_str()),
+        Some("edge-1")
+    );
+    assert!(
+        parsed
+            .get("dial_target")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        "dial_target should be untouched: {parsed}"
+    );
+}
+
 /// 400 when the body itself is unparseable (malformed JSON).
 #[tokio::test]
 async fn patch_host_malformed_body_returns_400() {
