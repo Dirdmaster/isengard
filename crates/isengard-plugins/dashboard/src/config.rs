@@ -9,6 +9,7 @@
 //! | GET    | `/config/{key}`       | Read one key.                                                 |
 //! | PUT    | `/config/{key}`       | Write one key. Validated against the schema.                  |
 //! | DELETE | `/config/{key}`       | Unset one key. 404 when the key was already unset.            |
+//! | POST   | `/config/zones/cloudflare-fetch` | Fetch zones from Cloudflare for the operator to confirm. |
 //!
 //! Secret-typed keys are redacted by default on `GET /config` and
 //! `GET /config/{key}`; pass `?show_secret=1` (single-key GET) or
@@ -29,9 +30,10 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, response::Json as JsonResp};
 use isengard_controller::ControllerHandles;
+use isengard_controller::cloudflare;
 use isengard_controller::config::{ConfigValue, KeyType, SchemaEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,14 +45,44 @@ use serde_json::{Value, json};
 /// in the path resolves to [`config_schema`] rather than getting
 /// captured as the `key` parameter.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
+    router_with_cf_base(handles, None)
+}
+
+/// Same as [`router`] but lets tests override the Cloudflare API base
+/// URL so wiremock can stand in for the public CF endpoint. `None`
+/// keeps the production base URL hard-coded inside the controller's
+/// [`cloudflare`] module.
+pub fn router_with_cf_base(
+    handles: Arc<ControllerHandles>,
+    cf_base_url: Option<String>,
+) -> Router {
     Router::new()
         .route("/config", get(list_config))
         .route("/config/schema", get(config_schema))
         .route(
+            "/config/zones/cloudflare-fetch",
+            post(post_cloudflare_zones),
+        )
+        .route(
             "/config/{key}",
             get(get_config).put(put_config).delete(delete_config),
         )
-        .with_state(handles)
+        .with_state(ConfigState {
+            handles,
+            cf_base_url,
+        })
+}
+
+/// Router state. Bundles the controller handles and the optional CF
+/// override so the test harness can swap in a wiremock endpoint without
+/// reaching into the controller crate.
+#[derive(Clone)]
+struct ConfigState {
+    /// Controller handles, same as every other dashboard route.
+    handles: Arc<ControllerHandles>,
+    /// `Some(url)` makes [`post_cloudflare_zones`] route through that
+    /// base URL; `None` uses the production CF endpoint.
+    cf_base_url: Option<String>,
 }
 
 /// PUT body for `/config/{key}`.
@@ -138,11 +170,11 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 
 /// `GET /api/v1/config/{key}` handler.
 async fn get_config(
-    State(handles): State<Arc<ControllerHandles>>,
+    State(state): State<ConfigState>,
     Path(key): Path<String>,
     Query(q): Query<GetQuery>,
 ) -> Response {
-    let dispatcher = handles.config_dispatcher();
+    let dispatcher = state.handles.config_dispatcher();
     let entry = match dispatcher.schema().get(&key) {
         Some(e) => e,
         None => return err(StatusCode::NOT_FOUND, format!("unknown config key: {key}")),
@@ -178,11 +210,12 @@ async fn get_config(
 
 /// `PUT /api/v1/config/{key}` handler.
 async fn put_config(
-    State(handles): State<Arc<ControllerHandles>>,
+    State(state): State<ConfigState>,
     Path(key): Path<String>,
     Json(body): Json<PutBody>,
 ) -> Response {
-    match handles
+    match state
+        .handles
         .config_dispatcher()
         .put(&key, body.value, Some("dashboard"))
         .await
@@ -194,10 +227,10 @@ async fn put_config(
 
 /// `DELETE /api/v1/config/{key}` handler.
 async fn delete_config(
-    State(handles): State<Arc<ControllerHandles>>,
+    State(state): State<ConfigState>,
     Path(key): Path<String>,
 ) -> Response {
-    match handles.config_dispatcher().delete(&key).await {
+    match state.handles.config_dispatcher().delete(&key).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => err(
             StatusCode::NOT_FOUND,
@@ -209,10 +242,10 @@ async fn delete_config(
 
 /// `GET /api/v1/config` handler. Snapshots every schema key.
 async fn list_config(
-    State(handles): State<Arc<ControllerHandles>>,
+    State(state): State<ConfigState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let rows = match handles.config_dispatcher().list().await {
+    let rows = match state.handles.config_dispatcher().list().await {
         Ok(r) => r,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
@@ -244,9 +277,51 @@ async fn list_config(
 /// `GET /api/v1/config/schema` handler. Echoes the static schema
 /// verbatim so the CLI can drive its help text + did-you-mean off the
 /// server's view.
-async fn config_schema(State(handles): State<Arc<ControllerHandles>>) -> Response {
-    let entries: Vec<SchemaEntry> = handles.config_dispatcher().schema().entries().to_vec();
+async fn config_schema(State(state): State<ConfigState>) -> Response {
+    let entries: Vec<SchemaEntry> = state
+        .handles
+        .config_dispatcher()
+        .schema()
+        .entries()
+        .to_vec();
     JsonResp(entries).into_response()
+}
+
+/// `POST /api/v1/config/zones/cloudflare-fetch` handler.
+///
+/// Reads the `cloudflare.api_token` secret via the dispatcher; calls
+/// [`cloudflare::list_zones`] with it; returns the resulting zone names
+/// as `{"zones": [...]}`. Does NOT auto-populate `routing.zones`: the
+/// CLI/TUI shows the fetched list to the operator and writes only after
+/// confirmation.
+///
+/// Status codes:
+///
+/// | Code | Reason                                              |
+/// |------|-----------------------------------------------------|
+/// | 200  | Fetch succeeded. Body: `{"zones": [...]}`.          |
+/// | 400  | `cloudflare.api_token` is unset.                    |
+/// | 502  | Upstream Cloudflare error (message bubbled).        |
+async fn post_cloudflare_zones(State(state): State<ConfigState>) -> Response {
+    let dispatcher = state.handles.config_dispatcher();
+    let token = match dispatcher.get("cloudflare.api_token").await {
+        Ok(Some(ConfigValue::Set(Value::String(s)))) if !s.is_empty() => s,
+        Ok(Some(ConfigValue::Set(_))) | Ok(Some(ConfigValue::Default(_))) | Ok(None) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "cloudflare.api_token is not set; set it first",
+            );
+        }
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let result = match state.cf_base_url.as_deref() {
+        Some(base) => cloudflare::list_zones_with_base(&token, base).await,
+        None => cloudflare::list_zones(&token).await,
+    };
+    match result {
+        Ok(zones) => JsonResp(json!({ "zones": zones })).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, e.to_string()),
+    }
 }
 
 #[cfg(test)]
