@@ -22,13 +22,15 @@ pub struct ContextArgs {
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
     /// List docker contexts. `*` marks the current one.
-    List,
+    #[command(alias = "list")]
+    Ls,
     /// Set the current context (same effect as `docker context use <name>`).
     Use(UseArgs),
     /// Print one context's docker endpoint.
     Show(ShowArgs),
-    /// Create a new docker context. Thin wrapper over `docker context create`.
-    Create(CreateArgs),
+    /// Add a new docker context. Thin wrapper over `docker context create`.
+    #[command(alias = "create")]
+    Add(CreateArgs),
     /// Remove a docker context. Thin wrapper over `docker context rm`.
     Rm(RmArgs),
 }
@@ -83,10 +85,10 @@ pub struct RmArgs {
 /// Propagates the sub-verb's error.
 pub async fn run(args: ContextArgs) -> Result<()> {
     match args.command {
-        ContextCommand::List => run_list().await,
+        ContextCommand::Ls => run_list().await,
         ContextCommand::Use(a) => run_use(a).await,
         ContextCommand::Show(a) => run_show(a).await,
-        ContextCommand::Create(a) => run_create(a).await,
+        ContextCommand::Add(a) => run_create(a).await,
         ContextCommand::Rm(a) => run_rm(a).await,
     }
 }
@@ -200,7 +202,7 @@ mod tests {
             c: ContextCommand,
         }
         let w = Wrap::try_parse_from(["x", "list"]).unwrap();
-        assert!(matches!(w.c, ContextCommand::List));
+        assert!(matches!(w.c, ContextCommand::Ls));
 
         let w = Wrap::try_parse_from(["x", "use", "lausanne"]).unwrap();
         match w.c {
@@ -238,7 +240,7 @@ mod tests {
         ])
         .unwrap();
         match w.c {
-            ContextCommand::Create(a) => {
+            ContextCommand::Add(a) => {
                 assert_eq!(a.name, "lausanne");
                 assert_eq!(a.docker, "ssh://user@host");
                 assert!(a.r#use);

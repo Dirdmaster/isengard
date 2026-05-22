@@ -1,4 +1,4 @@
-//! `isd route list` / `isd route create` / `isd route rm` (operator surface
+//! `isd route ls` / `isd route add` / `isd route rm` (operator surface
 //! for the controller's routing rules).
 //!
 //! Talks to the dashboard's `/api/v1/routing/rules[/<id>]` endpoints.
@@ -22,14 +22,19 @@ pub struct RouteArgs {
     pub command: RouteCommand,
 }
 
-/// Sub-verbs under `isd route`.
+/// Sub-verbs under `isd route`. Canonical verbs follow the lexicon
+/// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
+/// `ls` / `add` / `rm`. `list` and `create` are kept as deprecated
+/// aliases for one minor version.
 #[derive(Debug, Subcommand)]
-#[allow(clippy::large_enum_variant)] // CreateArgs is large but only one is alive at a time
+#[allow(clippy::large_enum_variant)] // AddArgs is large but only one is alive at a time
 pub enum RouteCommand {
     /// List routing rules.
-    List,
-    /// Create a routing rule.
-    Create(CreateArgs),
+    #[command(alias = "list")]
+    Ls,
+    /// Add a routing rule.
+    #[command(alias = "create")]
+    Add(CreateArgs),
     /// Delete a routing rule by id.
     Rm(RmArgs),
 }
@@ -142,8 +147,8 @@ struct HostEntry {
 /// Propagates the sub-verb's error.
 pub async fn run(args: RouteArgs, context: Option<&str>) -> Result<()> {
     match args.command {
-        RouteCommand::List => run_list(context).await,
-        RouteCommand::Create(a) => run_create(a, context).await,
+        RouteCommand::Ls => run_list(context).await,
+        RouteCommand::Add(a) => run_create(a, context).await,
         RouteCommand::Rm(a) => run_rm(a, context).await,
     }
 }
@@ -562,7 +567,7 @@ mod tests {
         ])
         .unwrap();
         match w.c {
-            RouteCommand::Create(a) => {
+            RouteCommand::Add(a) => {
                 assert_eq!(a.public_hostname.as_deref(), Some("iso.vallee.casa"));
                 assert!(a.host_id.is_none());
                 assert!(a.host.is_none());
@@ -597,7 +602,7 @@ mod tests {
         ])
         .unwrap();
         match w.c {
-            RouteCommand::Create(a) => {
+            RouteCommand::Add(a) => {
                 assert_eq!(a.host_id.as_deref(), Some("01H000000000000000000000"));
                 assert!(a.host.is_none());
             }
