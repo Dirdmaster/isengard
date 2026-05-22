@@ -10,14 +10,24 @@
 //!    `HostClass::Trusted`, no last-seen data.
 //!
 //! Frontend: native ratatui inline TUI (no alt-screen takeover),
-//! fuzzy-matched via `nucleo-matcher`. The earlier fzf + inquire
-//! dance was removed because fzf opens `/dev/tty` with raw ioctls that
+//! fuzzy-matched via `nucleo-matcher`. The earlier fzf + inquire dance
+//! was removed because fzf opens `/dev/tty` with raw ioctls that
 //! bypass capture tools (cheese, asciinema's pty wrap). The native
 //! picker keeps all output inside crossterm so screen capture works
 //! and the visual language matches `isd configure`. Inline rendering
 //! reserves a small viewport at the bottom of the current shell and
 //! clears it silently on exit, so the surrounding shell flow stays
 //! visible (gh/gum aesthetic).
+//!
+//! Visual: the picker IS the `isd ssh hosts` table. Same chrome from
+//! the unified renderer (rounded corners, vertical separators between
+//! columns, ALL CAPS dim headers, one header rule, `#` dim, NAME bold,
+//! DIAL TARGET cyan, LAST SEEN dim). The selected row is painted with
+//! a cyan background and black foreground inside the renderer. The
+//! filter input sits BELOW the table as a `> <query>` line (fzf
+//! default layout). The intent: an operator who knows `isd ssh hosts`
+//! recognises the picker at a glance and the columns line up so the
+//! `#` they read off the listing matches the `#` in the picker.
 
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
@@ -35,10 +45,12 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph},
+    style::{Color, Style},
+    text::{Line, Span, Text},
+    widgets::Paragraph,
 };
+
+use crate::render::{Align, CellStyle, Column, Table as RenderTable, render_to_lines};
 
 /// Source bucket for a picker row. The picker prints the bucket label
 /// in square brackets so the operator can tell at a glance which hosts
@@ -125,24 +137,43 @@ pub fn score_rows_by_filter(rows: &[PickerRow], query: &str) -> Vec<PickerRow> {
     scored.into_iter().map(|(_, _, r)| r).collect()
 }
 
-/// Render a row as the picker row's display Line. Hostname bold, dial
-/// target cyan when set, last-seen dim and relative ("2m ago"). Class
-/// tag dropped: single-fleet operators do not need the disambiguation,
-/// and the trusted-vs-isengard distinction is informational at best.
-fn row_line(row: &PickerRow) -> Line<'static> {
-    let last = relative_time(row.last_seen.as_deref());
+/// Column layout for the picker table. Mirrors `isd ssh hosts` so the
+/// operator sees the same chrome they get from the list command:
+/// `#` dim + right-aligned, `NAME` emphasized (bold), `DIAL TARGET`
+/// cyan (the action verb), `LAST SEEN` dim. The picker upgrades the
+/// dial-target style from Plain (default in `ssh hosts`) to Cyan
+/// because the picker's primary affordance is "pick a thing to dial".
+fn picker_columns() -> Vec<Column> {
+    vec![
+        Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+        Column::new("NAME", Align::Left, CellStyle::Emphasis, 6, 8),
+        Column::new("DIAL TARGET", Align::Left, CellStyle::Cyan, 5, 14),
+        Column::new("LAST SEEN", Align::Left, CellStyle::Dim, 1, 8),
+    ]
+}
+
+/// Build the cells for one picker row. `index` is the row's position
+/// in the CURRENT filtered list (0..N-1), so the operator can type the
+/// visible number to jump-pick once that wiring lands.
+fn picker_row_cells(index: usize, row: &PickerRow) -> Vec<String> {
     let dial = row.dial_target.clone().unwrap_or_else(|| "(unset)".into());
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            row.hostname.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(dial, Style::default().fg(Color::Cyan)),
-        Span::raw("  "),
-        Span::styled(last, Style::default().fg(Color::DarkGray)),
-    ])
+    let last = relative_time(row.last_seen.as_deref());
+    vec![index.to_string(), row.hostname.clone(), dial, last]
+}
+
+/// Build the picker's `RenderTable` from the currently visible rows.
+/// The `#` column carries the filtered-list index (not the source-list
+/// index) so the displayed numbers always start at 0 and stay dense.
+fn picker_table(visible: &[PickerRow]) -> RenderTable {
+    let rows: Vec<Vec<String>> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, r)| picker_row_cells(i, r))
+        .collect();
+    RenderTable {
+        columns: picker_columns(),
+        rows,
+    }
 }
 
 /// Format an RFC3339 timestamp as a coarse relative-time string
@@ -172,12 +203,14 @@ fn relative_time(rfc3339: Option<&str>) -> String {
 
 /// Compute the inline viewport height (rows) for `n_rows` source items.
 ///
-/// Layout budget: filter (1) + list (>=1) = 2 min. Cap at 12 so a long
-/// fleet does not eat the operator's scrollback. Floor at 3 so the
-/// picker still has a usable list area with a tiny fleet.
+/// Layout budget for the boxed picker: top border (1) + header (1) +
+/// header rule (1) + N data rows + bottom border (1) + filter line (1)
+/// = N + 6. Cap at 18 so a long fleet does not eat the operator's
+/// scrollback. Floor at 8 so the picker still has a parseable shape
+/// (chrome + at least two data slots) with an empty / tiny fleet.
 pub fn picker_height(n_rows: usize) -> u16 {
-    let raw = (n_rows as u16).saturating_add(1);
-    raw.clamp(3, 12)
+    let raw = (n_rows as u16).saturating_add(6);
+    raw.clamp(8, 18)
 }
 
 /// Picker public entry. Opens an inline ratatui viewport at the bottom
@@ -288,22 +321,19 @@ struct PickerState {
     filter: String,
     /// Selection cursor over `visible`. `None` when the filter has
     /// no matches.
-    list_state: ListState,
+    selected: Option<usize>,
 }
 
 impl PickerState {
     /// Seed picker state from the merged source list. Selects the
     /// first row (or `None` when the list is empty).
     fn new(rows: Vec<PickerRow>) -> Self {
-        let mut list_state = ListState::default();
-        if !rows.is_empty() {
-            list_state.select(Some(0));
-        }
+        let selected = if rows.is_empty() { None } else { Some(0) };
         Self {
             visible: rows.clone(),
             all: rows,
             filter: String::new(),
-            list_state,
+            selected,
         }
     }
 
@@ -313,28 +343,29 @@ impl PickerState {
     /// untouched filter picks the first row in source order.
     fn refresh(&mut self) {
         self.visible = score_rows_by_filter(&self.all, &self.filter);
-        if self.visible.is_empty() {
-            self.list_state.select(None);
+        self.selected = if self.visible.is_empty() {
+            None
         } else {
-            self.list_state.select(Some(0));
-        }
+            Some(0)
+        };
     }
 
     /// Currently highlighted hostname (`None` when no row matches).
     fn selected_hostname(&self) -> Option<String> {
-        let idx = self.list_state.selected()?;
+        let idx = self.selected?;
         self.visible.get(idx).map(|r| r.hostname.clone())
     }
 
-    /// Move the cursor by `delta` rows, clamped to the visible range.
+    /// Move the cursor by `delta` rows, wrapping at the visible
+    /// list's ends. No-op when no row matches the current filter.
     fn move_selection(&mut self, delta: i32) {
         let len = self.visible.len();
         if len == 0 {
             return;
         }
-        let cur = self.list_state.selected().unwrap_or(0) as i32;
+        let cur = self.selected.unwrap_or(0) as i32;
         let next = (cur + delta).rem_euclid(len as i32) as usize;
-        self.list_state.select(Some(next));
+        self.selected = Some(next);
     }
 }
 
@@ -398,39 +429,45 @@ fn handle_key(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
     }
 }
 
-/// Render the picker frame. Minimalist by design: a single `>` filter
-/// line on top, ranked rows below, nothing else. No bordered chrome, no
-/// title, no keybind footer. Esc / Enter are universal; operators know
-/// them. Selection is highlighted via background color, not a leading
-/// arrow.
+/// Render the picker frame. The viewport is split into the boxed
+/// hosts table on top and a single `> <query>` filter line at the
+/// bottom: fzf default layout. The table is built via the shared
+/// `crate::render::render_to_lines` so the chrome (rounded corners,
+/// vertical separators, ALL-CAPS dim headers, one header rule) and
+/// per-column styling (`#` dim, NAME bold, DIAL TARGET cyan, LAST
+/// SEEN dim) match `isd ssh hosts` exactly. The selected row is
+/// painted with a cyan background + black foreground inside the
+/// renderer so the highlight survives the same ratatui paint pass.
 fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // filter input
-            Constraint::Min(1),    // host list
+            Constraint::Min(1),    // boxed hosts table
+            Constraint::Length(1), // filter input at the bottom
         ])
         .split(area);
 
-    let filter_line = Paragraph::new(Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Yellow)),
-        Span::raw(state.filter.clone()),
-    ]));
-    f.render_widget(filter_line, chunks[0]);
+    // Build the table from the currently visible rows. The highlight
+    // index is the picker's `selected` cursor: when the filter
+    // excludes everything (`selected == None`), no row is painted.
+    let table = picker_table(&state.visible);
+    let lines = render_to_lines(&table, chunks[0].width as usize, state.selected);
+    let table_paragraph = Paragraph::new(Text::from(lines));
+    f.render_widget(table_paragraph, chunks[0]);
 
-    let items: Vec<ListItem> = state
-        .visible
-        .iter()
-        .map(|r| ListItem::new(row_line(r)))
-        .collect();
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
-    f.render_stateful_widget(list, chunks[1], &mut state.list_state);
+    // Filter line at the bottom. Yellow `>` prompt + raw query text;
+    // ratatui draws the terminal cursor at the end of this line so
+    // the operator sees a familiar input affordance.
+    let prompt = Span::styled("> ", Style::default().fg(Color::Yellow));
+    let query = Span::raw(state.filter.clone());
+    let filter_line = Paragraph::new(Line::from(vec![prompt, query]));
+    f.render_widget(filter_line, chunks[1]);
+
+    // Position the visible cursor at the end of the filter line.
+    // `2` accounts for the "> " prompt prefix.
+    let cursor_x = chunks[1].x + 2 + state.filter.chars().count() as u16;
+    f.set_cursor_position((cursor_x, chunks[1].y));
 }
 
 #[cfg(test)]
@@ -529,13 +566,13 @@ mod tests {
     fn picker_state_arrow_keys_wrap() {
         let rows = vec![isen("a", None, None), isen("b", None, None)];
         let mut st = PickerState::new(rows);
-        assert_eq!(st.list_state.selected(), Some(0));
+        assert_eq!(st.selected, Some(0));
         st.move_selection(1);
-        assert_eq!(st.list_state.selected(), Some(1));
+        assert_eq!(st.selected, Some(1));
         st.move_selection(1);
-        assert_eq!(st.list_state.selected(), Some(0));
+        assert_eq!(st.selected, Some(0));
         st.move_selection(-1);
-        assert_eq!(st.list_state.selected(), Some(1));
+        assert_eq!(st.selected, Some(1));
     }
 
     #[test]
@@ -546,7 +583,7 @@ mod tests {
         st.refresh();
         assert_eq!(st.visible.len(), 1);
         assert_eq!(st.visible[0].hostname, "lausanne");
-        assert_eq!(st.list_state.selected(), Some(0));
+        assert_eq!(st.selected, Some(0));
     }
 
     #[test]
@@ -556,29 +593,121 @@ mod tests {
         st.filter.push_str("x9z");
         st.refresh();
         assert!(st.visible.is_empty());
-        assert_eq!(st.list_state.selected(), None);
+        assert_eq!(st.selected, None);
         // Selecting on an empty list returns None, doesn't panic.
         assert_eq!(st.selected_hostname(), None);
     }
 
     #[test]
-    fn picker_height_floor_at_three_rows() {
-        assert_eq!(picker_height(0), 3);
-        assert_eq!(picker_height(1), 3);
-        assert_eq!(picker_height(2), 3);
+    fn picker_height_floor_at_eight_rows() {
+        // N + 6 clamped to (8, 18). Empty / tiny lists clamp to 8 so
+        // the chrome still has room to breathe.
+        assert_eq!(picker_height(0), 8);
+        assert_eq!(picker_height(1), 8);
+        assert_eq!(picker_height(2), 8);
     }
 
     #[test]
     fn picker_height_scales_with_row_count() {
-        // n+1 once we're past the floor: 5 rows + 1 = 6.
-        assert_eq!(picker_height(5), 6);
-        assert_eq!(picker_height(10), 11);
+        // N + 6 past the floor: 3 -> 9, 5 -> 11, 10 -> 16.
+        assert_eq!(picker_height(3), 9);
+        assert_eq!(picker_height(5), 11);
+        assert_eq!(picker_height(10), 16);
+        assert_eq!(picker_height(12), 18);
     }
 
     #[test]
-    fn picker_height_caps_at_twelve() {
-        assert_eq!(picker_height(50), 12);
-        assert_eq!(picker_height(1_000), 12);
+    fn picker_height_caps_at_eighteen() {
+        // Large fleets cap at 18 so we never eat the operator's
+        // scrollback.
+        assert_eq!(picker_height(50), 18);
+        assert_eq!(picker_height(1_000), 18);
+    }
+
+    #[test]
+    fn picker_row_cells_uses_filtered_list_index() {
+        let row = isen("edge-1", Some("ops@10.0.0.1"), None);
+        let cells = picker_row_cells(3, &row);
+        // Index column carries the filtered-list index, not the
+        // source-list index. The operator's mental model is "the
+        // number you see is the number you type".
+        assert_eq!(cells[0], "3");
+        assert_eq!(cells[1], "edge-1");
+        assert_eq!(cells[2], "ops@10.0.0.1");
+        assert_eq!(cells[3], "-");
+    }
+
+    #[test]
+    fn picker_table_renders_selected_row_with_highlight() {
+        use ratatui::style::Color;
+        let rows = vec![
+            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
+            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+        ];
+        let table = picker_table(&rows);
+        let lines = render_to_lines(&table, 80, Some(1));
+        // Expected line layout: top border + header + header rule +
+        // row 0 + row 1 + bottom border. Selected (row 1) is at idx 4.
+        let selected = &lines[4];
+        assert!(
+            selected
+                .spans
+                .iter()
+                .all(|s| s.style.bg == Some(Color::Cyan)),
+            "every span on the selected row carries the highlight bg"
+        );
+        // Sanity: the un-selected row keeps its native styling, no
+        // cyan background bleed.
+        let other = &lines[3];
+        assert!(
+            other.spans.iter().all(|s| s.style.bg != Some(Color::Cyan)),
+            "non-selected row stays un-highlighted"
+        );
+    }
+
+    #[test]
+    fn draw_places_filter_at_the_bottom_with_query_visible() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let rows = vec![
+            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
+            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+        ];
+        let mut st = PickerState::new(rows);
+        st.filter.push_str("lau");
+        st.refresh();
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // The bottom row of the viewport carries the filter prompt
+        // and the live query text. fzf-style: query lives below the
+        // table, never above.
+        let last_line: String = (0..80).map(|x| buf[(x, 11)].symbol()).collect();
+        assert!(
+            last_line.starts_with("> lau"),
+            "filter line must sit at the bottom: {last_line:?}"
+        );
+        // Top of the viewport carries the boxed table's top border.
+        let first_line: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(
+            first_line.starts_with('╭'),
+            "table top border at the top of the viewport: {first_line:?}"
+        );
+    }
+
+    #[test]
+    fn picker_table_with_empty_visible_shows_only_chrome() {
+        let table = picker_table(&[]);
+        let lines = render_to_lines(&table, 80, None);
+        // Top border, header, header rule, bottom border = 4 lines.
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].to_string().starts_with('╭'));
+        assert!(lines[1].to_string().contains("NAME"));
+        assert!(lines[1].to_string().contains("DIAL TARGET"));
+        assert!(lines[1].to_string().contains("LAST SEEN"));
+        assert!(lines[2].to_string().starts_with('├'));
+        assert!(lines[3].to_string().starts_with('╰'));
     }
 
     #[test]
@@ -605,6 +734,6 @@ mod tests {
         st.filter.clear();
         st.refresh();
         assert_eq!(st.visible.len(), 2);
-        assert_eq!(st.list_state.selected(), Some(0));
+        assert_eq!(st.selected, Some(0));
     }
 }

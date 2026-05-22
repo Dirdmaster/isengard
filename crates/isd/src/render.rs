@@ -75,6 +75,9 @@ pub enum CellStyle {
     Emphasis,
     /// Colored by `classify_status` of the cell text: `STATUS`.
     State,
+    /// Cyan foreground: `DIAL TARGET` in the host picker (the dial
+    /// string is the action verb of that table).
+    Cyan,
 }
 
 /// A column definition. `shrink_priority`: higher shrinks last when the
@@ -322,6 +325,7 @@ fn style_cell(padded: &str, raw: &str, style: CellStyle, color: bool) -> String 
             };
             s.apply_to(padded).to_string()
         }
+        CellStyle::Cyan => mk().cyan().apply_to(padded).to_string(),
     }
 }
 
@@ -390,6 +394,115 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
 
     out.push_str(&dim_border(&border_line(&widths, BL, T_UP, BR), color));
     out
+}
+
+/// Render the table as a vector of ratatui `Line`s suitable for a TUI
+/// `Paragraph` or inline viewport. Shares the same layout pass as
+/// [`render`] (column fit, truncation, padding, ALL-CAPS dim headers)
+/// but emits native ratatui spans so a TUI widget can compose the
+/// table without round-tripping through ANSI bytes.
+///
+/// `highlight_row` overrides every span on the i-th data row with a
+/// cyan background + black foreground, matching the picker's selected-
+/// row affordance (fzf-style). Index is into the data rows (the top
+/// border, header, and header rule are NOT countable indices).
+pub fn render_to_lines(
+    table: &Table,
+    term_width: usize,
+    highlight_row: Option<usize>,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    let widths = fit_widths(table, term_width);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let border_style = Style::default().add_modifier(Modifier::DIM);
+    let header_style = Style::default().add_modifier(Modifier::DIM);
+
+    // Top border.
+    lines.push(Line::from(Span::styled(
+        border_line(&widths, TL, T_DOWN, TR),
+        border_style,
+    )));
+
+    // Header row.
+    let mut header_spans: Vec<Span<'static>> = Vec::new();
+    header_spans.push(Span::styled(V.to_string(), border_style));
+    for (i, col) in table.columns.iter().enumerate() {
+        let truncated = truncate_cell(col.header, widths[i], false);
+        let padded = pad(&truncated, widths[i], col.align);
+        header_spans.push(Span::styled(format!(" {padded} "), header_style));
+        header_spans.push(Span::styled(V.to_string(), border_style));
+    }
+    lines.push(Line::from(header_spans));
+
+    // Header rule.
+    lines.push(Line::from(Span::styled(
+        border_line(&widths, T_RIGHT, CROSS, T_LEFT),
+        border_style,
+    )));
+
+    // Data rows.
+    let hl_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let highlighted = highlight_row == Some(row_idx);
+        let mut row_spans: Vec<Span<'static>> = Vec::new();
+        // Leading border: when highlighted, swap the dim border for
+        // the highlight background so the whole row reads as one
+        // selection band.
+        if highlighted {
+            row_spans.push(Span::styled(V.to_string(), hl_style));
+        } else {
+            row_spans.push(Span::styled(V.to_string(), border_style));
+        }
+        for (i, col) in table.columns.iter().enumerate() {
+            let is_image = col.header == "IMAGE";
+            let truncated = truncate_cell(&row[i], widths[i], is_image);
+            let padded = pad(&truncated, widths[i], col.align);
+            let cell_text = format!(" {padded} ");
+            let cell_style = if highlighted {
+                hl_style
+            } else {
+                cell_style_to_ratatui(col.style, &row[i])
+            };
+            row_spans.push(Span::styled(cell_text, cell_style));
+            if highlighted {
+                row_spans.push(Span::styled(V.to_string(), hl_style));
+            } else {
+                row_spans.push(Span::styled(V.to_string(), border_style));
+            }
+        }
+        lines.push(Line::from(row_spans));
+    }
+
+    // Bottom border.
+    lines.push(Line::from(Span::styled(
+        border_line(&widths, BL, T_UP, BR),
+        border_style,
+    )));
+
+    lines
+}
+
+/// Translate a [`CellStyle`] (plus the raw cell text, for `State`
+/// classification) into a ratatui `Style`. Kept private to the module:
+/// every consumer renders through `render` or `render_to_lines`, not
+/// directly off the style enum.
+fn cell_style_to_ratatui(style: CellStyle, raw: &str) -> ratatui::style::Style {
+    use ratatui::style::{Color, Modifier, Style};
+    match style {
+        CellStyle::Dim => Style::default().add_modifier(Modifier::DIM),
+        CellStyle::Plain => Style::default(),
+        CellStyle::Emphasis => Style::default().add_modifier(Modifier::BOLD),
+        CellStyle::State => match classify_status(raw) {
+            StatusColor::Green => Style::default().fg(Color::Green),
+            StatusColor::Yellow => Style::default().fg(Color::Yellow),
+            StatusColor::Red => Style::default().fg(Color::Red),
+            StatusColor::Grey => Style::default().add_modifier(Modifier::DIM),
+        },
+        CellStyle::Cyan => Style::default().fg(Color::Cyan),
+    }
 }
 
 /// Render for a non-TTY stdout: tab-separated plain text, no borders,
@@ -575,6 +688,80 @@ mod tests {
         assert_eq!(out.lines().count(), 1 + ps_rows().len());
         // Row content present, columns joined by tabs.
         assert!(out.contains("a1b2c3d4e5f6\tnginx:1.27\tUp 2 hours"));
+    }
+
+    #[test]
+    fn render_to_lines_returns_shape_matching_render() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let lines = render_to_lines(&table, 200, None);
+        // Total lines = top border + header + header rule + N rows +
+        // bottom border = N + 4.
+        assert_eq!(lines.len(), ps_rows().len() + 4);
+        // Top + bottom borders carry the rounded corners.
+        let top = lines.first().unwrap().to_string();
+        let bot = lines.last().unwrap().to_string();
+        assert!(top.starts_with('╭') && top.ends_with('╮'), "top: {top:?}");
+        assert!(bot.starts_with('╰') && bot.ends_with('╯'), "bot: {bot:?}");
+        // Header rule is the only line that starts with ├.
+        let rules: Vec<&ratatui::text::Line<'_>> = lines
+            .iter()
+            .filter(|l| l.to_string().starts_with('├'))
+            .collect();
+        assert_eq!(rules.len(), 1, "exactly one header rule");
+        // Header carries the spec column names.
+        let header = lines[1].to_string();
+        assert!(header.contains("CONTAINER ID"));
+        assert!(header.contains("NAMES"));
+    }
+
+    #[test]
+    fn render_to_lines_highlight_paints_selected_row() {
+        use ratatui::style::Color;
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let lines = render_to_lines(&table, 200, Some(1));
+        // Selected row sits at index: top border (0) + header (1) +
+        // header rule (2) + row 0 (3) + row 1 (4).
+        let selected = &lines[4];
+        // Every span on the highlighted row carries the cyan-bg /
+        // black-fg override (no exceptions, borders included).
+        for span in &selected.spans {
+            assert_eq!(
+                span.style.bg,
+                Some(Color::Cyan),
+                "selected row span missing highlight bg: {span:?}"
+            );
+            assert_eq!(
+                span.style.fg,
+                Some(Color::Black),
+                "selected row span missing highlight fg: {span:?}"
+            );
+        }
+        // A non-highlighted row keeps the dim border style.
+        let other = &lines[3];
+        assert!(
+            other.spans.iter().all(|s| s.style.bg != Some(Color::Cyan)),
+            "non-selected row should not be highlighted"
+        );
+    }
+
+    #[test]
+    fn render_to_lines_with_no_rows_emits_just_chrome() {
+        let table = Table {
+            columns: ps_columns(),
+            rows: vec![],
+        };
+        let lines = render_to_lines(&table, 200, None);
+        // Top border + header + header rule + bottom border = 4.
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].to_string().starts_with('╭'));
+        assert!(lines[2].to_string().starts_with('├'));
+        assert!(lines[3].to_string().starts_with('╰'));
     }
 
     #[test]
