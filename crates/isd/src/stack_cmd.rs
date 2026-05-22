@@ -34,15 +34,18 @@ pub struct StackArgs {
     pub command: StackCommand,
 }
 
-/// Sub-verbs under `isd stack`.
+/// Sub-verbs under `isd stack`. Canonical verbs follow the lexicon spec
+/// (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`).
+/// `deploy` is kept as a deprecated alias for `up`.
 #[derive(Debug, Subcommand)]
 pub enum StackCommand {
     /// List stacks.
     Ls(LsArgs),
     /// List services in a stack.
     Ps(PsArgs),
-    /// Deploy a stack from compose.yaml.
-    Deploy(DeployArgs),
+    /// Bring a stack up from compose.yaml.
+    #[command(alias = "deploy")]
+    Up(DeployArgs),
     /// Show the reconcile plan for a compose.yaml.
     Diff(DiffArgs),
     /// Open compose.yaml in $EDITOR and apply on save.
@@ -162,7 +165,7 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         StackCommand::Ls(a) => run_ls(a, context).await,
         StackCommand::Ps(a) => run_ps(a, context).await,
-        StackCommand::Deploy(a) => crate::compose_cmd::run_deploy(a, context).await,
+        StackCommand::Up(a) => crate::compose_cmd::run_deploy(a, context).await,
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
         StackCommand::Manifest(cmd) => {
