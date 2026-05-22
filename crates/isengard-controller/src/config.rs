@@ -78,6 +78,24 @@ pub struct SchemaEntry {
     pub default: Option<Value>,
     /// Single-line operator-facing description.
     pub doc: &'static str,
+    /// Optional fixed choice set. When present, the CLI presents a
+    /// select widget instead of free text input, regardless of [`Self::ty`].
+    ///
+    /// `None` means the key accepts any value of the declared type. A
+    /// non-empty slice locks the operator to one of the listed values
+    /// (the controller still type-validates via [`Self::validate`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choices: Option<&'static [Choice]>,
+}
+
+/// One option in a fixed [`SchemaEntry::choices`] set.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Choice {
+    /// Wire value persisted to the backing store when this choice
+    /// is selected.
+    pub value: &'static str,
+    /// Operator-facing label rendered in the select widget.
+    pub label: &'static str,
 }
 
 impl SchemaEntry {
@@ -126,6 +144,7 @@ impl Schema {
                     ty: KeyType::Secret,
                     default: None,
                     doc: "Cloudflare API token used by cf-tunnel and DNS-01 solver",
+                    choices: None,
                 },
                 SchemaEntry {
                     key: "cloudflare.zone_id",
@@ -134,6 +153,7 @@ impl Schema {
                     ty: KeyType::String,
                     default: None,
                     doc: "Cloudflare zone UUID (for DNS-01)",
+                    choices: None,
                 },
                 SchemaEntry {
                     key: "routing.default_zone",
@@ -142,6 +162,7 @@ impl Schema {
                     ty: KeyType::String,
                     default: None,
                     doc: "Default zone appended to bare hostnames in stack manifests",
+                    choices: None,
                 },
                 SchemaEntry {
                     key: "acme.contact_email",
@@ -150,6 +171,7 @@ impl Schema {
                     ty: KeyType::String,
                     default: None,
                     doc: "ACME account contact email",
+                    choices: None,
                 },
                 SchemaEntry {
                     key: "acme.directory",
@@ -160,6 +182,16 @@ impl Schema {
                         "https://acme-v02.api.letsencrypt.org/directory"
                     )),
                     doc: "ACME directory URL",
+                    choices: Some(&[
+                        Choice {
+                            value: "https://acme-v02.api.letsencrypt.org/directory",
+                            label: "Let's Encrypt production",
+                        },
+                        Choice {
+                            value: "https://acme-staging-v02.api.letsencrypt.org/directory",
+                            label: "Let's Encrypt staging",
+                        },
+                    ]),
                 },
                 SchemaEntry {
                     key: "ssh.max_ttl_seconds",
@@ -168,6 +200,7 @@ impl Schema {
                     ty: KeyType::Int,
                     default: Some(serde_json::json!(2_592_000)),
                     doc: "Maximum TTL ceiling for minted SSH operator certs",
+                    choices: None,
                 },
             ],
         }
@@ -514,6 +547,71 @@ mod tests {
         assert!(raw.contains("Cloudflare API token"), "raw: {raw}");
         assert!(raw.contains("category"), "raw: {raw}");
         assert!(raw.contains("Certificates"), "raw: {raw}");
+    }
+
+    #[test]
+    fn schema_choices_well_formed_for_every_entry() {
+        // Every entry has `choices` set to either None or a non-empty
+        // slice. An empty slice would render as a select widget with
+        // zero options, which is unreachable for the operator.
+        let schema = Schema::v01();
+        for entry in schema.entries() {
+            if let Some(choices) = entry.choices {
+                assert!(
+                    !choices.is_empty(),
+                    "{} has an empty choices slice",
+                    entry.key
+                );
+                // Every label and value must be non-empty so the select
+                // widget renders a readable row.
+                for c in choices {
+                    assert!(!c.value.is_empty(), "{} has empty choice value", entry.key);
+                    assert!(!c.label.is_empty(), "{} has empty choice label", entry.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn acme_directory_exposes_prod_and_staging_choices() {
+        let schema = Schema::v01();
+        let entry = schema.get("acme.directory").unwrap();
+        let choices = entry.choices.expect("acme.directory carries choices");
+        assert_eq!(choices.len(), 2);
+        assert!(
+            choices
+                .iter()
+                .any(|c| c.value == "https://acme-v02.api.letsencrypt.org/directory")
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|c| c.value == "https://acme-staging-v02.api.letsencrypt.org/directory")
+        );
+    }
+
+    #[test]
+    fn schema_serializes_choices_for_acme_directory() {
+        // The dashboard echoes SchemaEntry verbatim via serde. Operator
+        // CLI relies on `choices` propagating over the wire to decide
+        // between text input and select widget.
+        let schema = Schema::v01();
+        let entry = schema.get("acme.directory").unwrap();
+        let raw = serde_json::to_string(entry).unwrap();
+        assert!(raw.contains("choices"), "raw: {raw}");
+        assert!(raw.contains("Let's Encrypt production"), "raw: {raw}");
+        assert!(raw.contains("Let's Encrypt staging"), "raw: {raw}");
+    }
+
+    #[test]
+    fn schema_skips_choices_serialization_when_none() {
+        // Keys without choices must not emit `"choices": null` over the
+        // wire. We rely on serde's skip_serializing_if so the wire shape
+        // for keys lacking a choices set stays unchanged.
+        let schema = Schema::v01();
+        let entry = schema.get("cloudflare.api_token").unwrap();
+        let raw = serde_json::to_string(entry).unwrap();
+        assert!(!raw.contains("choices"), "raw: {raw}");
     }
 
     #[test]
