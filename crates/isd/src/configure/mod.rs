@@ -86,7 +86,10 @@ pub struct ConfigureArgs {
     pub command: Option<ConfigureCommand>,
 }
 
-/// Sub-verbs under `isd configure`.
+/// Sub-verbs under `isd configure`. Canonical verbs follow the lexicon
+/// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
+/// `get` / `set` / `rm` / `ls` / `schema`. `unset` and `list` are kept
+/// as deprecated aliases for one minor version.
 #[derive(Debug, Subcommand)]
 pub enum ConfigureCommand {
     /// Print one key's current value.
@@ -95,9 +98,11 @@ pub enum ConfigureCommand {
     /// `--stdin` or `--from-file` for secrets.
     Set(SetArgs),
     /// Remove a key. Falls back to the schema default if one exists.
-    Unset(UnsetArgs),
+    #[command(alias = "unset")]
+    Rm(RmArgs),
     /// Print every key with its current value (secrets redacted).
-    List(ListArgs),
+    #[command(alias = "list")]
+    Ls(LsArgs),
     /// Print the schema (key, type, default, description).
     Schema,
     /// Open the interactive two-level configure menu. Explicit alias
@@ -134,14 +139,14 @@ pub struct SetArgs {
 
 /// CLI flags for `isd configure unset`.
 #[derive(Debug, Args)]
-pub struct UnsetArgs {
+pub struct RmArgs {
     /// Schema key.
     pub key: String,
 }
 
 /// CLI flags for `isd configure list`.
 #[derive(Debug, Args)]
-pub struct ListArgs {
+pub struct LsArgs {
     /// Print secret-typed values in cleartext. Off by default.
     #[arg(long)]
     pub show_secrets: bool,
@@ -252,8 +257,8 @@ pub async fn run(args: ConfigureArgs, context: Option<&str>) -> Result<()> {
         }
         Some(ConfigureCommand::Get(a)) => run_get(&session, &base, a).await,
         Some(ConfigureCommand::Set(a)) => run_set(&session, &base, a).await,
-        Some(ConfigureCommand::Unset(a)) => run_unset(&session, &base, a).await,
-        Some(ConfigureCommand::List(a)) => run_list(&session, &base, a).await,
+        Some(ConfigureCommand::Rm(a)) => run_rm(&session, &base, a).await,
+        Some(ConfigureCommand::Ls(a)) => run_ls(&session, &base, a).await,
         Some(ConfigureCommand::Schema) => run_schema(&session, &base).await,
     }
 }
@@ -448,7 +453,7 @@ fn encode_value(ty: Option<KeyType>, raw: &str) -> Result<Value> {
 }
 
 /// `DELETE /api/v1/config/{key}` then render the outcome.
-async fn run_unset(session: &Session, base: &str, args: UnsetArgs) -> Result<()> {
+async fn run_rm(session: &Session, base: &str, args: RmArgs) -> Result<()> {
     let url = format!("{base}/api/v1/config/{}", args.key);
     let resp = session
         .client
@@ -471,17 +476,17 @@ async fn run_unset(session: &Session, base: &str, args: UnsetArgs) -> Result<()>
     let entry = schema.iter().find(|e| e.key == args.key);
     match entry.and_then(|e| e.default.clone()) {
         Some(default) => println!(
-            "Unset {} (will fall back to default: {})",
+            "Removed {} (will fall back to default: {})",
             args.key,
             json_to_display(&default)
         ),
-        None => println!("Unset {}", args.key),
+        None => println!("Removed {}", args.key),
     }
     Ok(())
 }
 
 /// `GET /api/v1/config` then render the snapshot as a table.
-async fn run_list(session: &Session, base: &str, args: ListArgs) -> Result<()> {
+async fn run_ls(session: &Session, base: &str, args: LsArgs) -> Result<()> {
     let rows = fetch_list(session, base, args.show_secrets).await?;
     if rows.is_empty() {
         println!("No config keys.");
@@ -931,8 +936,8 @@ mod tests {
     fn configure_unset_parses() {
         let w = Wrap::try_parse_from(["x", "unset", "acme.directory"]).unwrap();
         match w.c {
-            ConfigureCommand::Unset(a) => assert_eq!(a.key, "acme.directory"),
-            other => panic!("expected Unset, got {other:?}"),
+            ConfigureCommand::Rm(a) => assert_eq!(a.key, "acme.directory"),
+            other => panic!("expected Rm, got {other:?}"),
         }
     }
 
@@ -940,7 +945,7 @@ mod tests {
     fn configure_list_parses_default() {
         let w = Wrap::try_parse_from(["x", "list"]).unwrap();
         match w.c {
-            ConfigureCommand::List(a) => assert!(!a.show_secrets),
+            ConfigureCommand::Ls(a) => assert!(!a.show_secrets),
             other => panic!("expected List, got {other:?}"),
         }
     }
@@ -949,7 +954,7 @@ mod tests {
     fn configure_list_with_show_secrets_parses() {
         let w = Wrap::try_parse_from(["x", "list", "--show-secrets"]).unwrap();
         match w.c {
-            ConfigureCommand::List(a) => assert!(a.show_secrets),
+            ConfigureCommand::Ls(a) => assert!(a.show_secrets),
             other => panic!("expected List, got {other:?}"),
         }
     }
