@@ -123,14 +123,21 @@ pub struct HostsSetArgs {
     /// a `#N` index from the last `isd ssh hosts` render.
     pub agent: String,
     /// New dial target. Empty string clears the value (back to the
-    /// `(unset)` display). When neither `--dial` nor `--clear` is
-    /// passed the command errors so an operator never accidentally
-    /// no-ops the row.
+    /// `(unset)` display). When neither `--dial`, `--clear`, nor
+    /// `--name` is passed the command errors so an operator never
+    /// accidentally no-ops the row.
     #[arg(long)]
     pub dial: Option<String>,
     /// Clear the stored dial target (equivalent to `--dial ""`).
     #[arg(long, default_value_t = false)]
     pub clear: bool,
+    /// New operator-facing host name (the label rendered in
+    /// `isd ssh hosts`). Use this when the agent-reported value is a
+    /// container hash (docker-in-docker) or just unhelpful. Empty
+    /// string is rejected: the column has no `(unset)` render
+    /// fallback and an empty value would break the display path.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 }
 
 /// CLI flags for `isd ssh audit`. Both filters are optional.
@@ -682,33 +689,56 @@ async fn run_hosts(context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Override the operator-facing dial target on an enrolled host.
+/// Override the operator-facing dial target and / or host name on an
+/// enrolled host.
 ///
 /// Resolves `args.agent` against the controller's host list (matches
 /// against hostname, host id ULID, dial_target, or a `#N` index from
-/// the last `isd ssh hosts` render), then PATCHes the row.
+/// the last `isd ssh hosts` render), then PATCHes the row with
+/// whichever fields the operator passed. `--dial` / `--clear`
+/// targets the dial column; `--name` targets the hostname column.
+/// Both can ship in a single invocation.
 ///
 /// # Errors
 ///
-/// Returns `Err` when neither `--dial` nor `--clear` is set, when the
-/// agent token does not resolve to a host row, or when the PATCH HTTP
-/// call fails.
+/// Returns `Err` when no patchable flag is passed, when `--dial` +
+/// `--clear` collide, when `--name ""` is passed (the server rejects
+/// empty hostnames), when the agent token does not resolve to a host
+/// row, or when the PATCH HTTP call fails.
 async fn run_hosts_set(args: HostsSetArgs, context: Option<&str>) -> Result<()> {
-    let target_value = match (&args.dial, args.clear) {
-        (Some(_), true) => {
-            return Err(anyhow!(
-                "isd ssh hosts set: pass either --dial <target> or --clear, not both"
-            ));
-        }
-        (Some(t), false) => t.clone(),
-        // --clear: send an empty string so the controller nulls the column.
-        (None, true) => String::new(),
-        (None, false) => {
-            return Err(anyhow!(
-                "isd ssh hosts set: pass --dial <target> to set, or --clear to remove"
-            ));
-        }
+    if args.dial.is_some() && args.clear {
+        return Err(anyhow!(
+            "isd ssh hosts set: pass either --dial <target> or --clear, not both"
+        ));
+    }
+    // Compute the dial value: Some("") means "clear", Some(t) means
+    // "set to t", None means "leave the dial column alone".
+    let dial_value: Option<String> = match (&args.dial, args.clear) {
+        (Some(t), false) => Some(t.clone()),
+        (None, true) => Some(String::new()),
+        (None, false) => None,
+        (Some(_), true) => unreachable!("guarded above"),
     };
+
+    // Compute the name value: Some(n) means "set to n". Empty string
+    // is rejected up front so we don't lose the operator's other
+    // flags to a server-side 400.
+    let name_value: Option<String> = match &args.name {
+        Some(n) if n.is_empty() => {
+            return Err(anyhow!(
+                "isd ssh hosts set: --name cannot be empty; pass a non-empty value"
+            ));
+        }
+        Some(n) => Some(n.clone()),
+        None => None,
+    };
+
+    if dial_value.is_none() && name_value.is_none() {
+        return Err(anyhow!(
+            "isd ssh hosts set: pass --dial <target> to set the dial target, \
+             --clear to remove it, or --name <name> to set the host name"
+        ));
+    }
 
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;
@@ -726,28 +756,34 @@ async fn run_hosts_set(args: HostsSetArgs, context: Option<&str>) -> Result<()> 
         .context("decoding hosts JSON for `isd ssh hosts set`")?;
 
     let host_id = resolve_agent_token(&hosts, &args.agent)?;
-    let patched = dial_target::patch_host_dial_target(
+    let patched = dial_target::patch_host_fields(
         &session.client,
         controller_url,
         &host_id,
-        &target_value,
+        dial_value.as_deref(),
+        name_value.as_deref(),
     )
     .await?;
-    if target_value.is_empty() {
-        println!(
-            "cleared dial_target on {} ({})",
-            patched.hostname, patched.id
-        );
-    } else {
-        println!(
-            "set dial_target on {} ({}) -> {}",
-            patched.hostname,
-            patched.id,
-            patched
-                .dial_target
-                .as_deref()
-                .unwrap_or(target_value.as_str())
-        );
+
+    if let Some(name) = name_value.as_deref() {
+        println!("set hostname on {} -> {}", patched.id, name);
+    }
+    match dial_value.as_deref() {
+        Some("") => {
+            println!(
+                "cleared dial_target on {} ({})",
+                patched.hostname, patched.id
+            );
+        }
+        Some(t) => {
+            println!(
+                "set dial_target on {} ({}) -> {}",
+                patched.hostname,
+                patched.id,
+                patched.dial_target.as_deref().unwrap_or(t)
+            );
+        }
+        None => {}
     }
     Ok(())
 }
@@ -1871,6 +1907,66 @@ mod tests {
                 assert_eq!(args.agent, "edge-1");
                 assert!(args.dial.is_none());
                 assert!(args.clear);
+            }
+            other => panic!("expected Hosts(Set(...)), got {other:?}"),
+        }
+    }
+
+    /// `isd ssh hosts set <agent> --name <name>` parses with the
+    /// operator name landing in `HostsSetArgs.name` and no dial
+    /// flags touched.
+    #[test]
+    fn ssh_hosts_set_parses_with_name_flag() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: SshCommand,
+        }
+        let parsed = Wrap::try_parse_from(["wrap", "hosts", "set", "1", "--name", "lausanne"])
+            .expect("parses");
+        match parsed.cmd {
+            SshCommand::Hosts(HostsArgs {
+                command: Some(HostsCommand::Set(args)),
+            }) => {
+                assert_eq!(args.agent, "1");
+                assert_eq!(args.name.as_deref(), Some("lausanne"));
+                assert!(args.dial.is_none());
+                assert!(!args.clear);
+            }
+            other => panic!("expected Hosts(Set(...)), got {other:?}"),
+        }
+    }
+
+    /// `--name` and `--dial` together both land on the parsed args so
+    /// the operator can rename + retarget in one invocation.
+    #[test]
+    fn ssh_hosts_set_parses_name_and_dial_together() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: SshCommand,
+        }
+        let parsed = Wrap::try_parse_from([
+            "wrap",
+            "hosts",
+            "set",
+            "edge-1",
+            "--name",
+            "lausanne",
+            "--dial",
+            "op@10.0.0.7",
+        ])
+        .expect("parses");
+        match parsed.cmd {
+            SshCommand::Hosts(HostsArgs {
+                command: Some(HostsCommand::Set(args)),
+            }) => {
+                assert_eq!(args.agent, "edge-1");
+                assert_eq!(args.name.as_deref(), Some("lausanne"));
+                assert_eq!(args.dial.as_deref(), Some("op@10.0.0.7"));
+                assert!(!args.clear);
             }
             other => panic!("expected Hosts(Set(...)), got {other:?}"),
         }

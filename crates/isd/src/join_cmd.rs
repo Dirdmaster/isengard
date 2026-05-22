@@ -21,6 +21,17 @@ pub struct JoinArgs {
     /// Packed join-token (TK<bytes>.<fingerprint>) from `isd join-token`.
     #[arg(long)]
     pub token: String,
+
+    /// Operator-facing host name to record on the new agent's host
+    /// row. This is the label rendered in `isd ssh hosts`, NOT the
+    /// agent's container hostname (which is the Docker short hash on
+    /// docker-in-docker setups). When omitted, the target daemon's
+    /// `docker info` name is used; when that is also empty the
+    /// agent-reported value (container hash) is kept and the
+    /// operator can override later via
+    /// `isd ssh hosts set <agent> --name <foo>`.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 }
 
 /// Bundled compose recipe used to bring the agent up. Embedded at
@@ -83,12 +94,53 @@ pub async fn run(args: JoinArgs, context: Option<&str>) -> Result<()> {
 
     poll_for_enrolment(&args.controller).await?;
     // Best-effort: PATCH the just-enrolled host with the operator's
-    // dial target derived from the docker context URL. Skipped for
-    // non-SSH contexts; failures are logged + swallowed.
-    crate::dial_target::patch_latest_host_dial_target_best_effort(&args.controller, &docker_uri)
-        .await;
+    // dial target (derived from the docker context URL) AND an
+    // operator-facing host name (from --name or the target daemon's
+    // info.name). Failures are logged + swallowed.
+    record_host_metadata(&args.controller, &docker_uri, args.name.as_deref()).await;
     println!("Joined cluster as agent.");
     Ok(())
+}
+
+/// Best-effort PATCH of the just-enrolled host row with the
+/// operator's host name (from `--name` or `docker info`) and dial
+/// target (from the docker context URL). Mirrors `step_record_host_metadata`
+/// in `init_cmd.rs`; kept separate because `isd join` already knows the
+/// controller URL up front (passed by the operator) so we don't run
+/// the runtime discovery dance.
+///
+/// Failures are reported on stderr and swallowed: enrollment already
+/// succeeded; the operator can recover with
+/// `isd ssh hosts set <agent> --name <foo> --dial <target>`.
+async fn record_host_metadata(controller_url: &str, docker_uri: &str, name_override: Option<&str>) {
+    // Dial target: only set for SSH-backed docker contexts.
+    let dial_target = crate::docker_context::dial_target_from_docker_uri(docker_uri);
+
+    // Host name: try `docker info` on the target context. Skipped on
+    // backend-open failure so a busted SSH tunnel doesn't kill the
+    // enrollment summary; `--name` still works because it doesn't
+    // need the daemon round-trip.
+    let daemon_name = match isd_runtime::DockerBackend::from_uri(docker_uri).await {
+        Ok(backend) => match crate::host_name::resolve_from_docker_info(backend.client()).await {
+            Ok(opt) => opt,
+            Err(e) => {
+                eprintln!("isd join: docker info name lookup failed: {e:#}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("isd join: skipping docker info name lookup ({e:#})");
+            None
+        }
+    };
+    let hostname = crate::host_name::pick_enroll_hostname(name_override, daemon_name.as_deref());
+
+    crate::host_name::patch_latest_host_best_effort(
+        controller_url,
+        hostname.as_deref(),
+        dial_target.as_deref(),
+    )
+    .await;
 }
 
 /// Poll `GET /<controller>/api/v1/hosts` until the agent shows up.
@@ -133,4 +185,55 @@ async fn poll_for_enrolment(controller_url: &str) -> Result<()> {
     Err(anyhow!(
         "agent did not enrol within 60s. Check `docker logs isd-agent` on the target host."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `isd join --name <foo>` lands the operator-supplied name in
+    /// `JoinArgs.name` so the post-enroll PATCH carries it.
+    #[test]
+    fn join_args_parses_name_flag() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            join: JoinArgs,
+        }
+        let parsed = Wrap::try_parse_from([
+            "wrap",
+            "--controller",
+            "https://controller.local:9417",
+            "--token",
+            "TKxxxxx.yyyyy",
+            "--name",
+            "geneva",
+        ])
+        .expect("parses");
+        assert_eq!(parsed.join.name.as_deref(), Some("geneva"));
+        assert_eq!(parsed.join.controller, "https://controller.local:9417");
+        assert_eq!(parsed.join.token, "TKxxxxx.yyyyy");
+    }
+
+    /// Omitting `--name` leaves the field `None` so the post-enroll
+    /// PATCH falls back to the daemon's `docker info` name.
+    #[test]
+    fn join_args_default_name_is_none() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            join: JoinArgs,
+        }
+        let parsed = Wrap::try_parse_from([
+            "wrap",
+            "--controller",
+            "https://controller.local:9417",
+            "--token",
+            "TKxxxxx.yyyyy",
+        ])
+        .expect("parses");
+        assert!(parsed.join.name.is_none());
+    }
 }

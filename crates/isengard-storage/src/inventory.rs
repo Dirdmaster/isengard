@@ -251,6 +251,40 @@ impl Inventory {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Override the operator-facing host name for a host row. By
+    /// default the row's `hostname` is whatever the agent reported on
+    /// enroll (often a Docker container hash like `60999df9604f` on
+    /// docker-in-docker setups). The CLI captures a real name from
+    /// `docker info` on the target context (or accepts `--name`) and
+    /// PATCHes the row so `isd ssh hosts` shows a usable label.
+    ///
+    /// Empty `name` is rejected: the column is part of the operator's
+    /// display path and `(unset)` is not a valid render here (unlike
+    /// dial_target, which has a separate render fallback). Callers
+    /// that want to revert to the agent-reported value should re-PATCH
+    /// with the original string.
+    ///
+    /// The controller never updates `hostname` after enrollment (no
+    /// heartbeat path writes the column), so this override sticks for
+    /// the lifetime of the host row.
+    ///
+    /// Returns whether a row was actually updated (false when the
+    /// host does not exist).
+    pub async fn set_host_hostname(&self, id: HostId, name: &str) -> Result<bool> {
+        if name.is_empty() {
+            return Err(Error::Decode {
+                reason: "hostname cannot be empty".into(),
+            });
+        }
+        let id_bytes: &[u8] = &id.to_bytes();
+        let result = sqlx::query("UPDATE hosts SET hostname = ? WHERE id = ?")
+            .bind(name)
+            .bind(id_bytes)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// v0.3b: read the cached LAN IP for a host (set via `set_host_lan_ip`).
     /// Returns `None` if the host doesn't exist or the metadata has no
     /// `lan_ip` key yet (no agent connection has landed since boot).
@@ -1205,6 +1239,90 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok);
+    }
+
+    /// `set_host_hostname` overrides the agent-reported value (a
+    /// container hash on docker-in-docker setups) with an operator
+    /// name. `get_host` reflects the new value on subsequent reads.
+    #[tokio::test]
+    async fn set_host_hostname_overrides_enrolled_value() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let id = inv.enroll_host(sample_enrollment()).await.unwrap();
+        let before = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(before.hostname, sample_enrollment().hostname);
+
+        let ok = inv.set_host_hostname(id, "lausanne").await.unwrap();
+        assert!(ok);
+        let after = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(after.hostname, "lausanne");
+
+        // Overwrite with a different value.
+        let ok = inv.set_host_hostname(id, "geneva").await.unwrap();
+        assert!(ok);
+        let after = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(after.hostname, "geneva");
+    }
+
+    /// Empty input is rejected: the `hostname` column is part of the
+    /// operator's display path and `(unset)` is not a valid render.
+    #[tokio::test]
+    async fn set_host_hostname_rejects_empty() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let id = inv.enroll_host(sample_enrollment()).await.unwrap();
+        let err = inv.set_host_hostname(id, "").await.unwrap_err();
+        match err {
+            Error::Decode { reason } => {
+                assert!(reason.contains("hostname"), "{reason}");
+            }
+            other => panic!("expected Decode error, got {other:?}"),
+        }
+    }
+
+    /// Unknown host returns false (matches `set_host_dial_target`).
+    #[tokio::test]
+    async fn set_host_hostname_unknown_host_returns_false() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let ok = inv.set_host_hostname(HostId::new(), "x").await.unwrap();
+        assert!(!ok);
+    }
+
+    /// The heartbeat path only calls `touch_host` + the metadata
+    /// setters; it never updates `hostname`. After a PATCH overrides
+    /// the agent-reported value, subsequent `touch_host` calls must
+    /// leave that override in place. This is the storage-level
+    /// guarantee behind the "Option B" choice in the host-name PR:
+    /// no separate `reported_hostname` column is needed because no
+    /// post-enroll code path writes to `hostname`.
+    #[tokio::test]
+    async fn touch_host_does_not_overwrite_patched_hostname() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let id = inv
+            .enroll_host(EnrollHost {
+                fingerprint: "fp".into(),
+                // Container-hash style hostname the docker-in-docker
+                // agent would report.
+                hostname: "60999df9604f".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "0.7.0".into(),
+                docker_version: "27.0".into(),
+            })
+            .await
+            .unwrap();
+
+        // PATCH overrides the hash with a real operator name.
+        let ok = inv.set_host_hostname(id, "lausanne").await.unwrap();
+        assert!(ok);
+
+        // Simulate three heartbeats landing.
+        for ts in [1_700_000_000, 1_700_000_030, 1_700_000_060] {
+            assert!(inv.touch_host(id, ts).await.unwrap());
+        }
+
+        // The override survived.
+        let host = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(host.hostname, "lausanne");
+        assert_eq!(host.last_seen_at, Some(1_700_000_060));
     }
 
     /// Migration 0032: the `dial_target` column lands on `hosts`

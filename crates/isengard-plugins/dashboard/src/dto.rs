@@ -196,6 +196,15 @@ pub struct PatchHostRequest {
     /// overridable via `isd ssh hosts set <agent> --dial <target>`.
     #[serde(default)]
     pub dial_target: Option<String>,
+    /// Operator-facing host name to set on the host row. Send `null`
+    /// (or omit) to leave the value unchanged. Empty string is
+    /// rejected with 400 since `hostname` is part of the display
+    /// path. Captured by the CLI at enroll time from the target
+    /// docker daemon's `info.name` (or `--name <NAME>` override) so
+    /// `isd ssh hosts` shows a real label instead of the agent's
+    /// container hash.
+    #[serde(default)]
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

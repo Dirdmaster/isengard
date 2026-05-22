@@ -37,6 +37,17 @@ pub struct InitArgs {
     /// is to bundle the agent, matching `docker swarm init` UX.
     #[arg(long)]
     pub no_agent: bool,
+
+    /// Operator-facing host name to record on the bundled agent's
+    /// host row. This is the label rendered in `isd ssh hosts`, NOT
+    /// the agent's container hostname (which is the Docker short
+    /// hash on docker-in-docker setups). When omitted, the daemon's
+    /// `docker info` name is used; when that is also empty the
+    /// agent-reported value (container hash) is kept and the
+    /// operator can override later via
+    /// `isd ssh hosts set <agent> --name <foo>`.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 }
 
 /// Embedded compose recipe used by `init`, `join`, and `upgrade`. Single
@@ -80,7 +91,7 @@ pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
     if !args.no_agent {
         step_compose_up_agent(&docker_uri, &join_token).await?;
         step_wait_for_agent_enrolled(&docker_uri).await?;
-        step_record_dial_target(&docker_uri).await;
+        step_record_host_metadata(&docker_uri, args.name.as_deref()).await;
     }
 
     let join_block = step_render_join_block().await?;
@@ -88,32 +99,54 @@ pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-// === Step 8b: PATCH the freshly enrolled host with the operator's dial target ===
+// === Step 8b: PATCH the freshly enrolled host with name + dial target ===
 
 /// Step 8b: best-effort PATCH the just-enrolled host with the
-/// operator's dial target derived from `docker_uri`. Skipped for
-/// non-SSH docker contexts (no operator-typeable target to capture).
-/// Failures are logged + swallowed: enrollment already succeeded, the
-/// operator can recover with
-/// `isd ssh hosts set <agent> --dial <target>`.
-async fn step_record_dial_target(docker_uri: &str) {
+/// operator's dial target (derived from `docker_uri`) and an
+/// operator-facing host name (from `--name`, or the docker daemon's
+/// `info.name` on the target context). Skipped for non-SSH docker
+/// contexts when no operator-typeable target is available, but the
+/// host name PATCH still runs whenever a name can be resolved.
+///
+/// Failures are logged + swallowed: enrollment already succeeded.
+/// The operator can recover via
+/// `isd ssh hosts set <agent> --name <foo> --dial <target>`.
+async fn step_record_host_metadata(docker_uri: &str, name_override: Option<&str>) {
     let docker = match isd_runtime::DockerBackend::from_uri(docker_uri).await {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("isd init: dial_target capture skipped (docker: {e:#})");
+            eprintln!("isd init: host metadata capture skipped (docker: {e:#})");
             return;
         }
     };
     let endpoint = match isd_runtime::discover(docker.client()).await {
         Ok(ep) => ep,
         Err(e) => {
-            eprintln!("isd init: dial_target capture skipped (discover: {e:#})");
+            eprintln!("isd init: host metadata capture skipped (discover: {e:#})");
             return;
         }
     };
     let controller_url = format!("http://{}:{}", endpoint.host_ip, endpoint.host_port);
-    crate::dial_target::patch_latest_host_dial_target_best_effort(&controller_url, docker_uri)
-        .await;
+
+    // Dial target: only set for SSH-backed docker contexts.
+    let dial_target = crate::docker_context::dial_target_from_docker_uri(docker_uri);
+
+    // Host name: --name wins; else docker info; else leave as-is.
+    let daemon_name = match crate::host_name::resolve_from_docker_info(docker.client()).await {
+        Ok(opt) => opt,
+        Err(e) => {
+            eprintln!("isd init: docker info name lookup failed: {e:#}");
+            None
+        }
+    };
+    let hostname = crate::host_name::pick_enroll_hostname(name_override, daemon_name.as_deref());
+
+    crate::host_name::patch_latest_host_best_effort(
+        &controller_url,
+        hostname.as_deref(),
+        dial_target.as_deref(),
+    )
+    .await;
 }
 
 // === Step 1: no existing controller (or --force tears it down) ===
@@ -557,6 +590,37 @@ mod tests {
     fn extract_join_token_returns_none_on_empty() {
         assert!(extract_join_token("").is_none());
         assert!(extract_join_token("   \n  \n").is_none());
+    }
+
+    /// `isd init --name <foo>` lands the operator-supplied name in
+    /// `InitArgs.name` so step 8b can PATCH it onto the bundled
+    /// agent's host row.
+    #[test]
+    fn init_args_parses_name_flag() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            init: InitArgs,
+        }
+        let parsed = Wrap::try_parse_from(["wrap", "--name", "lausanne"]).expect("parses");
+        assert_eq!(parsed.init.name.as_deref(), Some("lausanne"));
+        assert!(!parsed.init.force);
+        assert!(!parsed.init.no_agent);
+    }
+
+    /// Omitting `--name` leaves the field `None` so step 8b falls
+    /// back to the daemon's `docker info` name.
+    #[test]
+    fn init_args_default_name_is_none() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            init: InitArgs,
+        }
+        let parsed = Wrap::try_parse_from(["wrap"]).expect("parses");
+        assert!(parsed.init.name.is_none());
     }
 
     // Integration-style; runs only against a real local docker.
