@@ -23,10 +23,26 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use isengard_storage::SettingStore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::secrets::SecretsStore;
+
+/// One row in a `routing.zones` value.
+///
+/// Each zone carries an operator-facing name (e.g. `weavers.engineering`)
+/// plus a `wildcard` flag: when `true` the future DNS-01 ACME solver
+/// will request `*.<name>` instead of per-host certificates. PR C only
+/// captures the intent; PR D wires it to the solver.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Zone {
+    /// Apex zone name. Non-empty UTF-8, validated at write time.
+    pub name: String,
+    /// Operator intent: request a wildcard cert for this zone instead
+    /// of per-host certs.
+    #[serde(default)]
+    pub wildcard: bool,
+}
 
 /// Type of a config value.
 ///
@@ -50,12 +66,19 @@ pub enum KeyType {
     Bool,
     /// Ordered list of non-empty UTF-8 strings.
     ///
-    /// Persisted as a JSON array. Used for operator-managed multi-value
-    /// keys like `routing.zones`. Validation rejects mixed-type arrays,
-    /// non-string elements, and empty-string elements so the wire shape
-    /// stays predictable for downstream consumers (the cascade picker on
-    /// `routing.default_zone`, for instance).
+    /// Persisted as a JSON array. Reserved for future operator-managed
+    /// multi-value keys that do not need per-row metadata. The legacy
+    /// `routing.zones` shape (a plain array of strings) is auto-migrated
+    /// to [`KeyType::ZoneList`] on read; the [`KeyType::StringList`]
+    /// variant remains so the schema stays expressive for future keys.
     StringList,
+    /// Ordered list of [`Zone`] entries.
+    ///
+    /// Persisted as a JSON array of `{ "name": String, "wildcard": bool }`
+    /// objects. Used by `routing.zones` so each zone carries its own
+    /// wildcard-cert intent. Validation rejects non-object elements,
+    /// missing or empty `name`, and non-bool `wildcard`.
+    ZoneList,
 }
 
 /// One row in the static schema.
@@ -134,6 +157,42 @@ impl SchemaEntry {
                 }
                 Ok(())
             }
+            (KeyType::ZoneList, Value::Array(items)) => {
+                for (i, item) in items.iter().enumerate() {
+                    let Value::Object(obj) = item else {
+                        return Err(anyhow!(
+                            "invalid value for {} (ZoneList): element {i} is not an object: {item}",
+                            self.key
+                        ));
+                    };
+                    match obj.get("name") {
+                        Some(Value::String(s)) if !s.is_empty() => {}
+                        Some(Value::String(_)) => {
+                            return Err(anyhow!(
+                                "invalid value for {} (ZoneList): element {i} has empty name",
+                                self.key
+                            ));
+                        }
+                        _ => {
+                            return Err(anyhow!(
+                                "invalid value for {} (ZoneList): element {i} is missing a string name",
+                                self.key
+                            ));
+                        }
+                    }
+                    // `wildcard` is optional (defaults to false via serde),
+                    // but if present must be a bool.
+                    if let Some(w) = obj.get("wildcard") {
+                        if !w.is_boolean() {
+                            return Err(anyhow!(
+                                "invalid value for {} (ZoneList): element {i} has non-bool wildcard: {w}",
+                                self.key
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
             _ => Err(anyhow!(
                 "invalid value for {} (type {:?}): {}",
                 self.key,
@@ -187,9 +246,9 @@ impl Schema {
                     key: "routing.zones",
                     display_name: "DNS zones",
                     category: "Routing",
-                    ty: KeyType::StringList,
+                    ty: KeyType::ZoneList,
                     default: None,
-                    doc: "DNS zones you manage (e.g. weavers.engineering). routing.default_zone picks from this list.",
+                    doc: "DNS zones you manage. Each entry carries a wildcard-cert intent flag (true = request *.<zone> via DNS-01).",
                     choices: None,
                 },
                 SchemaEntry {
@@ -275,6 +334,36 @@ impl Schema {
             .map(|(_, k)| k.to_string())
             .collect()
     }
+}
+
+/// Auto-migration: legacy `routing.zones` rows stored as
+/// `["a.com", "b.com"]` (plain `StringList` shape) become
+/// `[{ "name": "a.com", "wildcard": false }, ...]` on read.
+///
+/// Returns `Some(json)` when `v` is a JSON array whose elements are all
+/// non-empty strings; `None` for any other shape (already-migrated arrays
+/// of objects, scalars, mixed-type arrays, etc.). The caller falls back
+/// to the value as-is when this returns `None`.
+fn migrate_string_list_to_zone_list(v: &Value) -> Option<Value> {
+    let items = v.as_array()?;
+    if items.is_empty() {
+        // Empty array is ambiguous; treat as already-shaped to avoid
+        // re-emitting a log line every time the list is read while empty.
+        return None;
+    }
+    let mut migrated = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::String(s) if !s.is_empty() => {
+                migrated.push(serde_json::json!({
+                    "name": s,
+                    "wildcard": false,
+                }));
+            }
+            _ => return None,
+        }
+    }
+    Some(Value::Array(migrated))
 }
 
 /// Levenshtein distance with O(min(|a|,|b|)) extra memory.
@@ -427,7 +516,25 @@ impl ConfigDispatcher {
             }
         } else {
             match self.settings.get(key).await? {
-                Some(v) => Ok(Some(ConfigValue::Set(v))),
+                Some(v) => {
+                    // ZoneList legacy migration: a previous PR stored
+                    // `routing.zones` as a plain array of strings. Map
+                    // each string to `{ name, wildcard: false }` on read
+                    // so old rows transparently surface as the new shape.
+                    // The row only gets persisted in the new shape on the
+                    // next `put`.
+                    if matches!(entry.ty, KeyType::ZoneList) {
+                        if let Some(migrated) = migrate_string_list_to_zone_list(&v) {
+                            tracing::info!(
+                                target: "isd-configure",
+                                "auto-migrated routing.zones from StringList to ZoneList ({} entries)",
+                                migrated.as_array().map(|a| a.len()).unwrap_or(0)
+                            );
+                            return Ok(Some(ConfigValue::Set(migrated)));
+                        }
+                    }
+                    Ok(Some(ConfigValue::Set(v)))
+                }
                 None => Ok(entry.default.clone().map(ConfigValue::Default)),
             }
         }
@@ -544,45 +651,99 @@ mod tests {
     }
 
     #[test]
-    fn schema_validates_string_list_accepts_non_empty_strings() {
+    fn schema_validates_zone_list_accepts_objects() {
         let schema = Schema::v01();
         let entry = schema.get("routing.zones").unwrap();
-        assert_eq!(entry.ty, KeyType::StringList);
+        assert_eq!(entry.ty, KeyType::ZoneList);
+        // Empty list is fine.
         assert!(entry.validate(&json!([])).is_ok());
+        // Full shape with both flags is fine.
         assert!(
             entry
-                .validate(&json!(["a.com", "b.com", "weavers.engineering"]))
+                .validate(&json!([
+                    {"name": "weavers.engineering", "wildcard": true},
+                    {"name": "vallee.casa", "wildcard": false},
+                ]))
                 .is_ok()
         );
+        // Wildcard defaults to false when omitted on the wire.
+        assert!(entry.validate(&json!([{"name": "a.com"}])).is_ok());
     }
 
     #[test]
-    fn schema_validates_string_list_rejects_non_array() {
+    fn schema_validates_zone_list_rejects_non_array() {
         let schema = Schema::v01();
         let entry = schema.get("routing.zones").unwrap();
         assert!(entry.validate(&json!("a.com")).is_err());
         assert!(entry.validate(&json!(42)).is_err());
-        assert!(entry.validate(&json!({"zones": ["a.com"]})).is_err());
+        assert!(
+            entry
+                .validate(&json!({"zones": [{"name": "a.com"}]}))
+                .is_err()
+        );
     }
 
     #[test]
-    fn schema_validates_string_list_rejects_non_string_elements() {
+    fn schema_validates_zone_list_rejects_non_object_elements() {
         let schema = Schema::v01();
         let entry = schema.get("routing.zones").unwrap();
-        let err = entry.validate(&json!(["a.com", 42])).unwrap_err();
+        let err = entry.validate(&json!(["a.com"])).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("element 1"), "msg: {msg}");
-        assert!(msg.contains("not a string"), "msg: {msg}");
+        assert!(msg.contains("element 0"), "msg: {msg}");
+        assert!(msg.contains("not an object"), "msg: {msg}");
     }
 
     #[test]
-    fn schema_validates_string_list_rejects_empty_element() {
+    fn schema_validates_zone_list_rejects_missing_name() {
         let schema = Schema::v01();
         let entry = schema.get("routing.zones").unwrap();
-        let err = entry.validate(&json!(["a.com", ""])).unwrap_err();
+        let err = entry.validate(&json!([{"wildcard": true}])).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("element 1"), "msg: {msg}");
-        assert!(msg.contains("empty"), "msg: {msg}");
+        assert!(msg.contains("element 0"), "msg: {msg}");
+        assert!(msg.contains("missing"), "msg: {msg}");
+    }
+
+    #[test]
+    fn schema_validates_zone_list_rejects_empty_name() {
+        let schema = Schema::v01();
+        let entry = schema.get("routing.zones").unwrap();
+        let err = entry.validate(&json!([{"name": ""}])).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("element 0"), "msg: {msg}");
+        assert!(msg.contains("empty name"), "msg: {msg}");
+    }
+
+    #[test]
+    fn schema_validates_zone_list_rejects_non_bool_wildcard() {
+        let schema = Schema::v01();
+        let entry = schema.get("routing.zones").unwrap();
+        let err = entry
+            .validate(&json!([{"name": "a.com", "wildcard": "yes"}]))
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("element 0"), "msg: {msg}");
+        assert!(msg.contains("non-bool wildcard"), "msg: {msg}");
+    }
+
+    // StringList is still part of the schema language even though no
+    // current v0.1 key uses it. Exercise the validator with a synthetic
+    // entry so the variant cannot rot.
+    #[test]
+    fn schema_validates_string_list_via_synthetic_entry() {
+        let entry = SchemaEntry {
+            key: "synthetic.list",
+            display_name: "Synthetic list",
+            category: "Routing",
+            ty: KeyType::StringList,
+            default: None,
+            doc: "",
+            choices: None,
+        };
+        assert!(entry.validate(&json!([])).is_ok());
+        assert!(entry.validate(&json!(["a", "b"])).is_ok());
+        assert!(entry.validate(&json!(["a", 1])).is_err());
+        assert!(entry.validate(&json!(["a", ""])).is_err());
+        assert!(entry.validate(&json!("scalar")).is_err());
     }
 
     #[test]
@@ -723,11 +884,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_string_list_round_trips_through_setting_store() {
+    async fn put_zone_list_round_trips_through_setting_store() {
         let d = test_dispatcher().await;
         d.put(
             "routing.zones",
-            json!(["weavers.engineering", "vallee.casa"]),
+            json!([
+                {"name": "weavers.engineering", "wildcard": true},
+                {"name": "vallee.casa", "wildcard": false},
+            ]),
             Some("test"),
         )
         .await
@@ -736,20 +900,84 @@ mod tests {
         assert_eq!(
             v,
             Some(ConfigValue::Set(json!([
-                "weavers.engineering",
-                "vallee.casa"
+                {"name": "weavers.engineering", "wildcard": true},
+                {"name": "vallee.casa", "wildcard": false},
             ])))
         );
     }
 
     #[tokio::test]
-    async fn put_string_list_rejects_mixed_types() {
+    async fn put_zone_list_rejects_non_object_elements() {
         let d = test_dispatcher().await;
         let err = d
-            .put("routing.zones", json!(["ok.com", 42]), None)
+            .put("routing.zones", json!(["ok.com"]), None)
             .await
             .unwrap_err();
-        assert!(format!("{err}").contains("not a string"));
+        assert!(format!("{err}").contains("not an object"));
+    }
+
+    #[tokio::test]
+    async fn get_zone_list_auto_migrates_legacy_string_list_shape() {
+        // Simulate a row written by PR #247 (plain StringList shape).
+        // The new ZoneList read path maps each string to
+        // `{ name, wildcard: false }` transparently.
+        let d = test_dispatcher().await;
+        d.settings
+            .upsert(
+                "routing.zones",
+                &json!(["weavers.engineering", "vallee.casa"]),
+                Some("legacy"),
+            )
+            .await
+            .unwrap();
+        let v = d.get("routing.zones").await.unwrap();
+        assert_eq!(
+            v,
+            Some(ConfigValue::Set(json!([
+                {"name": "weavers.engineering", "wildcard": false},
+                {"name": "vallee.casa", "wildcard": false},
+            ])))
+        );
+    }
+
+    #[test]
+    fn migrate_string_list_to_zone_list_handles_clean_case() {
+        let v = json!(["a.com", "b.com"]);
+        let migrated = migrate_string_list_to_zone_list(&v).unwrap();
+        assert_eq!(
+            migrated,
+            json!([
+                {"name": "a.com", "wildcard": false},
+                {"name": "b.com", "wildcard": false},
+            ])
+        );
+    }
+
+    #[test]
+    fn migrate_string_list_returns_none_for_already_migrated_shape() {
+        let v = json!([{"name": "a.com", "wildcard": true}]);
+        assert!(migrate_string_list_to_zone_list(&v).is_none());
+    }
+
+    #[test]
+    fn migrate_string_list_returns_none_for_mixed_array() {
+        let v = json!(["a.com", 42]);
+        assert!(migrate_string_list_to_zone_list(&v).is_none());
+    }
+
+    #[test]
+    fn migrate_string_list_returns_none_for_empty_array() {
+        let v = json!([]);
+        // Empty array is ambiguous; treat as already-shaped so the call
+        // site does not emit a migration log line on every empty read.
+        assert!(migrate_string_list_to_zone_list(&v).is_none());
+    }
+
+    #[test]
+    fn migrate_string_list_returns_none_for_scalar() {
+        assert!(migrate_string_list_to_zone_list(&json!("a.com")).is_none());
+        assert!(migrate_string_list_to_zone_list(&json!(42)).is_none());
+        assert!(migrate_string_list_to_zone_list(&Value::Null).is_none());
     }
 
     #[tokio::test]
