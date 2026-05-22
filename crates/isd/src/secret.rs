@@ -1,11 +1,13 @@
-//! `isd secret set` / `isd secret ls` / `isd secret rm` (v0.3.6
-//! managed-secrets store). `put` and `list` are kept as deprecated
-//! aliases per the lexicon spec.
+//! `isd secret set` / `isd secret ls` / `isd secret rm` / `isd secret
+//! get` (v0.3.6 managed-secrets store). `put` and `list` are kept as
+//! deprecated aliases per the lexicon spec.
 //!
-//! Talks to the dashboard's `/api/v1/secrets[/<name>]` endpoints. There is
-//! intentionally NO `isd secret get`: secrets are write-only from the
-//! operator side. The agent is the only consumer that ever sees the
-//! plaintext (over the FetchSecret mTLS RPC).
+//! Talks to the dashboard's `/api/v1/secrets[/<name>]` endpoints over
+//! the operator's TLS/SSH transport. The v0.7 CLI lexicon spec added
+//! `isd secret get <name>`: it prints the plaintext value to stdout so
+//! the operator can pipe it into scripts. The agent still fetches its
+//! own values via the FetchSecret mTLS RPC; the new operator route
+//! does not replace that path.
 //!
 //! All three subcommands reuse the [`pinned_session`](crate::login::pinned_session)
 //! pattern from `compose_cmd.rs`: load the credentials file, pin the CA
@@ -59,8 +61,9 @@ pub struct SecretArgs {
 
 /// Sub-verbs under `isd secret`. Canonical verbs follow the lexicon
 /// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
-/// `set` / `ls` / `rm`. `put` and `list` are kept as deprecated aliases
-/// for one minor version so muscle memory and scripts keep working.
+/// `set` / `ls` / `rm` / `get`. `put` and `list` are kept as deprecated
+/// aliases for one minor version so muscle memory and scripts keep
+/// working.
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
     /// Upsert a secret value.
@@ -69,6 +72,8 @@ pub enum SecretCommand {
     /// List secret names (never values).
     #[command(alias = "list")]
     Ls(LsArgs),
+    /// Print one secret's plaintext value to stdout (operator can pipe).
+    Get(GetArgs),
     /// Delete a secret.
     Rm(RmArgs),
 }
@@ -86,11 +91,28 @@ pub struct SetArgs {
     pub scope: Scope,
 }
 
+/// CLI flags for `isd secret get`.
+///
+/// `name` is optional: bare `isd secret get` opens the same picker as
+/// `secret rm` and prints the picked secret's value. On a non-TTY
+/// stdout the helper errors out instead of hanging.
+#[derive(Debug, Args)]
+pub struct GetArgs {
+    /// Secret name. Omit to open the picker.
+    pub name: Option<String>,
+}
+
 /// CLI flags for `isd secret rm`.
+///
+/// `name` is optional: bare `isd secret rm` opens an interactive picker
+/// over the current context's secrets (per the v0.7 CLI lexicon spec,
+/// every list-or-pick verb falls back to the picker when no positional
+/// is supplied). On a non-TTY stdout the helper errors out with a
+/// clear message instead of hanging.
 #[derive(Debug, Args)]
 pub struct RmArgs {
-    /// Secret name to delete.
-    pub name: String,
+    /// Secret name to delete. Omit to open the picker.
+    pub name: Option<String>,
     /// Apply to one context or every saved context.
     #[arg(long, value_enum, default_value_t = Scope::Context)]
     pub scope: Scope,
@@ -142,6 +164,7 @@ pub async fn run(args: SecretArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         SecretCommand::Set(a) => run_set(a, context).await,
         SecretCommand::Ls(a) => run_ls(a, context).await,
+        SecretCommand::Get(a) => run_get(a, context).await,
         SecretCommand::Rm(a) => run_rm(a, context).await,
     }
 }
@@ -385,17 +408,59 @@ pub(crate) fn classify_coverage(present_in: usize, reachable: usize) -> &'static
     }
 }
 
-/// Delete a secret in one context or across every saved context.
+/// `isd secret get [<name>]`: fetch one secret's plaintext value over
+/// HTTPS and print it to stdout. When `args.name` is omitted, opens
+/// the picker so the operator can pick a name.
+///
+/// Output is `println!(value)` so scripts get the value plus a single
+/// trailing newline. Operators piping to a file or another command
+/// can strip the newline with `tr -d '\n'` if needed.
+async fn run_get(args: GetArgs, context: Option<&str>) -> Result<()> {
+    let context_owned = context.map(str::to_owned);
+    let name = crate::picker_or_arg::pick_or_arg(args.name, || async {
+        pick_secret_name(context_owned.as_deref()).await
+    })
+    .await?;
+    let session = Session::open(context).await?;
+    let value = fetch_secret_value(&session, &name).await?;
+    println!("{value}");
+    Ok(())
+}
+
+/// Delete a secret in one context or across every saved context. When
+/// `args.name` is omitted, opens an interactive picker over the current
+/// context's secrets (lexicon spec: every command of shape
+/// `isd <ns> <verb> [<target>]` falls back to a picker).
 async fn run_rm(args: RmArgs, context: Option<&str>) -> Result<()> {
+    let context_owned = context.map(str::to_owned);
+    let name = crate::picker_or_arg::pick_or_arg(args.name, || async {
+        pick_secret_name(context_owned.as_deref()).await
+    })
+    .await?;
     match args.scope {
         Scope::Context => {
             let session = Session::open(context).await?;
-            delete_secret(&session, &args.name).await?;
-            println!("Removed secret {:?}.", args.name);
+            delete_secret(&session, &name).await?;
+            println!("Removed secret {:?}.", name);
             Ok(())
         }
-        Scope::Global => run_rm_global(&args.name).await,
+        Scope::Global => run_rm_global(&name).await,
     }
+}
+
+/// Open the generic picker over the current context's secret names.
+/// Returns the picked name (or `None` on Esc / Ctrl-C). Empty list
+/// short-circuits with an actionable error.
+async fn pick_secret_name(context: Option<&str>) -> Result<Option<String>> {
+    let session = Session::open(context).await?;
+    let entries = list_secrets(&session).await?;
+    if entries.is_empty() {
+        return Err(anyhow!(
+            "no secrets stored in this context; nothing to pick from"
+        ));
+    }
+    let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+    crate::picker::pick(names, "NAME", "filter secrets...").await
 }
 
 /// Walk every saved context and DELETE the secret in each. Best-effort:
@@ -528,6 +593,38 @@ async fn list_secrets(session: &Session) -> Result<Vec<SecretEntry>> {
         .with_context(|| format!("GET {url}"))?;
     let entries: Vec<SecretEntry> = resp.error_for_status()?.json().await?;
     Ok(entries)
+}
+
+/// Response body for `GET /api/v1/secrets/<name>/value`. Mirrors the
+/// dashboard's `SecretValueResponse` shape (carries the plaintext).
+#[derive(Debug, Deserialize)]
+struct ValueResponse {
+    /// Plaintext value as stored.
+    value: String,
+}
+
+/// `GET /api/v1/secrets/<name>/value`: pull the plaintext over the
+/// session's TLS/SSH channel. 404 is surfaced as a "not found" error
+/// so the CLI exits non-zero with a clear message.
+async fn fetch_secret_value(session: &Session, name: &str) -> Result<String> {
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/secrets/{name}/value");
+    let resp = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!("secret {name:?} not found"));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("GET {url} -> {status}: {body}"));
+    }
+    let body: ValueResponse = resp.json().await.context("decoding secret value JSON")?;
+    Ok(body.value)
 }
 
 /// `DELETE /api/v1/secrets/<name>` with 404 surfaced as a "not found"
@@ -817,7 +914,61 @@ mod tests {
         match w.c {
             SecretCommand::Rm(a) => {
                 assert_eq!(a.scope, Scope::Global);
-                assert_eq!(a.name, "cf_token");
+                assert_eq!(a.name.as_deref(), Some("cf_token"));
+            }
+            other => panic!("expected Rm, got {other:?}"),
+        }
+    }
+
+    /// `isd secret get <name>` parses with the new `Get` variant.
+    #[test]
+    fn get_args_parses_with_name() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: SecretCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "get", "cf_token"]).unwrap();
+        match w.c {
+            SecretCommand::Get(a) => assert_eq!(a.name.as_deref(), Some("cf_token")),
+            other => panic!("expected Get, got {other:?}"),
+        }
+    }
+
+    /// Bare `isd secret get` (no name) parses with `name = None` so the
+    /// runtime can fall into the picker per the v0.7 lexicon spec.
+    #[test]
+    fn get_args_bare_parses_with_no_name() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: SecretCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "get"]).unwrap();
+        match w.c {
+            SecretCommand::Get(a) => assert!(a.name.is_none()),
+            other => panic!("expected Get, got {other:?}"),
+        }
+    }
+
+    /// Bare `isd secret rm` (no name) parses with `name = None` so the
+    /// runtime can fall into the interactive picker per the v0.7
+    /// lexicon spec.
+    #[test]
+    fn rm_args_bare_parses_with_no_name() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: SecretCommand,
+        }
+        let w = Wrap::try_parse_from(["x", "rm"]).unwrap();
+        match w.c {
+            SecretCommand::Rm(a) => {
+                assert!(a.name.is_none(), "expected None, got {:?}", a.name);
+                assert_eq!(a.scope, Scope::Context);
             }
             other => panic!("expected Rm, got {other:?}"),
         }

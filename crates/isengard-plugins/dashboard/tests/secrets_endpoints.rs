@@ -223,6 +223,48 @@ async fn post_invalid_name_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// PUT a secret, then GET its plaintext via the new
+/// `/secrets/{name}/value` route and assert the value round-trips
+/// untouched. Added with the v0.7 CLI lexicon spec (`isd secret get`).
+#[tokio::test]
+async fn put_then_get_value_round_trips_plaintext() {
+    let (app, _h) = setup_app(true).await;
+
+    let put_req = Request::builder()
+        .method("PUT")
+        .uri("/secrets/cf_token")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"value": "abc-xyz-123"}).to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri("/secrets/cf_token/value")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["name"], "cf_token");
+    assert_eq!(body["value"], "abc-xyz-123");
+}
+
+/// Missing secret on the new value route returns 404 so callers can
+/// surface a clean "not found" error.
+#[tokio::test]
+async fn get_value_missing_returns_404() {
+    let (app, _h) = setup_app(true).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/secrets/never-existed/value")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn list_omits_values_for_many_secrets() {
     let (app, _h) = setup_app(true).await;

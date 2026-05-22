@@ -19,6 +19,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
         "Cluster",
         &[
             "hosts",
+            "info",
             "service",
             "route",
             "secret",
