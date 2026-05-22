@@ -44,8 +44,8 @@ use ratatui::{
 use serde_json::Value;
 
 use super::{
-    KeyType, ListRow, SchemaEntry, fetch_list, fetch_schema, group_by_category, json_to_display,
-    key_label, key_type_label, menu_value_display, put_value,
+    KeyType, ListRow, SchemaEntry, fetch_list, fetch_schema, fetch_zones_from_cloudflare,
+    group_by_category, json_to_display, key_label, key_type_label, menu_value_display, put_value,
 };
 use crate::session::Session;
 
@@ -128,7 +128,7 @@ struct AppState {
     /// Which pane has focus.
     focus: Focus,
     /// Modal state, when open.
-    modal: Option<Modal>,
+    modal: Option<ModalKind>,
     /// Help overlay shown via `?`.
     help_open: bool,
     /// Latest user-facing status line.
@@ -217,7 +217,7 @@ enum Focus {
 }
 
 /// Modal editor state.
-struct Modal {
+pub(crate) struct Modal {
     /// Schema entry being edited.
     entry: SchemaEntry,
     /// Text buffer (used for free-text / int input).
@@ -301,6 +301,74 @@ enum Mode {
     Choices,
 }
 
+/// One of the two modal editors the TUI knows how to drive. Most schema
+/// keys go through the generic single-value [`Modal`]; the
+/// `routing.zones` StringList key gets its own list editor.
+pub(crate) enum ModalKind {
+    /// Generic single-value editor (string / secret / int / bool /
+    /// choices).
+    Key(Modal),
+    /// Operator-managed DNS zones list editor with optional Cloudflare
+    /// fetch.
+    Zones(ZonesModal),
+}
+
+/// State for the `routing.zones` list editor.
+///
+/// The editor renders the current zones as a vertical list and exposes:
+///
+///  * `a` / `i`: open the inline input to add a new zone.
+///  * `d` / `x`: remove the selected zone.
+///  * `F`: trigger a Cloudflare fetch; the response opens a confirmation
+///    overlay with `[Merge] [Replace] [Cancel]`.
+///  * `Enter`: PUT the current list to `/api/v1/config/routing.zones`.
+///  * `Esc`: cancel without writing.
+pub(crate) struct ZonesModal {
+    /// Working zone list. Mutates as the operator adds/removes/merges.
+    zones: Vec<String>,
+    /// Selection state for the list (highlights the row that `d` /`x`
+    /// removes).
+    list_state: ListState,
+    /// Inline input mode flag. `Some` when the operator pressed `a` /
+    /// `i`; carries the in-progress text.
+    add_buffer: Option<String>,
+    /// Cursor index into [`Self::add_buffer`] (chars).
+    add_cursor: usize,
+    /// Confirmation overlay state. `Some` after a successful Cloudflare
+    /// fetch; carries the zones the server returned plus the highlight
+    /// among `[Merge] [Replace] [Cancel]`.
+    fetch_confirm: Option<FetchConfirm>,
+    /// Latest server-side error, rendered red at the bottom.
+    error: Option<String>,
+}
+
+/// Confirmation overlay shown after a successful Cloudflare fetch.
+struct FetchConfirm {
+    /// Zones the server returned. Read-only inside this overlay.
+    fetched: Vec<String>,
+    /// Currently highlighted action: 0 = Merge, 1 = Replace, 2 = Cancel.
+    action_idx: usize,
+}
+
+impl ZonesModal {
+    /// Build a fresh editor from the current `routing.zones` row.
+    fn new(current: Option<&ListRow>) -> Self {
+        let zones = zones_from_list_row(current);
+        let mut list_state = ListState::default();
+        if !zones.is_empty() {
+            list_state.select(Some(0));
+        }
+        Self {
+            zones,
+            list_state,
+            add_buffer: None,
+            add_cursor: 0,
+            fetch_confirm: None,
+            error: None,
+        }
+    }
+}
+
 /// Drive the event loop until the operator quits. Returns the count
 /// of successful writes.
 async fn event_loop(
@@ -349,7 +417,7 @@ async fn event_loop(
             MainControl::OpenModal => {
                 if let Some(entry) = app.current_entry() {
                     let row = app.row_for(&entry.key).cloned();
-                    app.modal = Some(Modal::new(entry, row.as_ref()));
+                    app.modal = Some(open_modal_for(entry, &app.list, row.as_ref()));
                 }
             }
             MainControl::Refresh => {
@@ -477,14 +545,28 @@ async fn refresh_list(app: &mut AppState, session: &Session, base: &str) {
     app.busy = false;
 }
 
-/// Handle one key press inside the modal.
+/// Handle one key press inside whichever modal is currently open.
 async fn handle_modal_key(
     app: &mut AppState,
     session: &Session,
     base: &str,
     key: KeyEvent,
 ) -> Result<ModalControl> {
-    let Some(modal) = app.modal.as_mut() else {
+    match app.modal.as_ref() {
+        Some(ModalKind::Key(_)) => handle_key_modal_key(app, session, base, key).await,
+        Some(ModalKind::Zones(_)) => handle_zones_modal_key(app, session, base, key).await,
+        None => Ok(ModalControl::Close),
+    }
+}
+
+/// Handle one key press inside the generic single-value editor.
+async fn handle_key_modal_key(
+    app: &mut AppState,
+    session: &Session,
+    base: &str,
+    key: KeyEvent,
+) -> Result<ModalControl> {
+    let Some(ModalKind::Key(modal)) = app.modal.as_mut() else {
         return Ok(ModalControl::Close);
     };
     if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -523,7 +605,7 @@ async fn handle_modal_key(
                 Err(e) => {
                     // Re-borrow the modal because the await above
                     // crossed the &mut boundary.
-                    if let Some(m) = app.modal.as_mut() {
+                    if let Some(ModalKind::Key(m)) = app.modal.as_mut() {
                         m.error = Some(format!("{e}"));
                     }
                     return Ok(ModalControl::Stay);
@@ -585,6 +667,292 @@ async fn handle_modal_key(
         _ => {}
     }
     Ok(ModalControl::Stay)
+}
+
+/// Handle one key press inside the zones list editor.
+async fn handle_zones_modal_key(
+    app: &mut AppState,
+    session: &Session,
+    base: &str,
+    key: KeyEvent,
+) -> Result<ModalControl> {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+    {
+        return Ok(ModalControl::Close);
+    }
+    // Fetch-confirmation overlay swallows all input until the operator
+    // picks Merge / Replace / Cancel.
+    if matches!(
+        app.modal.as_ref(),
+        Some(ModalKind::Zones(z)) if z.fetch_confirm.is_some()
+    ) {
+        return handle_zones_fetch_confirm_key(app, session, base, key).await;
+    }
+    // Inline add buffer is a stricter text-input mode; only Esc / Enter
+    // / printable chars touch it.
+    if matches!(
+        app.modal.as_ref(),
+        Some(ModalKind::Zones(z)) if z.add_buffer.is_some()
+    ) {
+        return Ok(handle_zones_add_buffer_key(app, key));
+    }
+    let cf_token_set = cloudflare_token_is_set(&app.list);
+    let Some(ModalKind::Zones(zones_modal)) = app.modal.as_mut() else {
+        return Ok(ModalControl::Close);
+    };
+    match key.code {
+        KeyCode::Esc => return Ok(ModalControl::Close),
+        KeyCode::Enter => {
+            let payload: Vec<Value> = zones_modal
+                .zones
+                .iter()
+                .map(|s| Value::String(s.clone()))
+                .collect();
+            app.busy = true;
+            app.status = "Saving zones...".to_string();
+            let result = put_value(session, base, "routing.zones", Value::Array(payload)).await;
+            app.busy = false;
+            match result {
+                Ok(()) => {
+                    app.updated += 1;
+                    app.status = "Set routing.zones".to_string();
+                    refresh_list(app, session, base).await;
+                    return Ok(ModalControl::Close);
+                }
+                Err(e) => {
+                    if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                        z.error = Some(format!("{e}"));
+                    }
+                    return Ok(ModalControl::Stay);
+                }
+            }
+        }
+        KeyCode::Up => {
+            zones_step_selection(zones_modal, -1);
+        }
+        KeyCode::Down => {
+            zones_step_selection(zones_modal, 1);
+        }
+        KeyCode::Char('a') | KeyCode::Char('i') => {
+            zones_modal.add_buffer = Some(String::new());
+            zones_modal.add_cursor = 0;
+            zones_modal.error = None;
+        }
+        KeyCode::Char('d') | KeyCode::Char('x') => {
+            if let Some(idx) = zones_modal.list_state.selected() {
+                if idx < zones_modal.zones.len() {
+                    zones_modal.zones.remove(idx);
+                    let new_len = zones_modal.zones.len();
+                    if new_len == 0 {
+                        zones_modal.list_state.select(None);
+                    } else {
+                        zones_modal.list_state.select(Some(idx.min(new_len - 1)));
+                    }
+                }
+            }
+        }
+        KeyCode::Char('F') => {
+            if !cf_token_set {
+                zones_modal.error =
+                    Some("Set cloudflare.api_token first to enable fetch.".to_string());
+                return Ok(ModalControl::Stay);
+            }
+            app.busy = true;
+            app.status = "Fetching zones from Cloudflare...".to_string();
+            let result = fetch_zones_from_cloudflare(session, base).await;
+            app.busy = false;
+            match result {
+                Ok(fetched) => {
+                    if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                        z.fetch_confirm = Some(FetchConfirm {
+                            fetched,
+                            action_idx: 0,
+                        });
+                        z.error = None;
+                    }
+                    app.status.clear();
+                }
+                Err(e) => {
+                    if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                        z.error = Some(format!("fetch failed: {e}"));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(ModalControl::Stay)
+}
+
+/// Handle a key press while the inline "add zone" text input is active.
+///
+/// Pulled into a sync helper because it does not need to await: keeps
+/// the event loop's main async path readable.
+fn handle_zones_add_buffer_key(app: &mut AppState, key: KeyEvent) -> ModalControl {
+    let Some(ModalKind::Zones(z)) = app.modal.as_mut() else {
+        return ModalControl::Close;
+    };
+    let Some(buf) = z.add_buffer.as_mut() else {
+        return ModalControl::Stay;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            z.add_buffer = None;
+            z.add_cursor = 0;
+        }
+        KeyCode::Enter => {
+            let candidate = buf.trim().to_string();
+            if !candidate.is_empty() && !z.zones.iter().any(|s| s == &candidate) {
+                z.zones.push(candidate);
+                // Highlight the newly added row.
+                z.list_state.select(Some(z.zones.len() - 1));
+            }
+            z.add_buffer = None;
+            z.add_cursor = 0;
+        }
+        KeyCode::Backspace if z.add_cursor > 0 => {
+            let mut chars: Vec<char> = buf.chars().collect();
+            let i = z.add_cursor - 1;
+            if i < chars.len() {
+                chars.remove(i);
+            }
+            *buf = chars.into_iter().collect();
+            z.add_cursor -= 1;
+        }
+        KeyCode::Left if z.add_cursor > 0 => {
+            z.add_cursor -= 1;
+        }
+        KeyCode::Right if z.add_cursor < buf.chars().count() => {
+            z.add_cursor += 1;
+        }
+        KeyCode::Home => z.add_cursor = 0,
+        KeyCode::End => z.add_cursor = buf.chars().count(),
+        // Drop control modifiers; accept printable ASCII + common
+        // hostname characters (letters, digits, dot, dash). The
+        // controller validates the final value, this is just a UX
+        // filter so a stray `Ctrl+R` does not corrupt the buffer.
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let mut chars: Vec<char> = buf.chars().collect();
+            let i = z.add_cursor.min(chars.len());
+            chars.insert(i, ch);
+            *buf = chars.into_iter().collect();
+            z.add_cursor = i + 1;
+        }
+        _ => {}
+    }
+    ModalControl::Stay
+}
+
+/// Handle a key press while the post-fetch confirmation overlay is
+/// active. Operator picks one of Merge / Replace / Cancel; the first
+/// two call `PUT /config/routing.zones` with the resulting list.
+async fn handle_zones_fetch_confirm_key(
+    app: &mut AppState,
+    session: &Session,
+    base: &str,
+    key: KeyEvent,
+) -> Result<ModalControl> {
+    match key.code {
+        KeyCode::Esc => {
+            if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                z.fetch_confirm = None;
+            }
+            return Ok(ModalControl::Stay);
+        }
+        KeyCode::Left => {
+            if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                if let Some(fc) = z.fetch_confirm.as_mut() {
+                    fc.action_idx = (fc.action_idx + 2) % 3;
+                }
+            }
+            return Ok(ModalControl::Stay);
+        }
+        KeyCode::Right => {
+            if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                if let Some(fc) = z.fetch_confirm.as_mut() {
+                    fc.action_idx = (fc.action_idx + 1) % 3;
+                }
+            }
+            return Ok(ModalControl::Stay);
+        }
+        KeyCode::Enter => {
+            // Resolve target list from the chosen action without
+            // mutating state yet so we can drop the &mut before await.
+            let (action_idx, resolved) = {
+                let Some(ModalKind::Zones(z)) = app.modal.as_mut() else {
+                    return Ok(ModalControl::Stay);
+                };
+                let Some(fc) = z.fetch_confirm.as_ref() else {
+                    return Ok(ModalControl::Stay);
+                };
+                let resolved = match fc.action_idx {
+                    0 => merge_zones(&z.zones, &fc.fetched),
+                    1 => {
+                        // Replace = exactly the fetched list, deduped
+                        // and sorted for stable wire shape.
+                        merge_zones(&[], &fc.fetched)
+                    }
+                    _ => Vec::new(),
+                };
+                (fc.action_idx, resolved)
+            };
+            if action_idx == 2 {
+                // Cancel: drop the overlay without touching anything.
+                if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                    z.fetch_confirm = None;
+                }
+                return Ok(ModalControl::Stay);
+            }
+            let payload = Value::Array(
+                resolved
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect::<Vec<_>>(),
+            );
+            app.busy = true;
+            app.status = "Writing zones...".to_string();
+            let result = put_value(session, base, "routing.zones", payload).await;
+            app.busy = false;
+            match result {
+                Ok(()) => {
+                    app.updated += 1;
+                    if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                        z.zones = resolved.clone();
+                        if z.zones.is_empty() {
+                            z.list_state.select(None);
+                        } else {
+                            z.list_state.select(Some(0));
+                        }
+                        z.fetch_confirm = None;
+                    }
+                    refresh_list(app, session, base).await;
+                    app.status = format!("Wrote {} zone(s) to routing.zones", resolved.len());
+                }
+                Err(e) => {
+                    if let Some(ModalKind::Zones(z)) = app.modal.as_mut() {
+                        z.error = Some(format!("write failed: {e}"));
+                    }
+                }
+            }
+            return Ok(ModalControl::Stay);
+        }
+        _ => {}
+    }
+    Ok(ModalControl::Stay)
+}
+
+/// Step the highlighted row in the zones list (wraps).
+fn zones_step_selection(modal: &mut ZonesModal, delta: i32) {
+    let len = modal.zones.len();
+    if len == 0 {
+        modal.list_state.select(None);
+        return;
+    }
+    let i = modal.list_state.selected().unwrap_or(0) as i32;
+    let next = (i + delta).rem_euclid(len as i32) as usize;
+    modal.list_state.select(Some(next));
 }
 
 /// Insert `ch` at the current cursor position and advance the cursor.
@@ -766,11 +1134,17 @@ fn block_title_style(focused: bool) -> Style {
     }
 }
 
-/// Render the modal editor on top of the main view.
+/// Render whichever modal is currently open.
 fn draw_modal(f: &mut ratatui::Frame<'_>, app: &AppState) {
-    let Some(modal) = app.modal.as_ref() else {
-        return;
-    };
+    match app.modal.as_ref() {
+        Some(ModalKind::Key(modal)) => draw_key_modal(f, app, modal),
+        Some(ModalKind::Zones(zones)) => draw_zones_modal(f, app, zones),
+        None => {}
+    }
+}
+
+/// Render the generic single-value editor modal.
+fn draw_key_modal(f: &mut ratatui::Frame<'_>, app: &AppState, modal: &Modal) {
     let area = centered_rect(60, 50, f.area());
     f.render_widget(Clear, area);
 
@@ -889,6 +1263,180 @@ fn draw_modal_input(f: &mut ratatui::Frame<'_>, modal: &Modal, area: Rect) {
     }
 }
 
+/// Render the `routing.zones` list editor on top of the main view.
+fn draw_zones_modal(f: &mut ratatui::Frame<'_>, app: &AppState, zones: &ZonesModal) {
+    let area = centered_rect(70, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let category = app
+        .categories
+        .get(app.cat_state.selected().unwrap_or(0))
+        .map(|s| s.as_str())
+        .unwrap_or("Routing");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            format!(" {category} > DNS zones "),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // doc
+            Constraint::Min(3),    // zone list
+            Constraint::Length(3), // inline add input (when active)
+            Constraint::Length(1), // error
+            Constraint::Length(1), // hints
+        ])
+        .split(inner);
+
+    let cf_token_set = cloudflare_token_is_set(&app.list);
+    let doc_text = if cf_token_set {
+        "DNS zones you manage. Press F to fetch from Cloudflare."
+    } else {
+        "DNS zones you manage. Set cloudflare.api_token to enable Cloudflare fetch."
+    };
+    f.render_widget(
+        Paragraph::new(doc_text)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::Gray)),
+        layout[0],
+    );
+
+    // Zone list.
+    let items: Vec<ListItem> = if zones.zones.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "(no zones yet)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        zones
+            .zones
+            .iter()
+            .map(|z| ListItem::new(z.as_str()))
+            .collect()
+    };
+    let zone_block = Block::default().borders(Borders::ALL).title(" Zones ");
+    let zone_list = List::new(items).block(zone_block).highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut state = zones.list_state.clone();
+    f.render_stateful_widget(zone_list, layout[1], &mut state);
+
+    // Inline add input.
+    if let Some(buf) = zones.add_buffer.as_ref() {
+        let add_block = Block::default().borders(Borders::ALL).title(" Add zone ");
+        let para = Paragraph::new(buf.as_str()).block(add_block);
+        f.render_widget(para, layout[2]);
+        let inner_add = Block::default().borders(Borders::ALL).inner(layout[2]);
+        let col = inner_add.x + zones.add_cursor as u16;
+        let row = inner_add.y;
+        f.set_cursor_position((col, row));
+    }
+
+    if let Some(err) = &zones.error {
+        f.render_widget(
+            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+            layout[3],
+        );
+    }
+
+    let hint = if zones.add_buffer.is_some() {
+        "[Enter] add  *  [Esc] cancel input"
+    } else if cf_token_set {
+        "[a] add  *  [d] remove  *  [F] fetch CF  *  [Enter] save  *  [Esc] cancel"
+    } else {
+        "[a] add  *  [d] remove  *  [Enter] save  *  [Esc] cancel"
+    };
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        layout[4],
+    );
+
+    // Fetch-confirmation overlay sits over the editor.
+    if let Some(fc) = zones.fetch_confirm.as_ref() {
+        draw_zones_fetch_confirm(f, fc);
+    }
+}
+
+/// Render the post-fetch confirmation overlay on top of the zones
+/// editor.
+fn draw_zones_fetch_confirm(f: &mut ratatui::Frame<'_>, fc: &FetchConfirm) {
+    let area = centered_rect(50, 60, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(
+            " Cloudflare fetch result ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // summary
+            Constraint::Min(1),    // fetched list
+            Constraint::Length(1), // actions
+        ])
+        .split(inner);
+    let summary = if fc.fetched.is_empty() {
+        "Cloudflare returned no zones for the configured token.".to_string()
+    } else {
+        format!(
+            "Cloudflare returned {} zone(s). Pick how to apply.",
+            fc.fetched.len()
+        )
+    };
+    f.render_widget(
+        Paragraph::new(summary)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::Gray)),
+        layout[0],
+    );
+
+    let items: Vec<ListItem> = fc
+        .fetched
+        .iter()
+        .map(|z| ListItem::new(z.as_str()))
+        .collect();
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Fetched "));
+    f.render_widget(list, layout[1]);
+
+    let labels = ["[Merge]", "[Replace]", "[Cancel]"];
+    let mut spans: Vec<Span<'_>> = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        let style = if i == fc.action_idx {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(*label, style));
+        if i + 1 < labels.len() {
+            spans.push(Span::raw("  "));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        layout[2],
+    );
+}
+
 /// Help overlay rendered when `?` is pressed.
 fn draw_help(f: &mut ratatui::Frame<'_>) {
     let area = centered_rect(50, 40, f.area());
@@ -965,6 +1513,79 @@ pub(crate) fn format_value(entry: &SchemaEntry, current: Option<&ListRow>) -> St
             Some(v) => json_to_display(v),
             None => "<unset>".to_string(),
         },
+    }
+}
+
+/// Open the right modal for `entry` given the current snapshot.
+///
+/// Routing rules:
+///
+///  * `routing.zones` (StringList) → [`ModalKind::Zones`].
+///  * `routing.default_zone` when `routing.zones` is non-empty → key
+///    modal with the zones promoted into `entry.choices` so the picker
+///    renders a select widget.
+///  * Anything else → generic [`ModalKind::Key`].
+pub(crate) fn open_modal_for(
+    entry: SchemaEntry,
+    list: &[ListRow],
+    current: Option<&ListRow>,
+) -> ModalKind {
+    if entry.key == "routing.zones" || entry.ty == KeyType::StringList {
+        let zones_row = list.iter().find(|r| r.key == "routing.zones");
+        return ModalKind::Zones(ZonesModal::new(zones_row));
+    }
+    if entry.key == "routing.default_zone" {
+        let zones_row = list.iter().find(|r| r.key == "routing.zones");
+        let zones = zones_from_list_row(zones_row);
+        if !zones.is_empty() {
+            let mut promoted = entry.clone();
+            promoted.choices = Some(
+                zones
+                    .into_iter()
+                    .map(|z| super::Choice {
+                        value: z.clone(),
+                        label: z,
+                    })
+                    .collect(),
+            );
+            return ModalKind::Key(Modal::new(promoted, current));
+        }
+    }
+    ModalKind::Key(Modal::new(entry, current))
+}
+
+/// True when a backing-store row exists for `cloudflare.api_token`.
+///
+/// The TUI uses this to gate the Cloudflare fetch action: a default
+/// row (or no row at all) means the operator never set the token, so
+/// the `F` binding is disabled with an inline hint.
+pub(crate) fn cloudflare_token_is_set(list: &[ListRow]) -> bool {
+    list.iter()
+        .any(|r| r.key == "cloudflare.api_token" && r.source == "set")
+}
+
+/// Combine `current` and `fetched` into a stable, deduped, sorted
+/// list. Used by both the Merge and Replace branches of the fetch
+/// confirmation overlay (Replace passes an empty `current`).
+pub(crate) fn merge_zones(current: &[String], fetched: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = current.iter().chain(fetched.iter()).cloned().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Extract the zone list out of a `routing.zones` list row. Returns
+/// the empty vector when the row is missing, unset, or carries the
+/// wrong JSON shape (the controller validates incoming writes; a stray
+/// row here means the wire shape drifted and we surface a clean
+/// fallback).
+pub(crate) fn zones_from_list_row(row: Option<&ListRow>) -> Vec<String> {
+    match row.map(|r| &r.value) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1203,7 +1824,7 @@ mod tests {
             .position(|e| e.key == "acme.directory")
             .unwrap();
         app.key_state.select(Some(idx));
-        app.modal = Some(Modal::new(acme, None));
+        app.modal = Some(ModalKind::Key(Modal::new(acme, None)));
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let rendered = buffer_to_string(&buf);
@@ -1231,6 +1852,276 @@ mod tests {
         assert!(rendered.contains("Cancel"), "rendered: {rendered}");
     }
 
+    fn routing_zones_entry() -> SchemaEntry {
+        SchemaEntry {
+            key: "routing.zones".into(),
+            display_name: "DNS zones".into(),
+            category: "Routing".into(),
+            ty: KeyType::StringList,
+            default: None,
+            doc: "DNS zones you manage.".into(),
+            choices: None,
+        }
+    }
+
+    fn default_zone_entry() -> SchemaEntry {
+        SchemaEntry {
+            key: "routing.default_zone".into(),
+            display_name: "Default zone".into(),
+            category: "Routing".into(),
+            ty: KeyType::String,
+            default: None,
+            doc: "Default routing zone.".into(),
+            choices: None,
+        }
+    }
+
+    #[test]
+    fn cloudflare_token_is_set_true_only_when_source_set() {
+        let list_set = vec![ListRow {
+            key: "cloudflare.api_token".into(),
+            ty: KeyType::Secret,
+            value: Value::String("<redacted>".into()),
+            source: "set".into(),
+        }];
+        assert!(cloudflare_token_is_set(&list_set));
+
+        let list_unset = vec![ListRow {
+            key: "cloudflare.api_token".into(),
+            ty: KeyType::Secret,
+            value: Value::Null,
+            source: "unset".into(),
+        }];
+        assert!(!cloudflare_token_is_set(&list_unset));
+
+        assert!(!cloudflare_token_is_set(&[]));
+    }
+
+    #[test]
+    fn merge_zones_dedups_and_sorts() {
+        let current = vec![
+            "vallee.casa".to_string(),
+            "weavers.engineering".to_string(),
+        ];
+        let fetched = vec![
+            "weavers.engineering".to_string(),
+            "another.dev".to_string(),
+        ];
+        assert_eq!(
+            merge_zones(&current, &fetched),
+            vec![
+                "another.dev".to_string(),
+                "vallee.casa".to_string(),
+                "weavers.engineering".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_zones_replace_with_empty_current_returns_sorted_fetched() {
+        let fetched = vec![
+            "b.com".to_string(),
+            "a.com".to_string(),
+            "b.com".to_string(),
+        ];
+        assert_eq!(
+            merge_zones(&[], &fetched),
+            vec!["a.com".to_string(), "b.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn zones_from_list_row_returns_empty_for_missing_or_null() {
+        assert!(zones_from_list_row(None).is_empty());
+        let unset = ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::StringList,
+            value: Value::Null,
+            source: "unset".into(),
+        };
+        assert!(zones_from_list_row(Some(&unset)).is_empty());
+    }
+
+    #[test]
+    fn zones_from_list_row_parses_string_array() {
+        let row = ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::StringList,
+            value: json!(["a.com", "b.com"]),
+            source: "set".into(),
+        };
+        assert_eq!(
+            zones_from_list_row(Some(&row)),
+            vec!["a.com".to_string(), "b.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn open_modal_for_routing_zones_returns_zones_kind() {
+        let entry = routing_zones_entry();
+        let list = vec![ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::StringList,
+            value: json!(["one.dev", "two.dev"]),
+            source: "set".into(),
+        }];
+        let kind = open_modal_for(entry, &list, list.first());
+        match kind {
+            ModalKind::Zones(z) => {
+                assert_eq!(z.zones, vec!["one.dev".to_string(), "two.dev".to_string()]);
+            }
+            _ => panic!("expected ModalKind::Zones"),
+        }
+    }
+
+    #[test]
+    fn open_modal_for_default_zone_promotes_zones_to_choices() {
+        let entry = default_zone_entry();
+        let list = vec![ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::StringList,
+            value: json!(["one.dev", "two.dev"]),
+            source: "set".into(),
+        }];
+        let kind = open_modal_for(entry, &list, None);
+        match kind {
+            ModalKind::Key(modal) => {
+                let choices = modal
+                    .entry
+                    .choices
+                    .as_ref()
+                    .expect("choices promoted from routing.zones");
+                let values: Vec<&str> = choices.iter().map(|c| c.value.as_str()).collect();
+                assert_eq!(values, vec!["one.dev", "two.dev"]);
+                assert_eq!(modal.mode, Mode::Choices);
+            }
+            _ => panic!("expected ModalKind::Key with promoted choices"),
+        }
+    }
+
+    #[test]
+    fn open_modal_for_default_zone_falls_back_to_string_input_when_no_zones() {
+        let entry = default_zone_entry();
+        let kind = open_modal_for(entry, &[], None);
+        match kind {
+            ModalKind::Key(modal) => {
+                assert!(modal.entry.choices.is_none());
+                assert_eq!(modal.mode, Mode::String);
+            }
+            _ => panic!("expected ModalKind::Key"),
+        }
+    }
+
+    #[test]
+    fn zones_modal_seeds_from_current_row() {
+        let row = ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::StringList,
+            value: json!(["a.com", "b.com", "c.com"]),
+            source: "set".into(),
+        };
+        let modal = ZonesModal::new(Some(&row));
+        assert_eq!(modal.zones, vec!["a.com", "b.com", "c.com"]);
+        assert_eq!(modal.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn zones_modal_empty_when_no_row() {
+        let modal = ZonesModal::new(None);
+        assert!(modal.zones.is_empty());
+        assert_eq!(modal.list_state.selected(), None);
+    }
+
+    #[test]
+    fn zones_step_selection_wraps_around() {
+        let row = ListRow {
+            key: "routing.zones".into(),
+            ty: KeyType::StringList,
+            value: json!(["a", "b", "c"]),
+            source: "set".into(),
+        };
+        let mut modal = ZonesModal::new(Some(&row));
+        modal.list_state.select(Some(0));
+        zones_step_selection(&mut modal, -1);
+        assert_eq!(modal.list_state.selected(), Some(2));
+        zones_step_selection(&mut modal, 1);
+        assert_eq!(modal.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn draw_zones_modal_renders_list_and_hint() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let entries = vec![routing_zones_entry()];
+        let list = vec![
+            ListRow {
+                key: "cloudflare.api_token".into(),
+                ty: KeyType::Secret,
+                value: Value::String("<redacted>".into()),
+                source: "set".into(),
+            },
+            ListRow {
+                key: "routing.zones".into(),
+                ty: KeyType::StringList,
+                value: json!(["weavers.engineering", "vallee.casa"]),
+                source: "set".into(),
+            },
+        ];
+        let mut app = AppState::new(entries, list.clone());
+        app.modal = Some(ModalKind::Zones(ZonesModal::new(list.last())));
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let rendered = buffer_to_string(&terminal.backend().buffer().clone());
+        assert!(rendered.contains("DNS zones"), "rendered: {rendered}");
+        assert!(rendered.contains("weavers.engineering"), "rendered: {rendered}");
+        assert!(rendered.contains("vallee.casa"), "rendered: {rendered}");
+        // Fetch hint is enabled because the CF token is set in the
+        // fixture above.
+        assert!(rendered.contains("[F] fetch CF"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn draw_zones_modal_hides_fetch_hint_when_token_unset() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let entries = vec![routing_zones_entry()];
+        let list: Vec<ListRow> = Vec::new();
+        let mut app = AppState::new(entries, list);
+        app.modal = Some(ModalKind::Zones(ZonesModal::new(None)));
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let rendered = buffer_to_string(&terminal.backend().buffer().clone());
+        assert!(rendered.contains("DNS zones"), "rendered: {rendered}");
+        assert!(rendered.contains("(no zones yet)"), "rendered: {rendered}");
+        assert!(
+            !rendered.contains("[F] fetch CF"),
+            "fetch hint must be hidden without token: {rendered}"
+        );
+    }
+
+    #[test]
+    fn draw_zones_modal_shows_fetch_confirm_actions() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let entries = vec![routing_zones_entry()];
+        let mut app = AppState::new(entries, Vec::new());
+        let mut zones_modal = ZonesModal::new(None);
+        zones_modal.fetch_confirm = Some(FetchConfirm {
+            fetched: vec!["x.com".to_string(), "y.com".to_string()],
+            action_idx: 0,
+        });
+        app.modal = Some(ModalKind::Zones(zones_modal));
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let rendered = buffer_to_string(&terminal.backend().buffer().clone());
+        assert!(
+            rendered.contains("Cloudflare fetch result"),
+            "rendered: {rendered}"
+        );
+        assert!(rendered.contains("[Merge]"), "rendered: {rendered}");
+        assert!(rendered.contains("[Replace]"), "rendered: {rendered}");
+        assert!(rendered.contains("[Cancel]"), "rendered: {rendered}");
+        assert!(rendered.contains("x.com"), "rendered: {rendered}");
+        assert!(rendered.contains("y.com"), "rendered: {rendered}");
+    }
+
     #[test]
     fn draw_modal_masks_secret_buffer() {
         let backend = TestBackend::new(100, 24);
@@ -1245,7 +2136,7 @@ mod tests {
         let mut modal = Modal::new(secret, None);
         modal.buffer = "supersecret".into();
         modal.cursor = modal.buffer.chars().count();
-        app.modal = Some(modal);
+        app.modal = Some(ModalKind::Key(modal));
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let rendered = buffer_to_string(&buf);

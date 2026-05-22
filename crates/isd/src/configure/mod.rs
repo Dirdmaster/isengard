@@ -515,6 +515,40 @@ fn render_schema_table(entries: &[SchemaEntry]) -> Table {
     table
 }
 
+/// `POST /api/v1/config/zones/cloudflare-fetch` shared helper. Returns
+/// the zone names the dashboard's Cloudflare client found for the
+/// configured token. The TUI calls this when the operator presses `F`
+/// inside the `routing.zones` editor.
+pub(crate) async fn fetch_zones_from_cloudflare(
+    session: &Session,
+    base: &str,
+) -> Result<Vec<String>> {
+    let url = format!("{base}/api/v1/config/zones/cloudflare-fetch");
+    let resp = session
+        .client
+        .post(&url)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "cloudflare fetch: {}",
+            parse_error_message(&body, &body)
+        ));
+    }
+    let body: ZoneFetchResponse = resp.json().await.context("decoding cloudflare-fetch body")?;
+    Ok(body.zones)
+}
+
+/// JSON shape returned by `POST /api/v1/config/zones/cloudflare-fetch`.
+#[derive(Debug, Deserialize)]
+struct ZoneFetchResponse {
+    /// Zone names the controller discovered via the Cloudflare API.
+    zones: Vec<String>,
+}
+
 /// `GET /api/v1/config/schema` shared helper. `set` and `unset` call this
 /// to drive their client-side guards and default-fallback messaging.
 pub(crate) async fn fetch_schema(session: &Session, base: &str) -> Result<Vec<SchemaEntry>> {
