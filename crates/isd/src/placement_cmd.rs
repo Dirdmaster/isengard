@@ -16,11 +16,12 @@ pub struct PlacementArgs {
     pub command: PlacementCommand,
 }
 
-/// Sub-verbs under `isd placement`.
+/// Sub-verbs under `isd placement`. Canonical: `ls` (alias: `show`).
 #[derive(Debug, Subcommand)]
 pub enum PlacementCommand {
     /// Print the placement grid (one row per replica).
-    Show(ShowArgs),
+    #[command(alias = "show")]
+    Ls(ShowArgs),
 }
 
 /// CLI flags for `isd placement show`.
@@ -70,7 +71,7 @@ pub struct PlacementRow {
 /// or the controller-less actionable error from `require_controller`.
 pub async fn run(args: PlacementArgs, context: Option<&str>) -> Result<()> {
     match args.command {
-        PlacementCommand::Show(a) => run_show(a, context).await,
+        PlacementCommand::Ls(a) => run_show(a, context).await,
     }
 }
 
