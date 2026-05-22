@@ -102,10 +102,10 @@ whoami = "1"
 # workspace for the controller; we reuse the same version here.
 ssh-key.workspace = true
 
-# Bastion v2 PR 4: `isd ssh` (no args) opens a host picker. `which`
-# detects `fzf` on PATH so we can fall through to `inquire::Select`
-# when it is missing. Same workspace pin as the dev-dependencies entry
-# we used to gate the ssh-keygen test.
+# `isd ssh` detects `ssh-keygen` on PATH before invoking it for cert
+# pubkey dumps. Bastion v2 PR 4 originally pulled `which` in for `fzf`
+# detection; the native picker dropped that, but ssh-keygen probing
+# keeps the dep alive.
 which.workspace = true
 
 # Track G Phase 5: backup/restore pipeline.
@@ -124,6 +124,12 @@ tokio-util = { workspace = true, features = ["io", "io-util"] }
 # use it for their one-shot prompts.
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
+# `isd ssh` (no args) opens a native ratatui host picker. nucleo-matcher
+# powers the fuzzy filter (same matcher helix uses), replacing the
+# previous fzf shell-out + inquire fallback. fzf opened /dev/tty with
+# raw ioctls that bypass capture tools; the native picker stays inside
+# crossterm so screen-capture works.
+nucleo-matcher = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true
