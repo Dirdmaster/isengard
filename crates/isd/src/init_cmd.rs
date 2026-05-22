@@ -80,11 +80,40 @@ pub async fn run(args: InitArgs, context: Option<&str>) -> Result<()> {
     if !args.no_agent {
         step_compose_up_agent(&docker_uri, &join_token).await?;
         step_wait_for_agent_enrolled(&docker_uri).await?;
+        step_record_dial_target(&docker_uri).await;
     }
 
     let join_block = step_render_join_block().await?;
     println!("{join_block}");
     Ok(())
+}
+
+// === Step 8b: PATCH the freshly enrolled host with the operator's dial target ===
+
+/// Step 8b: best-effort PATCH the just-enrolled host with the
+/// operator's dial target derived from `docker_uri`. Skipped for
+/// non-SSH docker contexts (no operator-typeable target to capture).
+/// Failures are logged + swallowed: enrollment already succeeded, the
+/// operator can recover with
+/// `isd ssh hosts set <agent> --dial <target>`.
+async fn step_record_dial_target(docker_uri: &str) {
+    let docker = match isd_runtime::DockerBackend::from_uri(docker_uri).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("isd init: dial_target capture skipped (docker: {e:#})");
+            return;
+        }
+    };
+    let endpoint = match isd_runtime::discover(docker.client()).await {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("isd init: dial_target capture skipped (discover: {e:#})");
+            return;
+        }
+    };
+    let controller_url = format!("http://{}:{}", endpoint.host_ip, endpoint.host_port);
+    crate::dial_target::patch_latest_host_dial_target_best_effort(&controller_url, docker_uri)
+        .await;
 }
 
 // === Step 1: no existing controller (or --force tears it down) ===

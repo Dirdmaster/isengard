@@ -276,20 +276,46 @@ async fn force_update_stack(
 }
 
 /// `PATCH` handler for host.
+///
+/// Today the only patchable field is `dial_target`: the address an
+/// operator types into `ssh` to reach the host. `isd init` / `isd join`
+/// captures it from the operator's active docker context URL after
+/// enrollment; `isd ssh hosts set <agent> --dial <target>` overrides
+/// it.
+///
+/// Behaviour:
+/// - `dial_target: null` (or field omitted): no-op, returns the row.
+/// - `dial_target: ""`: clears the stored target.
+/// - `dial_target: "<value>"`: sets the stored target.
 async fn patch_host(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<String>,
-    Json(_body): Json<PatchHostRequest>,
+    Json(body): Json<PatchHostRequest>,
 ) -> Response {
     let host_id = match parse_host_id(&id) {
         Ok(h) => h,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, e),
     };
 
-    // kill-fleets: PATCH /hosts is currently a no-op. The only previously-
-    // supported field was `fleet`, which now lives on agent labels (reported
-    // from agent.toml `[labels]`, not server-mutated). Future patchable
-    // fields will land here.
+    if let Some(target) = body.dial_target.as_deref() {
+        // Empty string clears the column. Anything else sets it.
+        let store = if target.is_empty() {
+            None
+        } else {
+            Some(target)
+        };
+        match handles.inventory.set_host_dial_target(host_id, store).await {
+            Ok(true) => {}
+            Ok(false) => return json_err(StatusCode::NOT_FOUND, "host not found"),
+            Err(e) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("set_host_dial_target: {e}"),
+                );
+            }
+        }
+    }
+
     match handles.inventory.get_host(host_id).await {
         Ok(Some(h)) => Json(HostDto::from(h)).into_response(),
         Ok(None) => json_err(StatusCode::NOT_FOUND, "host not found"),

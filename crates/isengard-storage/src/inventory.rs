@@ -105,7 +105,8 @@ impl Inventory {
         let row: Option<HostRow> = sqlx::query_as(
             r#"
             SELECT id, fingerprint, hostname, os, arch,
-                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata,
+                   dial_target
             FROM hosts
             WHERE id = ?
             "#,
@@ -232,6 +233,24 @@ impl Inventory {
             .map(|s| s.to_string()))
     }
 
+    /// Set the operator-facing dial target for a host (e.g.
+    /// `dirdmaster@10.17.0.125`). Captured by the CLI at enroll time
+    /// from the operator's active docker context URL, and overridable
+    /// via `isd ssh hosts set <agent> --dial <target>`.
+    ///
+    /// Pass `Some(target)` to set; pass `None` to clear (back to the
+    /// "(unset)" display in `isd ssh hosts`). Returns whether a row
+    /// was actually updated (false when the host does not exist).
+    pub async fn set_host_dial_target(&self, id: HostId, target: Option<&str>) -> Result<bool> {
+        let id_bytes: &[u8] = &id.to_bytes();
+        let result = sqlx::query("UPDATE hosts SET dial_target = ? WHERE id = ?")
+            .bind(target)
+            .bind(id_bytes)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// v0.3b: read the cached LAN IP for a host (set via `set_host_lan_ip`).
     /// Returns `None` if the host doesn't exist or the metadata has no
     /// `lan_ip` key yet (no agent connection has landed since boot).
@@ -268,7 +287,8 @@ impl Inventory {
         let rows: Vec<HostRow> = sqlx::query_as(
             r#"
             SELECT id, fingerprint, hostname, os, arch,
-                   agent_version, docker_version, enrolled_at, last_seen_at, metadata
+                   agent_version, docker_version, enrolled_at, last_seen_at, metadata,
+                   dial_target
             FROM hosts
             ORDER BY last_seen_at DESC NULLS LAST, enrolled_at DESC
             "#,
@@ -917,16 +937,17 @@ fn host_action_from_row(row: sqlx::sqlite::SqliteRow) -> Result<HostAction> {
 /// sqlx `query_as` row tuple for `hosts`. Kept as a type alias so the
 /// `decode_host` signature stays readable.
 type HostRow = (
-    Vec<u8>,     // id
-    String,      // fingerprint
-    String,      // hostname
-    String,      // os
-    String,      // arch
-    String,      // agent_version
-    String,      // docker_version
-    i64,         // enrolled_at
-    Option<i64>, // last_seen_at
-    String,      // metadata (json text)
+    Vec<u8>,        // id
+    String,         // fingerprint
+    String,         // hostname
+    String,         // os
+    String,         // arch
+    String,         // agent_version
+    String,         // docker_version
+    i64,            // enrolled_at
+    Option<i64>,    // last_seen_at
+    String,         // metadata (json text)
+    Option<String>, // dial_target
 );
 
 /// Decode one [`HostRow`] tuple into a [`Host`].
@@ -951,6 +972,7 @@ fn decode_host(row: HostRow) -> Result<Host> {
         enrolled_at: row.7,
         last_seen_at: row.8,
         metadata,
+        dial_target: row.10,
     })
 }
 
@@ -1139,6 +1161,69 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok);
+    }
+
+    /// Migration 0032 adds `dial_target` as a nullable TEXT column on
+    /// `hosts`. Set/read round-trips through `get_host`; passing
+    /// `None` clears the column; an unknown host returns false.
+    #[tokio::test]
+    async fn set_and_read_host_dial_target_round_trips() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let id = inv.enroll_host(sample_enrollment()).await.unwrap();
+
+        // No dial target set yet -> None.
+        let host = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(host.dial_target, None);
+
+        // Set it.
+        let ok = inv
+            .set_host_dial_target(id, Some("dirdmaster@10.17.0.125"))
+            .await
+            .unwrap();
+        assert!(ok);
+        let host = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(host.dial_target.as_deref(), Some("dirdmaster@10.17.0.125"));
+
+        // Overwrite.
+        let ok = inv
+            .set_host_dial_target(id, Some("op@10.0.0.7"))
+            .await
+            .unwrap();
+        assert!(ok);
+        let host = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(host.dial_target.as_deref(), Some("op@10.0.0.7"));
+
+        // Clear it.
+        let ok = inv.set_host_dial_target(id, None).await.unwrap();
+        assert!(ok);
+        let host = inv.get_host(id).await.unwrap().unwrap();
+        assert_eq!(host.dial_target, None);
+
+        // Unknown host returns false.
+        let ok = inv
+            .set_host_dial_target(HostId::new(), Some("x@y"))
+            .await
+            .unwrap();
+        assert!(!ok);
+    }
+
+    /// Migration 0032: the `dial_target` column lands on `hosts`
+    /// after migration runs. Guards against an accidental rename or
+    /// drop of the column in a future migration.
+    #[tokio::test]
+    async fn migration_0032_adds_dial_target_column() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        // PRAGMA table_info returns one row per column.
+        let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(hosts)")
+                .fetch_all(inv.pool())
+                .await
+                .unwrap();
+        assert!(
+            rows.iter().any(|r| r.1 == "dial_target"),
+            "hosts table should carry a dial_target column after migration 0032; \
+             got {rows:?}"
+        );
     }
 
     #[tokio::test]

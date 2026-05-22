@@ -31,6 +31,8 @@ use clap::{Args, Subcommand};
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
+use crate::dial_target;
+use crate::index_cache::{IndexCache, IndexRow};
 use crate::render::{Align, CellStyle, Column, Table as RenderTable, render, render_plain};
 use crate::session::Session;
 
@@ -65,8 +67,9 @@ pub enum SshCommand {
     Mint(MintArgs),
     /// Show the current cert's state.
     Status,
-    /// List hosts the controller knows about.
-    Hosts,
+    /// List hosts (`isd ssh hosts`) or override the dial target of a
+    /// single host (`isd ssh hosts set <agent> --dial <target>`).
+    Hosts(HostsArgs),
     /// CA introspection.
     #[command(subcommand)]
     Ca(CaCommand),
@@ -88,6 +91,46 @@ pub enum SshCommand {
 pub enum CaCommand {
     /// Print the controller SSH CA pubkey in OpenSSH wire format.
     Pubkey,
+}
+
+/// CLI flags for `isd ssh hosts`.
+///
+/// Bare `isd ssh hosts` (no sub-verb) renders the host list with a
+/// dial target column. Sub-verbs (currently just `set`) gate further
+/// actions on an enrolled host row.
+#[derive(Debug, Args)]
+pub struct HostsArgs {
+    /// Resolved sub-verb. `None` means `isd ssh hosts`: list rendering.
+    #[command(subcommand)]
+    pub command: Option<HostsCommand>,
+}
+
+/// Sub-verbs under `isd ssh hosts`. Only `set` lives here today; the
+/// nesting is kept so future verbs (rename, untrust) slot in cleanly.
+#[derive(Debug, Subcommand)]
+pub enum HostsCommand {
+    /// Override the operator-facing dial target on an enrolled host.
+    /// `agent` accepts the host's reported hostname, the host id ULID,
+    /// the existing `dial_target`, or a `#N` index from the last
+    /// `isd ssh hosts` render.
+    Set(HostsSetArgs),
+}
+
+/// CLI flags for `isd ssh hosts set <agent>`.
+#[derive(Debug, Args, Clone)]
+pub struct HostsSetArgs {
+    /// Host selector: hostname, host id ULID, existing dial target, or
+    /// a `#N` index from the last `isd ssh hosts` render.
+    pub agent: String,
+    /// New dial target. Empty string clears the value (back to the
+    /// `(unset)` display). When neither `--dial` nor `--clear` is
+    /// passed the command errors so an operator never accidentally
+    /// no-ops the row.
+    #[arg(long)]
+    pub dial: Option<String>,
+    /// Clear the stored dial target (equivalent to `--dial ""`).
+    #[arg(long, default_value_t = false)]
+    pub clear: bool,
 }
 
 /// CLI flags for `isd ssh audit`. Both filters are optional.
@@ -206,10 +249,20 @@ pub(super) struct CaPubkeyResponse {
 /// tolerance.
 #[derive(Debug, Deserialize)]
 struct HostRow {
-    /// Reported hostname (the operator's dial target).
+    /// Host id ULID, as printed by the dashboard. Used to target the
+    /// PATCH endpoint from `isd ssh hosts set` and to seed the index
+    /// cache.
+    #[serde(default)]
+    id: String,
+    /// Reported hostname (`uname -n` on the agent host).
     hostname: String,
     /// Last heartbeat we saw from this host's agent, if any.
     last_seen_at: Option<DateTime<Utc>>,
+    /// Operator-facing dial target (e.g. `dirdmaster@10.17.0.125`).
+    /// `None` for hosts enrolled by a pre-PR-B CLI build or from a
+    /// non-SSH docker context. Rendered as `(unset)` in the table.
+    #[serde(default)]
+    dial_target: Option<String>,
 }
 
 /// Dispatch to the matching `ssh` sub-verb.
@@ -227,7 +280,10 @@ pub async fn run(args: SshArgs, context: Option<&str>) -> Result<()> {
             Ok(())
         }
         Some(SshCommand::Status) => run_status().await,
-        Some(SshCommand::Hosts) => run_hosts(context).await,
+        Some(SshCommand::Hosts(HostsArgs { command: None })) => run_hosts(context).await,
+        Some(SshCommand::Hosts(HostsArgs {
+            command: Some(HostsCommand::Set(a)),
+        })) => run_hosts_set(a, context).await,
         Some(SshCommand::Ca(CaCommand::Pubkey)) => run_ca_pubkey(context).await,
         Some(SshCommand::Audit(a)) => run_audit(a, context).await,
         Some(SshCommand::Trust(a)) => trust::run_trust(a, context).await,
@@ -260,7 +316,12 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
         .ok_or_else(|| anyhow!("isd ssh <host>: missing host argument"))?;
     let ssh_args: Vec<String> = iter.collect();
 
-    let (override_user, host) = parse_user_host(&host_token);
+    // Numeric tokens (`isd ssh 1`) resolve via the index cache the
+    // last `isd ssh hosts` render wrote. Strip a leading `#` so
+    // `#3` and `3` both work.
+    let resolved_token = resolve_dial_token(&host_token, context).await?;
+
+    let (override_user, host) = parse_user_host(&resolved_token);
     let default = default_user();
     if default.is_empty() {
         return Err(anyhow!(
@@ -293,6 +354,81 @@ async fn run_dial(tokens: Vec<String>, context: Option<&str>) -> Result<()> {
         .await
         .with_context(|| format!("spawning ssh {ssh_user}@{host}"))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Project a raw dial token (what the operator typed) into the actual
+/// address to pass to `ssh`.
+///
+/// Resolution chain:
+///
+/// 1. `#N` or bare `\d+`: look up the last `isd ssh hosts` index
+///    cache and return the row's `container_id` field (which we pack
+///    with the row's `dial_target` at render time, falling back to the
+///    hostname when unset).
+/// 2. `user@host` or bare `host` that matches an enrolled host's
+///    hostname AND that host has a `dial_target` set: substitute the
+///    dial target. Preserves any `user@` override the operator typed.
+/// 3. Anything else: pass through verbatim (matches the pre-PR-B
+///    behaviour).
+///
+/// The controller is optional: a token that does not look like a
+/// number passes through without an HTTP fetch so `isd ssh user@host`
+/// keeps working without a live controller (matches pre-PR-B).
+async fn resolve_dial_token(token: &str, context: Option<&str>) -> Result<String> {
+    let bare = token.strip_prefix('#').unwrap_or(token);
+    if let Ok(idx) = bare.parse::<usize>() {
+        return resolve_index_to_dial(idx);
+    }
+    // For non-numeric tokens we may still want to substitute the
+    // dial target. Try the controller; on any failure fall back to
+    // the original token (the operator's typed value still works).
+    let session = match Session::open(context).await {
+        Ok(s) => s,
+        Err(_) => return Ok(token.to_string()),
+    };
+    let Some(controller_url) = session.controller_url_opt() else {
+        return Ok(token.to_string());
+    };
+    let (override_user, host) = parse_user_host(token);
+    let lookup = match dial_target::lookup_dial_target(&session.client, controller_url, &host).await
+    {
+        Ok(opt) => opt,
+        Err(_) => return Ok(token.to_string()),
+    };
+    let Some(dial) = lookup else {
+        return Ok(token.to_string());
+    };
+    // Preserve the operator's user override if any: substitute
+    // user@<bare-host-from-dial> when the dial target carries no user,
+    // else use the dial target verbatim.
+    if let Some(user) = override_user {
+        let (_, dial_host) = parse_user_host(&dial);
+        Ok(format!("{user}@{dial_host}"))
+    } else {
+        Ok(dial)
+    }
+}
+
+/// Look up an integer index in the `isd ssh hosts` cache and return
+/// the dial target (or hostname fallback) for that row.
+fn resolve_index_to_dial(idx: usize) -> Result<String> {
+    let cache = crate::index_cache::read().context("reading ssh hosts index cache")?;
+    let cache = cache.ok_or_else(|| {
+        anyhow!(
+            "no index cache; run `isd ssh hosts` first so `isd ssh {idx}` can resolve the index"
+        )
+    })?;
+    if cache.is_stale() {
+        eprintln!(
+            "isd: ssh hosts index cache is {} seconds old; run `isd ssh hosts` to refresh",
+            cache.age_secs()
+        );
+    }
+    let row = cache.rows.iter().find(|r| r.index == idx).ok_or_else(|| {
+        let max = cache.rows.iter().map(|r| r.index).max().unwrap_or(0);
+        anyhow!("index {idx} out of range; last `isd ssh hosts` had 0-{max}")
+    })?;
+    Ok(row.container_id.clone())
 }
 
 /// Interactive host picker. Fetches Isengard-enrolled hosts from the
@@ -539,24 +675,153 @@ async fn run_hosts(context: Option<&str>) -> Result<()> {
         .json()
         .await
         .context("decoding hosts JSON")?;
+    // Write the index cache before rendering so a downstream
+    // `isd ssh <N>` reads the freshest set.
+    write_hosts_index_cache(&rows, &session.context.name);
     print_hosts_table(&rows);
     Ok(())
+}
+
+/// Override the operator-facing dial target on an enrolled host.
+///
+/// Resolves `args.agent` against the controller's host list (matches
+/// against hostname, host id ULID, dial_target, or a `#N` index from
+/// the last `isd ssh hosts` render), then PATCHes the row.
+///
+/// # Errors
+///
+/// Returns `Err` when neither `--dial` nor `--clear` is set, when the
+/// agent token does not resolve to a host row, or when the PATCH HTTP
+/// call fails.
+async fn run_hosts_set(args: HostsSetArgs, context: Option<&str>) -> Result<()> {
+    let target_value = match (&args.dial, args.clear) {
+        (Some(_), true) => {
+            return Err(anyhow!(
+                "isd ssh hosts set: pass either --dial <target> or --clear, not both"
+            ));
+        }
+        (Some(t), false) => t.clone(),
+        // --clear: send an empty string so the controller nulls the column.
+        (None, true) => String::new(),
+        (None, false) => {
+            return Err(anyhow!(
+                "isd ssh hosts set: pass --dial <target> to set, or --clear to remove"
+            ));
+        }
+    };
+
+    let session = Session::open(context).await?;
+    let controller_url = session.require_controller()?;
+    let url = format!("{controller_url}/api/v1/hosts");
+    let hosts: Vec<HostRow> = session
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .context("listing hosts for `isd ssh hosts set`")?
+        .json()
+        .await
+        .context("decoding hosts JSON for `isd ssh hosts set`")?;
+
+    let host_id = resolve_agent_token(&hosts, &args.agent)?;
+    let patched = dial_target::patch_host_dial_target(
+        &session.client,
+        controller_url,
+        &host_id,
+        &target_value,
+    )
+    .await?;
+    if target_value.is_empty() {
+        println!(
+            "cleared dial_target on {} ({})",
+            patched.hostname, patched.id
+        );
+    } else {
+        println!(
+            "set dial_target on {} ({}) -> {}",
+            patched.hostname,
+            patched.id,
+            patched
+                .dial_target
+                .as_deref()
+                .unwrap_or(target_value.as_str())
+        );
+    }
+    Ok(())
+}
+
+/// Resolve an `isd ssh hosts set` agent token to a host id ULID.
+///
+/// Matches in this order:
+/// 1. A `#N`-style integer (or bare integer) is looked up against the
+///    last `isd ssh hosts` index cache.
+/// 2. Otherwise we walk `hosts` and match against `hostname`, `id`,
+///    or `dial_target` exactly.
+///
+/// Errors with an actionable message when no row matches.
+fn resolve_agent_token(hosts: &[HostRow], token: &str) -> Result<String> {
+    // Strip a leading `#` so `#3` and `3` both work.
+    let bare = token.strip_prefix('#').unwrap_or(token);
+    if let Ok(idx) = bare.parse::<usize>() {
+        let cache = crate::index_cache::read().context("reading ssh hosts index cache")?;
+        let cache = cache.ok_or_else(|| {
+            anyhow!(
+                "no index cache; run `isd ssh hosts` first so `isd ssh hosts set {token} ...` \
+                 can resolve a numeric selector"
+            )
+        })?;
+        let row = cache.rows.iter().find(|r| r.index == idx).ok_or_else(|| {
+            let max = cache.rows.iter().map(|r| r.index).max().unwrap_or(0);
+            anyhow!("index {idx} out of range; last `isd ssh hosts` had 0-{max}")
+        })?;
+        // The cache's `name` is the hostname; look it up in the host
+        // list to recover the host id ULID for the PATCH route.
+        let host = hosts
+            .iter()
+            .find(|h| h.hostname == row.name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "index {idx} pointed at {:?} but the controller no longer reports that host; \
+                     run `isd ssh hosts` to refresh",
+                    row.name
+                )
+            })?;
+        return Ok(host.id.clone());
+    }
+    let host = hosts
+        .iter()
+        .find(|h| h.hostname == token || h.id == token || h.dial_target.as_deref() == Some(token))
+        .ok_or_else(|| {
+            anyhow!(
+                "no host matched {token:?}; pass a hostname, the host id, the existing \
+                 dial target, or a `#N` index from `isd ssh hosts`"
+            )
+        })?;
+    Ok(host.id.clone())
 }
 
 /// Column layout for `isd ssh hosts`. Drops the `SSH USER` /
 /// `PRINCIPAL` columns the operator no longer wants in the table:
 /// the default user is surfaced once in a footer line under the box.
-/// Columns in spec order: `#`, `NAME`, `LAST SEEN`.
+/// Columns in spec order: `#`, `NAME`, `DIAL TARGET`, `LAST SEEN`.
 fn hosts_columns() -> Vec<Column> {
     vec![
         Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
         Column::new("NAME", Align::Left, CellStyle::Emphasis, 6, 8),
+        // The dial target column is what the operator types into
+        // ssh; emphasized so it sits visually next to NAME. shrink
+        // priority sits below LAST SEEN so the timestamp stays
+        // readable on narrow terminals.
+        Column::new("DIAL TARGET", Align::Left, CellStyle::Plain, 5, 14),
         Column::new("LAST SEEN", Align::Left, CellStyle::Plain, 1, 12),
     ]
 }
 
 /// Build the row matrix for `isd ssh hosts`. Missing `last_seen_at`
-/// renders as `-` so the column never collapses.
+/// renders as `-`. Missing `dial_target` renders as `(unset)` so the
+/// column never collapses and the operator sees the action verb.
 fn build_hosts_row_cells(rows: &[HostRow]) -> Vec<Vec<String>> {
     rows.iter()
         .enumerate()
@@ -565,7 +830,8 @@ fn build_hosts_row_cells(rows: &[HostRow]) -> Vec<Vec<String>> {
                 .last_seen_at
                 .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
                 .unwrap_or_else(|| "-".into());
-            vec![i.to_string(), row.hostname.clone(), last_seen]
+            let dial = row.dial_target.clone().unwrap_or_else(|| "(unset)".into());
+            vec![i.to_string(), row.hostname.clone(), dial, last_seen]
         })
         .collect()
 }
@@ -595,6 +861,45 @@ fn print_hosts_table(rows: &[HostRow]) {
     } else {
         println!("{}", render_plain(&table));
         println!("{footer}");
+    }
+}
+
+/// Build the index-cache rows for `isd ssh hosts`. Mirrors the
+/// `ps.rs` pattern: render-order index + a stable identifier the dial
+/// path can consume. We pack the dial target into `container_id` so
+/// `isd ssh <N>` can read the cache via the same `IndexRow` schema
+/// without bumping the on-disk format. `name` carries the
+/// operator-visible label (the agent's reported hostname).
+fn build_hosts_index_rows(rows: &[HostRow], context_name: &str) -> Vec<IndexRow> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| IndexRow {
+            index: i,
+            context: context_name.to_string(),
+            // The dial path reads this column. Falls back to the
+            // hostname so a `#N` lookup never hands an empty string
+            // to `ssh`.
+            container_id: row
+                .dial_target
+                .clone()
+                .unwrap_or_else(|| row.hostname.clone()),
+            name: row.hostname.clone(),
+        })
+        .collect()
+}
+
+/// Write the `isd ssh hosts` index cache so `isd ssh <N>` can resolve
+/// a bare integer against the freshest render. Failures are a warning;
+/// the table render already landed and a missing cache is recoverable
+/// (`isd ssh hosts` again to refresh).
+fn write_hosts_index_cache(rows: &[HostRow], context_name: &str) {
+    let cache = IndexCache {
+        captured_at: chrono::Utc::now(),
+        command: "ssh hosts".to_string(),
+        rows: build_hosts_index_rows(rows, context_name),
+    };
+    if let Err(e) = crate::index_cache::write(&cache) {
+        eprintln!("isd: warning: could not write ssh hosts index cache: {e:#}");
     }
 }
 
@@ -1363,23 +1668,23 @@ mod tests {
         render_plain(&table)
     }
 
-    /// `isd ssh hosts` headers match the new spec: `#`, `NAME`,
-    /// `LAST SEEN`. The legacy `SSH USER` / `PRINCIPAL` columns are
-    /// gone (the default user lives in the footer).
+    /// `isd ssh hosts` headers match the PR B spec: `#`, `NAME`,
+    /// `DIAL TARGET`, `LAST SEEN`. The legacy `SSH USER` / `PRINCIPAL`
+    /// columns are gone (the default user lives in the footer).
     #[test]
     fn render_hosts_table_has_spec_columns_only() {
         let t = hosts_plain(&[]);
         let header = t.lines().next().unwrap();
         // `render_plain` drops the `#` column by contract; the
-        // remaining columns are `NAME\tLAST SEEN`.
-        assert_eq!(header, "NAME\tLAST SEEN");
+        // remaining columns are `NAME\tDIAL TARGET\tLAST SEEN`.
+        assert_eq!(header, "NAME\tDIAL TARGET\tLAST SEEN");
         // The legacy columns are gone.
         assert!(!t.contains("SSH USER"));
         assert!(!t.contains("PRINCIPAL"));
     }
 
     /// Boxed render carries the `#` column (TTY affordance) and all
-    /// three spec headers in order.
+    /// four spec headers in order.
     #[test]
     fn render_hosts_table_boxed_carries_index_column() {
         let table = RenderTable {
@@ -1390,30 +1695,38 @@ mod tests {
         assert!(boxed.contains('╭'));
         assert!(boxed.contains("#"));
         assert!(boxed.contains("NAME"));
+        assert!(boxed.contains("DIAL TARGET"));
         assert!(boxed.contains("LAST SEEN"));
     }
 
     /// Each input row surfaces in the rendered output with the
     /// hostname, the formatted timestamp, and the `-` placeholder
-    /// when `last_seen_at` is missing.
+    /// when `last_seen_at` is missing. The dial target column carries
+    /// the operator's address when set and `(unset)` when missing.
     #[test]
     fn render_hosts_table_renders_each_row() {
         let rows = vec![
             HostRow {
+                id: "01HEDGE1".into(),
                 hostname: "iso-edge-1".into(),
                 last_seen_at: Some(
                     chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 5, 21, 10, 0, 0).unwrap(),
                 ),
+                dial_target: Some("dirdmaster@10.17.0.125".into()),
             },
             HostRow {
+                id: "01HEDGE2".into(),
                 hostname: "iso-edge-2".into(),
                 last_seen_at: None,
+                dial_target: None,
             },
         ];
         let t = hosts_plain(&rows);
         assert!(t.contains("iso-edge-1"));
         assert!(t.contains("iso-edge-2"));
         assert!(t.contains("2026-05-21T10:00:00Z"));
+        assert!(t.contains("dirdmaster@10.17.0.125"));
+        assert!(t.contains("(unset)"));
         // The dash placeholder lives in the LAST SEEN column for the
         // host with no heartbeat.
         let lines: Vec<&str> = t.lines().collect();
@@ -1433,6 +1746,174 @@ mod tests {
         let line = hosts_footer_line("dirdmaster");
         assert!(line.contains("SSH user: dirdmaster"), "footer: {line}");
         assert!(line.contains("isd ssh user@<host>"), "footer: {line}");
+    }
+
+    fn sample_hosts() -> Vec<HostRow> {
+        vec![
+            HostRow {
+                id: "01HEDGE1".into(),
+                hostname: "edge-1".into(),
+                last_seen_at: None,
+                dial_target: Some("dirdmaster@10.17.0.125".into()),
+            },
+            HostRow {
+                id: "01HEDGE2".into(),
+                hostname: "edge-2".into(),
+                last_seen_at: None,
+                dial_target: None,
+            },
+        ]
+    }
+
+    /// `build_hosts_index_rows` packs the dial target into
+    /// `container_id` so `isd ssh <N>` can resolve straight to the
+    /// dialable address. Hosts with no dial target fall back to the
+    /// hostname so the dial still works.
+    #[test]
+    fn index_rows_pack_dial_target_then_fall_back_to_hostname() {
+        let rows = build_hosts_index_rows(&sample_hosts(), "lausanne");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].index, 0);
+        assert_eq!(rows[0].context, "lausanne");
+        assert_eq!(rows[0].container_id, "dirdmaster@10.17.0.125");
+        assert_eq!(rows[0].name, "edge-1");
+        // Row 1 has no dial target: fall back to hostname.
+        assert_eq!(rows[1].container_id, "edge-2");
+        assert_eq!(rows[1].name, "edge-2");
+    }
+
+    /// `resolve_agent_token` accepts hostname, host id, and the
+    /// existing dial target as selectors. Numeric tokens are handled
+    /// by a separate index-cache code path tested independently.
+    #[test]
+    fn resolve_agent_token_matches_hostname_id_and_dial_target() {
+        let hosts = sample_hosts();
+        assert_eq!(resolve_agent_token(&hosts, "edge-1").unwrap(), "01HEDGE1");
+        assert_eq!(resolve_agent_token(&hosts, "01HEDGE2").unwrap(), "01HEDGE2");
+        assert_eq!(
+            resolve_agent_token(&hosts, "dirdmaster@10.17.0.125").unwrap(),
+            "01HEDGE1"
+        );
+    }
+
+    /// `resolve_agent_token` errors with an actionable message when
+    /// nothing matches.
+    #[test]
+    fn resolve_agent_token_errors_with_actionable_message() {
+        let hosts = sample_hosts();
+        let err = resolve_agent_token(&hosts, "ghost").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no host matched"), "{msg}");
+        assert!(msg.contains("hostname"), "{msg}");
+    }
+
+    /// `isd ssh hosts` is parsed by clap as the bare `Hosts(HostsArgs)`
+    /// variant with `command: None`. Guards against an accidental
+    /// regression where the new `HostsArgs` indirection makes plain
+    /// `isd ssh hosts` ambiguous.
+    #[test]
+    fn ssh_hosts_bare_parses_to_list() {
+        use clap::Parser;
+        // Build a tiny parser that mirrors the top-level dispatch path.
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: SshCommand,
+        }
+        let parsed = Wrap::try_parse_from(["wrap", "hosts"]).expect("parses");
+        match parsed.cmd {
+            SshCommand::Hosts(HostsArgs { command: None }) => {}
+            other => panic!("expected Hosts(no subcmd), got {other:?}"),
+        }
+    }
+
+    /// `isd ssh hosts set <agent> --dial <target>` parses cleanly via
+    /// the nested HostsCommand::Set variant.
+    #[test]
+    fn ssh_hosts_set_parses_with_dial_flag() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: SshCommand,
+        }
+        let parsed =
+            Wrap::try_parse_from(["wrap", "hosts", "set", "edge-1", "--dial", "op@10.0.0.7"])
+                .expect("parses");
+        match parsed.cmd {
+            SshCommand::Hosts(HostsArgs {
+                command: Some(HostsCommand::Set(args)),
+            }) => {
+                assert_eq!(args.agent, "edge-1");
+                assert_eq!(args.dial.as_deref(), Some("op@10.0.0.7"));
+                assert!(!args.clear);
+            }
+            other => panic!("expected Hosts(Set(...)), got {other:?}"),
+        }
+    }
+
+    /// `isd ssh hosts set <agent> --clear` parses with the bool flag
+    /// flipped and no `--dial` value.
+    #[test]
+    fn ssh_hosts_set_parses_with_clear_flag() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: SshCommand,
+        }
+        let parsed =
+            Wrap::try_parse_from(["wrap", "hosts", "set", "edge-1", "--clear"]).expect("parses");
+        match parsed.cmd {
+            SshCommand::Hosts(HostsArgs {
+                command: Some(HostsCommand::Set(args)),
+            }) => {
+                assert_eq!(args.agent, "edge-1");
+                assert!(args.dial.is_none());
+                assert!(args.clear);
+            }
+            other => panic!("expected Hosts(Set(...)), got {other:?}"),
+        }
+    }
+
+    /// `resolve_index_to_dial` reads the on-disk cache and returns the
+    /// row's `container_id` (which the hosts index writer packs with
+    /// the dial target). Uses a temp `ISD_INDEX_CACHE` so the test does
+    /// not touch the operator's real cache file.
+    #[test]
+    fn resolve_index_to_dial_reads_from_cache() {
+        let _lock = crate::index_cache::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last-ps.json");
+        unsafe {
+            std::env::set_var("ISD_INDEX_CACHE", &path);
+        }
+        let cache = IndexCache {
+            captured_at: Utc::now(),
+            command: "ssh hosts".into(),
+            rows: vec![
+                IndexRow {
+                    index: 0,
+                    context: "lausanne".into(),
+                    container_id: "dirdmaster@10.17.0.125".into(),
+                    name: "edge-1".into(),
+                },
+                IndexRow {
+                    index: 1,
+                    context: "lausanne".into(),
+                    container_id: "edge-2".into(),
+                    name: "edge-2".into(),
+                },
+            ],
+        };
+        crate::index_cache::write(&cache).unwrap();
+        assert_eq!(resolve_index_to_dial(0).unwrap(), "dirdmaster@10.17.0.125");
+        assert_eq!(resolve_index_to_dial(1).unwrap(), "edge-2");
+        let err = resolve_index_to_dial(9).unwrap_err();
+        assert!(format!("{err}").contains("out of range"));
+        unsafe {
+            std::env::remove_var("ISD_INDEX_CACHE");
+        }
     }
 
     /// Helper: render the audit table via the unified renderer's

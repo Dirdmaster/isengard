@@ -82,6 +82,11 @@ pub async fn run(args: JoinArgs, context: Option<&str>) -> Result<()> {
     }
 
     poll_for_enrolment(&args.controller).await?;
+    // Best-effort: PATCH the just-enrolled host with the operator's
+    // dial target derived from the docker context URL. Skipped for
+    // non-SSH contexts; failures are logged + swallowed.
+    crate::dial_target::patch_latest_host_dial_target_best_effort(&args.controller, &docker_uri)
+        .await;
     println!("Joined cluster as agent.");
     Ok(())
 }

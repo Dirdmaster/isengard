@@ -34,6 +34,13 @@ pub struct HostDto {
     /// agents that never gossiped the field. Read from
     /// `metadata.runtime_backend` on the host row.
     pub runtime_backend: String,
+    /// Operator-facing dial target (e.g.
+    /// `dirdmaster@10.17.0.125`). Captured by the CLI at enroll time
+    /// from the operator's active docker context URL; overridable
+    /// via `isd ssh hosts set <agent> --dial <target>`. `None`
+    /// for hosts that predate the column or were enrolled by an
+    /// older CLI build.
+    pub dial_target: Option<String>,
 }
 
 impl From<Host> for HostDto {
@@ -60,6 +67,7 @@ impl From<Host> for HostDto {
                 .last_seen_at
                 .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
             runtime_backend,
+            dial_target: h.dial_target,
         }
     }
 }
@@ -182,11 +190,12 @@ pub struct EnrollRequest {
 #[derive(Debug, Deserialize, Default)]
 /// PatchHostRequest.
 pub struct PatchHostRequest {
-    // No patchable fields after kill-fleets. Kept as a placeholder so the
-    // handler retains its JSON body extractor; future fields land here.
-    #[serde(default, skip_serializing)]
-    /// `_placeholder` field.
-    pub _placeholder: Option<()>,
+    /// Operator-facing dial target to set on the host row. Send
+    /// `null` (or omit) to leave the value unchanged; send an empty
+    /// string to clear it. Captured by the CLI at enroll time and
+    /// overridable via `isd ssh hosts set <agent> --dial <target>`.
+    #[serde(default)]
+    pub dial_target: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -346,6 +355,7 @@ mod tests {
             enrolled_at: 1714521600, // 2024-05-01T00:00:00Z
             last_seen_at: Some(1714525200),
             metadata: serde_json::json!({}),
+            dial_target: None,
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.enrolled_at.timestamp(), 1714521600);
@@ -416,6 +426,7 @@ mod tests {
             enrolled_at: 0,
             last_seen_at: None,
             metadata: serde_json::json!({"runtime_backend": "wisp"}),
+            dial_target: None,
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.runtime_backend, "wisp");
@@ -435,6 +446,7 @@ mod tests {
             enrolled_at: 0,
             last_seen_at: None,
             metadata: serde_json::json!({}),
+            dial_target: None,
         };
         let dto: HostDto = h.into();
         assert_eq!(dto.runtime_backend, "docker");
