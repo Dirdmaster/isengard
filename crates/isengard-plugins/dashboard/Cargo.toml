@@ -46,3 +46,8 @@ rand.workspace = true
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
 futures-util = { workspace = true }
 tonic = { workspace = true }
+# PR B (`isd configure` zones cascade): mock the Cloudflare /zones
+# endpoint so the cloudflare-fetch route's integration test can exercise
+# both the happy path and the 502 upstream-error pass-through without
+# hitting the real CF API.
+wiremock.workspace = true

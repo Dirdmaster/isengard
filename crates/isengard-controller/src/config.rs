@@ -48,6 +48,14 @@ pub enum KeyType {
     Int,
     /// Boolean.
     Bool,
+    /// Ordered list of non-empty UTF-8 strings.
+    ///
+    /// Persisted as a JSON array. Used for operator-managed multi-value
+    /// keys like `routing.zones`. Validation rejects mixed-type arrays,
+    /// non-string elements, and empty-string elements so the wire shape
+    /// stays predictable for downstream consumers (the cascade picker on
+    /// `routing.default_zone`, for instance).
+    StringList,
 }
 
 /// One row in the static schema.
@@ -106,6 +114,26 @@ impl SchemaEntry {
             (KeyType::Secret, Value::String(s)) if !s.is_empty() => Ok(()),
             (KeyType::Int, Value::Number(n)) if n.is_i64() || n.is_u64() => Ok(()),
             (KeyType::Bool, Value::Bool(_)) => Ok(()),
+            (KeyType::StringList, Value::Array(items)) => {
+                for (i, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(s) if !s.is_empty() => {}
+                        Value::String(_) => {
+                            return Err(anyhow!(
+                                "invalid value for {} (StringList): element {i} is empty",
+                                self.key
+                            ));
+                        }
+                        _ => {
+                            return Err(anyhow!(
+                                "invalid value for {} (StringList): element {i} is not a string: {item}",
+                                self.key
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
             _ => Err(anyhow!(
                 "invalid value for {} (type {:?}): {}",
                 self.key,
@@ -153,6 +181,15 @@ impl Schema {
                     ty: KeyType::String,
                     default: None,
                     doc: "Cloudflare zone UUID (for DNS-01)",
+                    choices: None,
+                },
+                SchemaEntry {
+                    key: "routing.zones",
+                    display_name: "DNS zones",
+                    category: "Routing",
+                    ty: KeyType::StringList,
+                    default: None,
+                    doc: "DNS zones you manage (e.g. weavers.engineering). routing.default_zone picks from this list.",
                     choices: None,
                 },
                 SchemaEntry {
@@ -468,7 +505,8 @@ mod tests {
         assert!(keys.contains(&"acme.contact_email"));
         assert!(keys.contains(&"acme.directory"));
         assert!(keys.contains(&"ssh.max_ttl_seconds"));
-        assert_eq!(keys.len(), 6);
+        assert!(keys.contains(&"routing.zones"));
+        assert_eq!(keys.len(), 7);
     }
 
     #[test]
@@ -503,6 +541,48 @@ mod tests {
         assert_eq!(entry.ty, KeyType::Int);
         assert!(entry.validate(&json!(3600)).is_ok());
         assert!(entry.validate(&json!("not-an-int")).is_err());
+    }
+
+    #[test]
+    fn schema_validates_string_list_accepts_non_empty_strings() {
+        let schema = Schema::v01();
+        let entry = schema.get("routing.zones").unwrap();
+        assert_eq!(entry.ty, KeyType::StringList);
+        assert!(entry.validate(&json!([])).is_ok());
+        assert!(
+            entry
+                .validate(&json!(["a.com", "b.com", "weavers.engineering"]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn schema_validates_string_list_rejects_non_array() {
+        let schema = Schema::v01();
+        let entry = schema.get("routing.zones").unwrap();
+        assert!(entry.validate(&json!("a.com")).is_err());
+        assert!(entry.validate(&json!(42)).is_err());
+        assert!(entry.validate(&json!({"zones": ["a.com"]})).is_err());
+    }
+
+    #[test]
+    fn schema_validates_string_list_rejects_non_string_elements() {
+        let schema = Schema::v01();
+        let entry = schema.get("routing.zones").unwrap();
+        let err = entry.validate(&json!(["a.com", 42])).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("element 1"), "msg: {msg}");
+        assert!(msg.contains("not a string"), "msg: {msg}");
+    }
+
+    #[test]
+    fn schema_validates_string_list_rejects_empty_element() {
+        let schema = Schema::v01();
+        let entry = schema.get("routing.zones").unwrap();
+        let err = entry.validate(&json!(["a.com", ""])).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("element 1"), "msg: {msg}");
+        assert!(msg.contains("empty"), "msg: {msg}");
     }
 
     #[test]
@@ -643,6 +723,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_string_list_round_trips_through_setting_store() {
+        let d = test_dispatcher().await;
+        d.put(
+            "routing.zones",
+            json!(["weavers.engineering", "vallee.casa"]),
+            Some("test"),
+        )
+        .await
+        .unwrap();
+        let v = d.get("routing.zones").await.unwrap();
+        assert_eq!(
+            v,
+            Some(ConfigValue::Set(json!([
+                "weavers.engineering",
+                "vallee.casa"
+            ])))
+        );
+    }
+
+    #[tokio::test]
+    async fn put_string_list_rejects_mixed_types() {
+        let d = test_dispatcher().await;
+        let err = d
+            .put("routing.zones", json!(["ok.com", 42]), None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not a string"));
+    }
+
+    #[tokio::test]
     async fn put_secret_routes_to_secrets_store() {
         let d = test_dispatcher().await;
         d.put("cloudflare.api_token", json!("cf-token-xyz"), None)
@@ -727,7 +837,7 @@ mod tests {
             .await
             .unwrap();
         let rows = d.list().await.unwrap();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         // routing.default_zone is Set.
         let routing = rows
             .iter()

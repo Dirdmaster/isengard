@@ -8,6 +8,7 @@ pub mod acme;
 pub mod auth;
 pub mod bus;
 pub mod ca;
+pub mod cloudflare;
 pub mod compose_broker;
 pub mod config;
 pub mod container_id;

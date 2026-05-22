@@ -27,10 +27,13 @@ use isengard_storage::inventory::Inventory;
 use isengard_storage::journal::Journal;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Builds a router with the configure routes mounted and the secrets
-/// store unlocked so secret-typed keys can round-trip.
-async fn setup_app() -> (Router, Arc<ControllerHandles>) {
+/// Builds a router with the configure routes mounted, the secrets store
+/// unlocked, and the Cloudflare API base URL overridden to `cf_base`
+/// (set to `None` for the production endpoint).
+async fn setup_app_with_cf(cf_base: Option<String>) -> (Router, Arc<ControllerHandles>) {
     let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
     let journal = Arc::new(Journal::open_in_memory().await.unwrap());
     let bus = Arc::new(EventBus::new());
@@ -38,7 +41,6 @@ async fn setup_app() -> (Router, Arc<ControllerHandles>) {
     let ca = Arc::new(Authority::load_or_init(&inv).await.unwrap());
     let enrollment_svc = Arc::new(EnrollmentService::new(inv.clone(), ca.clone()));
     let revocation = RevocationSet::load_from_inventory(&inv).await.unwrap();
-    // Deterministic 32-byte test key for the secrets store.
     let mut key = [0u8; 32];
     for (i, b) in key.iter_mut().enumerate() {
         *b = i as u8;
@@ -63,8 +65,16 @@ async fn setup_app() -> (Router, Arc<ControllerHandles>) {
         config_dispatcher,
     });
 
-    let app = dashboard_config::router(handles.clone());
+    let app = dashboard_config::router_with_cf_base(handles.clone(), cf_base);
     (app, handles)
+}
+
+/// Builds a router with the configure routes mounted and the secrets
+/// store unlocked so secret-typed keys can round-trip. Cloudflare base
+/// URL stays at the production default; tests that need to mock CF use
+/// [`setup_app_with_cf`].
+async fn setup_app() -> (Router, Arc<ControllerHandles>) {
+    setup_app_with_cf(None).await
 }
 
 /// Drain a response into a JSON value (or `Null` when the body is
@@ -316,7 +326,7 @@ async fn get_unset_key_without_default_returns_404() {
 }
 
 #[tokio::test]
-async fn list_returns_all_six_v01_keys_secrets_redacted_by_default() {
+async fn list_returns_all_v01_keys_secrets_redacted_by_default() {
     let (app, _h) = setup_app().await;
 
     // Set the secret so list has something to redact.
@@ -329,7 +339,7 @@ async fn list_returns_all_six_v01_keys_secrets_redacted_by_default() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_to_json(resp).await;
     let arr = body.as_array().expect("list returns an array");
-    assert_eq!(arr.len(), 6, "v0.1 schema declares six keys: {arr:?}");
+    assert_eq!(arr.len(), 7, "v0.1 schema declares seven keys: {arr:?}");
 
     let raw = serde_json::to_string(&body).unwrap();
     assert!(
@@ -357,8 +367,97 @@ async fn list_returns_all_six_v01_keys_secrets_redacted_by_default() {
     );
 }
 
+/// Build a POST /api/v1/config/zones/cloudflare-fetch request with no
+/// body (the handler reads `cloudflare.api_token` from the dispatcher).
+fn post_cf_fetch_req() -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/config/zones/cloudflare-fetch")
+        .body(Body::empty())
+        .unwrap()
+}
+
 #[tokio::test]
-async fn schema_endpoint_returns_all_six_v01_keys() {
+async fn cloudflare_zones_fetch_returns_400_when_token_unset() {
+    let (app, _h) = setup_app().await;
+    let resp = app.clone().oneshot(post_cf_fetch_req()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_to_json(resp).await;
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(err.contains("cloudflare.api_token"), "error: {err}");
+    assert!(err.contains("not set"), "error: {err}");
+}
+
+#[tokio::test]
+async fn cloudflare_zones_fetch_returns_zones_on_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/zones"))
+        .and(header("authorization", "Bearer cf-token-success"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "errors": [],
+            "messages": [],
+            "result": [
+                { "id": "z1", "name": "weavers.engineering" },
+                { "id": "z2", "name": "vallee.casa" },
+            ],
+            "result_info": { "total_pages": 1 },
+        })))
+        .mount(&server)
+        .await;
+
+    let (app, _h) = setup_app_with_cf(Some(server.uri())).await;
+    // Seed the token via the same dashboard surface the operator uses.
+    let resp = app
+        .clone()
+        .oneshot(put_req("cloudflare.api_token", json!("cf-token-success")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app.clone().oneshot(post_cf_fetch_req()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_json(resp).await;
+    let zones = body["zones"]
+        .as_array()
+        .expect("zones is an array")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(zones, vec!["weavers.engineering", "vallee.casa"]);
+}
+
+#[tokio::test]
+async fn cloudflare_zones_fetch_surfaces_upstream_error_as_502() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/zones"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "success": false,
+            "errors": [{ "code": 6003, "message": "Invalid request headers" }],
+            "messages": [],
+            "result": null,
+        })))
+        .mount(&server)
+        .await;
+
+    let (app, _h) = setup_app_with_cf(Some(server.uri())).await;
+    app.clone()
+        .oneshot(put_req("cloudflare.api_token", json!("bad-token")))
+        .await
+        .unwrap();
+
+    let resp = app.clone().oneshot(post_cf_fetch_req()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = body_to_json(resp).await;
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(err.contains("403"), "error: {err}");
+    assert!(err.contains("Invalid request headers"), "error: {err}");
+}
+
+#[tokio::test]
+async fn schema_endpoint_returns_all_v01_keys() {
     let (app, _h) = setup_app().await;
     let resp = app
         .clone()
@@ -368,11 +467,12 @@ async fn schema_endpoint_returns_all_six_v01_keys() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_to_json(resp).await;
     let arr = body.as_array().expect("schema returns an array");
-    assert_eq!(arr.len(), 6, "v0.1 schema declares six keys");
+    assert_eq!(arr.len(), 7, "v0.1 schema declares seven keys");
     let keys: Vec<&str> = arr.iter().filter_map(|e| e["key"].as_str()).collect();
     assert!(keys.contains(&"cloudflare.api_token"));
     assert!(keys.contains(&"cloudflare.zone_id"));
     assert!(keys.contains(&"routing.default_zone"));
+    assert!(keys.contains(&"routing.zones"));
     assert!(keys.contains(&"acme.contact_email"));
     assert!(keys.contains(&"acme.directory"));
     assert!(keys.contains(&"ssh.max_ttl_seconds"));
