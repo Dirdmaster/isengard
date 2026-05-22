@@ -396,27 +396,15 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
     out
 }
 
-/// Optional mode badge appended to the right edge of an input row.
-///
-/// The picker uses this to surface its vim-style mode (NORMAL vs INSERT)
-/// inside the box without adding a separate status line. The renderer
-/// right-aligns the `label` against the input row's trailing edge with
-/// the given color.
-#[derive(Debug, Clone, Copy)]
-pub struct ModeBadge {
-    /// Short 3-letter tag (e.g. `NOR`, `INS`). No padding, no box.
-    pub label: &'static str,
-    /// Tag foreground color.
-    pub color: ratatui::style::Color,
-}
-
 /// Input row spec for [`render_to_lines`]: when supplied, the renderer
 /// emits a full-width footer row inside the box (under a `┴`-joined
 /// divider) instead of closing with the usual bottom border.
 ///
-/// The picker uses this to fold its `> filter hosts...` prompt into the
+/// The picker uses this to fold its `/ filter hosts...` prompt into the
 /// table's chrome, so the operator reads the whole picker as one boxed
-/// widget instead of "table + loose line below".
+/// widget instead of "table + loose line below". The `prompt_style`
+/// is the picker's mode affordance: dim glyph in NORMAL, colored in
+/// INSERT.
 #[derive(Debug, Clone, Copy)]
 pub struct InputRow<'a> {
     /// Operator-supplied query so far. Empty string + `placeholder`
@@ -424,10 +412,11 @@ pub struct InputRow<'a> {
     pub query: &'a str,
     /// Muted italic placeholder shown when `query.is_empty()`.
     pub placeholder: &'a str,
-    /// Prompt prefix to display before the query (e.g. `> `).
+    /// Prompt prefix to display before the query (e.g. `/ `).
     pub prompt: &'a str,
-    /// Optional mode badge right-aligned inside the input row.
-    pub mode: Option<ModeBadge>,
+    /// Style applied to the prompt glyph. The picker uses this to
+    /// signal its vim-modal state without a separate badge.
+    pub prompt_style: ratatui::style::Style,
     /// When `false`, suppress the cursor position output (NORMAL mode
     /// in the picker). When `true`, [`render_to_lines`] returns a
     /// `Some((row, col))` cursor anchor as usual.
@@ -564,29 +553,16 @@ pub fn render_to_lines(
             };
             let body_w = console::measure_text_width(&body_text);
 
-            // Mode badge width (including the leading space that
-            // separates it from the filler).
-            let badge_w = spec
-                .mode
-                .map(|b| console::measure_text_width(b.label) + 1)
-                .unwrap_or(0);
-
-            // Build: " " (left cell padding) + prompt + body + spaces
-            // to fill remaining interior + optional badge + " " (right
-            // cell padding). Concretely:
-            //   interior = " " + prompt + body + filler + badge + " "
-            //   |interior| == interior_w
-            // The trailing space is folded into the filler when no
-            // badge is set: existing layout (1-space right pad implied
-            // by the filler) is preserved.
-            let inner_used = 1 + prompt_w + body_w + badge_w + 1;
+            // Build: " " (left cell padding) + prompt + body + filler +
+            // " " (right cell padding). |interior| == interior_w.
+            let inner_used = 1 + prompt_w + body_w + 1;
             let filler = interior_w.saturating_sub(inner_used);
 
             let mut input_spans: Vec<Span<'static>> = Vec::new();
             input_spans.push(Span::styled(V.to_string(), border_style));
-            // Leading pad + prompt rendered with default style (the
-            // prompt glyph itself is not the placeholder).
-            input_spans.push(Span::raw(format!(" {prompt}")));
+            // Leading pad (default style) + prompt (styled per spec).
+            input_spans.push(Span::raw(" "));
+            input_spans.push(Span::styled(prompt, spec.prompt_style));
             // Body: italic dim placeholder when empty, plain query when not.
             if is_empty {
                 input_spans.push(Span::styled(
@@ -598,19 +574,9 @@ pub fn render_to_lines(
             } else {
                 input_spans.push(Span::raw(body_text));
             }
-            // Filler bridges the body and the optional badge (or the
-            // right edge).
+            // Filler bridges the body to the right edge.
             if filler > 0 {
                 input_spans.push(Span::raw(" ".repeat(filler)));
-            }
-            if let Some(badge) = spec.mode {
-                input_spans.push(Span::raw(" "));
-                input_spans.push(Span::styled(
-                    badge.label.to_string(),
-                    Style::default()
-                        .fg(badge.color)
-                        .add_modifier(Modifier::BOLD),
-                ));
             }
             // Trailing right cell padding before the box edge.
             input_spans.push(Span::raw(" "));
@@ -983,8 +949,8 @@ mod tests {
         let input = InputRow {
             query: "",
             placeholder: "filter hosts...",
-            prompt: "> ",
-            mode: None,
+            prompt: "/ ",
+            prompt_style: ratatui::style::Style::default(),
             show_cursor: true,
         };
         let (lines, cursor) = render_to_lines(&table, 200, None, Some(input));
@@ -1042,14 +1008,14 @@ mod tests {
         let input = InputRow {
             query: "lau",
             placeholder: "filter hosts...",
-            prompt: "> ",
-            mode: None,
+            prompt: "/ ",
+            prompt_style: ratatui::style::Style::default(),
             show_cursor: true,
         };
         let (lines, cursor) = render_to_lines(&table, 200, None, Some(input));
         let input_line = &lines[lines.len() - 2];
         let txt = input_line.to_string();
-        assert!(txt.contains("> lau"), "input row shows `> lau`: {txt:?}");
+        assert!(txt.contains("/ lau"), "input row shows `/ lau`: {txt:?}");
         assert!(
             !txt.contains("filter hosts..."),
             "placeholder must vanish once the query is non-empty: {txt:?}"
@@ -1063,14 +1029,14 @@ mod tests {
                 "non-empty query must not carry placeholder styling: {span:?}"
             );
         }
-        // Cursor sits at the end of `> lau`: 1 (`│`) + 1 (pad) + 2 (`> `) + 3 (`lau`) = 7.
+        // Cursor sits at the end of `/ lau`: 1 (`│`) + 1 (pad) + 2 (`/ `) + 3 (`lau`) = 7.
         let (_, col) = cursor.expect("input row must yield cursor");
         assert_eq!(col, 7, "cursor sits at the end of the query: {col}");
     }
 
     #[test]
-    fn render_to_lines_input_row_appends_mode_badge_with_color() {
-        use ratatui::style::{Color, Modifier};
+    fn render_to_lines_input_row_styles_prompt_glyph() {
+        use ratatui::style::{Color, Modifier, Style};
         let table = Table {
             columns: ps_columns(),
             rows: ps_rows(),
@@ -1078,40 +1044,25 @@ mod tests {
         let input = InputRow {
             query: "lau",
             placeholder: "filter hosts...",
-            prompt: "> ",
-            mode: Some(ModeBadge {
-                label: "NOR",
-                color: Color::Yellow,
-            }),
+            prompt: "/ ",
+            prompt_style: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
             show_cursor: false,
         };
         let (lines, cursor) = render_to_lines(&table, 80, None, Some(input));
-        // No visible cursor in NORMAL mode.
-        assert!(cursor.is_none(), "NORMAL mode hides the cursor: {cursor:?}");
-        let input_line = &lines[lines.len() - 2];
-        let text = input_line.to_string();
         assert!(
-            text.contains("NOR"),
-            "input row carries the NOR badge: {text:?}"
+            cursor.is_none(),
+            "show_cursor=false hides cursor: {cursor:?}"
         );
-        // Badge style: bold + Color::Yellow.
-        let badge_span = input_line
+        let input_line = &lines[lines.len() - 2];
+        let prompt_span = input_line
             .spans
             .iter()
-            .find(|s| s.content.as_ref() == "NOR")
-            .expect("badge span present");
-        assert_eq!(badge_span.style.fg, Some(Color::Yellow));
-        assert!(badge_span.style.add_modifier.contains(Modifier::BOLD));
-        // Input row still wrapped by the box's outer borders.
-        assert!(text.starts_with('│'));
-        assert!(text.trim_end().ends_with('│'));
-        // Badge sits to the right of the query, before the trailing `│`.
-        let nor_idx = text.find("NOR").unwrap();
-        let lau_idx = text.find("lau").unwrap();
-        assert!(
-            lau_idx < nor_idx,
-            "query renders left of the badge: {text:?}"
-        );
+            .find(|s| s.content.as_ref() == "/ ")
+            .expect("prompt span present");
+        assert_eq!(prompt_span.style.fg, Some(Color::Cyan));
+        assert!(prompt_span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

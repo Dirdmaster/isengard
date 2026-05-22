@@ -21,12 +21,12 @@ pub struct HostsArgs {
 #[derive(Debug, Subcommand)]
 pub enum HostsCommand {
     /// List enrolled hosts.
-    List(ListArgs),
+    Ls(LsArgs),
 }
 
 /// CLI flags for `isd hosts list`.
 #[derive(Debug, Args)]
-pub struct ListArgs {
+pub struct LsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
@@ -52,7 +52,7 @@ pub struct HostRow {
 /// Propagates the sub-verb's error.
 pub async fn run(args: HostsArgs, context: Option<&str>) -> Result<()> {
     match args.command {
-        HostsCommand::List(a) => run_list(a, context).await,
+        HostsCommand::Ls(a) => run_list(a, context).await,
     }
 }
 
@@ -64,7 +64,7 @@ pub async fn run(args: HostsArgs, context: Option<&str>) -> Result<()> {
 ///
 /// Returns `Err` on HTTP failure, controller-less context, or JSON
 /// decode errors.
-async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
+async fn run_list(args: LsArgs, context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/hosts");
@@ -233,7 +233,7 @@ url = "{}"
         }
 
         let result = run_list(
-            ListArgs {
+            LsArgs {
                 format: crate::output::Format::Json,
             },
             None,

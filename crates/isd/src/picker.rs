@@ -4,8 +4,9 @@
 //! chrome.
 //!
 //! Same visual language as the ssh picker (boxed table, `┴`-joined
-//! divider, folded `> filter ...` input row, vim modal with `NOR`/`INS`
-//! badge) so the operator sees one consistent picker shape everywhere.
+//! divider, folded `/ filter ...` input row, vim modal: the `/` prompt
+//! glyph itself colors per mode, dim in NORMAL, bold cyan in INSERT)
+//! so the operator sees one consistent picker shape everywhere.
 //! Built on `crate::render::render_to_lines` so the shared layout +
 //! highlight code lives in exactly one place.
 //!
@@ -28,9 +29,7 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, text::Text, widgets::Paragraph,
 };
 
-use crate::render::{
-    Align, CellStyle, Column, InputRow, ModeBadge, Table as RenderTable, render_to_lines,
-};
+use crate::render::{Align, CellStyle, Column, InputRow, Table as RenderTable, render_to_lines};
 
 /// Compute the inline viewport height (rows) for `n_rows` source items.
 /// Mirrors `ssh::picker::picker_height` so the generic picker shares
@@ -409,25 +408,21 @@ fn draw(
     header: &'static str,
     placeholder: &'static str,
 ) {
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier, Style};
     let area = f.area();
     let table = picker_table(header, &state.visible);
-    let badge = match state.mode {
-        Mode::Normal => ModeBadge {
-            label: "NOR",
-            color: Color::Yellow,
-        },
-        Mode::Insert => ModeBadge {
-            label: "INS",
-            color: Color::Green,
-        },
+    let prompt_style = match state.mode {
+        Mode::Normal => Style::default().fg(Color::DarkGray),
+        Mode::Insert => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     };
     let show_cursor = state.mode == Mode::Insert;
     let input = InputRow {
         query: &state.filter,
         placeholder,
-        prompt: "> ",
-        mode: Some(badge),
+        prompt: "/ ",
+        prompt_style,
         show_cursor,
     };
     let (lines, cursor) = render_to_lines(&table, area.width as usize, state.selected, Some(input));
