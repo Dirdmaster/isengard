@@ -2,20 +2,26 @@
 //!
 //! Endpoints (mounted under `/api/v1`):
 //!
-//! | Method | Path                  | Purpose                                                   |
-//! |--------|-----------------------|-----------------------------------------------------------|
-//! | POST   | `/secrets`            | Create a new secret. 409 if `name` exists; PUT to replace.|
-//! | PUT    | `/secrets/{name}`     | Upsert: replace if present, insert otherwise.             |
-//! | GET    | `/secrets`            | List `(name, created_at, updated_at)`. NEVER values.      |
-//! | DELETE | `/secrets/{name}`     | Remove a secret. 204 on success, 404 if missing.          |
+//! | Method | Path                       | Purpose                                                    |
+//! |--------|----------------------------|------------------------------------------------------------|
+//! | POST   | `/secrets`                 | Create a new secret. 409 if `name` exists; PUT to replace. |
+//! | PUT    | `/secrets/{name}`          | Upsert: replace if present, insert otherwise.              |
+//! | GET    | `/secrets`                 | List `(name, created_at, updated_at)`. NEVER values.       |
+//! | GET    | `/secrets/{name}/value`    | Fetch one secret's plaintext value (operator-only).        |
+//! | DELETE | `/secrets/{name}`          | Remove a secret. 204 on success, 404 if missing.           |
 //!
 //! Auth: these run on the dashboard plugin's HTTP port, which is currently
 //! unauthenticated per. The operator binds the dashboard behind
 //! their own access control (Cloudflare Access, mTLS, VPN). v1.x will add
 //! a first-party gate; until then we rely on the existing stance.
 //!
-//! Plaintext values are accepted on POST/PUT and never logged. Logs refer
-//! to secrets by `name` only. The list endpoint NEVER returns values.
+//! Plaintext values are accepted on POST/PUT and returned by GET
+//! `/secrets/{name}/value` over the same channel; the value flows in
+//! cleartext only over the dashboard's TLS/SSH transport and is never
+//! logged. Logs refer to secrets by `name` only. The list endpoint
+//! NEVER returns values; `secret get` (added with the v0.7 lexicon
+//! spec) gates value retrieval per-name so a list scrape does not
+//! also leak plaintext.
 
 use std::sync::Arc;
 
@@ -23,7 +29,7 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, response::Json as JsonResp};
 use isengard_controller::ControllerHandles;
 use isengard_controller::secrets::SecretsError;
@@ -40,6 +46,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
             "/secrets/{name}",
             axum::routing::put(put_secret).delete(delete_secret),
         )
+        .route("/secrets/{name}/value", get(get_secret_value))
         .with_state(handles)
 }
 
@@ -188,6 +195,42 @@ async fn list_secrets(State(handles): State<Arc<ControllerHandles>>) -> Response
             let dtos: Vec<SecretListEntry> = metas.into_iter().map(SecretListEntry::from).collect();
             JsonResp(dtos).into_response()
         }
+        Err(e) => map_secrets_err(e),
+    }
+}
+
+/// Response body for `GET /api/v1/secrets/{name}/value`. Carries the
+/// plaintext value verbatim; the dashboard's TLS/SSH transport is the
+/// only thing protecting it on the wire. Returned as a JSON object
+/// rather than a bare string so the shape stays forward-compatible
+/// (e.g. future `{ value, content_type }` extensions).
+#[derive(Debug, Serialize)]
+pub struct SecretValueResponse {
+    /// `name` field.
+    pub name: String,
+    /// `value` field.
+    pub value: String,
+}
+
+/// `GET` handler for one secret's plaintext value. Added with the v0.7
+/// CLI lexicon spec so `isd secret get <name>` can round-trip via the
+/// same HTTPS channel as the rest of the secret routes; the agent
+/// continues to fetch over its dedicated mTLS gRPC path.
+async fn get_secret_value(
+    State(handles): State<Arc<ControllerHandles>>,
+    Path(name): Path<String>,
+) -> Response {
+    if name.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "name is required");
+    }
+    match handles.secrets.fetch(&name).await {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(value) => JsonResp(SecretValueResponse { name, value }).into_response(),
+            Err(_) => json_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "stored secret is not valid UTF-8; fetch via the agent's binary path instead",
+            ),
+        },
         Err(e) => map_secrets_err(e),
     }
 }
