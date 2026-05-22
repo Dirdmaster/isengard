@@ -647,6 +647,8 @@ mod tests {
     #[ignore]
     async fn docker_backend_writes_index_cache() {
         let dir = tempfile::tempdir().unwrap();
+        // `ISD_INDEX_CACHE` now names a directory; per-command files
+        // (`last-ps.json` here) land inside it.
         let cache_path = dir.path().join("last-ps.json");
         // Use an empty $DOCKER_CONFIG so we resolve the synthetic
         // "default" context against $DOCKER_HOST / the local socket.
@@ -654,7 +656,7 @@ mod tests {
         // pattern in this module.
         unsafe {
             std::env::set_var("DOCKER_CONFIG", dir.path());
-            std::env::set_var("ISD_INDEX_CACHE", &cache_path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         let args = PsArgs {
             all: true,

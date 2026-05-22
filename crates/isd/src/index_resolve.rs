@@ -44,17 +44,18 @@ pub struct ResolvedTarget {
 /// A literal ID/name produces one target with `name = arg.to_string()`
 /// (we do not reverse-lookup the container's name from the daemon to
 /// keep this pure and offline). A selector produces one target per
-/// index. Selector args require the index cache; literal-only args
-/// don't.
+/// index. Selector args require the `isd ps` index cache; literal-only
+/// args don't.
 ///
 /// # Errors
 ///
 /// Returns `Err` when any selector arg references an out-of-range
-/// index, when a selector arg is supplied but no cache exists, or
+/// index, when a selector arg is supplied but no `ps` cache exists, or
 /// when the cache exists but is unreadable. Stale-but-valid caches
 /// log a warning to stderr and proceed.
 pub fn resolve(args: &[String]) -> Result<Vec<ResolvedTarget>> {
-    let cache: Option<IndexCache> = index_cache::read().context("reading index cache")?;
+    let cache: Option<IndexCache> =
+        index_cache::read_for("ps").context("reading index cache")?;
 
     let mut want_indices = false;
     for arg in args {
@@ -66,8 +67,8 @@ pub fn resolve(args: &[String]) -> Result<Vec<ResolvedTarget>> {
 
     if want_indices && cache.is_none() {
         return Err(anyhow!(
-            "no index cache found at {}; run `isd ps` first",
-            index_cache::cache_path()?.display()
+            "no recent `isd ps` to resolve index; run it first (expected cache at {})",
+            index_cache::cache_path_for("ps")?.display()
         ));
     }
 
@@ -112,8 +113,10 @@ pub fn resolve(args: &[String]) -> Result<Vec<ResolvedTarget>> {
 /// out-of-range message stays in one place.
 fn lookup(cache: &IndexCache, idx: usize) -> Result<&IndexRow> {
     cache.rows.iter().find(|r| r.index == idx).ok_or_else(|| {
-        let max = cache.rows.iter().map(|r| r.index).max().unwrap_or(0);
-        anyhow!("index {idx} out of range; last `isd ps` had 0-{max}")
+        anyhow!(
+            "{}",
+            crate::index_cache::out_of_range_message(idx, "isd ps", cache.rows.len())
+        )
     })
 }
 
@@ -129,9 +132,8 @@ mod tests {
 
     fn with_cache(rows: Vec<IndexRow>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("last-ps.json");
         unsafe {
-            std::env::set_var("ISD_INDEX_CACHE", &path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         let cache = IndexCache {
             captured_at: Utc::now(),
@@ -213,28 +215,74 @@ mod tests {
         let _dir = with_cache(sample_rows());
         let err = resolve(&["9".into()]).unwrap_err().to_string();
         assert!(err.contains("out of range"), "got: {err}");
-        assert!(err.contains("0-2"), "should name the valid range: {err}");
+        // Friendlier 0-indexed message: 3 rows -> indices 0..2.
+        assert!(
+            err.contains("indices 0..2"),
+            "should name the 0-indexed valid range: {err}"
+        );
+        assert!(err.contains("isd ps"), "should point at isd ps: {err}");
+    }
+
+    #[test]
+    fn out_of_range_index_single_row_includes_zero_hint() {
+        let _lock = env_lock();
+        let _dir = with_cache(vec![IndexRow {
+            index: 0,
+            context: "lausanne".into(),
+            container_id: "only".into(),
+            name: "only".into(),
+        }]);
+        let err = resolve(&["1".into()]).unwrap_err().to_string();
+        assert!(err.contains("1 row"), "should say `1 row`: {err}");
+        assert!(
+            err.contains("Use `0`"),
+            "single-row hint should suggest 0: {err}"
+        );
     }
 
     #[test]
     fn missing_cache_errors_with_pointer() {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.json");
         unsafe {
-            std::env::set_var("ISD_INDEX_CACHE", &path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         let err = resolve(&["0".into()]).unwrap_err().to_string();
-        assert!(err.contains("no index cache"), "got: {err}");
+        assert!(err.contains("no recent `isd ps`"), "got: {err}");
+    }
+
+    /// The cross-command bug: a previous `isd ps` cache must not be
+    /// reached through `resolve` after a different command (`ssh hosts`)
+    /// wrote its own cache. Here we write ONLY the `ssh hosts` cache;
+    /// `resolve` looks for `ps` and must error.
+    #[test]
+    fn resolve_ignores_unrelated_command_cache() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
+        }
+        let ssh_cache = IndexCache {
+            captured_at: Utc::now(),
+            command: "ssh hosts".into(),
+            rows: vec![IndexRow {
+                index: 0,
+                context: "lausanne".into(),
+                container_id: "edge-1".into(),
+                name: "edge-1".into(),
+            }],
+        };
+        index_cache::write(&ssh_cache).unwrap();
+        let err = resolve(&["0".into()]).unwrap_err().to_string();
+        assert!(err.contains("no recent `isd ps`"), "got: {err}");
     }
 
     #[test]
     fn literal_only_args_do_not_require_cache() {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.json");
         unsafe {
-            std::env::set_var("ISD_INDEX_CACHE", &path);
+            std::env::set_var("ISD_INDEX_CACHE", dir.path());
         }
         // No selector token present: works even without a cache.
         let r = resolve(&["my-container".into()]).unwrap();
