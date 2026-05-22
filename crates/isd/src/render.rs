@@ -396,6 +396,24 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
     out
 }
 
+/// Input row spec for [`render_to_lines`]: when supplied, the renderer
+/// emits a full-width footer row inside the box (under a `┴`-joined
+/// divider) instead of closing with the usual bottom border.
+///
+/// The picker uses this to fold its `> filter hosts...` prompt into the
+/// table's chrome, so the operator reads the whole picker as one boxed
+/// widget instead of "table + loose line below".
+#[derive(Debug, Clone, Copy)]
+pub struct InputRow<'a> {
+    /// Operator-supplied query so far. Empty string + `placeholder`
+    /// renders the placeholder; non-empty renders the query verbatim.
+    pub query: &'a str,
+    /// Muted italic placeholder shown when `query.is_empty()`.
+    pub placeholder: &'a str,
+    /// Prompt prefix to display before the query (e.g. `> `).
+    pub prompt: &'a str,
+}
+
 /// Render the table as a vector of ratatui `Line`s suitable for a TUI
 /// `Paragraph` or inline viewport. Shares the same layout pass as
 /// [`render`] (column fit, truncation, padding, ALL-CAPS dim headers)
@@ -405,12 +423,26 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
 /// `highlight_row` overrides every span on the i-th data row with a
 /// cyan background + black foreground, matching the picker's selected-
 /// row affordance (fzf-style). Index is into the data rows (the top
-/// border, header, and header rule are NOT countable indices).
+/// border, header, and header rule are NOT countable indices). The
+/// highlight stops at the rightmost data `│`: the box's closing edge
+/// keeps the dim border style so the selection band does not bleed
+/// past the table.
+///
+/// `input_row`: when `Some`, the renderer emits a `┴`-joined divider
+/// followed by a full-width input row and the box's bottom border.
+/// When `None`, the table closes with the usual `╰─...─╯` bottom border.
+///
+/// Returns the rendered lines plus, when an input row was emitted,
+/// the cursor position as `(row, col)` (0-indexed). `row` is the index
+/// of the input row inside the returned `Vec<Line>`; `col` is the cell
+/// column where the cursor should sit (one space cell-padding + prompt
+/// width + query width, all offset by 1 for the leading `│`).
 pub fn render_to_lines(
     table: &Table,
     term_width: usize,
     highlight_row: Option<usize>,
-) -> Vec<ratatui::text::Line<'static>> {
+    input_row: Option<InputRow<'_>>,
+) -> (Vec<ratatui::text::Line<'static>>, Option<(u16, u16)>) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
@@ -445,12 +477,13 @@ pub fn render_to_lines(
 
     // Data rows.
     let hl_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+    let n_cols = table.columns.len();
     for (row_idx, row) in table.rows.iter().enumerate() {
         let highlighted = highlight_row == Some(row_idx);
         let mut row_spans: Vec<Span<'static>> = Vec::new();
         // Leading border: when highlighted, swap the dim border for
-        // the highlight background so the whole row reads as one
-        // selection band.
+        // the highlight background so the selection band reads as one
+        // continuous strip on the left edge of the row.
         if highlighted {
             row_spans.push(Span::styled(V.to_string(), hl_style));
         } else {
@@ -467,22 +500,124 @@ pub fn render_to_lines(
                 cell_style_to_ratatui(col.style, &row[i])
             };
             row_spans.push(Span::styled(cell_text, cell_style));
-            if highlighted {
-                row_spans.push(Span::styled(V.to_string(), hl_style));
+            // Inner separators between columns stay highlighted on the
+            // selected row so the band reads as one strip. The LAST
+            // `│` (right edge of the box) keeps the dim border style
+            // even on the highlighted row: the highlight stops AT the
+            // box edge, never past it.
+            let is_last_sep = i + 1 == n_cols;
+            let sep_style = if highlighted && !is_last_sep {
+                hl_style
             } else {
-                row_spans.push(Span::styled(V.to_string(), border_style));
-            }
+                border_style
+            };
+            row_spans.push(Span::styled(V.to_string(), sep_style));
         }
         lines.push(Line::from(row_spans));
     }
 
-    // Bottom border.
-    lines.push(Line::from(Span::styled(
-        border_line(&widths, BL, T_UP, BR),
-        border_style,
-    )));
+    let cursor = match input_row {
+        Some(spec) => {
+            // Divider that closes the inner column separators with `┴`
+            // and joins to the box's outer border via `├`/`┤`.
+            lines.push(Line::from(Span::styled(
+                border_line(&widths, T_RIGHT, T_UP, T_LEFT),
+                border_style,
+            )));
 
-    lines
+            // Inner content width: same as a normal row's content (sum
+            // of column widths + 2 per column for cell padding + 1 per
+            // inner separator). Reuse the divider's display width minus
+            // the two outer tees to stay in lock-step with the table
+            // chrome regardless of column-count math.
+            let chrome_w =
+                console::measure_text_width(&border_line(&widths, T_RIGHT, T_UP, T_LEFT));
+            // chrome_w includes the leading `├` and trailing `┤`; the
+            // interior available for our input content is everything
+            // between them.
+            let interior_w = chrome_w.saturating_sub(2);
+
+            let prompt = spec.prompt.to_string();
+            let prompt_w = console::measure_text_width(&prompt);
+            let is_empty = spec.query.is_empty();
+            let body_text: String = if is_empty {
+                spec.placeholder.to_string()
+            } else {
+                spec.query.to_string()
+            };
+            let body_w = console::measure_text_width(&body_text);
+
+            // Build: " " (left cell padding) + prompt + body + spaces
+            // to fill remaining interior + " " (right cell padding)?
+            // The table's data rows use ` cell ` (one space each side)
+            // INSIDE the column. The input row spans the full interior
+            // and we want one space of left padding before the prompt
+            // and trailing pad to the right edge. Concretely:
+            //   interior = " " + prompt + body + filler
+            //   |interior| == interior_w
+            let inner_used = 1 + prompt_w + body_w;
+            let filler = interior_w.saturating_sub(inner_used);
+
+            let mut input_spans: Vec<Span<'static>> = Vec::new();
+            input_spans.push(Span::styled(V.to_string(), border_style));
+            // Leading pad + prompt rendered with default style (the
+            // prompt glyph itself is not the placeholder).
+            input_spans.push(Span::raw(format!(" {prompt}")));
+            // Body: italic dim placeholder when empty, plain query when not.
+            if is_empty {
+                input_spans.push(Span::styled(
+                    body_text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            } else {
+                input_spans.push(Span::raw(body_text));
+            }
+            // Trailing filler to the right edge of the interior.
+            if filler > 0 {
+                input_spans.push(Span::raw(" ".repeat(filler)));
+            }
+            input_spans.push(Span::styled(V.to_string(), border_style));
+
+            // Cursor row index: the input row's index in `lines` after
+            // we push it. We push divider above; the input row is
+            // about to be pushed at lines.len().
+            let cursor_row = lines.len() as u16;
+            lines.push(Line::from(input_spans));
+
+            // Bottom border: no `┴`s, the divider already closed them.
+            lines.push(Line::from(Span::styled(
+                format!("{BL}{}{BR}", H.to_string().repeat(interior_w)),
+                border_style,
+            )));
+
+            // Cursor column: leading `│` (1) + leading pad (1) +
+            // prompt + query (for non-empty). For an empty query the
+            // cursor sits over the first placeholder character (right
+            // after `> `).
+            let cursor_col = 1u16 + 1u16 + prompt_w as u16 + body_w as u16;
+            // When empty, body_w is the placeholder width: we don't
+            // want the cursor at the placeholder's end. Park it on the
+            // first placeholder cell instead.
+            let cursor_col = if is_empty {
+                1u16 + 1u16 + prompt_w as u16
+            } else {
+                cursor_col
+            };
+            Some((cursor_row, cursor_col))
+        }
+        None => {
+            // Normal bottom border.
+            lines.push(Line::from(Span::styled(
+                border_line(&widths, BL, T_UP, BR),
+                border_style,
+            )));
+            None
+        }
+    };
+
+    (lines, cursor)
 }
 
 /// Translate a [`CellStyle`] (plus the raw cell text, for `State`
@@ -696,10 +831,11 @@ mod tests {
             columns: ps_columns(),
             rows: ps_rows(),
         };
-        let lines = render_to_lines(&table, 200, None);
+        let (lines, cursor) = render_to_lines(&table, 200, None, None);
         // Total lines = top border + header + header rule + N rows +
         // bottom border = N + 4.
         assert_eq!(lines.len(), ps_rows().len() + 4);
+        assert!(cursor.is_none(), "no input row -> no cursor");
         // Top + bottom borders carry the rounded corners.
         let top = lines.first().unwrap().to_string();
         let bot = lines.last().unwrap().to_string();
@@ -718,29 +854,47 @@ mod tests {
     }
 
     #[test]
-    fn render_to_lines_highlight_paints_selected_row() {
+    fn render_to_lines_highlight_paints_selected_row_but_not_right_edge() {
         use ratatui::style::Color;
         let table = Table {
             columns: ps_columns(),
             rows: ps_rows(),
         };
-        let lines = render_to_lines(&table, 200, Some(1));
+        let (lines, _) = render_to_lines(&table, 200, Some(1), None);
         // Selected row sits at index: top border (0) + header (1) +
         // header rule (2) + row 0 (3) + row 1 (4).
         let selected = &lines[4];
-        // Every span on the highlighted row carries the cyan-bg /
-        // black-fg override (no exceptions, borders included).
-        for span in &selected.spans {
-            assert_eq!(
-                span.style.bg,
-                Some(Color::Cyan),
-                "selected row span missing highlight bg: {span:?}"
-            );
-            assert_eq!(
-                span.style.fg,
-                Some(Color::Black),
-                "selected row span missing highlight fg: {span:?}"
-            );
+        // Every span EXCEPT the trailing right-edge `│` carries the
+        // cyan-bg / black-fg override. The last span is the box's
+        // closing edge and must keep the dim border style: the
+        // highlight stops AT the rightmost `│`, never past it.
+        let n = selected.spans.len();
+        assert!(n >= 2, "row must have at least leading + trailing borders");
+        for (idx, span) in selected.spans.iter().enumerate() {
+            if idx + 1 == n {
+                // Trailing `│`: dim border, no highlight.
+                assert_eq!(
+                    span.content.as_ref(),
+                    "│",
+                    "last span must be the right-edge border glyph"
+                );
+                assert_ne!(
+                    span.style.bg,
+                    Some(Color::Cyan),
+                    "right-edge `│` must NOT carry highlight bg: {span:?}"
+                );
+            } else {
+                assert_eq!(
+                    span.style.bg,
+                    Some(Color::Cyan),
+                    "interior span missing highlight bg at idx {idx}: {span:?}"
+                );
+                assert_eq!(
+                    span.style.fg,
+                    Some(Color::Black),
+                    "interior span missing highlight fg at idx {idx}: {span:?}"
+                );
+            }
         }
         // A non-highlighted row keeps the dim border style.
         let other = &lines[3];
@@ -756,12 +910,104 @@ mod tests {
             columns: ps_columns(),
             rows: vec![],
         };
-        let lines = render_to_lines(&table, 200, None);
+        let (lines, cursor) = render_to_lines(&table, 200, None, None);
         // Top border + header + header rule + bottom border = 4.
         assert_eq!(lines.len(), 4);
+        assert!(cursor.is_none());
         assert!(lines[0].to_string().starts_with('╭'));
         assert!(lines[2].to_string().starts_with('├'));
         assert!(lines[3].to_string().starts_with('╰'));
+    }
+
+    #[test]
+    fn render_to_lines_with_input_row_empty_query_shows_italic_placeholder() {
+        use ratatui::style::{Color, Modifier};
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let input = InputRow {
+            query: "",
+            placeholder: "filter hosts...",
+            prompt: "> ",
+        };
+        let (lines, cursor) = render_to_lines(&table, 200, None, Some(input));
+        // top + header + rule + N rows + divider + input row + bottom.
+        assert_eq!(lines.len(), ps_rows().len() + 6);
+        // Divider closes inner columns with `┴` and joins outer borders.
+        let divider = &lines[lines.len() - 3];
+        let dtxt = divider.to_string();
+        assert!(dtxt.starts_with('├'), "divider starts with ├: {dtxt:?}");
+        assert!(dtxt.ends_with('┤'), "divider ends with ┤: {dtxt:?}");
+        assert!(
+            dtxt.contains('┴'),
+            "divider has at least one ┴ join: {dtxt:?}"
+        );
+        // Input row carries the placeholder text in italic + DarkGray.
+        let input_line = &lines[lines.len() - 2];
+        let body_span = input_line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("filter hosts..."))
+            .expect("placeholder span present");
+        assert!(
+            body_span.style.add_modifier.contains(Modifier::ITALIC),
+            "placeholder must be italic: {body_span:?}"
+        );
+        assert_eq!(
+            body_span.style.fg,
+            Some(Color::DarkGray),
+            "placeholder must be DarkGray: {body_span:?}"
+        );
+        // Bottom border is plain `╰─...─╯` with NO `┴` joins (divider
+        // already closed them).
+        let bottom = &lines[lines.len() - 1];
+        let btxt = bottom.to_string();
+        assert!(btxt.starts_with('╰'));
+        assert!(btxt.ends_with('╯'));
+        assert!(
+            !btxt.contains('┴'),
+            "bottom border under input row should not carry ┴ joins: {btxt:?}"
+        );
+        // Cursor parked on the first placeholder char (right after `> `).
+        let (row, col) = cursor.expect("input row must yield cursor");
+        assert_eq!(row, (lines.len() - 2) as u16, "cursor on the input row");
+        // Column = 1 (leading `│`) + 1 (pad) + 2 (`> `) = 4.
+        assert_eq!(col, 4, "cursor sits over first placeholder cell: {col}");
+    }
+
+    #[test]
+    fn render_to_lines_with_input_row_non_empty_query_hides_placeholder() {
+        use ratatui::style::{Color, Modifier};
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let input = InputRow {
+            query: "lau",
+            placeholder: "filter hosts...",
+            prompt: "> ",
+        };
+        let (lines, cursor) = render_to_lines(&table, 200, None, Some(input));
+        let input_line = &lines[lines.len() - 2];
+        let txt = input_line.to_string();
+        assert!(txt.contains("> lau"), "input row shows `> lau`: {txt:?}");
+        assert!(
+            !txt.contains("filter hosts..."),
+            "placeholder must vanish once the query is non-empty: {txt:?}"
+        );
+        // No span on the input row may be italic/DarkGray now.
+        for span in &input_line.spans {
+            let is_placeholder_style = span.style.add_modifier.contains(Modifier::ITALIC)
+                || span.style.fg == Some(Color::DarkGray);
+            assert!(
+                !is_placeholder_style,
+                "non-empty query must not carry placeholder styling: {span:?}"
+            );
+        }
+        // Cursor sits at the end of `> lau`: 1 (`│`) + 1 (pad) + 2 (`> `) + 3 (`lau`) = 7.
+        let (_, col) = cursor.expect("input row must yield cursor");
+        assert_eq!(col, 7, "cursor sits at the end of the query: {col}");
     }
 
     #[test]
