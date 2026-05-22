@@ -396,6 +396,20 @@ pub fn render(table: &Table, term_width: usize, color: bool) -> String {
     out
 }
 
+/// Optional mode badge appended to the right edge of an input row.
+///
+/// The picker uses this to surface its vim-style mode (NORMAL vs INSERT)
+/// inside the box without adding a separate status line. The renderer
+/// right-aligns the `label` against the input row's trailing edge with
+/// the given color.
+#[derive(Debug, Clone, Copy)]
+pub struct ModeBadge {
+    /// Short 3-letter tag (e.g. `NOR`, `INS`). No padding, no box.
+    pub label: &'static str,
+    /// Tag foreground color.
+    pub color: ratatui::style::Color,
+}
+
 /// Input row spec for [`render_to_lines`]: when supplied, the renderer
 /// emits a full-width footer row inside the box (under a `┴`-joined
 /// divider) instead of closing with the usual bottom border.
@@ -412,6 +426,12 @@ pub struct InputRow<'a> {
     pub placeholder: &'a str,
     /// Prompt prefix to display before the query (e.g. `> `).
     pub prompt: &'a str,
+    /// Optional mode badge right-aligned inside the input row.
+    pub mode: Option<ModeBadge>,
+    /// When `false`, suppress the cursor position output (NORMAL mode
+    /// in the picker). When `true`, [`render_to_lines`] returns a
+    /// `Some((row, col))` cursor anchor as usual.
+    pub show_cursor: bool,
 }
 
 /// Render the table as a vector of ratatui `Line`s suitable for a TUI
@@ -420,13 +440,14 @@ pub struct InputRow<'a> {
 /// but emits native ratatui spans so a TUI widget can compose the
 /// table without round-tripping through ANSI bytes.
 ///
-/// `highlight_row` overrides every span on the i-th data row with a
-/// cyan background + black foreground, matching the picker's selected-
-/// row affordance (fzf-style). Index is into the data rows (the top
-/// border, header, and header rule are NOT countable indices). The
-/// highlight stops at the rightmost data `│`: the box's closing edge
-/// keeps the dim border style so the selection band does not bleed
-/// past the table.
+/// `highlight_row` marks the i-th data row as the selected one with a
+/// restrained, vim-style affordance: the `#` cell's index text is
+/// replaced with a cyan-bold `▸` glyph and the `NAME` cell (assumed to
+/// be the second column) is forced bold on top of its column style.
+/// Every other cell on the row keeps its column's native styling, and
+/// the trailing right-edge `│` stays dim. No background fill, no row-
+/// wide band. Index is into the data rows (the top border, header, and
+/// header rule are NOT countable indices).
 ///
 /// `input_row`: when `Some`, the renderer emits a `┴`-joined divider
 /// followed by a full-width input row and the box's bottom border.
@@ -476,42 +497,38 @@ pub fn render_to_lines(
     )));
 
     // Data rows.
-    let hl_style = Style::default().bg(Color::Cyan).fg(Color::Black);
-    let n_cols = table.columns.len();
+    let arrow_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     for (row_idx, row) in table.rows.iter().enumerate() {
         let highlighted = highlight_row == Some(row_idx);
         let mut row_spans: Vec<Span<'static>> = Vec::new();
-        // Leading border: when highlighted, swap the dim border for
-        // the highlight background so the selection band reads as one
-        // continuous strip on the left edge of the row.
-        if highlighted {
-            row_spans.push(Span::styled(V.to_string(), hl_style));
-        } else {
-            row_spans.push(Span::styled(V.to_string(), border_style));
-        }
+        row_spans.push(Span::styled(V.to_string(), border_style));
         for (i, col) in table.columns.iter().enumerate() {
             let is_image = col.header == "IMAGE";
-            let truncated = truncate_cell(&row[i], widths[i], is_image);
+            let is_index_col = i == 0 && col.header == "#";
+            // Replace the index text with an arrow glyph on the
+            // highlighted row, keep alignment via the column's pad rule.
+            let raw_cell = if highlighted && is_index_col {
+                "▸".to_string()
+            } else {
+                row[i].clone()
+            };
+            let truncated = truncate_cell(&raw_cell, widths[i], is_image);
             let padded = pad(&truncated, widths[i], col.align);
             let cell_text = format!(" {padded} ");
-            let cell_style = if highlighted {
-                hl_style
+            // Pick the styling: arrow on the highlighted `#` cell, bold
+            // on the highlighted NAME cell (i == 1), otherwise the
+            // column's native style.
+            let cell_style = if highlighted && is_index_col {
+                arrow_style
+            } else if highlighted && i == 1 {
+                cell_style_to_ratatui(col.style, &row[i]).add_modifier(Modifier::BOLD)
             } else {
                 cell_style_to_ratatui(col.style, &row[i])
             };
             row_spans.push(Span::styled(cell_text, cell_style));
-            // Inner separators between columns stay highlighted on the
-            // selected row so the band reads as one strip. The LAST
-            // `│` (right edge of the box) keeps the dim border style
-            // even on the highlighted row: the highlight stops AT the
-            // box edge, never past it.
-            let is_last_sep = i + 1 == n_cols;
-            let sep_style = if highlighted && !is_last_sep {
-                hl_style
-            } else {
-                border_style
-            };
-            row_spans.push(Span::styled(V.to_string(), sep_style));
+            row_spans.push(Span::styled(V.to_string(), border_style));
         }
         lines.push(Line::from(row_spans));
     }
@@ -547,15 +564,22 @@ pub fn render_to_lines(
             };
             let body_w = console::measure_text_width(&body_text);
 
+            // Mode badge width (including the leading space that
+            // separates it from the filler).
+            let badge_w = spec
+                .mode
+                .map(|b| console::measure_text_width(b.label) + 1)
+                .unwrap_or(0);
+
             // Build: " " (left cell padding) + prompt + body + spaces
-            // to fill remaining interior + " " (right cell padding)?
-            // The table's data rows use ` cell ` (one space each side)
-            // INSIDE the column. The input row spans the full interior
-            // and we want one space of left padding before the prompt
-            // and trailing pad to the right edge. Concretely:
-            //   interior = " " + prompt + body + filler
+            // to fill remaining interior + optional badge + " " (right
+            // cell padding). Concretely:
+            //   interior = " " + prompt + body + filler + badge + " "
             //   |interior| == interior_w
-            let inner_used = 1 + prompt_w + body_w;
+            // The trailing space is folded into the filler when no
+            // badge is set: existing layout (1-space right pad implied
+            // by the filler) is preserved.
+            let inner_used = 1 + prompt_w + body_w + badge_w + 1;
             let filler = interior_w.saturating_sub(inner_used);
 
             let mut input_spans: Vec<Span<'static>> = Vec::new();
@@ -574,10 +598,22 @@ pub fn render_to_lines(
             } else {
                 input_spans.push(Span::raw(body_text));
             }
-            // Trailing filler to the right edge of the interior.
+            // Filler bridges the body and the optional badge (or the
+            // right edge).
             if filler > 0 {
                 input_spans.push(Span::raw(" ".repeat(filler)));
             }
+            if let Some(badge) = spec.mode {
+                input_spans.push(Span::raw(" "));
+                input_spans.push(Span::styled(
+                    badge.label.to_string(),
+                    Style::default()
+                        .fg(badge.color)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            // Trailing right cell padding before the box edge.
+            input_spans.push(Span::raw(" "));
             input_spans.push(Span::styled(V.to_string(), border_style));
 
             // Cursor row index: the input row's index in `lines` after
@@ -592,20 +628,20 @@ pub fn render_to_lines(
                 border_style,
             )));
 
-            // Cursor column: leading `│` (1) + leading pad (1) +
-            // prompt + query (for non-empty). For an empty query the
-            // cursor sits over the first placeholder character (right
-            // after `> `).
-            let cursor_col = 1u16 + 1u16 + prompt_w as u16 + body_w as u16;
-            // When empty, body_w is the placeholder width: we don't
-            // want the cursor at the placeholder's end. Park it on the
-            // first placeholder cell instead.
-            let cursor_col = if is_empty {
-                1u16 + 1u16 + prompt_w as u16
+            if !spec.show_cursor {
+                None
             } else {
-                cursor_col
-            };
-            Some((cursor_row, cursor_col))
+                // Cursor column: leading `│` (1) + leading pad (1) +
+                // prompt + query (for non-empty). For an empty query
+                // the cursor sits over the first placeholder character
+                // (right after `> `).
+                let cursor_col = if is_empty {
+                    1u16 + 1u16 + prompt_w as u16
+                } else {
+                    1u16 + 1u16 + prompt_w as u16 + body_w as u16
+                };
+                Some((cursor_row, cursor_col))
+            }
         }
         None => {
             // Normal bottom border.
@@ -854,8 +890,8 @@ mod tests {
     }
 
     #[test]
-    fn render_to_lines_highlight_paints_selected_row_but_not_right_edge() {
-        use ratatui::style::Color;
+    fn render_to_lines_highlight_uses_arrow_glyph_and_bold_name() {
+        use ratatui::style::{Color, Modifier};
         let table = Table {
             columns: ps_columns(),
             rows: ps_rows(),
@@ -864,40 +900,58 @@ mod tests {
         // Selected row sits at index: top border (0) + header (1) +
         // header rule (2) + row 0 (3) + row 1 (4).
         let selected = &lines[4];
-        // Every span EXCEPT the trailing right-edge `│` carries the
-        // cyan-bg / black-fg override. The last span is the box's
-        // closing edge and must keep the dim border style: the
-        // highlight stops AT the rightmost `│`, never past it.
-        let n = selected.spans.len();
-        assert!(n >= 2, "row must have at least leading + trailing borders");
-        for (idx, span) in selected.spans.iter().enumerate() {
-            if idx + 1 == n {
-                // Trailing `│`: dim border, no highlight.
-                assert_eq!(
-                    span.content.as_ref(),
-                    "│",
-                    "last span must be the right-edge border glyph"
-                );
-                assert_ne!(
-                    span.style.bg,
-                    Some(Color::Cyan),
-                    "right-edge `│` must NOT carry highlight bg: {span:?}"
-                );
-            } else {
-                assert_eq!(
-                    span.style.bg,
-                    Some(Color::Cyan),
-                    "interior span missing highlight bg at idx {idx}: {span:?}"
-                );
-                assert_eq!(
-                    span.style.fg,
-                    Some(Color::Black),
-                    "interior span missing highlight fg at idx {idx}: {span:?}"
-                );
-            }
+        // No span on the highlighted row carries the legacy cyan-bg
+        // band styling (the highlight is now glyph-driven).
+        for span in &selected.spans {
+            assert_ne!(
+                span.style.bg,
+                Some(Color::Cyan),
+                "no cyan-bg leftover on the highlighted row: {span:?}"
+            );
         }
-        // A non-highlighted row keeps the dim border style.
+        // The `#` cell carries the arrow glyph in cyan-bold and the
+        // NAMES cell (column index 5 in ps_columns) carries bold on
+        // top of its native emphasis style.
+        let row_text = selected.to_string();
+        assert!(
+            row_text.contains('▸'),
+            "selected row carries the arrow glyph: {row_text:?}"
+        );
+        // First non-border span is the padded `#` cell. Confirm it
+        // carries cyan + bold styling.
+        let index_cell = &selected.spans[1];
+        assert!(
+            index_cell.content.contains('▸'),
+            "the `#` cell holds the arrow glyph: {index_cell:?}"
+        );
+        assert_eq!(
+            index_cell.style.fg,
+            Some(Color::Cyan),
+            "arrow cell is cyan: {index_cell:?}"
+        );
+        assert!(
+            index_cell.style.add_modifier.contains(Modifier::BOLD),
+            "arrow cell is bold: {index_cell:?}"
+        );
+        // The NAMES cell sits at the second-to-last data column. The
+        // span layout per row is: border, (cell, sep)+. The NAMES cell
+        // is column index 5; its span sits at 1 + 5*2 = 11.
+        let names_span = &selected.spans[1 + 5 * 2];
+        assert!(
+            names_span.content.contains("app-db"),
+            "NAMES span content: {names_span:?}"
+        );
+        assert!(
+            names_span.style.add_modifier.contains(Modifier::BOLD),
+            "NAMES span is bold on the highlighted row: {names_span:?}"
+        );
+        // A non-highlighted row keeps the dim border style and has no
+        // arrow glyph in its `#` cell.
         let other = &lines[3];
+        assert!(
+            !other.to_string().contains('▸'),
+            "unselected row has no arrow glyph"
+        );
         assert!(
             other.spans.iter().all(|s| s.style.bg != Some(Color::Cyan)),
             "non-selected row should not be highlighted"
@@ -930,6 +984,8 @@ mod tests {
             query: "",
             placeholder: "filter hosts...",
             prompt: "> ",
+            mode: None,
+            show_cursor: true,
         };
         let (lines, cursor) = render_to_lines(&table, 200, None, Some(input));
         // top + header + rule + N rows + divider + input row + bottom.
@@ -987,6 +1043,8 @@ mod tests {
             query: "lau",
             placeholder: "filter hosts...",
             prompt: "> ",
+            mode: None,
+            show_cursor: true,
         };
         let (lines, cursor) = render_to_lines(&table, 200, None, Some(input));
         let input_line = &lines[lines.len() - 2];
@@ -1008,6 +1066,52 @@ mod tests {
         // Cursor sits at the end of `> lau`: 1 (`│`) + 1 (pad) + 2 (`> `) + 3 (`lau`) = 7.
         let (_, col) = cursor.expect("input row must yield cursor");
         assert_eq!(col, 7, "cursor sits at the end of the query: {col}");
+    }
+
+    #[test]
+    fn render_to_lines_input_row_appends_mode_badge_with_color() {
+        use ratatui::style::{Color, Modifier};
+        let table = Table {
+            columns: ps_columns(),
+            rows: ps_rows(),
+        };
+        let input = InputRow {
+            query: "lau",
+            placeholder: "filter hosts...",
+            prompt: "> ",
+            mode: Some(ModeBadge {
+                label: "NOR",
+                color: Color::Yellow,
+            }),
+            show_cursor: false,
+        };
+        let (lines, cursor) = render_to_lines(&table, 80, None, Some(input));
+        // No visible cursor in NORMAL mode.
+        assert!(cursor.is_none(), "NORMAL mode hides the cursor: {cursor:?}");
+        let input_line = &lines[lines.len() - 2];
+        let text = input_line.to_string();
+        assert!(
+            text.contains("NOR"),
+            "input row carries the NOR badge: {text:?}"
+        );
+        // Badge style: bold + Color::Yellow.
+        let badge_span = input_line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "NOR")
+            .expect("badge span present");
+        assert_eq!(badge_span.style.fg, Some(Color::Yellow));
+        assert!(badge_span.style.add_modifier.contains(Modifier::BOLD));
+        // Input row still wrapped by the box's outer borders.
+        assert!(text.starts_with('│'));
+        assert!(text.trim_end().ends_with('│'));
+        // Badge sits to the right of the query, before the trailing `│`.
+        let nor_idx = text.find("NOR").unwrap();
+        let lau_idx = text.find("lau").unwrap();
+        assert!(
+            lau_idx < nor_idx,
+            "query renders left of the badge: {text:?}"
+        );
     }
 
     #[test]

@@ -22,17 +22,26 @@
 //! Visual: the picker IS the `isd ssh hosts` table. Same chrome from
 //! the unified renderer (rounded corners, vertical separators between
 //! columns, ALL CAPS dim headers, one header rule, `#` dim, NAME bold,
-//! DIAL TARGET cyan, LAST SEEN dim). The selected row is painted with
-//! a cyan background and black foreground inside the renderer; the
-//! highlight stops at the box's rightmost `│`. The filter input is
-//! folded INSIDE the box as a full-width footer row under a
-//! `┴`-joined divider, so the whole picker reads as one rounded
-//! widget instead of "table + loose line below". Empty query shows
-//! a muted italic `filter hosts...` placeholder; as soon as the
-//! operator types, the placeholder vanishes. Intent: an operator who
-//! knows `isd ssh hosts` recognises the picker at a glance and the
-//! columns line up so the `#` they read off the listing matches the
-//! `#` in the picker.
+//! DIAL TARGET cyan, LAST SEEN dim). The selected row is marked with a
+//! cyan-bold `▸` glyph in the `#` cell and forced-bold NAME; every
+//! other cell keeps its native column styling and no background fill
+//! is applied. The filter input is folded INSIDE the box as a full-
+//! width footer row under a `┴`-joined divider, so the whole picker
+//! reads as one rounded widget instead of "table + loose line below".
+//! Empty query shows a muted italic `filter hosts...` placeholder; as
+//! soon as the operator types, the placeholder vanishes. Intent: an
+//! operator who knows `isd ssh hosts` recognises the picker at a glance
+//! and the columns line up so the `#` they read off the listing
+//! matches the `#` in the picker.
+//!
+//! Modal: the picker is vim-modal. It opens in NORMAL mode (no visible
+//! cursor; `j`/`k`/`g`/`G`/`Ctrl-d`/`Ctrl-u` navigate, `Enter` picks,
+//! `Esc`/`q`/`Ctrl-C` cancels, `c` clears the filter). Pressing `/`
+//! enters INSERT mode (cursor visible; printable chars extend the
+//! filter, `↓`/`Ctrl-N` and `↑`/`Ctrl-P` still navigate, `Esc` returns
+//! to NORMAL preserving the query). A three-letter mode badge sits at
+//! the right edge of the input row: `NOR` (yellow) in NORMAL, `INS`
+//! (green) in INSERT.
 
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
@@ -50,7 +59,9 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, text::Text, widgets::Paragraph,
 };
 
-use crate::render::{Align, CellStyle, Column, InputRow, Table as RenderTable, render_to_lines};
+use crate::render::{
+    Align, CellStyle, Column, InputRow, ModeBadge, Table as RenderTable, render_to_lines,
+};
 
 /// Source bucket for a picker row. The picker prints the bucket label
 /// in square brackets so the operator can tell at a glance which hosts
@@ -311,8 +322,20 @@ async fn event_loop(
     Ok(None)
 }
 
-/// Picker TUI state. Filter is mutated as the operator types;
-/// `visible` is recomputed every keystroke from `all` + `filter`.
+/// Picker mode: vim-style NORMAL (navigate, no filter input) or INSERT
+/// (filter buffer is active, cursor visible). Default = NORMAL so the
+/// picker opens ready for `j`/`k`/`Enter` and `/` slides into filter
+/// input on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerMode {
+    /// Navigate the visible list, no filter input.
+    Normal,
+    /// Filter input active, cursor visible.
+    Insert,
+}
+
+/// Picker TUI state. Filter is mutated as the operator types in INSERT
+/// mode; `visible` is recomputed every keystroke from `all` + `filter`.
 struct PickerState {
     /// Full source list, unchanged after construction. Acts as the
     /// pool every filter pass scores against.
@@ -325,11 +348,14 @@ struct PickerState {
     /// Selection cursor over `visible`. `None` when the filter has
     /// no matches.
     selected: Option<usize>,
+    /// Vim modal state: NORMAL by default.
+    mode: PickerMode,
 }
 
 impl PickerState {
     /// Seed picker state from the merged source list. Selects the
-    /// first row (or `None` when the list is empty).
+    /// first row (or `None` when the list is empty). Opens in NORMAL
+    /// mode.
     fn new(rows: Vec<PickerRow>) -> Self {
         let selected = if rows.is_empty() { None } else { Some(0) };
         Self {
@@ -337,6 +363,7 @@ impl PickerState {
             all: rows,
             filter: String::new(),
             selected,
+            mode: PickerMode::Normal,
         }
     }
 
@@ -359,16 +386,72 @@ impl PickerState {
         self.visible.get(idx).map(|r| r.hostname.clone())
     }
 
-    /// Move the cursor by `delta` rows, wrapping at the visible
-    /// list's ends. No-op when no row matches the current filter.
+    /// Move the cursor by `delta` rows, clamped at the visible list's
+    /// ends (fzf default; no wraparound). No-op when no row matches
+    /// the current filter.
     fn move_selection(&mut self, delta: i32) {
         let len = self.visible.len();
         if len == 0 {
             return;
         }
         let cur = self.selected.unwrap_or(0) as i32;
-        let next = (cur + delta).rem_euclid(len as i32) as usize;
+        let next = (cur + delta).clamp(0, len as i32 - 1) as usize;
         self.selected = Some(next);
+    }
+
+    /// Jump straight to the first visible row.
+    fn jump_first(&mut self) {
+        if !self.visible.is_empty() {
+            self.selected = Some(0);
+        }
+    }
+
+    /// Jump straight to the last visible row.
+    fn jump_last(&mut self) {
+        if self.visible.is_empty() {
+            return;
+        }
+        self.selected = Some(self.visible.len() - 1);
+    }
+
+    /// Half-page step: ceil(len / 2). Acts as the row count for the
+    /// vim `Ctrl-d` / `Ctrl-u` motions.
+    fn half_page(&self) -> i32 {
+        let len = self.visible.len();
+        if len <= 1 {
+            1
+        } else {
+            (len.div_ceil(2)) as i32
+        }
+    }
+
+    /// Drop the trailing word from the filter (vim/readline `Ctrl-W`).
+    /// Treats whitespace as the word separator. Two-pass so a trailing
+    /// space gets chomped together with the preceding word.
+    fn delete_last_word(&mut self) {
+        let trimmed_len = self.filter.trim_end().len();
+        let had_trailing_ws = trimmed_len != self.filter.len();
+        if trimmed_len == 0 {
+            self.filter.clear();
+            return;
+        }
+        let cut = self.filter[..trimmed_len]
+            .rfind(char::is_whitespace)
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        self.filter.truncate(cut);
+        // If we only chopped trailing whitespace, also chop the
+        // preceding word so a `Ctrl-W` after a space still removes
+        // something meaningful.
+        if had_trailing_ws && self.filter.len() == trimmed_len {
+            let cut2 = self
+                .filter
+                .trim_end()
+                .rfind(char::is_whitespace)
+                .map(|idx| idx + 1)
+                .unwrap_or(0);
+            self.filter.truncate(cut2);
+        }
     }
 }
 
@@ -383,25 +466,107 @@ enum KeyOutcome {
 }
 
 /// Translate one key event into a `KeyOutcome`. Pure function over
-/// state mutation: no IO, no draws, no terminal calls. Lets the event
-/// loop stay thin.
+/// state mutation: no IO, no draws, no terminal calls. Dispatches to
+/// the mode-specific handler so NORMAL and INSERT bindings stay
+/// readable side-by-side.
 fn handle_key(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
-    // Global Ctrl-C exits.
+    // Global Ctrl-C exits regardless of mode.
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
     {
         return KeyOutcome::Cancel;
     }
-    // Ctrl-U clears the filter (readline parity).
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'))
-    {
-        state.filter.clear();
-        state.refresh();
+    match state.mode {
+        PickerMode::Normal => apply_key_normal(state, key),
+        PickerMode::Insert => apply_key_insert(state, key),
+    }
+}
+
+/// NORMAL-mode bindings: vim-style navigation + `/` to enter INSERT.
+fn apply_key_normal(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-D / Ctrl-U: half-page navigation.
+    if ctrl && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
+        let step = state.half_page();
+        state.move_selection(step);
+        return KeyOutcome::Continue;
+    }
+    if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
+        let step = state.half_page();
+        state.move_selection(-step);
         return KeyOutcome::Continue;
     }
     match key.code {
         KeyCode::Esc => KeyOutcome::Cancel,
+        KeyCode::Enter => match state.selected_hostname() {
+            Some(h) => KeyOutcome::Pick(h),
+            None => KeyOutcome::Continue,
+        },
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            state.move_selection(-1);
+            KeyOutcome::Continue
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            state.move_selection(1);
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('g') => {
+            state.jump_first();
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('G') => {
+            state.jump_last();
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('/') => {
+            state.mode = PickerMode::Insert;
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('q') | KeyCode::Char('Q') => KeyOutcome::Cancel,
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            state.filter.clear();
+            state.refresh();
+            KeyOutcome::Continue
+        }
+        _ => KeyOutcome::Continue,
+    }
+}
+
+/// INSERT-mode bindings: filter input + fzf-style cursor motions.
+fn apply_key_insert(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-U: clear the filter (readline parity).
+    if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
+        state.filter.clear();
+        state.refresh();
+        return KeyOutcome::Continue;
+    }
+    // Ctrl-W: delete the trailing word.
+    if ctrl && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('W')) {
+        state.delete_last_word();
+        state.refresh();
+        return KeyOutcome::Continue;
+    }
+    // Ctrl-N / Ctrl-P: cursor motions while in INSERT.
+    if ctrl && matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N')) {
+        state.move_selection(1);
+        return KeyOutcome::Continue;
+    }
+    if ctrl && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+        state.move_selection(-1);
+        return KeyOutcome::Continue;
+    }
+    // Ctrl-H is the wire form of Backspace on some terminals.
+    if ctrl && matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H')) {
+        state.filter.pop();
+        state.refresh();
+        return KeyOutcome::Continue;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            state.mode = PickerMode::Normal;
+            KeyOutcome::Continue
+        }
         KeyCode::Enter => match state.selected_hostname() {
             Some(h) => KeyOutcome::Pick(h),
             None => KeyOutcome::Continue,
@@ -422,7 +587,7 @@ fn handle_key(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
         KeyCode::Char(c) => {
             // Reject control chars not handled above; only printable
             // characters extend the filter.
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            if !ctrl {
                 state.filter.push(c);
                 state.refresh();
             }
@@ -442,13 +607,27 @@ fn handle_key(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
 /// painted with a cyan background + black foreground (highlight
 /// clipped at the box's right edge).
 fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
+    use ratatui::style::Color;
     let area = f.area();
 
     let table = picker_table(&state.visible);
+    let badge = match state.mode {
+        PickerMode::Normal => ModeBadge {
+            label: "NOR",
+            color: Color::Yellow,
+        },
+        PickerMode::Insert => ModeBadge {
+            label: "INS",
+            color: Color::Green,
+        },
+    };
+    let show_cursor = state.mode == PickerMode::Insert;
     let input = InputRow {
         query: &state.filter,
         placeholder: "filter hosts...",
         prompt: "> ",
+        mode: Some(badge),
+        show_cursor,
     };
     let (lines, cursor) = render_to_lines(&table, area.width as usize, state.selected, Some(input));
     let paragraph = Paragraph::new(Text::from(lines));
@@ -552,16 +731,20 @@ mod tests {
     }
 
     #[test]
-    fn picker_state_arrow_keys_wrap() {
+    fn picker_state_arrow_keys_clamp_at_ends() {
+        // fzf-style: pressing `j` past the last row stays on the last
+        // row instead of wrapping back to the top.
         let rows = vec![isen("a", None, None), isen("b", None, None)];
         let mut st = PickerState::new(rows);
         assert_eq!(st.selected, Some(0));
         st.move_selection(1);
         assert_eq!(st.selected, Some(1));
         st.move_selection(1);
+        assert_eq!(st.selected, Some(1), "clamps at the last row, no wrap");
+        st.move_selection(-1);
         assert_eq!(st.selected, Some(0));
         st.move_selection(-1);
-        assert_eq!(st.selected, Some(1));
+        assert_eq!(st.selected, Some(0), "clamps at the first row, no wrap");
     }
 
     #[test]
@@ -627,8 +810,8 @@ mod tests {
     }
 
     #[test]
-    fn picker_table_renders_selected_row_with_highlight() {
-        use ratatui::style::Color;
+    fn picker_table_renders_selected_row_with_arrow_glyph_and_bold_name() {
+        use ratatui::style::{Color, Modifier};
         let rows = vec![
             isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
             isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
@@ -638,28 +821,42 @@ mod tests {
         // Expected line layout: top border + header + header rule +
         // row 0 + row 1 + bottom border. Selected (row 1) is at idx 4.
         let selected = &lines[4];
-        // Every interior span carries the highlight bg; the trailing
-        // right-edge `│` keeps the dim border style (no bleed past
-        // the box).
-        let n = selected.spans.len();
-        for (idx, span) in selected.spans.iter().enumerate() {
-            if idx + 1 == n {
-                assert_ne!(
-                    span.style.bg,
-                    Some(Color::Cyan),
-                    "right-edge `│` should not carry the highlight bg"
-                );
-            } else {
-                assert_eq!(
-                    span.style.bg,
-                    Some(Color::Cyan),
-                    "interior span missing highlight bg at idx {idx}"
-                );
-            }
+        // No span on the highlighted row carries the legacy cyan-bg
+        // band styling (the highlight is now glyph-driven).
+        for span in &selected.spans {
+            assert_ne!(
+                span.style.bg,
+                Some(Color::Cyan),
+                "no cyan-bg leftover on the highlighted row: {span:?}"
+            );
         }
-        // Sanity: the un-selected row keeps its native styling, no
-        // cyan background bleed.
+        let txt = selected.to_string();
+        assert!(
+            txt.contains('▸'),
+            "highlighted row carries the arrow glyph: {txt:?}"
+        );
+        // The `#` cell is the first content span (span index 1): it
+        // holds the arrow in cyan + bold.
+        let index_cell = &selected.spans[1];
+        assert!(
+            index_cell.content.contains('▸'),
+            "`#` cell holds the arrow: {index_cell:?}"
+        );
+        assert_eq!(index_cell.style.fg, Some(Color::Cyan));
+        assert!(index_cell.style.add_modifier.contains(Modifier::BOLD));
+        // NAME column is index 1: its span sits at 1 + 1*2 = 3.
+        let name_span = &selected.spans[3];
+        assert!(
+            name_span.content.contains("edge-fra"),
+            "NAME cell: {name_span:?}"
+        );
+        assert!(
+            name_span.style.add_modifier.contains(Modifier::BOLD),
+            "NAME on highlighted row is bold: {name_span:?}"
+        );
+        // Sanity: the un-selected row has no arrow glyph and no bg.
         let other = &lines[3];
+        assert!(!other.to_string().contains('▸'));
         assert!(
             other.spans.iter().all(|s| s.style.bg != Some(Color::Cyan)),
             "non-selected row stays un-highlighted"
@@ -776,6 +973,269 @@ mod tests {
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
         assert_eq!(relative_time(Some(&three_hours_ago)), "3h ago");
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn picker_state_starts_in_normal_mode() {
+        let st = PickerState::new(vec![isen("a", None, None)]);
+        assert_eq!(st.mode, PickerMode::Normal);
+    }
+
+    #[test]
+    fn normal_j_and_k_navigate() {
+        let mut st = PickerState::new(vec![isen("a", None, None), isen("b", None, None)]);
+        // `j` moves down.
+        let out = handle_key(&mut st, key(KeyCode::Char('j')));
+        assert!(matches!(out, KeyOutcome::Continue));
+        assert_eq!(st.selected, Some(1));
+        // `k` moves up.
+        let out = handle_key(&mut st, key(KeyCode::Char('k')));
+        assert!(matches!(out, KeyOutcome::Continue));
+        assert_eq!(st.selected, Some(0));
+    }
+
+    #[test]
+    fn normal_slash_enters_insert_mode() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        let out = handle_key(&mut st, key(KeyCode::Char('/')));
+        assert!(matches!(out, KeyOutcome::Continue));
+        assert_eq!(st.mode, PickerMode::Insert);
+    }
+
+    #[test]
+    fn insert_esc_returns_to_normal_and_preserves_query() {
+        let mut st = PickerState::new(vec![isen("lausanne", None, None)]);
+        st.mode = PickerMode::Insert;
+        st.filter.push_str("lau");
+        st.refresh();
+        let out = handle_key(&mut st, key(KeyCode::Esc));
+        assert!(matches!(out, KeyOutcome::Continue));
+        assert_eq!(st.mode, PickerMode::Normal);
+        assert_eq!(st.filter, "lau", "query preserved across mode flip");
+        assert_eq!(st.visible.len(), 1, "filter still applied");
+    }
+
+    #[test]
+    fn normal_esc_cancels_the_picker() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        let out = handle_key(&mut st, key(KeyCode::Esc));
+        assert!(matches!(out, KeyOutcome::Cancel));
+    }
+
+    #[test]
+    fn normal_q_cancels_the_picker() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        let out = handle_key(&mut st, key(KeyCode::Char('q')));
+        assert!(matches!(out, KeyOutcome::Cancel));
+    }
+
+    #[test]
+    fn enter_picks_in_either_mode() {
+        let mut st = PickerState::new(vec![isen("a", None, None), isen("b", None, None)]);
+        // NORMAL: Enter picks the highlighted host.
+        let out = handle_key(&mut st, key(KeyCode::Enter));
+        match out {
+            KeyOutcome::Pick(h) => assert_eq!(h, "a"),
+            _ => panic!("expected Pick"),
+        }
+        // INSERT: Enter still picks.
+        st.mode = PickerMode::Insert;
+        let out = handle_key(&mut st, key(KeyCode::Enter));
+        match out {
+            KeyOutcome::Pick(h) => assert_eq!(h, "a"),
+            _ => panic!("expected Pick"),
+        }
+    }
+
+    #[test]
+    fn backspace_only_edits_filter_in_insert_mode() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        st.filter.push_str("abc");
+        // NORMAL: Backspace is ignored.
+        let _ = handle_key(&mut st, key(KeyCode::Backspace));
+        assert_eq!(st.filter, "abc", "backspace is a no-op in NORMAL mode");
+        // INSERT: Backspace deletes a char.
+        st.mode = PickerMode::Insert;
+        let _ = handle_key(&mut st, key(KeyCode::Backspace));
+        assert_eq!(st.filter, "ab");
+    }
+
+    #[test]
+    fn normal_c_clears_the_filter() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        st.filter.push_str("xyz");
+        st.refresh();
+        let _ = handle_key(&mut st, key(KeyCode::Char('c')));
+        assert_eq!(st.filter, "");
+        // refresh ran: every row is visible again.
+        assert_eq!(st.visible.len(), 1);
+    }
+
+    #[test]
+    fn normal_g_jumps_first_and_capital_g_jumps_last() {
+        let mut st = PickerState::new(vec![
+            isen("a", None, None),
+            isen("b", None, None),
+            isen("c", None, None),
+        ]);
+        let _ = handle_key(&mut st, key(KeyCode::Char('G')));
+        assert_eq!(st.selected, Some(2));
+        let _ = handle_key(&mut st, key(KeyCode::Char('g')));
+        assert_eq!(st.selected, Some(0));
+    }
+
+    #[test]
+    fn normal_ctrl_d_and_ctrl_u_half_page() {
+        let mut st = PickerState::new(
+            (0..6)
+                .map(|i| isen(&format!("h{i}"), None, None))
+                .collect::<Vec<_>>(),
+        );
+        // half-page = ceil(6 / 2) = 3.
+        let _ = handle_key(&mut st, ctrl('d'));
+        assert_eq!(st.selected, Some(3));
+        let _ = handle_key(&mut st, ctrl('u'));
+        assert_eq!(st.selected, Some(0));
+    }
+
+    #[test]
+    fn insert_ctrl_n_and_ctrl_p_navigate_while_filtering() {
+        let mut st = PickerState::new(vec![isen("a", None, None), isen("b", None, None)]);
+        st.mode = PickerMode::Insert;
+        let _ = handle_key(&mut st, ctrl('n'));
+        assert_eq!(st.selected, Some(1));
+        let _ = handle_key(&mut st, ctrl('p'));
+        assert_eq!(st.selected, Some(0));
+    }
+
+    #[test]
+    fn insert_ctrl_w_deletes_trailing_word() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        st.mode = PickerMode::Insert;
+        st.filter.push_str("foo bar");
+        let _ = handle_key(&mut st, ctrl('w'));
+        assert_eq!(st.filter, "foo ");
+        let _ = handle_key(&mut st, ctrl('w'));
+        assert_eq!(st.filter, "");
+    }
+
+    #[test]
+    fn insert_printable_chars_extend_the_filter() {
+        let mut st = PickerState::new(vec![isen("lausanne", None, None)]);
+        st.mode = PickerMode::Insert;
+        let _ = handle_key(&mut st, key(KeyCode::Char('l')));
+        let _ = handle_key(&mut st, key(KeyCode::Char('a')));
+        let _ = handle_key(&mut st, key(KeyCode::Char('u')));
+        assert_eq!(st.filter, "lau");
+        assert_eq!(st.visible.len(), 1);
+    }
+
+    #[test]
+    fn normal_letters_dont_extend_the_filter() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        let _ = handle_key(&mut st, key(KeyCode::Char('z')));
+        assert_eq!(st.filter, "", "NORMAL ignores unbound printable keys");
+    }
+
+    #[test]
+    fn ctrl_c_cancels_in_both_modes() {
+        let mut st = PickerState::new(vec![isen("a", None, None)]);
+        let out = handle_key(&mut st, ctrl('c'));
+        assert!(matches!(out, KeyOutcome::Cancel));
+        st.mode = PickerMode::Insert;
+        let out = handle_key(&mut st, ctrl('c'));
+        assert!(matches!(out, KeyOutcome::Cancel));
+    }
+
+    #[test]
+    fn draw_in_normal_mode_renders_nor_badge_and_hides_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut st = PickerState::new(vec![isen("lausanne", None, None)]);
+        // Default mode is NORMAL.
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Find the input row by searching for the line that contains `>`.
+        let mut found = false;
+        for y in 0..12 {
+            let line: String = (0..80).map(|x| buf[(x, y)].symbol()).collect();
+            if line.contains('>') && line.contains('│') {
+                assert!(
+                    line.contains("NOR"),
+                    "NOR badge on the input row at y={y}: {line:?}"
+                );
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "no input row found in the rendered buffer");
+        // Indirectly confirm the picker hid the cursor by re-running
+        // the same layout through `render_to_lines`: NORMAL mode sets
+        // `show_cursor: false` so the returned cursor anchor is None.
+        let table = picker_table(&st.visible);
+        let badge = ModeBadge {
+            label: "NOR",
+            color: ratatui::style::Color::Yellow,
+        };
+        let input = InputRow {
+            query: &st.filter,
+            placeholder: "filter hosts...",
+            prompt: "> ",
+            mode: Some(badge),
+            show_cursor: false,
+        };
+        let (_, cursor) = render_to_lines(&table, 80, st.selected, Some(input));
+        assert!(cursor.is_none(), "NORMAL mode hides the cursor");
+    }
+
+    #[test]
+    fn draw_in_insert_mode_renders_ins_badge_and_shows_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut st = PickerState::new(vec![isen("lausanne", None, None)]);
+        st.mode = PickerMode::Insert;
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut found = false;
+        for y in 0..12 {
+            let line: String = (0..80).map(|x| buf[(x, y)].symbol()).collect();
+            if line.contains('>') && line.contains('│') {
+                assert!(
+                    line.contains("INS"),
+                    "INS badge on the input row at y={y}: {line:?}"
+                );
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "no input row found in the rendered buffer");
+        // Confirm INSERT mode yields a cursor anchor via the renderer.
+        let table = picker_table(&st.visible);
+        let badge = ModeBadge {
+            label: "INS",
+            color: ratatui::style::Color::Green,
+        };
+        let input = InputRow {
+            query: &st.filter,
+            placeholder: "filter hosts...",
+            prompt: "> ",
+            mode: Some(badge),
+            show_cursor: true,
+        };
+        let (_, cursor) = render_to_lines(&table, 80, st.selected, Some(input));
+        assert!(cursor.is_some(), "INSERT mode shows the cursor");
     }
 
     #[test]
