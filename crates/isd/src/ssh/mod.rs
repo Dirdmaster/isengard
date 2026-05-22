@@ -722,7 +722,14 @@ fn build_audit_row_cells(rows: &[AuditEntry]) -> Vec<Vec<String>> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("-")
                 .to_string();
-            vec![when, row.kind.clone(), principals, fingerprint, ttl, comment]
+            vec![
+                when,
+                row.kind.clone(),
+                principals,
+                fingerprint,
+                ttl,
+                comment,
+            ]
         })
         .collect()
 }
@@ -1486,7 +1493,10 @@ mod tests {
         // metadata columns. Tab-separated output keeps adjacent dashes
         // distinct, so the row contains literal `-` tokens.
         let row_line = t.lines().nth(1).unwrap();
-        assert!(row_line.contains('-'), "placeholder is rendered: {row_line}");
+        assert!(
+            row_line.contains('-'),
+            "placeholder is rendered: {row_line}"
+        );
     }
 
     #[test]

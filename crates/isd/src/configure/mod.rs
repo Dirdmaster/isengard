@@ -1204,7 +1204,10 @@ mod tests {
             rows: build_schema_row_cells(&[]),
         };
         let plain = render_plain(&table);
-        assert_eq!(plain.lines().next().unwrap(), "KEY\tTYPE\tDEFAULT\tDESCRIPTION");
+        assert_eq!(
+            plain.lines().next().unwrap(),
+            "KEY\tTYPE\tDEFAULT\tDESCRIPTION"
+        );
     }
 
     #[test]

@@ -564,7 +564,10 @@ mod tests {
             rows: build_ls_row_cells(&[], false),
         };
         let t = render_plain(&table);
-        assert_eq!(t.lines().next().unwrap(), "NAME\tSERVICES\tHOSTS\tSTATE\tSOURCE\tDISCOVERED");
+        assert_eq!(
+            t.lines().next().unwrap(),
+            "NAME\tSERVICES\tHOSTS\tSTATE\tSOURCE\tDISCOVERED"
+        );
     }
 
     /// `stack ps` rows render through the unified boxed renderer:
@@ -599,7 +602,10 @@ mod tests {
             rows: build_ps_row_cells(&[], false),
         };
         let t = render_plain(&table);
-        assert_eq!(t.lines().next().unwrap(), "SERVICE\tHOST\tSTATE\tIMAGE\tLAST SEEN");
+        assert_eq!(
+            t.lines().next().unwrap(),
+            "SERVICE\tHOST\tSTATE\tIMAGE\tLAST SEEN"
+        );
     }
 
     /// STATE coloring maps the stack vocabulary to the renderer's
