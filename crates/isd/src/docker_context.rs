@@ -151,6 +151,33 @@ pub fn resolve_docker_uri(context: Option<&str>) -> Result<String> {
     Ok(meta.endpoints.docker.host)
 }
 
+/// Project a docker host URI into an operator-typeable SSH dial target.
+///
+/// docker's URL shapes that map to a dialable SSH target:
+///
+/// - `ssh://user@host`            -> `Some("user@host")`
+/// - `ssh://user@host:port`       -> `Some("user@host:port")`
+/// - `ssh://user@host/some/path`  -> `Some("user@host")` (strip path)
+/// - `ssh://host`                 -> `Some("host")` (no user)
+///
+/// Non-SSH docker URIs (`tcp://`, `unix://`, anything else) return
+/// `None`: there is no operator-meaningful SSH target to capture. The
+/// PR B contract treats `None` as "do not PATCH": the host row keeps
+/// its existing dial_target (which may have been set on an earlier
+/// enroll from an SSH context, or by an explicit
+/// `isd ssh hosts set <agent> --dial`).
+pub fn dial_target_from_docker_uri(docker_uri: &str) -> Option<String> {
+    let rest = docker_uri.strip_prefix("ssh://")?;
+    // Strip any trailing path component: docker's context URL form
+    // technically does not carry one, but be tolerant of an operator
+    // who pasted `ssh://user@host/` from a shell history.
+    let target = rest.split('/').next().unwrap_or(rest);
+    if target.is_empty() {
+        return None;
+    }
+    Some(target.to_string())
+}
+
 /// Returns the active context's name (post-resolution, for diagnostics).
 pub fn resolve_context_name(context: Option<&str>) -> Result<String> {
     match context {
@@ -473,5 +500,59 @@ mod tests {
         }
         let msg = format!("{err:#}");
         assert!(msg.contains("docker context create"), "{msg}");
+    }
+
+    /// `dial_target_from_docker_uri` returns the SSH target an operator
+    /// would type into `ssh`. Non-SSH docker URIs return `None` so the
+    /// enroll-time PATCH skips the call.
+    #[test]
+    fn dial_target_for_ssh_user_host() {
+        assert_eq!(
+            dial_target_from_docker_uri("ssh://dirdmaster@10.17.0.125"),
+            Some("dirdmaster@10.17.0.125".to_string())
+        );
+    }
+
+    #[test]
+    fn dial_target_for_ssh_user_host_port() {
+        assert_eq!(
+            dial_target_from_docker_uri("ssh://op@host.example:2222"),
+            Some("op@host.example:2222".to_string())
+        );
+    }
+
+    #[test]
+    fn dial_target_strips_trailing_path() {
+        assert_eq!(
+            dial_target_from_docker_uri("ssh://op@host/some/path"),
+            Some("op@host".to_string())
+        );
+    }
+
+    #[test]
+    fn dial_target_for_ssh_bare_host() {
+        // No `user@`: docker falls back to the local username at
+        // connect time. We return the bare host so the operator's
+        // `ssh` invocation honors their `~/.ssh/config` default user.
+        assert_eq!(
+            dial_target_from_docker_uri("ssh://lausanne.local"),
+            Some("lausanne.local".to_string())
+        );
+    }
+
+    #[test]
+    fn dial_target_for_non_ssh_uri_is_none() {
+        assert_eq!(dial_target_from_docker_uri("tcp://10.0.0.1:2375"), None);
+        assert_eq!(
+            dial_target_from_docker_uri("unix:///var/run/docker.sock"),
+            None
+        );
+        assert_eq!(dial_target_from_docker_uri("garbage"), None);
+    }
+
+    #[test]
+    fn dial_target_empty_ssh_uri_is_none() {
+        // `ssh://` with no host: refuse to PATCH an empty target.
+        assert_eq!(dial_target_from_docker_uri("ssh://"), None);
     }
 }

@@ -30,6 +30,7 @@ mod compose_cmd;
 mod configure;
 mod confirm;
 mod context;
+mod dial_target;
 mod docker_context;
 mod help_render;
 mod hosts_cmd;
