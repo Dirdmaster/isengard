@@ -31,6 +31,7 @@ use clap::{Args, Subcommand};
 use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
+use crate::render::{Align, CellStyle, Column, Table as RenderTable, render, render_plain};
 use crate::session::Session;
 
 pub mod picker;
@@ -538,34 +539,63 @@ async fn run_hosts(context: Option<&str>) -> Result<()> {
         .json()
         .await
         .context("decoding hosts JSON")?;
-    let out = render_hosts_table(&rows);
-    println!("{}", out.trim_end());
+    print_hosts_table(&rows);
     Ok(())
 }
 
+/// Column layout for `isd ssh hosts`. Drops the `SSH USER` /
+/// `PRINCIPAL` columns the operator no longer wants in the table:
+/// the default user is surfaced once in a footer line under the box.
+/// Columns in spec order: `#`, `NAME`, `LAST SEEN`.
+fn hosts_columns() -> Vec<Column> {
+    vec![
+        Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+        Column::new("NAME", Align::Left, CellStyle::Emphasis, 6, 8),
+        Column::new("LAST SEEN", Align::Left, CellStyle::Plain, 1, 12),
+    ]
+}
+
+/// Build the row matrix for `isd ssh hosts`. Missing `last_seen_at`
+/// renders as `-` so the column never collapses.
+fn build_hosts_row_cells(rows: &[HostRow]) -> Vec<Vec<String>> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let last_seen = row
+                .last_seen_at
+                .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| "-".into());
+            vec![i.to_string(), row.hostname.clone(), last_seen]
+        })
+        .collect()
+}
+
+/// Footer hint that surfaces the default SSH user without consuming
+/// table columns. Mirrors how `isd ssh <host>` actually dials.
+fn hosts_footer_line(default_user: &str) -> String {
+    format!("  SSH user: {default_user}   (override with `isd ssh user@<host>`)")
+}
+
 /// Render the host rows under `isd ssh hosts`. Empty input still
-/// prints the header so `wc -l` keeps a stable shape. The SSH USER /
-/// PRINCIPAL columns are filled from `default_user()` so the listing
-/// reflects how `isd ssh <host>` would actually dial.
-fn render_hosts_table(rows: &[HostRow]) -> String {
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["HOST", "SSH USER", "PRINCIPAL", "LAST SEEN"]);
-    let user = default_user();
-    for row in rows {
-        let last_seen = row
-            .last_seen_at
-            .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-            .unwrap_or_else(|| "-".into());
-        t.add_row(vec![
-            row.hostname.as_str(),
-            user.as_str(),
-            user.as_str(),
-            last_seen.as_str(),
-        ]);
+/// prints the header (and a header rule, on a TTY) so `wc -l` keeps a
+/// stable shape and the operator sees the spec columns. A footer
+/// line beneath the table calls out the default SSH user once.
+fn print_hosts_table(rows: &[HostRow]) {
+    let table = RenderTable {
+        columns: hosts_columns(),
+        rows: build_hosts_row_cells(rows),
+    };
+    let term = console::Term::stdout();
+    let footer = hosts_footer_line(&default_user());
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        let color = console::colors_enabled();
+        println!("{}", render(&table, width, color));
+        println!("{footer}");
+    } else {
+        println!("{}", render_plain(&table));
+        println!("{footer}");
     }
-    t.to_string()
 }
 
 /// Fetch the controller's SSH CA pubkey and print it verbatim so it
@@ -640,67 +670,79 @@ async fn run_audit(args: AuditArgs, context: Option<&str>) -> Result<()> {
         .json()
         .await
         .context("decoding ssh audit JSON")?;
-    let rendered = render_audit_table(&entries);
-    println!("{}", rendered.trim_end());
+    print_audit_table(&entries);
     Ok(())
 }
 
-/// Render the audit rows under `isd ssh audit`. Empty input still
-/// prints the header so the operator can pipe through `wc -l` or
-/// `grep` without losing column labels.
-fn render_audit_table(rows: &[AuditEntry]) -> String {
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec![
-            "WHEN",
-            "KIND",
-            "PRINCIPALS",
-            "FINGERPRINT",
-            "TTL",
-            "COMMENT",
-        ]);
-    for row in rows {
-        let when = format_audit_timestamp(&row.occurred_at);
-        let principals = row
-            .metadata
-            .get("principals")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_else(|| "-".into());
-        let fingerprint = row
-            .metadata
-            .get("pubkey_fingerprint")
-            .and_then(|v| v.as_str())
-            .map(shorten_fingerprint)
-            .unwrap_or_else(|| "-".into());
-        let ttl = row
-            .metadata
-            .get("ttl_seconds")
-            .and_then(|v| v.as_u64())
-            .map(|s| format!("{s}s"))
-            .unwrap_or_else(|| "-".into());
-        let comment = row
-            .metadata
-            .get("comment")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-")
-            .to_string();
-        t.add_row(vec![
-            when.as_str(),
-            row.kind.as_str(),
-            principals.as_str(),
-            fingerprint.as_str(),
-            ttl.as_str(),
-            comment.as_str(),
-        ]);
+/// Column layout for `isd ssh audit`. Columns in spec order:
+/// `WHEN`, `KIND`, `PRINCIPALS`, `FINGERPRINT`, `TTL`, `COMMENT`.
+fn audit_columns() -> Vec<Column> {
+    vec![
+        Column::new("WHEN", Align::Left, CellStyle::Plain, 2, 20),
+        Column::new("KIND", Align::Left, CellStyle::Plain, 5, 12),
+        Column::new("PRINCIPALS", Align::Left, CellStyle::Plain, 4, 8),
+        Column::new("FINGERPRINT", Align::Left, CellStyle::Dim, 3, 16),
+        Column::new("TTL", Align::Right, CellStyle::Plain, 6, 4),
+        Column::new("COMMENT", Align::Left, CellStyle::Plain, 1, 12),
+    ]
+}
+
+/// Build the row matrix for `isd ssh audit`. Missing metadata fields
+/// fall back to `-` so a malformed audit row still renders.
+fn build_audit_row_cells(rows: &[AuditEntry]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| {
+            let when = format_audit_timestamp(&row.occurred_at);
+            let principals = row
+                .metadata
+                .get("principals")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "-".into());
+            let fingerprint = row
+                .metadata
+                .get("pubkey_fingerprint")
+                .and_then(|v| v.as_str())
+                .map(shorten_fingerprint)
+                .unwrap_or_else(|| "-".into());
+            let ttl = row
+                .metadata
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .map(|s| format!("{s}s"))
+                .unwrap_or_else(|| "-".into());
+            let comment = row
+                .metadata
+                .get("comment")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-")
+                .to_string();
+            vec![when, row.kind.clone(), principals, fingerprint, ttl, comment]
+        })
+        .collect()
+}
+
+/// Render the audit rows to stdout: boxed table on a TTY, tab-
+/// separated plain on a pipe. Empty input still emits a header line
+/// so pipeline consumers do not break on a quiet audit log.
+fn print_audit_table(rows: &[AuditEntry]) {
+    let table = RenderTable {
+        columns: audit_columns(),
+        rows: build_audit_row_cells(rows),
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        let color = console::colors_enabled();
+        println!("{}", render(&table, width, color));
+    } else {
+        println!("{}", render_plain(&table));
     }
-    t.to_string()
 }
 
 /// Render the `occurred_at` timestamp as a compact UTC `Z` string. We
@@ -1304,15 +1346,49 @@ mod tests {
         assert!(parsed.valid_to < Utc::now());
     }
 
-    #[test]
-    fn render_hosts_table_has_header_columns() {
-        let t = render_hosts_table(&[]);
-        assert!(t.contains("HOST"));
-        assert!(t.contains("SSH USER"));
-        assert!(t.contains("PRINCIPAL"));
-        assert!(t.contains("LAST SEEN"));
+    /// Helper: render the hosts table via the unified renderer's
+    /// non-TTY decay path so tests assert against stable plain text.
+    fn hosts_plain(rows: &[HostRow]) -> String {
+        let table = RenderTable {
+            columns: hosts_columns(),
+            rows: build_hosts_row_cells(rows),
+        };
+        render_plain(&table)
     }
 
+    /// `isd ssh hosts` headers match the new spec: `#`, `NAME`,
+    /// `LAST SEEN`. The legacy `SSH USER` / `PRINCIPAL` columns are
+    /// gone (the default user lives in the footer).
+    #[test]
+    fn render_hosts_table_has_spec_columns_only() {
+        let t = hosts_plain(&[]);
+        let header = t.lines().next().unwrap();
+        // `render_plain` drops the `#` column by contract; the
+        // remaining columns are `NAME\tLAST SEEN`.
+        assert_eq!(header, "NAME\tLAST SEEN");
+        // The legacy columns are gone.
+        assert!(!t.contains("SSH USER"));
+        assert!(!t.contains("PRINCIPAL"));
+    }
+
+    /// Boxed render carries the `#` column (TTY affordance) and all
+    /// three spec headers in order.
+    #[test]
+    fn render_hosts_table_boxed_carries_index_column() {
+        let table = RenderTable {
+            columns: hosts_columns(),
+            rows: build_hosts_row_cells(&[]),
+        };
+        let boxed = render(&table, 200, false);
+        assert!(boxed.contains('╭'));
+        assert!(boxed.contains("#"));
+        assert!(boxed.contains("NAME"));
+        assert!(boxed.contains("LAST SEEN"));
+    }
+
+    /// Each input row surfaces in the rendered output with the
+    /// hostname, the formatted timestamp, and the `-` placeholder
+    /// when `last_seen_at` is missing.
     #[test]
     fn render_hosts_table_renders_each_row() {
         let rows = vec![
@@ -1327,26 +1403,50 @@ mod tests {
                 last_seen_at: None,
             },
         ];
-        let t = render_hosts_table(&rows);
+        let t = hosts_plain(&rows);
         assert!(t.contains("iso-edge-1"));
         assert!(t.contains("iso-edge-2"));
         assert!(t.contains("2026-05-21T10:00:00Z"));
-        // Hosts with no last_seen_at render the dash placeholder so
-        // the column never collapses.
-        assert!(t.contains(" - "));
+        // The dash placeholder lives in the LAST SEEN column for the
+        // host with no heartbeat.
+        let lines: Vec<&str> = t.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("iso-edge-2\t") && l.contains('-')),
+            "dash placeholder rendered: {t}"
+        );
     }
 
+    /// The footer line surfaces the default user and the override
+    /// recipe so the operator sees how `isd ssh <host>` will dial
+    /// without consuming a table column for it.
+    #[test]
+    fn hosts_footer_calls_out_default_user_and_override_recipe() {
+        let line = hosts_footer_line("dirdmaster");
+        assert!(line.contains("SSH user: dirdmaster"), "footer: {line}");
+        assert!(line.contains("isd ssh user@<host>"), "footer: {line}");
+    }
+
+    /// Helper: render the audit table via the unified renderer's
+    /// non-TTY decay path.
+    fn audit_plain(rows: &[AuditEntry]) -> String {
+        let table = RenderTable {
+            columns: audit_columns(),
+            rows: build_audit_row_cells(rows),
+        };
+        render_plain(&table)
+    }
+
+    /// Audit headers match the spec order, with no columns dropped.
     #[test]
     fn render_audit_table_has_header_columns() {
-        let t = render_audit_table(&[]);
-        assert!(t.contains("WHEN"));
-        assert!(t.contains("KIND"));
-        assert!(t.contains("PRINCIPALS"));
-        assert!(t.contains("FINGERPRINT"));
-        assert!(t.contains("TTL"));
-        assert!(t.contains("COMMENT"));
+        let t = audit_plain(&[]);
+        let header = t.lines().next().unwrap();
+        assert_eq!(header, "WHEN\tKIND\tPRINCIPALS\tFINGERPRINT\tTTL\tCOMMENT");
     }
 
+    /// Every projected metadata field surfaces in the rendered cells.
     #[test]
     fn render_audit_table_pulls_fields_from_metadata() {
         let rows = vec![AuditEntry {
@@ -1359,7 +1459,7 @@ mod tests {
                 "comment": "operator@laptop 2026-05-21T10:30:00Z",
             }),
         }];
-        let t = render_audit_table(&rows);
+        let t = audit_plain(&rows);
         assert!(t.contains("ssh.cert.issued"), "kind column: {t}");
         assert!(t.contains("2026-05-21T10:30:00Z"), "when column: {t}");
         assert!(t.contains("isengard,root"), "principals column: {t}");
@@ -1371,23 +1471,22 @@ mod tests {
         assert!(t.contains("operator@laptop"), "comment column: {t}");
     }
 
+    /// Missing metadata falls back to `-` placeholders so a malformed
+    /// audit row still renders.
     #[test]
     fn render_audit_table_handles_missing_metadata_gracefully() {
-        // No metadata fields at all: every projected column falls
-        // back to the `-` placeholder. The table still renders so
-        // pipeline consumers do not break on a malformed row.
         let rows = vec![AuditEntry {
             kind: "ssh.cert.issued".into(),
             occurred_at: "2026-05-21T10:30:00+00:00".into(),
             metadata: serde_json::Value::Null,
         }];
-        let t = render_audit_table(&rows);
+        let t = audit_plain(&rows);
         assert!(t.contains("ssh.cert.issued"));
-        // Three `-` placeholders for principals, fingerprint shortener
-        // result on missing input, ttl, comment. Don't pin the exact
-        // count: the table padding can collapse adjacent dashes into
-        // a single space cell. Just assert one is present.
-        assert!(t.contains(" - "), "placeholder is rendered: {t}");
+        // At least one `-` placeholder is present across the empty
+        // metadata columns. Tab-separated output keeps adjacent dashes
+        // distinct, so the row contains literal `-` tokens.
+        let row_line = t.lines().nth(1).unwrap();
+        assert!(row_line.contains('-'), "placeholder is rendered: {row_line}");
     }
 
     #[test]
