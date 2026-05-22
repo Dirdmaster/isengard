@@ -1,5 +1,6 @@
-//! `isd secret put` / `isd secret list` / `isd secret rm` (v0.3.6
-//! managed-secrets store).
+//! `isd secret set` / `isd secret ls` / `isd secret rm` (v0.3.6
+//! managed-secrets store). `put` and `list` are kept as deprecated
+//! aliases per the lexicon spec.
 //!
 //! Talks to the dashboard's `/api/v1/secrets[/<name>]` endpoints. There is
 //! intentionally NO `isd secret get`: secrets are write-only from the
@@ -56,20 +57,25 @@ pub struct SecretArgs {
     pub command: SecretCommand,
 }
 
-/// Sub-verbs under `isd secret`.
+/// Sub-verbs under `isd secret`. Canonical verbs follow the lexicon
+/// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
+/// `set` / `ls` / `rm`. `put` and `list` are kept as deprecated aliases
+/// for one minor version so muscle memory and scripts keep working.
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
     /// Upsert a secret value.
-    Put(PutArgs),
+    #[command(alias = "put")]
+    Set(SetArgs),
     /// List secret names (never values).
-    List(ListArgs),
+    #[command(alias = "list")]
+    Ls(LsArgs),
     /// Delete a secret.
     Rm(RmArgs),
 }
 
-/// CLI flags for `isd secret put`.
+/// CLI flags for `isd secret set` (alias: `put`).
 #[derive(Debug, Args)]
-pub struct PutArgs {
+pub struct SetArgs {
     /// Secret name.
     pub name: String,
     /// Read the value from this file (defaults to stdin).
@@ -90,9 +96,9 @@ pub struct RmArgs {
     pub scope: Scope,
 }
 
-/// CLI flags for `isd secret list`.
+/// CLI flags for `isd secret ls` (alias: `list`).
 #[derive(Debug, Args)]
-pub struct ListArgs {
+pub struct LsArgs {
     /// List secrets in one context or every saved context.
     #[arg(long, value_enum, default_value_t = Scope::Context)]
     pub scope: Scope,
@@ -134,15 +140,15 @@ struct SecretEntry {
 /// Propagates the sub-verb's error.
 pub async fn run(args: SecretArgs, context: Option<&str>) -> Result<()> {
     match args.command {
-        SecretCommand::Put(a) => run_put(a, context).await,
-        SecretCommand::List(a) => run_list(a, context).await,
+        SecretCommand::Set(a) => run_set(a, context).await,
+        SecretCommand::Ls(a) => run_ls(a, context).await,
         SecretCommand::Rm(a) => run_rm(a, context).await,
     }
 }
 
 /// Resolve the value (stdin or `--from-file`), then PUT it to one
 /// context or fan out across every saved context per `--scope`.
-async fn run_put(args: PutArgs, context: Option<&str>) -> Result<()> {
+async fn run_set(args: SetArgs, context: Option<&str>) -> Result<()> {
     let value = read_value(args.from_file.as_deref())?;
     if value.is_empty() {
         return Err(anyhow!(
@@ -157,7 +163,7 @@ async fn run_put(args: PutArgs, context: Option<&str>) -> Result<()> {
             println!("Stored secret {:?}.", args.name);
             Ok(())
         }
-        Scope::Global => run_put_global(&args.name, value).await,
+        Scope::Global => run_set_global(&args.name, value).await,
     }
 }
 
@@ -165,7 +171,7 @@ async fn run_put(args: PutArgs, context: Option<&str>) -> Result<()> {
 /// per-context failures are reported in the summary line; the run does
 /// not abort. The summary mirrors the format used by `secret rm --scope
 /// global`.
-async fn run_put_global(name: &str, value: String) -> Result<()> {
+async fn run_set_global(name: &str, value: String) -> Result<()> {
     let contexts = load_all_contexts()?;
     if contexts.is_empty() {
         return Err(anyhow!(
@@ -204,16 +210,16 @@ async fn put_to_context(ctx: &DockerContextSummary, name: &str, value: String) -
 }
 
 /// Dispatch to the context-scope or global-scope listing.
-async fn run_list(args: ListArgs, context: Option<&str>) -> Result<()> {
+async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
     match args.scope {
-        Scope::Context => run_list_context(context).await,
-        Scope::Global => run_list_global().await,
+        Scope::Context => run_ls_context(context).await,
+        Scope::Global => run_ls_global().await,
     }
 }
 
 /// `secret ls --scope context`: GET + render a `NAME / CREATED /
 /// UPDATED` table for the current context.
-async fn run_list_context(context: Option<&str>) -> Result<()> {
+async fn run_ls_context(context: Option<&str>) -> Result<()> {
     let session = Session::open(context).await?;
     let entries = list_secrets(&session).await?;
     if entries.is_empty() {
@@ -245,7 +251,7 @@ async fn run_list_context(context: Option<&str>) -> Result<()> {
 /// coverage. The operator decides what to do.
 /// `secret ls --scope global`: walk every context, aggregate by name,
 /// classify coverage, and print one row per distinct name.
-async fn run_list_global() -> Result<()> {
+async fn run_ls_global() -> Result<()> {
     let contexts = load_all_contexts()?;
     if contexts.is_empty() {
         return Err(anyhow!(
@@ -697,7 +703,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "put", "cf_token"]).unwrap();
         match w.c {
-            SecretCommand::Put(a) => {
+            SecretCommand::Set(a) => {
                 assert_eq!(a.name, "cf_token");
                 assert!(a.from_file.is_none());
             }
@@ -715,7 +721,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "put", "cf_token", "--from-file", "/tmp/x"]).unwrap();
         match w.c {
-            SecretCommand::Put(a) => assert_eq!(a.from_file.unwrap().to_str().unwrap(), "/tmp/x"),
+            SecretCommand::Set(a) => assert_eq!(a.from_file.unwrap().to_str().unwrap(), "/tmp/x"),
             other => panic!("expected Put, got {other:?}"),
         }
     }
@@ -730,7 +736,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "put", "cf_token"]).unwrap();
         match w.c {
-            SecretCommand::Put(a) => assert_eq!(a.scope, Scope::Context),
+            SecretCommand::Set(a) => assert_eq!(a.scope, Scope::Context),
             other => panic!("expected Put, got {other:?}"),
         }
     }
@@ -745,7 +751,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "put", "cf_token", "--scope", "global"]).unwrap();
         match w.c {
-            SecretCommand::Put(a) => assert_eq!(a.scope, Scope::Global),
+            SecretCommand::Set(a) => assert_eq!(a.scope, Scope::Global),
             other => panic!("expected Put, got {other:?}"),
         }
     }
@@ -760,7 +766,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "list"]).unwrap();
         match w.c {
-            SecretCommand::List(a) => assert_eq!(a.scope, Scope::Context),
+            SecretCommand::Ls(a) => assert_eq!(a.scope, Scope::Context),
             other => panic!("expected List, got {other:?}"),
         }
     }
@@ -775,7 +781,7 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["x", "list", "--scope", "global"]).unwrap();
         match w.c {
-            SecretCommand::List(a) => assert_eq!(a.scope, Scope::Global),
+            SecretCommand::Ls(a) => assert_eq!(a.scope, Scope::Global),
             other => panic!("expected List, got {other:?}"),
         }
     }
