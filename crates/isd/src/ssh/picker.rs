@@ -39,9 +39,8 @@
 //! `Esc`/`q`/`Ctrl-C` cancels, `c` clears the filter). Pressing `/`
 //! enters INSERT mode (cursor visible; printable chars extend the
 //! filter, `↓`/`Ctrl-N` and `↑`/`Ctrl-P` still navigate, `Esc` returns
-//! to NORMAL preserving the query). A three-letter mode badge sits at
-//! the right edge of the input row: `NOR` (yellow) in NORMAL, `INS`
-//! (green) in INSERT.
+//! to NORMAL preserving the query). The mode affordance is the `/`
+//! prompt glyph itself: dim in NORMAL, bold cyan in INSERT.
 
 use std::collections::HashSet;
 use std::io::{Stdout, stdout};
@@ -59,9 +58,7 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, text::Text, widgets::Paragraph,
 };
 
-use crate::render::{
-    Align, CellStyle, Column, InputRow, ModeBadge, Table as RenderTable, render_to_lines,
-};
+use crate::render::{Align, CellStyle, Column, InputRow, Table as RenderTable, render_to_lines};
 
 /// Source bucket for a picker row. The picker prints the bucket label
 /// in square brackets so the operator can tell at a glance which hosts
@@ -607,26 +604,22 @@ fn apply_key_insert(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
 /// painted with a cyan background + black foreground (highlight
 /// clipped at the box's right edge).
 fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier, Style};
     let area = f.area();
 
     let table = picker_table(&state.visible);
-    let badge = match state.mode {
-        PickerMode::Normal => ModeBadge {
-            label: "NOR",
-            color: Color::Yellow,
-        },
-        PickerMode::Insert => ModeBadge {
-            label: "INS",
-            color: Color::Green,
-        },
+    let prompt_style = match state.mode {
+        PickerMode::Normal => Style::default().fg(Color::DarkGray),
+        PickerMode::Insert => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     };
     let show_cursor = state.mode == PickerMode::Insert;
     let input = InputRow {
         query: &state.filter,
         placeholder: "filter hosts...",
-        prompt: "> ",
-        mode: Some(badge),
+        prompt: "/ ",
+        prompt_style,
         show_cursor,
     };
     let (lines, cursor) = render_to_lines(&table, area.width as usize, state.selected, Some(input));
@@ -889,8 +882,8 @@ mod tests {
         // input(5) bottom(6). Lines below are blank viewport tail.
         let input_line: String = (0..80).map(|x| buf[(x, 5)].symbol()).collect();
         assert!(
-            input_line.contains("> lau"),
-            "input row inside the box carries `> lau`: {input_line:?}"
+            input_line.contains("/ lau"),
+            "input row inside the box carries `/ lau`: {input_line:?}"
         );
         assert!(
             input_line.starts_with('│') && input_line.trim_end().ends_with('│'),
@@ -1165,33 +1158,24 @@ mod tests {
         // Default mode is NORMAL.
         terminal.draw(|f| draw(f, &mut st)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        // Find the input row by searching for the line that contains `>`.
+        // Find the input row by searching for the `/` prompt glyph.
         let mut found = false;
         for y in 0..12 {
             let line: String = (0..80).map(|x| buf[(x, y)].symbol()).collect();
-            if line.contains('>') && line.contains('│') {
-                assert!(
-                    line.contains("NOR"),
-                    "NOR badge on the input row at y={y}: {line:?}"
-                );
+            if line.contains('/') && line.contains('│') {
                 found = true;
                 break;
             }
         }
         assert!(found, "no input row found in the rendered buffer");
-        // Indirectly confirm the picker hid the cursor by re-running
-        // the same layout through `render_to_lines`: NORMAL mode sets
-        // `show_cursor: false` so the returned cursor anchor is None.
+        // NORMAL mode hides the cursor: re-run the same layout through
+        // `render_to_lines` to confirm.
         let table = picker_table(&st.visible);
-        let badge = ModeBadge {
-            label: "NOR",
-            color: ratatui::style::Color::Yellow,
-        };
         let input = InputRow {
             query: &st.filter,
             placeholder: "filter hosts...",
-            prompt: "> ",
-            mode: Some(badge),
+            prompt: "/ ",
+            prompt_style: ratatui::style::Style::default(),
             show_cursor: false,
         };
         let (_, cursor) = render_to_lines(&table, 80, st.selected, Some(input));
@@ -1199,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_in_insert_mode_renders_ins_badge_and_shows_cursor() {
+    fn draw_in_insert_mode_shows_cursor() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(80, 12);
@@ -1211,27 +1195,19 @@ mod tests {
         let mut found = false;
         for y in 0..12 {
             let line: String = (0..80).map(|x| buf[(x, y)].symbol()).collect();
-            if line.contains('>') && line.contains('│') {
-                assert!(
-                    line.contains("INS"),
-                    "INS badge on the input row at y={y}: {line:?}"
-                );
+            if line.contains('/') && line.contains('│') {
                 found = true;
                 break;
             }
         }
         assert!(found, "no input row found in the rendered buffer");
-        // Confirm INSERT mode yields a cursor anchor via the renderer.
+        // INSERT mode yields a cursor anchor.
         let table = picker_table(&st.visible);
-        let badge = ModeBadge {
-            label: "INS",
-            color: ratatui::style::Color::Green,
-        };
         let input = InputRow {
             query: &st.filter,
             placeholder: "filter hosts...",
-            prompt: "> ",
-            mode: Some(badge),
+            prompt: "/ ",
+            prompt_style: ratatui::style::Style::default(),
             show_cursor: true,
         };
         let (_, cursor) = render_to_lines(&table, 80, st.selected, Some(input));
