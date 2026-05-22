@@ -538,7 +538,10 @@ pub(crate) async fn fetch_zones_from_cloudflare(
             parse_error_message(&body, &body)
         ));
     }
-    let body: ZoneFetchResponse = resp.json().await.context("decoding cloudflare-fetch body")?;
+    let body: ZoneFetchResponse = resp
+        .json()
+        .await
+        .context("decoding cloudflare-fetch body")?;
     Ok(body.zones)
 }
 

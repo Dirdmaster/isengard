@@ -213,9 +213,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/zones"))
             .and(query_param("page", "1"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(ok_page(&["one.example"], 0)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_page(&["one.example"], 0)))
             .mount(&server)
             .await;
         let zones = list_zones_with_base("t", &server.uri()).await.unwrap();

@@ -52,10 +52,7 @@ pub fn router(handles: Arc<ControllerHandles>) -> Router {
 /// URL so wiremock can stand in for the public CF endpoint. `None`
 /// keeps the production base URL hard-coded inside the controller's
 /// [`cloudflare`] module.
-pub fn router_with_cf_base(
-    handles: Arc<ControllerHandles>,
-    cf_base_url: Option<String>,
-) -> Router {
+pub fn router_with_cf_base(handles: Arc<ControllerHandles>, cf_base_url: Option<String>) -> Router {
     Router::new()
         .route("/config", get(list_config))
         .route("/config/schema", get(config_schema))
@@ -226,10 +223,7 @@ async fn put_config(
 }
 
 /// `DELETE /api/v1/config/{key}` handler.
-async fn delete_config(
-    State(state): State<ConfigState>,
-    Path(key): Path<String>,
-) -> Response {
+async fn delete_config(State(state): State<ConfigState>, Path(key): Path<String>) -> Response {
     match state.handles.config_dispatcher().delete(&key).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => err(
@@ -241,10 +235,7 @@ async fn delete_config(
 }
 
 /// `GET /api/v1/config` handler. Snapshots every schema key.
-async fn list_config(
-    State(state): State<ConfigState>,
-    Query(q): Query<ListQuery>,
-) -> Response {
+async fn list_config(State(state): State<ConfigState>, Query(q): Query<ListQuery>) -> Response {
     let rows = match state.handles.config_dispatcher().list().await {
         Ok(r) => r,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

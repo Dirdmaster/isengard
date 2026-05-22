@@ -1899,14 +1899,8 @@ mod tests {
 
     #[test]
     fn merge_zones_dedups_and_sorts() {
-        let current = vec![
-            "vallee.casa".to_string(),
-            "weavers.engineering".to_string(),
-        ];
-        let fetched = vec![
-            "weavers.engineering".to_string(),
-            "another.dev".to_string(),
-        ];
+        let current = vec!["vallee.casa".to_string(), "weavers.engineering".to_string()];
+        let fetched = vec!["weavers.engineering".to_string(), "another.dev".to_string()];
         assert_eq!(
             merge_zones(&current, &fetched),
             vec![
@@ -2072,7 +2066,10 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let rendered = buffer_to_string(&terminal.backend().buffer().clone());
         assert!(rendered.contains("DNS zones"), "rendered: {rendered}");
-        assert!(rendered.contains("weavers.engineering"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("weavers.engineering"),
+            "rendered: {rendered}"
+        );
         assert!(rendered.contains("vallee.casa"), "rendered: {rendered}");
         // Fetch hint is enabled because the CF token is set in the
         // fixture above.
