@@ -37,7 +37,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{List, ListItem, ListState, Paragraph},
 };
 
 /// Source bucket for a picker row. The picker prints the bucket label
@@ -60,7 +60,10 @@ pub enum HostClass {
 pub struct PickerRow {
     /// Dial target as the operator typed it (or as the agent reported).
     pub hostname: String,
-    /// Source bucket for visual disambiguation.
+    /// Source bucket. Constructed by callers but not currently surfaced
+    /// in the minimalist render. Kept for future visual cues (e.g., a
+    /// glyph column distinguishing isengard from trusted hosts).
+    #[allow(dead_code)]
     pub class: HostClass,
     /// RFC3339 timestamp the agent last heartbeated, when known.
     pub last_seen: Option<String>,
@@ -122,18 +125,15 @@ pub fn score_rows_by_filter(rows: &[PickerRow], query: &str) -> Vec<PickerRow> {
     scored.into_iter().map(|(_, _, r)| r).collect()
 }
 
-/// Render a row as the picker row's display Line. Hostname is bold,
-/// dial target cyan when present, last-seen dim, class tag dim in
-/// brackets. The caller wraps this in a `ListItem` and prefixes the
-/// selection marker.
+/// Render a row as the picker row's display Line. Hostname bold, dial
+/// target cyan when set, last-seen dim and relative ("2m ago"). Class
+/// tag dropped: single-fleet operators do not need the disambiguation,
+/// and the trusted-vs-isengard distinction is informational at best.
 fn row_line(row: &PickerRow) -> Line<'static> {
-    let class = match row.class {
-        HostClass::Isengard => "isengard",
-        HostClass::Trusted => "trusted",
-    };
-    let last = row.last_seen.clone().unwrap_or_else(|| "-".into());
+    let last = relative_time(row.last_seen.as_deref());
     let dial = row.dial_target.clone().unwrap_or_else(|| "(unset)".into());
     Line::from(vec![
+        Span::raw("  "),
         Span::styled(
             row.hostname.clone(),
             Style::default().add_modifier(Modifier::BOLD),
@@ -142,21 +142,42 @@ fn row_line(row: &PickerRow) -> Line<'static> {
         Span::styled(dial, Style::default().fg(Color::Cyan)),
         Span::raw("  "),
         Span::styled(last, Style::default().fg(Color::DarkGray)),
-        Span::raw("  "),
-        Span::styled(format!("[{class}]"), Style::default().fg(Color::DarkGray)),
     ])
+}
+
+/// Format an RFC3339 timestamp as a coarse relative-time string
+/// ("2m ago", "3h ago", "5d ago"). Falls back to "-" on missing / bad
+/// input, "just now" for under 60s. Pure function so the picker stays
+/// testable without freezing the system clock.
+fn relative_time(rfc3339: Option<&str>) -> String {
+    let Some(raw) = rfc3339 else {
+        return "-".into();
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return raw.to_string();
+    };
+    let now = chrono::Utc::now();
+    let delta = now.signed_duration_since(parsed.with_timezone(&chrono::Utc));
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 /// Compute the inline viewport height (rows) for `n_rows` source items.
 ///
-/// Layout budget: filter input (3) + list (>=1) + footer (1) = 5 min.
-/// Cap at 14 so a long fleet does not eat the operator's scrollback.
-/// Floor at 5 so the picker is always usable even with zero rows
-/// (empty-list early-out happens upstream, but the floor keeps the
-/// math total).
+/// Layout budget: filter (1) + list (>=1) = 2 min. Cap at 12 so a long
+/// fleet does not eat the operator's scrollback. Floor at 3 so the
+/// picker still has a usable list area with a tiny fleet.
 pub fn picker_height(n_rows: usize) -> u16 {
-    let raw = (n_rows as u16).saturating_add(4);
-    raw.clamp(5, 14)
+    let raw = (n_rows as u16).saturating_add(1);
+    raw.clamp(3, 12)
 }
 
 /// Picker public entry. Opens an inline ratatui viewport at the bottom
@@ -377,29 +398,25 @@ fn handle_key(state: &mut PickerState, key: KeyEvent) -> KeyOutcome {
     }
 }
 
-/// Render the picker frame: title block, filter line, ranked list,
-/// keybind hint footer.
+/// Render the picker frame. Minimalist by design: a single `>` filter
+/// line on top, ranked rows below, nothing else. No bordered chrome, no
+/// title, no keybind footer. Esc / Enter are universal; operators know
+/// them. Selection is highlighted via background color, not a leading
+/// arrow.
 fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // filter input
+            Constraint::Length(1), // filter input
             Constraint::Min(1),    // host list
-            Constraint::Length(1), // footer hint
         ])
         .split(area);
 
-    let title = " Pick a host (type to filter, Esc to cancel) ";
-    let filter_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(title);
     let filter_line = Paragraph::new(Line::from(vec![
         Span::styled("> ", Style::default().fg(Color::Yellow)),
         Span::raw(state.filter.clone()),
-    ]))
-    .block(filter_block);
+    ]));
     f.render_widget(filter_line, chunks[0]);
 
     let items: Vec<ListItem> = state
@@ -407,24 +424,13 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
         .iter()
         .map(|r| ListItem::new(row_line(r)))
         .collect();
-    // No borders on the list. The filter input above already carries
-    // the rounded chrome; a second box around the rows wastes 2 lines
-    // of the inline viewport. With borders here, a 1-host picker
-    // collapsed to zero visible content rows (3-line filter box + 2
-    // border lines + 1 footer = 6, but the inline height for n=1 is 5).
-    let list = List::new(items).highlight_symbol("> ").highlight_style(
+    let list = List::new(items).highlight_style(
         Style::default()
             .fg(Color::Black)
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     );
     f.render_stateful_widget(list, chunks[1], &mut state.list_state);
-
-    let footer = Paragraph::new(Line::from(vec![Span::styled(
-        "  up/down navigate . Enter dial . Esc cancel . Ctrl-U clear",
-        Style::default().fg(Color::DarkGray),
-    )]));
-    f.render_widget(footer, chunks[2]);
 }
 
 #[cfg(test)]
@@ -556,21 +562,37 @@ mod tests {
     }
 
     #[test]
-    fn picker_height_floor_at_five_rows() {
-        assert_eq!(picker_height(0), 5);
-        assert_eq!(picker_height(1), 5);
+    fn picker_height_floor_at_three_rows() {
+        assert_eq!(picker_height(0), 3);
+        assert_eq!(picker_height(1), 3);
+        assert_eq!(picker_height(2), 3);
     }
 
     #[test]
     fn picker_height_scales_with_row_count() {
-        // n+4 once we're past the floor: 5 rows + 4 = 9, well under cap.
-        assert_eq!(picker_height(5), 9);
+        // n+1 once we're past the floor: 5 rows + 1 = 6.
+        assert_eq!(picker_height(5), 6);
+        assert_eq!(picker_height(10), 11);
     }
 
     #[test]
-    fn picker_height_caps_at_fourteen() {
-        assert_eq!(picker_height(50), 14);
-        assert_eq!(picker_height(1_000), 14);
+    fn picker_height_caps_at_twelve() {
+        assert_eq!(picker_height(50), 12);
+        assert_eq!(picker_height(1_000), 12);
+    }
+
+    #[test]
+    fn relative_time_handles_known_shapes() {
+        assert_eq!(relative_time(None), "-");
+        assert_eq!(relative_time(Some("not-a-timestamp")), "not-a-timestamp");
+        let ten_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        assert_eq!(relative_time(Some(&ten_min_ago)), "10m ago");
+        let three_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(3))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        assert_eq!(relative_time(Some(&three_hours_ago)), "3h ago");
     }
 
     #[test]
