@@ -407,18 +407,17 @@ fn draw(f: &mut ratatui::Frame<'_>, state: &mut PickerState) {
         .iter()
         .map(|r| ListItem::new(row_line(r)))
         .collect();
-    let list_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
-    let list = List::new(items)
-        .block(list_block)
-        .highlight_symbol("> ")
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    // No borders on the list. The filter input above already carries
+    // the rounded chrome; a second box around the rows wastes 2 lines
+    // of the inline viewport. With borders here, a 1-host picker
+    // collapsed to zero visible content rows (3-line filter box + 2
+    // border lines + 1 footer = 6, but the inline height for n=1 is 5).
+    let list = List::new(items).highlight_symbol("> ").highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_stateful_widget(list, chunks[1], &mut state.list_state);
 
     let footer = Paragraph::new(Line::from(vec![Span::styled(
