@@ -3658,6 +3658,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "isengard-dns"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hickory-proto",
+ "hickory-resolver",
+ "hickory-server",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "isengard-lsp"
 version = "0.6.0"
 dependencies = [
