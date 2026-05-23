@@ -1,0 +1,36 @@
+-- 2026-05-23: track the provenance of a stack's stored compose.yaml.
+--
+-- Migration 0024 added compose_yaml + compose_sha256 + compose_imported_at
+-- to `stacks` so the agent could store the compose body it
+-- reverse-engineered from running containers. That column set had no
+-- way to distinguish two very different cases:
+--
+--   1. The operator ran `isd stack deploy <file>` (or hand-edited via
+--      `isd stack edit`) and the YAML on disk is the source of truth
+--      they wrote. The controller must never overwrite this without
+--      explicit operator intent (`--refresh` / `deploy`).
+--
+--   2. The controller's auto-adopt path observed a stable container set
+--      with rich snapshots, synthesized a compose, and stored it as a
+--      best-effort starting point. Operator hasn't endorsed it; future
+--      auto-adopt for the same stack stays dormant (no continuous
+--      reconciliation), but the doctor surface is allowed to soft-prompt
+--      "consider isd stack edit to take ownership".
+--
+-- Spec: 3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md
+--       (Auto-adoption + "Hard rule: observation auto; mutation never".)
+--
+-- Values:
+--   'operator_written'  Default. Every legacy row predating this
+--                       migration is operator_written: nothing was
+--                       auto-synthesized before, and the upgrade must
+--                       not silently re-flag existing rows.
+--   'auto_synthesized'  Written by the controller's auto-adopt path on
+--                       a stable heartbeat with full rich data.
+--
+-- A third value ('live_synthesized') is returned by the
+-- `GET /api/v1/stacks/<id>/compose?source=synthesized` endpoint when
+-- the operator forces a fresh live synth, but that value is computed on
+-- read and never persisted, so it does not appear in this column.
+
+ALTER TABLE stacks ADD COLUMN compose_source TEXT NOT NULL DEFAULT 'operator_written';

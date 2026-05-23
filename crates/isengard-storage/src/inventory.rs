@@ -20,7 +20,8 @@ use crate::host_action::{HostAction, HostActionId, HostActionKind};
 use crate::service::{InsertService, Service, ServiceId, ServiceState};
 use crate::setting::Setting;
 use crate::stack::{
-    InsertStack, Stack, StackComposeRow, StackHook, StackId, StackManifestBundle, StackSource,
+    ComposeSource, InsertStack, Stack, StackComposeRow, StackHook, StackId, StackManifestBundle,
+    StackSource,
 };
 
 /// Wraps a `sqlx::SqlitePool` opened against a single `.db` file.
@@ -412,6 +413,15 @@ impl Inventory {
     /// from the running containers in `stack`. `imported_at` is RFC3339.
     /// Idempotent: callers may invoke with the same payload on every
     /// reconnect without churning the row.
+    ///
+    /// `source` tags the provenance: [`ComposeSource::OperatorWritten`]
+    /// for `isd stack deploy` / `isd stack edit` /
+    /// `isd stack adopt --refresh`, [`ComposeSource::AutoSynthesized`]
+    /// for the controller's auto-adopt path (spec
+    /// `2026-05-23-isd-compose-synthesize-design.md`). Migration 0034
+    /// defaults the column to `operator_written`, so legacy callers that
+    /// pre-date this parameter pass `ComposeSource::OperatorWritten`
+    /// without changing behaviour.
     pub async fn set_stack_compose(
         &self,
         host_id: HostId,
@@ -419,19 +429,22 @@ impl Inventory {
         compose_yaml: &str,
         sha256: &str,
         imported_at: &str,
+        source: ComposeSource,
     ) -> Result<bool> {
         let result = sqlx::query(
             r#"
             UPDATE stacks
                SET compose_yaml         = ?,
                    compose_sha256       = ?,
-                   compose_imported_at  = ?
+                   compose_imported_at  = ?,
+                   compose_source       = ?
              WHERE host_id = ? AND name = ?
             "#,
         )
         .bind(compose_yaml)
         .bind(sha256)
         .bind(imported_at)
+        .bind(source.as_str())
         .bind(host_id.to_bytes().as_slice())
         .bind(stack_name)
         .execute(&self.pool)
@@ -441,10 +454,14 @@ impl Inventory {
 
     /// v0.3c compose import: read the stored YAML for a stack. Returns
     /// `Ok(None)` if the row exists but no import has been recorded yet.
+    /// The returned row's `source` field reflects the provenance tag
+    /// written by [`Self::set_stack_compose`]; rows that pre-date
+    /// migration 0034 read back as
+    /// [`ComposeSource::OperatorWritten`].
     pub async fn get_stack_compose(&self, id: StackId) -> Result<Option<StackComposeRow>> {
         use sqlx::Row;
         let row = sqlx::query(
-            "SELECT compose_yaml, compose_sha256, compose_imported_at FROM stacks WHERE id = ?",
+            "SELECT compose_yaml, compose_sha256, compose_imported_at, compose_source FROM stacks WHERE id = ?",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -453,11 +470,14 @@ impl Inventory {
         let yaml: Option<String> = row.try_get("compose_yaml")?;
         let sha: Option<String> = row.try_get("compose_sha256")?;
         let imported_at: Option<String> = row.try_get("compose_imported_at")?;
+        let source_str: String = row.try_get("compose_source")?;
+        let source = ComposeSource::from_db_str(&source_str);
         match (yaml, sha, imported_at) {
             (Some(yaml), Some(sha256), Some(imported_at)) => Ok(Some(StackComposeRow {
                 yaml,
                 sha256,
                 imported_at,
+                source,
             })),
             _ => Ok(None),
         }
@@ -1643,5 +1663,173 @@ mod tests {
         assert!(bundle.deploy_strategy.is_none());
         assert!(bundle.secrets.is_empty());
         assert!(bundle.hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compose_source_round_trips_through_storage_operator_written() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = test_enroll_h(&inv, "host-cw").await;
+        inv.insert_stack(InsertStack {
+            host_id,
+            name: "owned".into(),
+            source: StackSource::Compose,
+        })
+        .await
+        .unwrap();
+
+        let ok = inv
+            .set_stack_compose(
+                host_id,
+                "owned",
+                "services:\n  web:\n    image: nginx\n",
+                "deadbeef",
+                "2026-05-23T12:00:00Z",
+                ComposeSource::OperatorWritten,
+            )
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let stack_id = inv
+            .list_stacks(Some(host_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "owned")
+            .unwrap()
+            .id;
+        let row = inv.get_stack_compose(stack_id).await.unwrap().unwrap();
+        assert_eq!(row.source, ComposeSource::OperatorWritten);
+    }
+
+    #[tokio::test]
+    async fn compose_source_round_trips_through_storage_auto_synthesized() {
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = test_enroll_h(&inv, "host-cs").await;
+        inv.insert_stack(InsertStack {
+            host_id,
+            name: "discovered".into(),
+            source: StackSource::Compose,
+        })
+        .await
+        .unwrap();
+
+        let ok = inv
+            .set_stack_compose(
+                host_id,
+                "discovered",
+                "services:\n  redis:\n    image: redis\n",
+                "cafe",
+                "2026-05-23T12:00:00Z",
+                ComposeSource::AutoSynthesized,
+            )
+            .await
+            .unwrap();
+        assert!(ok);
+
+        let stack_id = inv
+            .list_stacks(Some(host_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "discovered")
+            .unwrap()
+            .id;
+        let row = inv.get_stack_compose(stack_id).await.unwrap().unwrap();
+        assert_eq!(row.source, ComposeSource::AutoSynthesized);
+        assert_eq!(row.sha256, "cafe");
+    }
+
+    #[tokio::test]
+    async fn compose_source_legacy_row_reads_as_operator_written() {
+        // Migration 0034 backfills every row created before this PR
+        // as 'operator_written'. Simulate that by stuffing values into
+        // the row directly through `set_stack_compose` with the
+        // OperatorWritten tag (which matches the column default), then
+        // verifying the read path returns OperatorWritten without
+        // depending on the upgrade migration.
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = test_enroll_h(&inv, "host-legacy").await;
+        inv.insert_stack(InsertStack {
+            host_id,
+            name: "legacy".into(),
+            source: StackSource::Compose,
+        })
+        .await
+        .unwrap();
+        inv.set_stack_compose(
+            host_id,
+            "legacy",
+            "services: {}\n",
+            "0",
+            "2026-05-23T00:00:00Z",
+            ComposeSource::OperatorWritten,
+        )
+        .await
+        .unwrap();
+        let stack_id = inv
+            .list_stacks(Some(host_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "legacy")
+            .unwrap()
+            .id;
+        let row = inv.get_stack_compose(stack_id).await.unwrap().unwrap();
+        assert_eq!(row.source, ComposeSource::OperatorWritten);
+    }
+
+    #[tokio::test]
+    async fn compose_source_overwrite_with_operator_clears_auto_tag() {
+        // The auto-adopt path tags rows as AutoSynthesized. When the
+        // operator later runs `isd stack deploy` / `isd stack edit` /
+        // `isd stack adopt --refresh`, the row flips to
+        // OperatorWritten and the auto-adopt debouncer never touches
+        // it again (compose_source-aware short-circuit).
+        let inv = Inventory::open_in_memory().await.unwrap();
+        let host_id = test_enroll_h(&inv, "host-flip").await;
+        inv.insert_stack(InsertStack {
+            host_id,
+            name: "flipped".into(),
+            source: StackSource::Compose,
+        })
+        .await
+        .unwrap();
+
+        inv.set_stack_compose(
+            host_id,
+            "flipped",
+            "services: {}\n",
+            "auto",
+            "2026-05-23T00:00:00Z",
+            ComposeSource::AutoSynthesized,
+        )
+        .await
+        .unwrap();
+        let id1 = inv
+            .list_stacks(Some(host_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "flipped")
+            .unwrap()
+            .id;
+        let row1 = inv.get_stack_compose(id1).await.unwrap().unwrap();
+        assert_eq!(row1.source, ComposeSource::AutoSynthesized);
+
+        // Operator deploy: rewrite as OperatorWritten.
+        inv.set_stack_compose(
+            host_id,
+            "flipped",
+            "services:\n  web:\n    image: nginx\n",
+            "op",
+            "2026-05-23T01:00:00Z",
+            ComposeSource::OperatorWritten,
+        )
+        .await
+        .unwrap();
+        let row2 = inv.get_stack_compose(id1).await.unwrap().unwrap();
+        assert_eq!(row2.source, ComposeSource::OperatorWritten);
+        assert_eq!(row2.sha256, "op");
     }
 }

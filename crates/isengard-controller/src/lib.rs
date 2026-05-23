@@ -9,6 +9,8 @@ pub mod auth;
 pub mod bus;
 pub mod ca;
 pub mod cloudflare;
+pub mod compose_autoadopt;
+pub mod compose_autoadopt_wire;
 pub mod compose_broker;
 pub mod compose_synthesize;
 pub mod config;
@@ -642,6 +644,12 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         .client_ca_root(ca_root)
         .client_auth_optional(true);
 
+    // Auto-adoption debouncer: in-memory state, single instance per
+    // controller process. Shared with the Sync handler via the
+    // service. A controller restart discards the state; the next two
+    // heartbeats per stack re-establish stability.
+    let auto_adoption = Arc::new(compose_autoadopt::AutoAdoptionTracker::new());
+
     let svc = ControllerServer::new(ControllerService::new(
         inventory.clone(),
         journal,
@@ -657,6 +665,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         secrets_store.clone(),
         Some(placement_scheduler.clone()),
         ssh_ca.clone(),
+        auto_adoption,
     ));
 
     // Periodic reaper for orphaned container-scope policy rows.

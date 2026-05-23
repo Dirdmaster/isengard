@@ -21,6 +21,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use crate::adopt_cmd::AdoptArgs;
 use crate::compose_cmd::{DeployArgs, DiffArgs, EditArgs};
 use crate::manifest_cmd::ManifestCommand;
 use crate::render::{Align, CellStyle, Column, StatusColor, Table, render, render_plain};
@@ -52,6 +53,14 @@ pub enum StackCommand {
     ///
     /// Read-only in v0.1; v0.2 ships the interactive fixer.
     Doctor(crate::doctor::DoctorArgs),
+    /// Re-adopt a stack by re-synthesizing from live containers.
+    ///
+    /// First-adoption is automatic (controller's auto-adopt path);
+    /// this verb is the manual *re*-adoption path after operator
+    /// drift (`docker exec`, hand edits, kill cycles). v0.1 requires
+    /// `--refresh`; v0.2 will add `--release` for dropping stored
+    /// compose. Spec: `2026-05-23-isd-compose-synthesize-design.md`.
+    Adopt(AdoptArgs),
     /// View and edit a stack's stack.toml.
     #[command(subcommand)]
     Manifest(ManifestCommand),
@@ -171,6 +180,7 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
         StackCommand::Doctor(a) => crate::doctor::run(a, context).await,
+        StackCommand::Adopt(a) => crate::adopt_cmd::run(a, context).await,
         StackCommand::Manifest(cmd) => {
             crate::manifest_cmd::run(crate::manifest_cmd::ManifestArgs { command: cmd }, context)
                 .await

@@ -113,6 +113,57 @@ pub struct StackComposeRow {
     pub sha256: String,
     /// RFC3339 string: when the agent wrote this YAML to disk.
     pub imported_at: String,
+    /// Provenance of the stored compose. One of
+    /// [`ComposeSource::OperatorWritten`] (`isd stack deploy` /
+    /// `isd stack edit` / `isd stack adopt --refresh`) or
+    /// [`ComposeSource::AutoSynthesized`] (controller's auto-adopt path
+    /// on a stable heartbeat). Migration 0034 backfills legacy rows as
+    /// `OperatorWritten`. v0.7 auto-adoption (spec
+    /// `2026-05-23-isd-compose-synthesize-design.md`).
+    pub source: ComposeSource,
+}
+
+/// Provenance of a stored compose YAML.
+///
+/// Persisted on the `stacks.compose_source` column (migration 0034).
+/// Drives the "is this operator-owned or controller-synthesized?"
+/// decision throughout the surface: the doctor soft-prompts on
+/// `AutoSynthesized`, the dashboard tags the source visibly, and the
+/// auto-adoption debouncer refuses to overwrite an `OperatorWritten`
+/// row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComposeSource {
+    /// Operator pushed the YAML (deploy / edit / adopt --refresh).
+    /// Controller never overwrites without explicit operator intent.
+    #[default]
+    OperatorWritten,
+    /// Controller's auto-adopt path wrote the YAML by synthesizing
+    /// from rich container snapshots on a stable heartbeat.
+    AutoSynthesized,
+}
+
+impl ComposeSource {
+    /// Canonical snake-case spelling matching the SQLite column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OperatorWritten => "operator_written",
+            Self::AutoSynthesized => "auto_synthesized",
+        }
+    }
+
+    /// Parse a `stacks.compose_source` string back into the enum.
+    /// Unknown values fall back to [`Self::OperatorWritten`] so a
+    /// future-only value (e.g. a v0.8 source we don't recognise yet)
+    /// never demotes an operator-owned row to "ok to overwrite".
+    /// Returning the safer side is deliberate; the doctor surface
+    /// can still complain.
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "auto_synthesized" => Self::AutoSynthesized,
+            _ => Self::OperatorWritten,
+        }
+    }
 }
 
 /// One hook row read back from `stack_hooks`.
@@ -176,5 +227,51 @@ mod tests {
             serde_json::to_string(&StackSource::Inferred).unwrap(),
             "\"inferred\""
         );
+    }
+
+    #[test]
+    fn compose_source_str_round_trips() {
+        assert_eq!(ComposeSource::OperatorWritten.as_str(), "operator_written");
+        assert_eq!(ComposeSource::AutoSynthesized.as_str(), "auto_synthesized");
+        assert_eq!(
+            ComposeSource::from_db_str("operator_written"),
+            ComposeSource::OperatorWritten
+        );
+        assert_eq!(
+            ComposeSource::from_db_str("auto_synthesized"),
+            ComposeSource::AutoSynthesized
+        );
+    }
+
+    #[test]
+    fn compose_source_unknown_defaults_to_operator_written() {
+        // A future controller might write a value this build doesn't
+        // know about. Defaulting to OperatorWritten is the safer side:
+        // the auto-adopt path will refuse to overwrite the row.
+        assert_eq!(
+            ComposeSource::from_db_str("live_synthesized"),
+            ComposeSource::OperatorWritten
+        );
+        assert_eq!(
+            ComposeSource::from_db_str(""),
+            ComposeSource::OperatorWritten
+        );
+    }
+
+    #[test]
+    fn compose_source_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ComposeSource::OperatorWritten).unwrap(),
+            "\"operator_written\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ComposeSource::AutoSynthesized).unwrap(),
+            "\"auto_synthesized\""
+        );
+    }
+
+    #[test]
+    fn compose_source_default_is_operator_written() {
+        assert_eq!(ComposeSource::default(), ComposeSource::OperatorWritten);
     }
 }

@@ -23,6 +23,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod adopt_cmd;
 mod backup_cmd;
 mod backup_credentials;
 mod backup_crypto;
