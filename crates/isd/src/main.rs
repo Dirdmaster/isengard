@@ -48,6 +48,7 @@ mod open_cmd;
 mod output;
 mod picker;
 mod picker_or_arg;
+mod picker_term;
 mod placement_cmd;
 mod ps;
 mod render;
