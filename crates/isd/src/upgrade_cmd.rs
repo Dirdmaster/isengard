@@ -47,6 +47,21 @@ pub struct UpgradeArgs {
     /// Skip the confirm prompt.
     #[arg(long)]
     pub yes: bool,
+    /// Seconds to wait for the controller to answer after recreate.
+    ///
+    /// First-boot migrations on a non-trivial DB plus image pull on
+    /// a slow link can easily eat 90s; default bumped to 240s so the
+    /// poll outlasts a realistic upgrade rather than aborting halfway.
+    #[arg(long, default_value_t = 240)]
+    pub wait_secs: u64,
+    /// Return as soon as the containers are recreated; skip the
+    /// readiness poll.
+    ///
+    /// Use when you know the upgrade will take longer than the wait
+    /// window (large DB migrations, slow disk) and you want to watch
+    /// progress with `isd logs isd-controller` yourself.
+    #[arg(long)]
+    pub no_wait: bool,
 }
 
 /// Pull a new controller + agent image tag and recreate the
@@ -85,14 +100,22 @@ pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
         }
     }
 
+    // Open the cliclack ladder: every subsequent step renders as a
+    // completed ◇ entry under this intro, and the active step shows
+    // an animated ● spinner with our embedded braille progress bar.
+    cliclack::intro(format!("isd upgrade  {current_tag} \u{2192} {target_tag}"))?;
+
     // 3. Auto-backup.
     let backup_path = if args.skip_backup {
+        cliclack::log::step("backup skipped (--skip-backup)")?;
         None
     } else {
         let path = std::env::temp_dir().join(format!(
             "iso-upgrade-pre-{}.tgz.age",
             chrono::Local::now().format("%Y%m%d%H%M")
         ));
+        let sp = cliclack::spinner();
+        sp.start("taking pre-upgrade backup");
         crate::backup_cmd::run(
             crate::backup_cmd::BackupArgs {
                 out: Some(path.clone()),
@@ -102,37 +125,54 @@ pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
         )
         .await
         .context("taking pre-upgrade backup (re-run with --skip-backup to bypass)")?;
+        sp.stop(format!("backup at {}", path.display()));
         Some(path)
     };
 
     // 4. Pull both images at the target tag.
-    eprintln!("isd upgrade: pulling {CONTROLLER_IMAGE}:{target_tag}");
+    let sp = cliclack::spinner();
+    sp.start(format!("pulling controller:{target_tag}"));
     pull_image(&docker, CONTROLLER_IMAGE, &target_tag).await?;
-    eprintln!("isd upgrade: pulling {AGENT_IMAGE}:{target_tag}");
+    sp.stop(format!("pulled controller:{target_tag}"));
+
+    let sp = cliclack::spinner();
+    sp.start(format!("pulling agent:{target_tag}"));
     pull_image(&docker, AGENT_IMAGE, &target_tag).await?;
+    sp.stop(format!("pulled agent:{target_tag}"));
 
     // 5. docker compose up -d against the embedded recipe with the target tag.
-    eprintln!("isd upgrade: recreating containers via docker compose up -d");
+    let sp = cliclack::spinner();
+    sp.start("recreating containers");
     compose_up(&docker_uri, &target_tag, backup_path.as_deref())?;
+    sp.stop("containers recreated");
 
-    // 6. Health-check via discovery + GET /api/v1/hosts.
-    wait_for_controller_ready(&docker, std::time::Duration::from_secs(90))
-        .await
-        .map_err(|e| {
-            let restore_hint = backup_path
-                .as_ref()
-                .map(|p| format!("isd restore {}", p.display()))
-                .unwrap_or_else(|| "<no backup taken; recreate via `isd init --force`>".into());
-            anyhow!(
-                "{e}\n\
-                 Cluster did not come back healthy. Inspect with `docker logs isd-controller`. \
-                 Roll back with `{restore_hint}`."
-            )
-        })?;
-
-    println!("Upgraded to {target_tag}. Cluster healthy.");
-    if let Some(p) = backup_path {
-        println!("Pre-upgrade backup at {}.", p.display());
+    // 6. Health-check via discovery + GET /api/v1/hosts. Skipped
+    //    entirely when --no-wait is set.
+    if args.no_wait {
+        cliclack::log::warning(
+            "readiness poll skipped (--no-wait); tail `isd logs isd-controller` to watch boot",
+        )?;
+        cliclack::outro(format!("Upgraded to {target_tag}."))?;
+    } else {
+        match wait_for_controller_ready(&docker, std::time::Duration::from_secs(args.wait_secs))
+            .await
+        {
+            Ok(elapsed) => {
+                cliclack::outro(format!(
+                    "Upgraded to {target_tag}. Cluster healthy in {elapsed}s."
+                ))?;
+            }
+            Err(e) => {
+                let restore_hint = backup_path
+                    .as_ref()
+                    .map(|p| format!("isd restore {}", p.display()))
+                    .unwrap_or_else(|| "<no backup taken; recreate via `isd init --force`>".into());
+                cliclack::outro_cancel(format!(
+                    "{e}\nTail `isd logs isd-controller` to watch progress. Roll back with `{restore_hint}`."
+                ))?;
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
@@ -253,21 +293,41 @@ fn compose_up(
 }
 
 /// Poll until the upgraded controller answers `GET /api/v1/hosts`.
-/// 90 second deadline by default; bumps with each successful upgrade.
+/// Renders an indicatif progress bar with braille fill characters
+/// that ticks as `elapsed/timeout` grows, plus a live phase label
+/// derived from tailing the controller logs. Beats the old
+/// dot-and-pray UX where the operator couldn't tell if the boot was
+/// progressing or hung. Default deadline is operator-tunable via
+/// `--wait-secs`.
 async fn wait_for_controller_ready(
     docker: &isd_runtime::DockerBackend,
     timeout: std::time::Duration,
-) -> Result<()> {
+) -> Result<u64> {
     use tokio::time::{Duration, Instant, sleep};
 
     let deadline = Instant::now() + timeout;
-    eprint!("isd upgrade: waiting for controller to become ready");
+    let started = Instant::now();
+    let total = timeout.as_secs();
+    let sp = cliclack::spinner();
+    sp.start("controller booting");
+
+    let mut phase: &'static str = "booting";
     loop {
+        let elapsed = started.elapsed().as_secs().min(total);
+        if let Some(new_phase) = peek_controller_phase(docker).await {
+            phase = new_phase;
+        }
+        let bar = render_braille_bar(elapsed, total, 20);
+        sp.set_message(format!(
+            "controller {phase}\n\u{2502}   {bar}  {elapsed}s/{total}s"
+        ));
+
         if Instant::now() > deadline {
-            eprintln!();
+            sp.error(format!(
+                "controller did not answer in {total}s (last: {phase})"
+            ));
             return Err(anyhow!(
-                "controller did not become ready within {}s after upgrade",
-                timeout.as_secs()
+                "controller did not become ready within {total}s after upgrade (last log phase: {phase})"
             ));
         }
         if let Ok(endpoint) = isd_runtime::discover(docker.client()).await {
@@ -277,14 +337,121 @@ async fn wait_for_controller_ready(
             );
             if let Ok(resp) = reqwest::get(&url).await {
                 if resp.status().is_success() {
-                    eprintln!(" ready");
-                    return Ok(());
+                    sp.stop("controller ready");
+                    return Ok(elapsed);
                 }
             }
         }
-        eprint!(".");
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// Render a `width`-cell braille progress bar at `pos/total`. Each
+/// cell crawls through 8 sub-steps as the fill grows so even narrow
+/// bars feel fluid. Trailing cells use the soft `\u{2840}` (⡀)
+/// baseline rather than blank space; matches the chosen ladder
+/// design preview.
+fn render_braille_bar(pos: u64, total: u64, width: usize) -> String {
+    if total == 0 {
+        return "\u{2840}".repeat(width);
+    }
+    let progress = (pos as f64 / total as f64).clamp(0.0, 1.0);
+    let total_subcells = (width * 8) as f64;
+    let filled_subcells = (progress * total_subcells).round() as usize;
+    let full_cells = filled_subcells / 8;
+    let partial = filled_subcells % 8;
+    let mut out = String::with_capacity(width * 3);
+    for i in 0..width {
+        if i < full_cells {
+            out.push('\u{28FF}'); // ⣿
+        } else if i == full_cells && partial > 0 {
+            out.push(match partial {
+                1 => '\u{2840}', // ⡀
+                2 => '\u{2844}', // ⡄
+                3 => '\u{2846}', // ⡆
+                4 => '\u{2847}', // ⡇
+                5 => '\u{28C7}', // ⣇
+                6 => '\u{28E7}', // ⣧
+                7 => '\u{28F7}', // ⣷
+                _ => '\u{28FF}',
+            });
+        } else {
+            out.push('\u{2840}'); // ⡀ soft tail
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod render_bar_tests {
+    use super::render_braille_bar;
+
+    #[test]
+    fn empty_total_renders_soft_baseline() {
+        let b = render_braille_bar(0, 0, 4);
+        assert_eq!(b.chars().count(), 4);
+        assert!(b.chars().all(|c| c == '\u{2840}'));
+    }
+
+    #[test]
+    fn full_progress_renders_full_cells() {
+        let b = render_braille_bar(10, 10, 4);
+        assert_eq!(b.chars().count(), 4);
+        assert!(b.chars().all(|c| c == '\u{28FF}'));
+    }
+
+    #[test]
+    fn half_progress_fills_left_half() {
+        let b = render_braille_bar(5, 10, 4);
+        let cs: Vec<_> = b.chars().collect();
+        assert_eq!(cs.len(), 4);
+        assert_eq!(cs[0], '\u{28FF}');
+        assert_eq!(cs[1], '\u{28FF}');
+        assert_eq!(cs[2], '\u{2840}');
+        assert_eq!(cs[3], '\u{2840}');
+    }
+}
+
+/// Tail the last few lines of the controller container's logs and
+/// map them onto a coarse phase the operator recognises. Best-effort:
+/// any error short-circuits to `None` and the spinner keeps its
+/// previous phase. Phases are stable strings; the matcher is the
+/// only place that knows about controller-internal log markers.
+async fn peek_controller_phase(docker: &isd_runtime::DockerBackend) -> Option<&'static str> {
+    use futures_util::stream::StreamExt;
+    let opts = bollard::container::LogsOptions::<String> {
+        follow: false,
+        stdout: true,
+        stderr: true,
+        tail: "40".to_string(),
+        ..Default::default()
+    };
+    let mut stream = docker.client().logs("isd-controller", Some(opts));
+    let mut blob = String::new();
+    while let Some(chunk) = stream.next().await {
+        if let Ok(c) = chunk {
+            blob.push_str(&c.to_string());
+        }
+    }
+    // Walk from newest to oldest; the latest match wins.
+    for line in blob.lines().rev() {
+        if line.contains("gRPC server listening") || line.contains("agent connected") {
+            return Some("almost ready (server listening)");
+        }
+        if line.contains("loading controller plugin") {
+            return Some("loading plugins");
+        }
+        if line.contains("applying migration") || line.contains("migration error") {
+            return Some("running migrations");
+        }
+        if line.contains("opening inventory") {
+            return Some("opening database");
+        }
+        if line.contains("starting controller") {
+            return Some("starting");
+        }
+    }
+    None
 }
 
 #[cfg(test)]
