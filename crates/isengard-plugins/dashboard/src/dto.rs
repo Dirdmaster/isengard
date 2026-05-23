@@ -467,7 +467,7 @@ mod tests {
 /// `host_offline` and `host_offline_secs` are derived at the API
 /// boundary by joining containers to hosts and comparing
 /// `hosts.last_seen_at` to a configured threshold (see
-/// [`HOST_OFFLINE_THRESHOLD_SECS`] in `containers.rs`).
+/// `HOST_OFFLINE_THRESHOLD_SECS` in `containers.rs`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ContainerDto {
     /// 16-char hex digest. The default `isd ps` column shows the first

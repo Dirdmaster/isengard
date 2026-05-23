@@ -205,7 +205,7 @@ fn shell_quote(s: &str) -> String {
 
 /// Per-deploy context passed to every hook in a sweep. The fields land
 /// in the child process's environment via the
-/// [`HookContext::env_for_phase`] helper.
+/// `HookContext::env_for_phase` helper.
 #[derive(Debug, Clone)]
 pub struct HookContext {
     /// Stack name. Exposed to hooks as `ISENGARD_STACK`.

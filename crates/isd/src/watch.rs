@@ -543,7 +543,7 @@ where
 ///   - [`PlainRenderer`]: append-only stdout lines, one per transition.
 ///     Used when stdout is piped / not a tty (CI, redirected output).
 ///
-/// Plus a test renderer ([`CaptureRenderer`]) that collects lines into a
+/// Plus a test renderer (`CaptureRenderer`) that collects lines into a
 /// `Vec` without touching the terminal.
 pub trait TransitionRenderer {
     /// Render one observed state transition for `svc`.

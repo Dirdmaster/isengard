@@ -10,7 +10,7 @@
 //!
 //! Color decision (checked in order):
 //!   1. `LOG_FORMAT=json` => never color
-//!   2. `NO_COLOR` set => never color (https://no-color.org)
+//!   2. `NO_COLOR` set => never color (<https://no-color.org>)
 //!   3. `RUST_LOG_STYLE=never|always|auto` => honor it
 //!   4. otherwise => true even when stderr is not a TTY (the Docker case;
 //!      operators reading `docker logs` should see colors by default)

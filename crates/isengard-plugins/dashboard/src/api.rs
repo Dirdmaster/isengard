@@ -1512,7 +1512,7 @@ async fn create_stack(
 /// `POST /api/v1/stacks/:id/diff` (v0.3d).
 ///
 /// Body: raw YAML (the operator's proposed compose).
-/// Returns the [`isengard_agent::compose_reconciler::ReconcilePlan`] in
+/// Returns the `isengard_agent::compose_reconciler::ReconcilePlan` in
 /// JSON, or 422 if the YAML doesn't parse. Used by:
 /// - the dashboard's "Apply preview" button.
 /// - `isd diff <stack>` and `isd apply <path>`.

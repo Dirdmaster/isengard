@@ -42,7 +42,7 @@ use serde_json::{Value, json};
 ///
 /// Order matters: the static `/config/schema` route is registered
 /// before the dynamic `/config/{key}` route so that a literal `schema`
-/// in the path resolves to [`config_schema`] rather than getting
+/// in the path resolves to `config_schema` rather than getting
 /// captured as the `key` parameter.
 pub fn router(handles: Arc<ControllerHandles>) -> Router {
     router_with_cf_base(handles, None)

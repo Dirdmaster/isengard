@@ -26,7 +26,7 @@ digest against the remote registry digest, classify as
    [`maybe_minor_bump`] (degrades to tag-only on registry errors).
 7. **Apply.** On `needs_update`, re-resolve the policy with both
    digests so `gate = Approval` can trigger
-   [`handle_pending_approval`] (idempotent insert + dedupe). When
+   `handle_pending_approval` (idempotent insert + dedupe). When
    the gate doesn't apply, hand off to the [`UpdateDispatcher`]
    (blue-green driver) if wired, else recreate in place via
    [`recreate::update_container`]. Self-update (the updater's own
@@ -45,7 +45,7 @@ behind it.
 # Approval gate
 
 When the resolved policy has `gate = Approval`, the cycle calls
-[`handle_pending_approval`] before any recreate. The helper:
+`handle_pending_approval` before any recreate. The helper:
 
 - Looks up `(host, stack, service, proposed_digest)` for an existing
   open row. A match returns `Deduplicated` (no event, no insert).

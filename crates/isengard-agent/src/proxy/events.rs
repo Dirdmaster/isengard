@@ -41,7 +41,7 @@ pub struct ProxyEventBus {
 }
 
 impl ProxyEventBus {
-    /// Construct a fresh bus with [`CHANNEL_CAPACITY`] slots.
+    /// Construct a fresh bus with `CHANNEL_CAPACITY` slots.
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
         Self { tx }

@@ -65,7 +65,7 @@ pub struct MintTokenResponse {
 #[derive(Debug, Serialize, Deserialize)]
 /// TokenListEntry.
 pub struct TokenListEntry {
-    /// Hex-encoded first [`HASH_PREFIX_LEN`] bytes of `token_hash`. Used as the
+    /// Hex-encoded first `HASH_PREFIX_LEN` bytes of `token_hash`. Used as the
     /// stable identifier in delete URLs.
     pub hash_prefix: String,
     /// `role` field.

@@ -42,7 +42,7 @@ pub(crate) struct HostDtoSubset {
 }
 
 /// PATCH /api/v1/hosts/{id} with any combination of patchable
-/// fields. Mirrors the dashboard's [`PatchHostRequest`] shape:
+/// fields. Mirrors the dashboard's `PatchHostRequest` shape:
 /// `dial_target` is set when `Some(t)` (empty string clears, per the
 /// API contract) and `hostname` is set when `Some(n)` (the server
 /// rejects empty `hostname` with 400, so callers should filter empty

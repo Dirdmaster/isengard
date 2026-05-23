@@ -4,7 +4,7 @@
 //! router. The handler validates the operator's pubkey, caps the
 //! requested TTL against the operator-settable `ssh.max_ttl_seconds`
 //! configure key (falling back to `ISENGARD_SSH_CERT_MAX_TTL`, then
-//! a 1h default), signs the cert via the controller's [`SshAuthority`],
+//! a 1h default), signs the cert via the controller's `SshAuthority`,
 //! and journals an `ssh.cert.issued` event for audit.
 //!
 //! Phase 4 (`isd ssh <host>`) is the primary consumer: it generates a
@@ -41,7 +41,7 @@ const ABSOLUTE_MAX_TTL_SECS: u64 = 86_400;
 const DEFAULT_MAX_TTL_SECS: u64 = 3_600;
 
 /// Env var operators set on the controller to raise (or lower) the
-/// per-request TTL ceiling. Capped against [`ABSOLUTE_MAX_TTL_SECS`].
+/// per-request TTL ceiling. Capped against `ABSOLUTE_MAX_TTL_SECS`.
 /// Retained for back-compat; new deployments should use
 /// `isd configure set ssh.max_ttl_seconds <n>` instead.
 pub const MAX_TTL_ENV_VAR: &str = "ISENGARD_SSH_CERT_MAX_TTL";
@@ -190,7 +190,7 @@ pub async fn post_ssh_cert(
 /// Cap `requested` seconds against the configured + absolute ceilings.
 ///
 /// Resolution order: the `ssh.max_ttl_seconds` configure key (when set
-/// to a positive integer within [`ABSOLUTE_MAX_TTL_SECS`]), then the
+/// to a positive integer within `ABSOLUTE_MAX_TTL_SECS`), then the
 /// legacy `ISENGARD_SSH_CERT_MAX_TTL` env (same validity gate), then
 /// [`DEFAULT_MAX_TTL_SECS`]. The returned value is also pinned at
 /// least 1 second so the cert builder never sees a zero window.
@@ -241,7 +241,7 @@ async fn read_dispatcher_max_ttl(dispatcher: &ConfigDispatcher) -> Option<u64> {
 /// Reads the legacy `ISENGARD_SSH_CERT_MAX_TTL` env override.
 ///
 /// Same validity gate as the dispatcher path: positive and within
-/// [`ABSOLUTE_MAX_TTL_SECS`].
+/// `ABSOLUTE_MAX_TTL_SECS`.
 fn read_env_max_ttl() -> Option<u64> {
     std::env::var(MAX_TTL_ENV_VAR)
         .ok()
@@ -278,8 +278,8 @@ pub struct AuditQuery {
     /// Inclusive lower bound on `occurred_at`. Accepts any RFC3339
     /// timestamp; entries with `occurred_at < since` are dropped.
     pub since: Option<String>,
-    /// Cap on returned entries. Defaults to [`DEFAULT_AUDIT_LIMIT`]
-    /// and is clamped to [`MAX_AUDIT_LIMIT`].
+    /// Cap on returned entries. Defaults to `DEFAULT_AUDIT_LIMIT`
+    /// and is clamped to `MAX_AUDIT_LIMIT`.
     pub limit: Option<usize>,
 }
 

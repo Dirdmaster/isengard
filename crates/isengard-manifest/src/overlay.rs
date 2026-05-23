@@ -78,7 +78,7 @@ fn merge_value(dst: &mut Value, src: Value) {
 
 /// Merges every entry of `src` into `dst`.
 ///
-/// Keys in [`LIST_FIELDS`] use [`merge_list_field`] (append + dedupe).
+/// Keys in `LIST_FIELDS` use [`merge_list_field`] (append + dedupe).
 /// Other keys recurse through [`merge_value`]. Missing keys are inserted
 /// from `src` verbatim.
 fn merge_mapping(dst: &mut Mapping, src: Mapping) {

@@ -8,8 +8,8 @@
 //! own values via the FetchSecret mTLS RPC; the new operator route
 //! does not replace that path.
 //!
-//! All three subcommands reuse the [`pinned_session`](crate::login::pinned_session)
-//! pattern from `compose_cmd.rs`: load the credentials file, pin the CA
+//! All three subcommands reuse the pinned-session pattern from
+//! `compose_cmd.rs`: load the credentials file, pin the CA
 //! fingerprint, send the request.
 //!
 //! Adds a `--scope` flag (`context` | `global`). `context` (the

@@ -3,8 +3,8 @@
 //! Schema (subset we care about):
 //!   {
 //!     "auths": {
-//!       "https://index.docker.io/v1/": { "auth": "<base64 user:pass>" },
-//!       "ghcr.io": { "auth": "<base64 user:pass>" }
+//!       "<https://index.docker.io/v1/>": { "auth": "BASE64 user:pass" },
+//!       "ghcr.io": { "auth": "BASE64 user:pass" }
 //!     }
 //!   }
 //!

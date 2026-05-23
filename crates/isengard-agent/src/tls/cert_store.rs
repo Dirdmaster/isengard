@@ -1,4 +1,4 @@
-//! Process-wide cache of (leaf X509, chain Vec<X509>, PKey) entries indexed
+//! Process-wide cache of (leaf X509, chain `Vec<X509>`, PKey) entries indexed
 //! by hostname (SNI). Backed by `TlsStorage` (filesystem). Cache is
 //! read-mostly; mutations happen on cert install / renewal.
 
