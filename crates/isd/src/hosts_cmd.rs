@@ -1,4 +1,4 @@
-//! `isd hosts list`: enumerate every host enrolled on the controller.
+//! `isd hosts ls`: enumerate every host enrolled on the controller.
 //! Talks to `GET /api/v1/hosts`.
 
 use anyhow::{Context as _, Result};
@@ -24,7 +24,7 @@ pub enum HostsCommand {
     Ls(LsArgs),
 }
 
-/// CLI flags for `isd hosts list`.
+/// CLI flags for `isd hosts ls`.
 #[derive(Debug, Args)]
 pub struct LsArgs {
     /// Output format.
@@ -179,7 +179,7 @@ mod tests {
     #[ignore]
     async fn list_hits_hosts_endpoint_against_stub() {
         // Spins up a stub controller, writes a temp credentials file
-        // pointing at it, then runs `isd hosts list --json`. The stub
+        // pointing at it, then runs `isd hosts ls --json`. The stub
         // verifies one GET /api/v1/hosts arrives and returns a fixture
         // payload. Marked #[ignore] because it sets ISD_CREDENTIALS_FILE
         // (process-global) and binds a TCP port; the same pattern as the

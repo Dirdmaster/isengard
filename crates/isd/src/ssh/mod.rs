@@ -665,7 +665,7 @@ async fn run_status() -> Result<()> {
 }
 
 /// List the hosts the controller knows about. Renders the same
-/// columns as `isd hosts list` plus a hint at the default principal
+/// columns as `isd hosts ls` plus a hint at the default principal
 /// to ssh as.
 ///
 /// # Errors

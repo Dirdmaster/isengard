@@ -34,7 +34,7 @@ pub enum RouteCommand {
     Rm(RmArgs),
 }
 
-/// CLI flags for `isd route create`.
+/// CLI flags for `isd route add`.
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Public hostname the rule matches. Prompted when omitted.

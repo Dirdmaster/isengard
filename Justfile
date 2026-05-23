@@ -161,7 +161,7 @@ example-deploy-hello:
 
 # Deploy every stack in examples/stack-toml/ (currently hello + monitoring).
 # Note: the monitoring stack binds `grafana_admin_password`; create it
-# first with `isd secret put grafana_admin_password` or POST /stacks
+# first with `isd secret set grafana_admin_password` or POST /stacks
 # returns 422.
 example-deploy:
     cd examples/stack-toml && isd deploy --all

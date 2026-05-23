@@ -49,7 +49,7 @@ pub struct DockerEndpoint {
     pub host: String,
 }
 
-/// Operator-facing summary used by `isd context list / show`.
+/// Operator-facing summary used by `isd context ls / show`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerContextSummary {
     /// Context name.

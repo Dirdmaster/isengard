@@ -252,7 +252,7 @@ pub struct ContainerSummary {
     /// Distinct private (container-internal) ports the container
     /// declares.
     ///
-    /// Used by the interactive `isd route create` wizard to pre-fill
+    /// Used by the interactive `isd route add` wizard to pre-fill
     /// the upstream port when there is exactly one obvious candidate.
     /// Order matches the daemon's enumeration; duplicates from
     /// IPv4 + IPv6 bindings are collapsed.
@@ -347,7 +347,7 @@ fn map_summary(c: &bollard::models::ContainerSummary) -> ContainerSummary {
 
 /// Distinct container-internal ports, in daemon-reported order.
 ///
-/// Used by `isd route create`'s wizard to detect an unambiguous
+/// Used by `isd route add`'s wizard to detect an unambiguous
 /// upstream port. bollard reports each `Port` once per binding (often
 /// v4 plus v6), so the function dedupes on `private_port`.
 fn distinct_private_ports(ports: &[bollard::models::Port]) -> Vec<u16> {

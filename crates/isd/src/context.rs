@@ -47,7 +47,7 @@ pub struct ShowArgs {
     pub name: Option<String>,
 }
 
-/// CLI flags for `isd context create`.
+/// CLI flags for `isd context add`.
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Context name.

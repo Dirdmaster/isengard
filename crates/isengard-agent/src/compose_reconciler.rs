@@ -129,7 +129,7 @@ pub struct DesiredCompose {
 /// In v0.3.6 we only support `external: true` (resolved via the
 /// controller's FetchSecret RPC). `file:`-source secrets used to be on
 /// the roadmap but are explicitly NOT supported in v0.3.6: the parser
-/// returns a clear error pointing operators at `isd secret put`.
+/// returns a clear error pointing operators at `isd secret set`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopLevelSecret {
     /// Resolves at apply time via the agent's FetchSecret RPC. Stored
@@ -441,11 +441,11 @@ pub fn parse_compose(yaml: &str) -> anyhow::Result<DesiredCompose> {
 fn parse_top_level_secret(name: &str, m: &Mapping) -> anyhow::Result<TopLevelSecret> {
     // file-source secrets are explicitly rejected: v0.3.6 only ships the
     // managed (`external: true`) path. Operators get a clear pointer at
-    // `isd secret put` instead of a silent half-implementation.
+    // `isd secret set` instead of a silent half-implementation.
     if m.contains_key(Value::String("file".into())) {
         return Err(anyhow::anyhow!(
             "secret {name:?}: file-source secrets are not supported in v0.4; \
-             use `isd secret put {name}` to load the value, then mark the \
+             use `isd secret set {name}` to load the value, then mark the \
              secret `external: true` in compose.yaml",
         ));
     }
@@ -462,7 +462,7 @@ fn parse_top_level_secret(name: &str, m: &Mapping) -> anyhow::Result<TopLevelSec
     if !external {
         return Err(anyhow::anyhow!(
             "secret {name:?}: must declare `external: true` (the only \
-             supported source in v0.4); use `isd secret put` to load values",
+             supported source in v0.4); use `isd secret set` to load values",
         ));
     }
     Ok(TopLevelSecret::External)
@@ -2309,7 +2309,7 @@ strategy = "blue-green"
         let err = parse_compose(yaml).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("file-source secrets are not supported"));
-        assert!(s.contains("isd secret put"));
+        assert!(s.contains("isd secret set"));
     }
 
     #[test]

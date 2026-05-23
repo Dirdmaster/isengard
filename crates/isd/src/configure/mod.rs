@@ -12,9 +12,9 @@
 //!    write one key. Secret-typed keys refuse inline values at the
 //!    parser-side level via clap `conflicts_with`, and again at runtime
 //!    via a schema fetch before the PUT.
-//!  - `isd configure unset <key>`: clear one key (falls back to the
+//!  - `isd configure rm <key>`: clear one key (falls back to the
 //!    schema default if any).
-//!  - `isd configure list [--show-secrets]`: print every key with its
+//!  - `isd configure ls [--show-secrets]`: print every key with its
 //!    current value (secrets redacted by default).
 //!  - `isd configure schema`: print the static schema (key, type,
 //!    default, description).
@@ -149,7 +149,7 @@ pub struct RmArgs {
     pub key: Option<String>,
 }
 
-/// CLI flags for `isd configure list`.
+/// CLI flags for `isd configure ls`.
 #[derive(Debug, Args)]
 pub struct LsArgs {
     /// Print secret-typed values in cleartext. Off by default.
@@ -545,7 +545,7 @@ pub(crate) async fn fetch_list(
     Ok(rows)
 }
 
-/// Column layout for `isd configure list`. Columns in spec order:
+/// Column layout for `isd configure ls`. Columns in spec order:
 /// `KEY`, `TYPE`, `VALUE`, `SOURCE`.
 fn list_columns() -> Vec<Column> {
     vec![
@@ -556,7 +556,7 @@ fn list_columns() -> Vec<Column> {
     ]
 }
 
-/// Build the row matrix for `isd configure list`.
+/// Build the row matrix for `isd configure ls`.
 fn build_list_row_cells(rows: &[ListRow]) -> Vec<Vec<String>> {
     rows.iter()
         .map(|r| {
@@ -570,7 +570,7 @@ fn build_list_row_cells(rows: &[ListRow]) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Render `isd configure list` to stdout: boxed table on a TTY, tab-
+/// Render `isd configure ls` to stdout: boxed table on a TTY, tab-
 /// separated plain text on a pipe.
 fn print_list_table(rows: &[ListRow]) {
     let table = Table {
@@ -1157,7 +1157,7 @@ mod tests {
         assert_eq!(parse_error_message("not-json", "fallback"), "fallback");
     }
 
-    /// `isd configure list` renders through the unified boxed renderer.
+    /// `isd configure ls` renders through the unified boxed renderer.
     /// The non-TTY decay path emits ALL CAPS headers in spec order and
     /// every row's text.
     #[test]

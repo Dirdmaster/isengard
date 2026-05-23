@@ -62,14 +62,14 @@ The recipes assume you have a controller running locally and an
 `isd` context that points to it. Set one up once with:
 
 ```sh
-isd context create local --http http://127.0.0.1:9418 --use
+isd context add local --http http://127.0.0.1:9418 --use
 ```
 
 The `monitoring` stack binds to a `grafana_admin_password` secret;
 create it first or the POST returns 422:
 
 ```sh
-isd secret put grafana_admin_password --from-stdin <<< "change-me"
+isd secret set grafana_admin_password --from-stdin <<< "change-me"
 ```
 
 ## Verify
@@ -78,7 +78,7 @@ After deploy:
 
 ```sh
 isd ps                                       # both stacks present
-isd hosts list                               # which host ships each
+isd hosts ls                                 # which host ships each
 curl -fsS http://127.0.0.1:18080/            # hello: nginx welcome page
 curl -fsS http://127.0.0.1:3000/api/health   # grafana healthcheck
 ```

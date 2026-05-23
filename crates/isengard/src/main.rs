@@ -129,7 +129,7 @@ enum Command {
     /// the encrypted secrets store before the controller boots; reads the
     /// master key directly from the host filesystem and writes the
     /// ciphertext to the same SQLite database the running controller uses.
-    /// Not for day-to-day ops: use `isd secret put|list|rm` against a
+    /// Not for day-to-day ops: use `isd secret set|ls|rm` against a
     /// running dashboard once the stack is up.
     Secret {
         #[command(subcommand)]
@@ -234,7 +234,7 @@ enum SecretOp {
     /// and reads the same DB. Plaintext NEVER touches a file on the
     /// host: stdin only.
     Bootstrap {
-        /// Secret name (matches `isd secret put`'s rules:
+        /// Secret name (matches `isd secret set`'s rules:
         /// `[A-Za-z0-9._-]{1,64}`).
         name: String,
         /// Path to the raw 32-byte master key file. The installer
