@@ -93,8 +93,10 @@ pub struct ConfigureArgs {
 pub enum ConfigureCommand {
     /// Print one key's current value.
     Get(GetArgs),
-    /// Set a key. Use the inline positional for plain types; pass
-    /// `--stdin` or `--from-file` for secrets.
+    /// Set a key (inline value for plain types, `--stdin`/`--from-file` for secrets).
+    ///
+    /// Use the inline positional for plain types; pass `--stdin` or
+    /// `--from-file` for secrets.
     Set(SetArgs),
     /// Remove a key. Falls back to the schema default if one exists.
     Rm(RmArgs),
@@ -102,8 +104,9 @@ pub enum ConfigureCommand {
     Ls(LsArgs),
     /// Print the schema (key, type, default, description).
     Schema,
-    /// Open the interactive two-level configure menu. Explicit alias
-    /// for bare `isd configure`.
+    /// Open the interactive two-level configure menu.
+    ///
+    /// Explicit alias for bare `isd configure`.
     Setup,
 }
 
@@ -114,10 +117,11 @@ pub enum ConfigureCommand {
 /// v0.7 CLI lexicon spec).
 #[derive(Debug, Args)]
 pub struct GetArgs {
-    /// Schema key, e.g. `acme.directory` or `cloudflare.api_token`.
-    /// Omit to open the picker.
+    /// Schema key (e.g. `acme.directory`). Omit to open the picker.
+    ///
+    /// Example keys: `acme.directory`, `cloudflare.api_token`.
     pub key: Option<String>,
-    /// Print secret-typed values in cleartext. Off by default.
+    /// Print secret-typed values in cleartext (off by default).
     #[arg(long)]
     pub show_secret: bool,
 }
@@ -128,8 +132,10 @@ pub struct GetArgs {
 pub struct SetArgs {
     /// Schema key.
     pub key: String,
-    /// Inline value for plain-typed keys (rejected for secret-typed
-    /// keys at runtime; see [`SetArgs::stdin`] / [`SetArgs::from_file`]).
+    /// Inline value for plain-typed keys.
+    ///
+    /// Rejected for secret-typed keys at runtime; use [`SetArgs::stdin`]
+    /// or [`SetArgs::from_file`] for those.
     pub value: Option<String>,
     /// Read the value from stdin (refused when stdin is a TTY).
     #[arg(long, conflicts_with_all = ["value", "from_file"])]
@@ -152,7 +158,7 @@ pub struct RmArgs {
 /// CLI flags for `isd configure ls`.
 #[derive(Debug, Args)]
 pub struct LsArgs {
-    /// Print secret-typed values in cleartext. Off by default.
+    /// Print secret-typed values in cleartext (off by default).
     #[arg(long)]
     pub show_secrets: bool,
 }

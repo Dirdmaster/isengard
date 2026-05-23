@@ -30,6 +30,11 @@ pub struct LsArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
+    /// Render the full 26-char ULID instead of the short suffix.
+    ///
+    /// JSON output always carries the full id regardless of this flag.
+    #[arg(long)]
+    pub full_id: bool,
 }
 
 /// Subset of the dashboard's `HostDto` we render. Pre-0.5 fields are
@@ -85,17 +90,19 @@ async fn run_list(args: LsArgs, context: Option<&str>) -> Result<()> {
         crate::output::Format::Json => {
             println!("{}", serde_json::to_string_pretty(&rows)?);
         }
-        crate::output::Format::Table => print_hosts_table(&rows),
+        crate::output::Format::Table => print_hosts_table(&rows, args.full_id),
     }
     Ok(())
 }
 
 /// Column layout for `isd hosts ls`: `#` dim + right-aligned, `HOST ID`
-/// dim, `NAME` emphasized (bold), `ENROLLED` dim.
+/// dim (renders the short suffix by default), `NAME` emphasized (bold),
+/// `ENROLLED` dim. `min_width` on HOST ID stays 12 so the column has
+/// room for the full ULID when `--full-id` is set.
 fn hosts_columns() -> Vec<Column> {
     vec![
         Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
-        Column::new("HOST ID", Align::Left, CellStyle::Dim, 7, 12),
+        Column::new("HOST ID", Align::Left, CellStyle::Dim, 7, 8),
         Column::new("NAME", Align::Left, CellStyle::Emphasis, 1, 8),
         Column::new("ENROLLED", Align::Left, CellStyle::Dim, 4, 20),
     ]
@@ -103,13 +110,20 @@ fn hosts_columns() -> Vec<Column> {
 
 /// Build the display rows: `#` plus the three data columns. Timestamp
 /// is RFC 3339 with seconds (matches the rest of isd's surface).
-fn build_rows(rows: &[HostRow]) -> Vec<Vec<String>> {
+/// `full_id` controls the HOST ID rendering: short suffix by default,
+/// full ULID when the operator opts in.
+fn build_rows(rows: &[HostRow], full_id: bool) -> Vec<Vec<String>> {
     rows.iter()
         .enumerate()
         .map(|(i, r)| {
+            let id = if full_id {
+                r.id.clone()
+            } else {
+                crate::host_id::short(&r.id)
+            };
             vec![
                 i.to_string(),
-                r.id.clone(),
+                id,
                 r.hostname.clone(),
                 r.enrolled_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             ]
@@ -119,10 +133,10 @@ fn build_rows(rows: &[HostRow]) -> Vec<Vec<String>> {
 
 /// Print the hosts table: rounded-corner boxed renderer on a TTY, plain
 /// tab-separated when stdout is redirected so scripts stay clean.
-fn print_hosts_table(rows: &[HostRow]) {
+fn print_hosts_table(rows: &[HostRow], full_id: bool) {
     let table = Table {
         columns: hosts_columns(),
-        rows: build_rows(rows),
+        rows: build_rows(rows, full_id),
     };
     let term = console::Term::stdout();
     if term.is_term() {
@@ -146,21 +160,21 @@ mod tests {
         }
     }
 
-    fn render_for_test(rows: &[HostRow]) -> String {
+    fn render_for_test(rows: &[HostRow], full_id: bool) -> String {
         let table = Table {
             columns: hosts_columns(),
-            rows: build_rows(rows),
+            rows: build_rows(rows, full_id),
         };
         render_plain(&table)
     }
 
     #[test]
-    fn table_contains_header_and_each_row() {
+    fn table_contains_header_and_each_row_with_full_id() {
         let rows = vec![
             host_row("01KRA25CW1F263ETCNTJCGJJ59", "iso-fresh-1"),
             host_row("01KRA25YV3HFJG2EKEKW5KFKY3", "iso-fresh-2"),
         ];
-        let t = render_for_test(&rows);
+        let t = render_for_test(&rows, true);
         assert!(t.contains("HOST ID"), "header has HOST ID column");
         assert!(t.contains("NAME"), "header has NAME column");
         assert!(t.contains("ENROLLED"), "header has ENROLLED column");
@@ -174,8 +188,25 @@ mod tests {
     }
 
     #[test]
+    fn default_render_shows_short_host_id_suffix() {
+        let rows = vec![host_row("01KRA25CW1F263ETCNTJCGJJ59", "iso-fresh-1")];
+        let t = render_for_test(&rows, false);
+        // Last 8 chars of the ULID.
+        assert!(
+            t.contains("TJCGJJ59"),
+            "rendered table omits short id: {t:?}"
+        );
+        // Full ULID is NOT rendered by default; the operator opts in via
+        // --full-id.
+        assert!(
+            !t.contains("01KRA25CW1F263ETCNTJCGJJ59"),
+            "default render must not carry full ULID: {t:?}"
+        );
+    }
+
+    #[test]
     fn empty_input_still_renders_header() {
-        let t = render_for_test(&[]);
+        let t = render_for_test(&[], false);
         assert!(t.contains("HOST ID"));
     }
 
@@ -261,6 +292,7 @@ url = "{}"
         let result = run_list(
             LsArgs {
                 format: crate::output::Format::Json,
+                full_id: false,
             },
             None,
         )

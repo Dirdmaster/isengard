@@ -22,8 +22,10 @@ pub struct UninitArgs {
     /// Skip the y/N prompt.
     #[arg(long)]
     pub yes: bool,
-    /// Also remove the isd-controller-state / isd-agent-state / isd-stacks
-    /// docker volumes. UNRECOVERABLE without a prior backup.
+    /// Also remove the cluster's state volumes (UNRECOVERABLE).
+    ///
+    /// Wipes `isd-controller-state`, `isd-agent-state`, `isd-stacks`.
+    /// UNRECOVERABLE without a prior `isd backup`.
     #[arg(long)]
     pub wipe_state: bool,
     /// Take an encrypted backup before tearing down.

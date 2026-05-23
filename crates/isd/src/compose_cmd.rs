@@ -1,4 +1,4 @@
-//! `isd stack up` / `isd stack diff` / `isd stack edit` (v0.3d
+//! `isd stack deploy` / `isd stack diff` / `isd stack edit` (v0.3d
 //! compose-as-truth).
 //!
 //! Talk to the dashboard REST surface:
@@ -8,11 +8,11 @@
 //!  - `PUT  /api/v1/stacks/{id}/compose` (apply with optimistic concurrency)
 //!  - `POST /api/v1/stacks`              (create a fresh stack from compose)
 //!
-//! `isd stack up` is the operator's "ship this" verb: list stacks, find by
+//! `isd stack deploy` is the operator's "ship this" verb: list stacks, find by
 //! name, GET the current YAML for the diff, POST diff for the plan, prompt
 //! y/N, PUT the new YAML. If the stack doesn't exist yet, POST
 //! /stacks creates + writes in a single round-trip. `isd stack diff` stops
-//! at the plan render. `isd stack edit` is `isd stack up` driven from
+//! at the plan render. `isd stack edit` is `isd stack deploy` driven from
 //! `$EDITOR` against the controller's current YAML.
 //!
 //! Internal names still use the historical "deploy" terminology
@@ -31,7 +31,7 @@ use similar::TextDiff;
 use crate::session::Session;
 use crate::watch;
 
-/// CLI flags for `isd stack up`.
+/// CLI flags for `isd stack deploy`.
 #[derive(Debug, Args)]
 pub struct DeployArgs {
     /// Path to compose file or directory with stack.toml.
@@ -69,6 +69,15 @@ pub struct DeployArgs {
     /// Don't stream state transitions after deploy.
     #[arg(long)]
     pub detach: bool,
+    /// Skip the pre-flight `isd stack doctor` audit.
+    ///
+    /// The audit walks compose for missing Isengard idioms (no
+    /// `isengard.expose` label on a web-facing service, etc.) and
+    /// prints any findings as `warning:` lines above the reconcile
+    /// plan. Findings never block the deploy; pass this flag to
+    /// silence them entirely.
+    #[arg(long)]
+    pub no_doctor: bool,
 }
 
 impl DeployArgs {
@@ -197,7 +206,7 @@ struct PutConflict {
     current_yaml: String,
 }
 
-/// Entry point for `isd stack up`. Classifies the args into one of three
+/// Entry point for `isd stack deploy`. Classifies the args into one of three
 /// modes (manifest, single compose, `--all`) and dispatches.
 ///
 /// # Errors
@@ -209,6 +218,15 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     // have a manifest (`stack.toml` in cwd or the supplied dir) or a
     // bare compose file (legacy).
     let plan = resolve_deploy_plan(&args)?;
+
+    // Pre-flight: walk every compose file in the plan through the
+    // doctor audit and print non-blocking warnings. `--no-doctor`
+    // opts out. Findings never abort the deploy; the operator may
+    // have intentionally chosen the bare shape.
+    if !args.no_doctor {
+        run_doctor_preflight(&plan);
+    }
+
     match plan {
         DeployPlan::All { root } => return run_all_deploy(args, root, context).await,
         DeployPlan::Manifest { manifest_path } => {
@@ -221,7 +239,74 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
-/// Classify what `isd stack up` is being asked to do.
+/// Best-effort pre-flight audit. Walks the compose YAML (or, for the
+/// manifest / --all paths, the discovered compose files) and prints
+/// `warning:` lines for every finding. Any IO error reading a compose
+/// file is logged and swallowed: the audit is advisory, never the
+/// reason a deploy fails.
+fn run_doctor_preflight(plan: &DeployPlan) {
+    let compose_paths: Vec<PathBuf> = match plan {
+        DeployPlan::Single { compose_path } => vec![compose_path.clone()],
+        DeployPlan::Manifest { manifest_path } => {
+            // Manifest path is `<dir>/stack.toml`; compose typically
+            // lives at `<dir>/compose.yaml`. Probe the obvious names.
+            let dir = manifest_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            ["compose.yaml", "compose.yml"]
+                .iter()
+                .map(|n| dir.join(n))
+                .filter(|p| p.exists())
+                .collect()
+        }
+        DeployPlan::All { root } => {
+            // Walk immediate subdirs of root, pick whichever compose
+            // file each carries. The classifier already vetted that
+            // each subdir is deployable.
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .flat_map(|e| {
+                    ["compose.yaml", "compose.yml"]
+                        .iter()
+                        .map(|n| e.path().join(n))
+                        .filter(|p| p.exists())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+    };
+
+    for path in compose_paths {
+        match crate::doctor::load_compose(&path) {
+            Ok(compose) => {
+                let findings = crate::doctor::audit(&compose);
+                if !findings.is_empty() {
+                    eprintln!(
+                        "doctor: {} finding(s) in {}",
+                        findings.len(),
+                        path.display()
+                    );
+                    crate::doctor::print_warnings(&findings);
+                    eprintln!(
+                        "  run `isd stack doctor {}` for the full report",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                // The deploy path will re-read the file and surface
+                // its own error; suppress here so we don't double-up.
+                tracing::debug!(?e, ?path, "doctor pre-flight skipped: load failed");
+            }
+        }
+    }
+}
+
+/// Classify what `isd stack deploy` is being asked to do.
 #[derive(Debug)]
 pub enum DeployPlan {
     /// `--all`: walk immediate subdirs of `root` and deploy each
@@ -284,7 +369,7 @@ pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
                 })
             } else {
                 Err(anyhow!(
-                    "no stack.toml in cwd; pass a path or run `isd stack up` \
+                    "no stack.toml in cwd; pass a path or run `isd stack deploy` \
                      to deploy a single compose file"
                 ))
             }
@@ -351,8 +436,8 @@ fn resolve_positional_arg(p: &std::path::Path) -> Result<DeployPlan> {
     let display = p.display();
     Err(anyhow!(
         "no file or directory named {display:?} in cwd; \
-         did you mean `isd stack up ./{display}`? \
-         (bare names are not yet looked up as stack names by `isd stack up`; \
+         did you mean `isd stack deploy ./{display}`? \
+         (bare names are not yet looked up as stack names by `isd stack deploy`; \
          the path resolver expects a stack.toml, a compose file, or a \
          directory containing one)"
     ))
@@ -540,6 +625,10 @@ async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) 
             fail_fast: false,
             diff: args.diff,
             detach: args.detach,
+            // The outer `--all` already ran the pre-flight; suppress
+            // it on every per-stack inner call to avoid duplicate
+            // warnings.
+            no_doctor: true,
         };
         match run_manifest_deploy(inner, manifest_path, context).await {
             Ok(()) => {
@@ -825,14 +914,14 @@ fn stack_from_path(path: &std::path::Path) -> Result<String> {
 }
 
 /// Resolve a stack name to its id, erroring when not found.
-async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
+pub(crate) async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
     resolve_stack_id_opt(session, name)
         .await?
         .ok_or_else(|| anyhow!("stack {name:?} not found on controller"))
 }
 
 /// Like [`resolve_stack_id`] but returns `Ok(None)` for the not-found
-/// case instead of erroring. Used by `isd stack up` so it can branch into
+/// case instead of erroring. Used by `isd stack deploy` so it can branch into
 /// the create-from-scratch path when the operator deploys a stack that
 /// isn't yet in the controller's inventory.
 async fn resolve_stack_id_opt(session: &Session, name: &str) -> Result<Option<String>> {
@@ -945,7 +1034,7 @@ pub struct CreateStackManifestBody {
 /// names without an extra round-trip.
 /// POST a stack with the full manifest bundle (compose, TOML, secrets,
 /// hooks). Replaces the manifest-less `create_stack` path when
-/// `isd stack up` runs against a `stack.toml`.
+/// `isd stack deploy` runs against a `stack.toml`.
 async fn create_stack_with_manifest(
     session: &Session,
     body: &CreateStackManifestBody,
@@ -973,7 +1062,7 @@ async fn create_stack_with_manifest(
 
 /// Body for the JSON content-type
 /// variant of `PUT /api/v1/stacks/:id/compose`. Mirrors the controller's
-/// `PutComposeJsonBody` shape. Used by `isd stack up` so a second deploy
+/// `PutComposeJsonBody` shape. Used by `isd stack deploy` so a second deploy
 /// with manifest changes actually propagates, instead of silently
 /// dropping the new bindings.
 #[derive(Debug, Serialize)]
@@ -1039,6 +1128,23 @@ async fn put_compose_json(
     }
     let ok: PutOk = resp.json().await.context("decoding 200 body")?;
     Ok(ok)
+}
+
+/// Fetch the controller's current compose YAML for a stack by name.
+/// Errors when the stack doesn't exist. Returns `Ok(None)` when the
+/// stack exists but has no compose stored (legacy or freshly created).
+///
+/// # Errors
+///
+/// Returns `Err` on stack-not-found or HTTP failure.
+pub(crate) async fn fetch_compose_yaml_by_name(
+    session: &Session,
+    stack_name: &str,
+) -> Result<Option<String>> {
+    let stack_id = resolve_stack_id(session, stack_name).await?;
+    Ok(fetch_compose(session, &stack_id)
+        .await?
+        .map(|c| c.compose_yaml))
 }
 
 /// `GET /api/v1/stacks/<id>/compose`. 204 means the stack has no
@@ -1218,6 +1324,7 @@ mod tests {
             fail_fast: false,
             diff: false,
             detach: true,
+            no_doctor: true,
         }
     }
 
@@ -1320,7 +1427,7 @@ mod tests {
         .unwrap();
         // Pass the directory path (not a bare-name resolved from cwd,
         // since cwd shouldn't be mutated in unit tests). The dir-probe
-        // path is what `isd stack up hello` exercises when `hello` is in
+        // path is what `isd stack deploy hello` exercises when `hello` is in
         // cwd: PathBuf::from("hello").is_dir() takes the same branch.
         let plan = resolve_deploy_plan(&args_with_path(Some(stack_dir))).unwrap();
         assert!(matches!(plan, DeployPlan::Manifest { .. }));

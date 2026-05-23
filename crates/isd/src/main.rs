@@ -10,6 +10,7 @@
 //!
 //!  - Containers: `ps`, `logs`, `stop`, `start`, `restart`, `rm`, `kill`.
 //!  - Stacks: `stack ls | ps | deploy | diff | edit | manifest`, `open`.
+//!    (`stack up` parses as a hidden alias for `stack deploy`.)
 //!  - Cluster: `hosts`, `service ls`, `route`, `secret`, `placement`,
 //!    `join`, `join-token`.
 //!  - Setup: `init`, `uninit`, `upgrade`, `context`, `update`.
@@ -32,7 +33,9 @@ mod confirm;
 mod context;
 mod dial_target;
 mod docker_context;
+mod doctor;
 mod help_render;
+mod host_id;
 mod host_name;
 mod hosts_cmd;
 mod index_cache;
@@ -115,18 +118,21 @@ enum Command {
     Start(lifecycle_cmd::StartArgs),
     /// Restart one or more containers.
     Restart(lifecycle_cmd::RestartArgs),
-    /// Remove one or more containers. Confirms when targets came from
-    /// indices; `-f` skips the prompt.
+    /// Remove one or more containers.
+    ///
+    /// Confirms when targets came from indices; `-f` skips the prompt.
     Rm(lifecycle_cmd::RmArgs),
-    /// Send a signal to one or more containers. Confirms when targets
-    /// came from indices.
+    /// Send a signal to one or more containers.
+    ///
+    /// Confirms when targets came from indices.
     Kill(lifecycle_cmd::KillArgs),
     /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
-    /// Get, set, rm, ls, or print the schema for controller-wide
-    /// configuration keys (Cloudflare token, ACME email, default zone,
-    /// SSH TTL cap, etc.).
+    /// Configure controller-wide settings (get / set / rm / ls / schema).
+    ///
+    /// Manages keys like the Cloudflare token, ACME email, default zone,
+    /// and SSH TTL cap. Bare `isd configure` opens the interactive TUI.
     Configure(configure::ConfigureArgs),
     /// Manage routing rules.
     #[command(subcommand)]
@@ -135,12 +141,13 @@ enum Command {
     #[command(subcommand)]
     Hosts(hosts_cmd::HostsCommand),
     /// Show detail for one resource (host, stack, or container).
+    ///
     /// Auto-detects the type from the id; opens a picker when no id
     /// is supplied.
     Info(info_cmd::InfoArgs),
     /// Self-update isd.
     Update(update_cmd::UpdateArgs),
-    /// Bring stacks up, diff, edit, and manage manifests.
+    /// Deploy, diff, edit stacks, and manage manifests.
     #[command(subcommand)]
     Stack(stack_cmd::StackCommand),
     /// List services across stacks.
@@ -157,19 +164,22 @@ enum Command {
     Restore(restore_cmd::RestoreArgs),
     /// Upgrade controller + agent to a new image tag (auto-backup first).
     Upgrade(upgrade_cmd::UpgradeArgs),
-    /// Connect to a fleet host over SSH using a short-lived cert. Also
-    /// hosts `mint`, `status`, `hosts`, and `ca pubkey` sub-verbs.
+    /// Connect to a fleet host over SSH using a short-lived cert.
+    ///
+    /// Also hosts `mint`, `status`, `hosts`, and `ca pubkey` sub-verbs.
     /// Bare `isd ssh` opens the interactive host picker.
     Ssh(ssh::SshArgs),
-    /// Run the Isengard language server over stdio. Editors invoke this
-    /// via `isd lsp`; filetype detection + auto-attach are configured
-    /// by the editor plugin (`isengard.nvim` for Neovim, VSCode extension
-    /// for VSCode).
+    /// Run the Isengard language server over stdio.
+    ///
+    /// Editors invoke this via `isd lsp`; filetype detection + auto-attach
+    /// are configured by the editor plugin (`isengard.nvim` for Neovim,
+    /// VSCode extension for VSCode).
     Lsp,
-    /// Run the Model Context Protocol server over stdio. AI hosts
-    /// (Claude Code, any MCP-capable LLM) invoke this via `isd mcp`
-    /// and consume the embedded operator docs, per-crate API reference,
-    /// and AI playbooks under `skills/`.
+    /// Run the Model Context Protocol server over stdio.
+    ///
+    /// AI hosts (Claude Code, any MCP-capable LLM) invoke this via
+    /// `isd mcp` and consume the embedded operator docs, per-crate API
+    /// reference, and AI playbooks under `skills/`.
     Mcp,
 }
 
