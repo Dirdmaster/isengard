@@ -69,6 +69,15 @@ pub struct DeployArgs {
     /// Don't stream state transitions after deploy.
     #[arg(long)]
     pub detach: bool,
+    /// Skip the pre-flight `isd stack doctor` audit.
+    ///
+    /// The audit walks compose for missing Isengard idioms (no
+    /// `isengard.expose` label on a web-facing service, etc.) and
+    /// prints any findings as `warning:` lines above the reconcile
+    /// plan. Findings never block the deploy; pass this flag to
+    /// silence them entirely.
+    #[arg(long)]
+    pub no_doctor: bool,
 }
 
 impl DeployArgs {
@@ -209,6 +218,15 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     // have a manifest (`stack.toml` in cwd or the supplied dir) or a
     // bare compose file (legacy).
     let plan = resolve_deploy_plan(&args)?;
+
+    // Pre-flight: walk every compose file in the plan through the
+    // doctor audit and print non-blocking warnings. `--no-doctor`
+    // opts out. Findings never abort the deploy; the operator may
+    // have intentionally chosen the bare shape.
+    if !args.no_doctor {
+        run_doctor_preflight(&plan);
+    }
+
     match plan {
         DeployPlan::All { root } => return run_all_deploy(args, root, context).await,
         DeployPlan::Manifest { manifest_path } => {
@@ -217,6 +235,73 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
         DeployPlan::Single { compose_path } => {
             // Fall through to the legacy single-compose path below.
             run_single_compose(args, compose_path, context).await
+        }
+    }
+}
+
+/// Best-effort pre-flight audit. Walks the compose YAML (or, for the
+/// manifest / --all paths, the discovered compose files) and prints
+/// `warning:` lines for every finding. Any IO error reading a compose
+/// file is logged and swallowed: the audit is advisory, never the
+/// reason a deploy fails.
+fn run_doctor_preflight(plan: &DeployPlan) {
+    let compose_paths: Vec<PathBuf> = match plan {
+        DeployPlan::Single { compose_path } => vec![compose_path.clone()],
+        DeployPlan::Manifest { manifest_path } => {
+            // Manifest path is `<dir>/stack.toml`; compose typically
+            // lives at `<dir>/compose.yaml`. Probe the obvious names.
+            let dir = manifest_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            ["compose.yaml", "compose.yml"]
+                .iter()
+                .map(|n| dir.join(n))
+                .filter(|p| p.exists())
+                .collect()
+        }
+        DeployPlan::All { root } => {
+            // Walk immediate subdirs of root, pick whichever compose
+            // file each carries. The classifier already vetted that
+            // each subdir is deployable.
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .flat_map(|e| {
+                    ["compose.yaml", "compose.yml"]
+                        .iter()
+                        .map(|n| e.path().join(n))
+                        .filter(|p| p.exists())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+    };
+
+    for path in compose_paths {
+        match crate::doctor::load_compose(&path) {
+            Ok(compose) => {
+                let findings = crate::doctor::audit(&compose);
+                if !findings.is_empty() {
+                    eprintln!(
+                        "doctor: {} finding(s) in {}",
+                        findings.len(),
+                        path.display()
+                    );
+                    crate::doctor::print_warnings(&findings);
+                    eprintln!(
+                        "  run `isd stack doctor {}` for the full report",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                // The deploy path will re-read the file and surface
+                // its own error; suppress here so we don't double-up.
+                tracing::debug!(?e, ?path, "doctor pre-flight skipped: load failed");
+            }
         }
     }
 }
@@ -540,6 +625,10 @@ async fn run_all_deploy(args: DeployArgs, root: PathBuf, context: Option<&str>) 
             fail_fast: false,
             diff: args.diff,
             detach: args.detach,
+            // The outer `--all` already ran the pre-flight; suppress
+            // it on every per-stack inner call to avoid duplicate
+            // warnings.
+            no_doctor: true,
         };
         match run_manifest_deploy(inner, manifest_path, context).await {
             Ok(()) => {
@@ -1218,6 +1307,7 @@ mod tests {
             fail_fast: false,
             diff: false,
             detach: true,
+            no_doctor: true,
         }
     }
 

@@ -33,6 +33,7 @@ mod confirm;
 mod context;
 mod dial_target;
 mod docker_context;
+mod doctor;
 mod help_render;
 mod host_id;
 mod host_name;
