@@ -39,6 +39,10 @@ pre-push:
       run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo clippy --workspace --all-targets -- -D warnings
       tags: rust
 
+    rustdoc:
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+      tags: rust
+
     test:
       # Prefer nextest (faster, better output); fall back to cargo test.
       run: |
