@@ -17,11 +17,11 @@
 //! See the design spec:
 //! `3 Resources/Superpowers/specs/2026-05-23-isd-stack-doctor-design.md`.
 
-use std::path::PathBuf;
-
 use anyhow::{Context as _, Result};
 use clap::Args;
 use serde_yaml::Value;
+
+use crate::session::Session;
 
 pub mod checks;
 
@@ -92,29 +92,59 @@ pub fn print_warnings(findings: &[Finding]) {
 /// CLI flags for `isd stack doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
-    /// Path to the compose file (or directory containing one).
+    /// Stack name (fetched from the controller) or a local path to a
+    /// compose file or directory.
     ///
-    /// Defaults to `./compose.yaml` when omitted.
-    pub path: Option<PathBuf>,
+    /// Resolution order: if the value exists on disk it is treated as
+    /// a local path; otherwise it is treated as a stack name and the
+    /// controller's stored compose is fetched. Omitted defaults to
+    /// `./compose.yaml`.
+    pub target: Option<String>,
+}
+
+/// Where the audited compose came from. Used to render a meaningful
+/// header above the findings.
+enum ComposeSource {
+    /// Read from a path on disk.
+    Local(std::path::PathBuf),
+    /// Fetched from the controller for a named stack.
+    Controller(String),
+}
+
+impl ComposeSource {
+    /// Operator-facing label for the source: a filesystem path or a
+    /// `stack "<name>" (controller)` tag.
+    fn label(&self) -> String {
+        match self {
+            Self::Local(p) => p.display().to_string(),
+            Self::Controller(name) => format!("stack {name:?} (controller)"),
+        }
+    }
 }
 
 /// `isd stack doctor`: run the audit and print every finding. v0.1
 /// is read-only. The interactive fix loop lands in v0.2.
 ///
+/// Accepts a local path OR a stack name. Local wins when the value
+/// exists on disk; otherwise the controller is queried for the named
+/// stack's stored compose.
+///
 /// # Errors
 ///
-/// Returns `Err` when the compose file can't be located or parsed.
-pub async fn run(args: DoctorArgs) -> Result<()> {
-    let path = resolve_compose_path(args.path.as_deref())?;
-    let compose = load_compose(&path)?;
+/// Returns `Err` when the compose file / stack can't be located or
+/// when the YAML fails to parse.
+pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
+    let (yaml, source) = resolve_compose(args.target.as_deref(), context).await?;
+    let compose: Value = serde_yaml::from_str(&yaml)
+        .with_context(|| format!("parsing compose from {}", source.label()))?;
     let findings = audit(&compose);
 
     if findings.is_empty() {
-        println!("{} looks healthy. No findings.", path.display());
+        println!("{} looks healthy. No findings.", source.label());
         return Ok(());
     }
 
-    println!("{}:", path.display());
+    println!("{}:", source.label());
     for f in &findings {
         let tag = match f.severity {
             Severity::Warning => "warning",
@@ -126,41 +156,68 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
     }
     println!();
     println!(
-        "{} finding(s). Re-run with `isd stack doctor --fix <path>` once v0.2 ships the interactive fixer.",
+        "{} finding(s). Re-run with `isd stack doctor --fix <target>` once v0.2 ships the interactive fixer.",
         findings.len()
     );
     Ok(())
 }
 
-/// Resolve the operator's positional arg into a concrete compose path.
-/// Mirrors the resolution `isd stack deploy` does, but stays in-module
-/// so we don't pull on compose_cmd's heavier path-classifier.
-fn resolve_compose_path(arg: Option<&std::path::Path>) -> Result<PathBuf> {
-    let target = arg.unwrap_or_else(|| std::path::Path::new("."));
-    let resolved = if target.is_dir() {
+/// Pick the compose YAML for the requested target.
+///
+/// 1. `None` → `./compose.yaml` (or `compose.yml`) in the cwd.
+/// 2. A value that resolves to a file or directory on disk → load locally.
+/// 3. Otherwise → treat as a stack name and fetch from the controller.
+async fn resolve_compose(
+    target: Option<&str>,
+    context: Option<&str>,
+) -> Result<(String, ComposeSource)> {
+    if let Some(t) = target {
+        let path = std::path::Path::new(t);
+        if path.exists() {
+            let resolved = resolve_local_path(path)?;
+            let yaml = std::fs::read_to_string(&resolved)
+                .with_context(|| format!("reading compose file {}", resolved.display()))?;
+            return Ok((yaml, ComposeSource::Local(resolved)));
+        }
+        // Not on disk; assume stack name.
+        let session = Session::open(context).await?;
+        match crate::compose_cmd::fetch_compose_yaml_by_name(&session, t).await? {
+            Some(yaml) => Ok((yaml, ComposeSource::Controller(t.to_string()))),
+            None => Err(anyhow::anyhow!(
+                "stack {t:?} has no compose stored on the controller yet"
+            )),
+        }
+    } else {
+        let resolved = resolve_local_path(std::path::Path::new("."))?;
+        let yaml = std::fs::read_to_string(&resolved)
+            .with_context(|| format!("reading compose file {}", resolved.display()))?;
+        Ok((yaml, ComposeSource::Local(resolved)))
+    }
+}
+
+/// Resolve a local path or directory into a concrete compose file.
+fn resolve_local_path(target: &std::path::Path) -> Result<std::path::PathBuf> {
+    if target.is_dir() {
         let candidate = target.join("compose.yaml");
         if candidate.exists() {
-            candidate
-        } else {
-            let yml = target.join("compose.yml");
-            if yml.exists() {
-                yml
-            } else {
-                return Err(anyhow::anyhow!(
-                    "no compose.yaml or compose.yml in {}",
-                    target.display()
-                ));
-            }
+            return Ok(candidate);
         }
-    } else if target.exists() {
-        target.to_path_buf()
-    } else {
+        let yml = target.join("compose.yml");
+        if yml.exists() {
+            return Ok(yml);
+        }
         return Err(anyhow::anyhow!(
-            "compose path {} does not exist",
+            "no compose.yaml or compose.yml in {}",
             target.display()
         ));
-    };
-    Ok(resolved)
+    }
+    if target.exists() {
+        return Ok(target.to_path_buf());
+    }
+    Err(anyhow::anyhow!(
+        "compose path {} does not exist",
+        target.display()
+    ))
 }
 
 #[cfg(test)]
