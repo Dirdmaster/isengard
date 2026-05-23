@@ -123,7 +123,7 @@ enum Command {
     /// Manage secrets.
     #[command(subcommand)]
     Secret(secret::SecretCommand),
-    /// Get, set, unset, list, or print the schema for controller-wide
+    /// Get, set, rm, ls, or print the schema for controller-wide
     /// configuration keys (Cloudflare token, ACME email, default zone,
     /// SSH TTL cap, etc.).
     Configure(configure::ConfigureArgs),
@@ -135,13 +135,11 @@ enum Command {
     Hosts(hosts_cmd::HostsCommand),
     /// Show detail for one resource (host, stack, or container).
     /// Auto-detects the type from the id; opens a picker when no id
-    /// is supplied. `inspect` is kept as a clap alias for muscle
-    /// memory.
-    #[command(alias = "inspect")]
+    /// is supplied.
     Info(info_cmd::InfoArgs),
     /// Self-update isd.
     Update(update_cmd::UpdateArgs),
-    /// Deploy, diff, edit, inspect stacks.
+    /// Bring stacks up, diff, edit, and manage manifests.
     #[command(subcommand)]
     Stack(stack_cmd::StackCommand),
     /// List services across stacks.
