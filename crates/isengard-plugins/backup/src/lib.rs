@@ -121,7 +121,7 @@ impl Plugin for BackupPlugin {
     }
 
     /// Opens the plugin's dedicated pool, builds the runner, stores
-    /// it in [`RUNNER_CELL`], and spawns the scheduler loop.
+    /// it in `RUNNER_CELL`, and spawns the scheduler loop.
     ///
     /// # Errors
     ///

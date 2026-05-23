@@ -128,7 +128,7 @@ pub struct ControllerHandles {
     /// Schema-driven dispatcher for `isd configure`.
     ///
     /// Reads and writes every operator-settable key, routing secret
-    /// keys to `secrets` and non-secret keys to a [`SettingStore`]
+    /// keys to `secrets` and non-secret keys to a `SettingStore`
     /// wrapping the same inventory pool. Built at boot off
     /// [`config::Schema::v01`]; the dashboard's configure routes
     /// (added in PR 2 of this track) hang off this handle.

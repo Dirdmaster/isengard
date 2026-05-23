@@ -240,7 +240,7 @@ pub fn decision_from_resolved(
 /// Build a [`PendingApprovalBody`] from the resolver output + the caller's
 /// per-candidate context. Pure; no I/O. Falls back to empty strings for
 /// missing context fields so the body always has a stable shape (the
-/// dashboard renders empty strings as "<unknown>" rather than panicking on
+/// dashboard renders empty strings as `<unknown>` rather than panicking on
 /// `Option`).
 ///
 /// `host_id`: parsed from `ctx.host_id_hex` if present, else nil ULID.

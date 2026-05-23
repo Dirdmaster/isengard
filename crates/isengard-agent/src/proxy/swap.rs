@@ -3,11 +3,11 @@
 //! [`swap_upstream`] flips the existing entry to `Draining`, schedules a
 //! background cleanup that runs after the grace period, then installs the new
 //! upstream as `Active` under the same hostname. The router's
-//! [`super::router::IsengardProxy::upstream_peer`] short-circuits requests
+//! `IsengardProxy::upstream_peer` short-circuits requests
 //! routed to a `Draining` entry with a 503: but in the swap path the new
 //! entry replaces the old immediately, so traffic continues uninterrupted.
 //!
-//! The cleanup uses [`UpstreamRegistry::remove_if_draining`], which is a no-op
+//! The cleanup uses `UpstreamRegistry::remove_if_draining`, which is a no-op
 //! when the entry has been re-set to `Active` in the meantime. That makes
 //! repeated swaps within the grace window safe: only the *currently draining*
 //! entry is ever evicted, never the live one.

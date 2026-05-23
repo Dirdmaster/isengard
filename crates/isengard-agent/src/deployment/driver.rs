@@ -65,7 +65,7 @@ pub trait DriverDeps: Send + Sync + 'static {
 
     /// Snapshot the upstream currently routing for this deployment's hostname.
     /// Returned `None` means there's nothing to recover to (no public_hostname,
-    /// or the registry has no entry yet). Used by [`Driver::recover_to_blue`]
+    /// or the registry has no entry yet). Used by `Driver::recover_to_blue`
     /// when a post-switch collapse forces a rollback.
     async fn snapshot_current_upstream(&self, deployment: &Deployment) -> Option<Upstream>;
 

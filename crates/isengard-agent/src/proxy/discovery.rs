@@ -68,7 +68,7 @@ const DRIVER_ONLY_NETWORKS: &[&str] = &["bridge", "host", "none"];
 ///
 /// Operates on the bollard `EndpointSettings` shape; preserved for the
 /// existing unit-test corpus and any caller that already holds a bollard
-/// inspect response. The trait-driven path uses [`pick_snapshot_ip`].
+/// inspect response. The trait-driven path uses `pick_snapshot_ip`.
 pub fn pick_container_ip(networks: &HashMap<String, EndpointSettings>) -> Option<String> {
     // Rule 1: prefer the shared proxy network.
     if let Some(settings) = networks.get(SHARED_PROXY_NETWORK) {

@@ -119,7 +119,7 @@ enum Command {
         acme_domains: String,
         /// ACME directory URL. Defaults to LE production. Set to the LE
         /// staging URL for dry-runs:
-        ///   https://acme-staging-v02.api.letsencrypt.org/directory
+        ///   <https://acme-staging-v02.api.letsencrypt.org/directory>
         #[arg(long, env = "ISENGARD_ACME_DIRECTORY", default_value = "")]
         acme_directory: String,
         #[command(subcommand)]

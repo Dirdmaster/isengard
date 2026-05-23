@@ -110,7 +110,7 @@ const DEFAULT_TOKENS_PER_MINUTE: f64 = 10.0;
 /// Token bucket backing [`RateLimited`].
 ///
 /// Refill rate is `tokens_per_minute / 60` per second. Capacity equals
-/// the configured `tokens_per_minute`. [`try_acquire`] returns true and
+/// the configured `tokens_per_minute`. `try_acquire` returns true and
 /// debits a token when one is available, false otherwise.
 struct Bucket {
     /// Tokens currently available.
@@ -178,7 +178,7 @@ impl<C: NotifyChannel> RateLimited<C> {
     /// Builds a limiter around `inner` with the supplied refill rate.
     ///
     /// `tokens_per_minute <= 0.0` falls back to
-    /// [`DEFAULT_TOKENS_PER_MINUTE`].
+    /// `DEFAULT_TOKENS_PER_MINUTE`.
     pub fn new(inner: C, tokens_per_minute: f64) -> Self {
         let tpm = if tokens_per_minute > 0.0 {
             tokens_per_minute

@@ -1,7 +1,7 @@
 //! Per-upstream healthcheck primitive.
 //!
 //! Two modes:
-//! - HTTP: GET <path>, 2xx response = healthy
+//! - HTTP: GET `<path>`, 2xx response = healthy
 //! - TCP-only: connect succeeds = healthy
 //!
 //! Used by the eviction state machine (Task 19) which calls `check_once`

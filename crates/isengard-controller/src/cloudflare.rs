@@ -28,7 +28,7 @@ const MAX_PAGES: usize = 5;
 /// Returns every zone name visible to `token`, in CF's response order.
 ///
 /// Walks the paginated `/zones` endpoint until either the server signals
-/// the last page or we hit [`MAX_PAGES`]. Filters strictly to the
+/// the last page or we hit `MAX_PAGES`. Filters strictly to the
 /// `result[].name` strings: zone ids, account info, plan tier, etc. are
 /// dropped. Empty list is a valid result (token has no zones yet).
 ///

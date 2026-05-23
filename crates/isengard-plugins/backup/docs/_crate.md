@@ -3,11 +3,11 @@ Age-encrypted SQLite backups for the Isengard controller.
 Pipeline at a glance: WAL snapshot, age passphrase encryption, upload
 to a pluggable destination, record history in `backup_runs`. The
 plugin only reads from the controller's storage; the only rows it
-writes are its own [`backup_runs`] history.
+writes are its own `backup_runs` history.
 
 # Scheduler
 
-[`spawn_scheduler`] runs a forever loop:
+`spawn_scheduler` runs a forever loop:
 
 1. Load [`config::BackupConfig`] from the settings table.
 2. Sleep until the next run is due
@@ -50,7 +50,7 @@ Two backends ship in 11a:
 
 # Retention
 
-[`runner::BackupRunner::prune_retention`] lists every object the
+`runner::BackupRunner::prune_retention` lists every object the
 destination is responsible for, sorts newest-first by name (names
 embed a UTC timestamp, so lexical sort is chronological), and
 deletes everything past `retention_keep`. Failure during prune logs
@@ -74,6 +74,6 @@ restored bytes.
 
 A successful restore replaces the live DB file, which means the
 `running` row inserted on entry now lives in the renamed `.bak.<ts>`.
-The restore opens a fresh [`Inventory`] against the new file and
+The restore opens a fresh `Inventory` against the new file and
 inserts a final `success` row there; the `.bak.<ts>` keeps its
 `running` row as a forensic trail.

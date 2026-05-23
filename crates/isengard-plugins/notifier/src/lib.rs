@@ -598,7 +598,7 @@ fn html_escape(s: &str) -> String {
 impl EventSubscriber for Notifier {
     /// Returns an empty slice. The dispatch task subscribes to every
     /// event on the bus and per-channel filtering happens inside
-    /// [`dispatch`]; the `EventSubscriber` shape is implemented for
+    /// `dispatch`; the `EventSubscriber` shape is implemented for
     /// trait conformance only.
     fn event_kinds(&self) -> &[&'static str] {
         &[]
