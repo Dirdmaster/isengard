@@ -1,12 +1,12 @@
 //! v0.3d compose reconciler: parse a desired `compose.yaml`, diff it
 //! against the running containers, return a [`ReconcilePlan`] of ops the
-//! agent can either apply or surface in `isd diff` / dashboard previews.
+//! agent can either apply or surface in `isd stack diff` / dashboard previews.
 //!
 //! The plan is intentionally simple: each service is one of
 //! `Start | Recreate | Stop | NoChange`. v0.3d targets the smoke-test
 //! shape (image + ports + env + labels + restart): full compose semantics
 //! (depends_on, env_file, healthcheck.test rewrites, secrets) are
-//! follow-ups. The diff logic here is what `isd diff` shows the operator
+//! follow-ups. The diff logic here is what `isd stack diff` shows the operator
 //! before they say yes.
 //!
 //! Compose files are parsed in two formats, both with the same shape:
@@ -150,7 +150,7 @@ pub enum ServiceOp {
         image: String,
     },
     /// Service running but image / env / ports / labels drifted.
-    /// `reasons` is human-readable so `isd diff` can show why.
+    /// `reasons` is human-readable so `isd stack diff` can show why.
     Recreate {
         /// Service name to recreate.
         service: String,
@@ -185,7 +185,7 @@ impl ServiceOp {
     }
 }
 
-/// Plan returned to dashboards / `isd diff`. Sorted alphabetically by
+/// Plan returned to dashboards / `isd stack diff`. Sorted alphabetically by
 /// service name for stable output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcilePlan {
@@ -653,13 +653,13 @@ fn parse_service(name: &str, m: &Mapping) -> anyhow::Result<DesiredService> {
     // Native placement verbs + swarm-compat `deploy:` block.
     // See `compose_placement_for_service` for the surface; the parser is
     // intentionally strict so a bad selector or conflicting verbs is a
-    // hard error at `isd deploy` rather than a silent default.
+    // hard error at `isd stack up` rather than a silent default.
     svc.placement = compose_placement_for_service(name, m)?;
 
     // 2026-05-15 stack file model: per-service `strategy:` selects the
     // deploy rollout behavior. Only the four kebab-case keywords are
     // allowed; anything else is a hard parse error so typos surface at
-    // `isd deploy` instead of silently defaulting.
+    // `isd stack up` instead of silently defaulting.
     if let Some(value) = m.get(Value::String("strategy".into())) {
         let Value::String(s) = value else {
             return Err(anyhow::anyhow!(

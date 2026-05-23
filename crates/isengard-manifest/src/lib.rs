@@ -253,7 +253,7 @@ impl StackManifest {
     /// The result has `name`, one compose entry (`compose.toml`), no
     /// fleet, no overlays, no secrets, no hooks, [`Strategy::Auto`], and
     /// an empty [`StackManifest::root`]. Operators can drop the
-    /// serialized output into a stack directory and `isd deploy --all`
+    /// serialized output into a stack directory and `isd stack up --all`
     /// picks it up.
     pub fn minimal_for(name: &str) -> Self {
         Self {

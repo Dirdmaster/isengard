@@ -1010,7 +1010,7 @@ struct PutManifestBody {
 ///
 /// This endpoint does NOT push compose to the agent: the manifest is the
 /// orchestration sidecar (secrets, hooks, fleet, strategy). The on-host
-/// compose.yaml is unchanged by this call. A subsequent `isd deploy`
+/// compose.yaml is unchanged by this call. A subsequent `isd stack up`
 /// re-resolves the merged compose using the new manifest.
 ///
 /// Status codes:
@@ -1310,7 +1310,7 @@ fn sha256_hex_of(s: &str) -> String {
 /// Create a new stack from a compose.yaml. Behaves like `PUT
 /// /stacks/:id/compose` but for the case where the stack doesn't exist
 /// yet: inserts the row, then forwards the YAML to the agent via the
-/// existing WriteCompose path. The CLI uses this for `isd deploy <path>`
+/// existing WriteCompose path. The CLI uses this for `isd stack up <path>`
 /// when the stack name isn't yet in the controller's inventory; the
 /// dashboard will use it for the future "new stack" button.
 ///
@@ -1515,7 +1515,7 @@ async fn create_stack(
 /// Returns the `isengard_agent::compose_reconciler::ReconcilePlan` in
 /// JSON, or 422 if the YAML doesn't parse. Used by:
 /// - the dashboard's "Apply preview" button.
-/// - `isd diff <stack>` and `isd apply <path>`.
+/// - `isd stack diff <stack>` and `isd apply <path>`.
 ///
 /// The plan is computed against the LAST IMPORTED compose snapshot the
 /// controller has cached. The agent runs the actual reconcile against

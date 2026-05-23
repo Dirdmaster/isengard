@@ -4,7 +4,7 @@
 //! `compose_yaml` columns for the v0.3c compose import path; `0028`
 //! lands the `stack.toml` manifest columns and the
 //! `stack_hooks`/`stack_secrets` sidecar tables. A stack is what an
-//! operator names with `isd deploy` and what `isd ps` groups by.
+//! operator names with `isd stack up` and what `isd ps` groups by.
 
 use crate::host::HostId;
 use chrono::{DateTime, Utc};

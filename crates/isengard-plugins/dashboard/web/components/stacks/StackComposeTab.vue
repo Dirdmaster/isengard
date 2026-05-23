@@ -185,7 +185,7 @@ function forceOverwrite() {
       </div>
       <div class="flex flex-col gap-1 text-sm leading-relaxed">
         <p class="text-iso-text-primary">
-          Compose-as-truth: edits here, in <code class="font-mono">isd edit</code>, and
+          Compose-as-truth: edits here, in <code class="font-mono">isd stack edit</code>, and
           <code class="font-mono">vim</code> on the host all converge on the same
           <code class="font-mono">compose.yaml</code>.
         </p>

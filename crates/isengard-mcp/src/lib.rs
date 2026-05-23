@@ -12,7 +12,7 @@
 //!   parameters the host should solicit.
 //!
 //! No `tools/*` surface in v1. Exposing destructive operations
-//! (`isd init`, `isd deploy`) as MCP tools needs its own scoping
+//! (`isd init`, `isd stack up`) as MCP tools needs its own scoping
 //! design; that's deferred.
 //!
 //! Design: `3 Resources/Superpowers/specs/2026-05-20-isengard-docs-and-ai-surface-design.md`
