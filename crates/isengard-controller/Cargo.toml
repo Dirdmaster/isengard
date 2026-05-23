@@ -29,6 +29,10 @@ secrecy = "0.10"
 ssh-key.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Compose YAML synthesis. The `compose_synthesize` module builds a
+# nested `serde_yaml::Value` tree and serialises it to a compose.yaml
+# string for stacks the operator brought up outside isengard.
+serde_yaml.workspace = true
 sha2.workspace = true
 # Phase 0.18: container heartbeat ingest hands a SqlitePool to the
 # DAO functions exported by isengard-storage::containers.
