@@ -4,9 +4,9 @@
 //! never run docker commands directly. `list` / `use` / `show` read +
 //! write the store via `crate::docker_context`.
 
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 
 use crate::docker_context;
 
@@ -91,27 +91,41 @@ pub async fn run(args: ContextArgs) -> Result<()> {
     }
 }
 
-/// Print every docker context as a table, marking the current one
-/// with `*` in the first column.
+/// Print every docker context as a boxed table, marking the current
+/// one with `▸` in the first column.
 async fn run_list() -> Result<()> {
     let contexts = docker_context::list_contexts()?;
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["", "NAME", "KIND", "TARGET"]);
-    for ctx in &contexts {
-        t.add_row(vec![
-            if ctx.current {
-                "*".to_string()
-            } else {
-                "".to_string()
-            },
-            ctx.name.clone(),
-            ctx.kind.to_string(),
-            ctx.target.clone(),
-        ]);
+    let rows: Vec<Vec<String>> = contexts
+        .iter()
+        .map(|ctx| {
+            vec![
+                if ctx.current {
+                    "▸".into()
+                } else {
+                    String::new()
+                },
+                ctx.name.clone(),
+                ctx.kind.to_string(),
+                ctx.target.clone(),
+            ]
+        })
+        .collect();
+    let table = Table {
+        columns: vec![
+            Column::new("", Align::Right, CellStyle::Cyan, 9, 1),
+            Column::new("NAME", Align::Left, CellStyle::Emphasis, 1, 6),
+            Column::new("KIND", Align::Left, CellStyle::Dim, 6, 4),
+            Column::new("TARGET", Align::Left, CellStyle::Plain, 4, 14),
+        ],
+        rows,
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        println!("{}", render(&table, width, console::colors_enabled()));
+    } else {
+        println!("{}", render_plain(&table));
     }
-    println!("{t}");
     Ok(())
 }
 

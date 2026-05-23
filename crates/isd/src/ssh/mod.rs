@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
+// `crate::render::Table` aliased as `RenderTable` is already imported via the
+// ssh hosts/audit renderers; reuse it for the cert-detail readout below.
 use serde::{Deserialize, Serialize};
 
 use crate::dial_target;
@@ -623,38 +624,40 @@ async fn run_status() -> Result<()> {
     let now = Utc::now();
     let expired = parsed.valid_to <= now;
 
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["FIELD", "VALUE"]);
-    t.add_row(vec!["PATH", cert_path.display().to_string().as_str()]);
-    t.add_row(vec!["FINGERPRINT", parsed.fingerprint.as_str()]);
-    t.add_row(vec!["PRINCIPALS", parsed.principals.join(",").as_str()]);
-    t.add_row(vec!["KEY ID", parsed.key_id.as_str()]);
-    t.add_row(vec![
-        "VALID FROM",
-        parsed
-            .valid_from
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
-            .as_str(),
-    ]);
-    t.add_row(vec![
-        "VALID TO",
-        parsed
-            .valid_to
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
-            .as_str(),
-    ]);
     let remaining = if expired {
         "expired".to_string()
     } else {
         let secs = (parsed.valid_to - now).num_seconds().max(0);
         format!("{secs}s")
     };
-    t.add_row(vec!["REMAINING", remaining.as_str()]);
-    println!("{}", t.to_string().trim_end());
+    let table = RenderTable {
+        columns: vec![
+            Column::new("FIELD", Align::Left, CellStyle::Dim, 6, 6),
+            Column::new("VALUE", Align::Left, CellStyle::Plain, 1, 12),
+        ],
+        rows: vec![
+            vec!["PATH".into(), cert_path.display().to_string()],
+            vec!["FINGERPRINT".into(), parsed.fingerprint.clone()],
+            vec!["PRINCIPALS".into(), parsed.principals.join(",")],
+            vec!["KEY ID".into(), parsed.key_id.clone()],
+            vec![
+                "VALID FROM".into(),
+                parsed.valid_from.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            ],
+            vec![
+                "VALID TO".into(),
+                parsed.valid_to.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            ],
+            vec!["REMAINING".into(), remaining.clone()],
+        ],
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        println!("{}", render(&table, width, console::colors_enabled()));
+    } else {
+        println!("{}", render_plain(&table));
+    }
 
     if expired {
         return Err(anyhow!(

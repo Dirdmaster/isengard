@@ -1,10 +1,10 @@
 //! `isd service ls`: list every service across every stack.
 //! Talks to `GET /api/v1/services`.
 
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
@@ -77,10 +77,7 @@ async fn run_ls(args: LsArgs, context: Option<&str>) -> Result<()> {
         crate::output::Format::Json => {
             println!("{}", serde_json::to_string_pretty(&rows)?);
         }
-        crate::output::Format::Table => {
-            let out = render_table(&rows);
-            println!("{}", out.trim_end());
-        }
+        crate::output::Format::Table => print_table(&rows),
     }
     Ok(())
 }
@@ -132,30 +129,47 @@ pub fn build_rows(stacks: &[StackApiRow], services: &[ServiceApiRow]) -> Vec<Ser
     rows
 }
 
-/// Render `service ls` rows as a comfy-table.
-fn render_table(rows: &[ServiceLsRow]) -> String {
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec![
-            "STACK",
-            "SERVICE",
-            "HOST",
-            "STATE",
-            "IMAGE",
-            "LAST SEEN",
-        ]);
-    for row in rows {
-        t.add_row(vec![
-            row.stack.clone().unwrap_or_else(|| "-".into()),
-            row.name.clone(),
-            row.host.clone(),
-            row.state.clone(),
-            row.image.clone(),
-            row.last_seen_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        ]);
+/// Build the boxed-renderer table for `service ls`.
+fn build_table(rows: &[ServiceLsRow]) -> Table {
+    Table {
+        columns: vec![
+            Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+            Column::new("STACK", Align::Left, CellStyle::Dim, 5, 6),
+            Column::new("SERVICE", Align::Left, CellStyle::Emphasis, 1, 8),
+            Column::new("HOST", Align::Left, CellStyle::Cyan, 4, 6),
+            Column::new("STATE", Align::Left, CellStyle::State, 6, 5),
+            Column::new("IMAGE", Align::Left, CellStyle::Plain, 2, 12),
+            Column::new("LAST SEEN", Align::Left, CellStyle::Dim, 3, 20),
+        ],
+        rows: rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                vec![
+                    i.to_string(),
+                    row.stack.clone().unwrap_or_else(|| "-".into()),
+                    row.name.clone(),
+                    row.host.clone(),
+                    row.state.clone(),
+                    row.image.clone(),
+                    row.last_seen_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                ]
+            })
+            .collect(),
     }
-    t.to_string()
+}
+
+/// Print the table: boxed rounded-corners on a TTY, tab-separated plain
+/// when stdout is redirected so scripts stay clean.
+fn print_table(rows: &[ServiceLsRow]) {
+    let table = build_table(rows);
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        println!("{}", render(&table, width, console::colors_enabled()));
+    } else {
+        println!("{}", render_plain(&table));
+    }
 }
 
 #[cfg(test)]
@@ -227,7 +241,7 @@ mod tests {
         let stacks = vec![];
         let services = vec![svc("orphan", None, "iso-1", "running")];
         let rows = build_rows(&stacks, &services);
-        let t = render_table(&rows);
+        let t = render_plain(&build_table(&rows));
         assert!(t.contains("STACK"));
         assert!(t.contains("SERVICE"));
         assert!(t.contains("orphan"));

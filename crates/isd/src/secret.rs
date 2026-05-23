@@ -28,7 +28,7 @@ use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 
 use crate::docker_context::{self, DockerContextSummary};
 use crate::session::{ResolvedContext, Session};
@@ -244,20 +244,40 @@ async fn run_ls_context(context: Option<&str>) -> Result<()> {
         println!("No secrets stored.");
         return Ok(());
     }
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["NAME", "CREATED", "UPDATED"]);
-    for e in &entries {
-        table.add_row(vec![
-            e.name.clone(),
-            short_ts(&e.created_at),
-            short_ts(&e.updated_at),
-        ]);
-    }
-    println!("{table}");
+    let table = Table {
+        columns: vec![
+            Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+            Column::new("NAME", Align::Left, CellStyle::Emphasis, 1, 6),
+            Column::new("CREATED", Align::Left, CellStyle::Dim, 4, 16),
+            Column::new("UPDATED", Align::Left, CellStyle::Dim, 3, 16),
+        ],
+        rows: entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                vec![
+                    i.to_string(),
+                    e.name.clone(),
+                    short_ts(&e.created_at),
+                    short_ts(&e.updated_at),
+                ]
+            })
+            .collect(),
+    };
+    print_boxed(&table);
     Ok(())
+}
+
+/// Print a [`Table`] via the shared boxed renderer on a TTY, falling
+/// back to the tab-separated plain renderer for piped output.
+fn print_boxed(table: &Table) {
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        println!("{}", render(table, width, console::colors_enabled()));
+    } else {
+        println!("{}", render_plain(table));
+    }
 }
 
 /// Aggregate secrets across every saved context. The scope column is
@@ -357,16 +377,29 @@ pub(crate) fn print_global_listing(snapshot: &GlobalSnapshot) {
             println!("No secrets stored in any reachable context.");
         }
     } else {
-        let mut table = Table::new();
-        table
-            .load_preset(NOTHING)
-            .set_content_arrangement(ContentArrangement::Disabled)
-            .set_header(vec!["NAME", "SCOPE", "CONTEXTS"]);
-        for (name, contexts) in &snapshot.coverage {
-            let scope = classify_coverage(contexts.len(), snapshot.reachable);
-            table.add_row(vec![name.clone(), scope.into(), contexts.join(", ")]);
-        }
-        println!("{table}");
+        let table = Table {
+            columns: vec![
+                Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+                Column::new("NAME", Align::Left, CellStyle::Emphasis, 1, 6),
+                Column::new("SCOPE", Align::Left, CellStyle::Cyan, 4, 5),
+                Column::new("CONTEXTS", Align::Left, CellStyle::Dim, 2, 10),
+            ],
+            rows: snapshot
+                .coverage
+                .iter()
+                .enumerate()
+                .map(|(i, (name, contexts))| {
+                    let scope = classify_coverage(contexts.len(), snapshot.reachable);
+                    vec![
+                        i.to_string(),
+                        name.clone(),
+                        scope.into(),
+                        contexts.join(", "),
+                    ]
+                })
+                .collect(),
+        };
+        print_boxed(&table);
     }
     if !snapshot.unreachable.is_empty() {
         let parts: Vec<_> = snapshot

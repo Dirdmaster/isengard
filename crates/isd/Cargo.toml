@@ -41,10 +41,6 @@ base64.workspace = true
 bollard.workspace = true
 chrono.workspace = true
 clap.workspace = true
-# v0.5.3: `tty` brings in `crossterm` so `Cell::fg` is available for the
-# `isd ps` STATE column. comfy-table auto-suppresses ANSI when stdout is
-# not a TTY, so piping into `jq`/`grep` stays clean.
-comfy-table = { workspace = true, features = ["tty"] }
 dirs.workspace = true
 futures-util.workspace = true
 hex.workspace = true
