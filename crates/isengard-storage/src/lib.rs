@@ -69,7 +69,8 @@ pub use secret::{SecretMeta, validate_secret_name};
 pub use service::{InsertService, Service, ServiceId, ServiceState};
 pub use setting::{Setting, SettingStore};
 pub use stack::{
-    InsertStack, Stack, StackComposeRow, StackHook, StackId, StackManifestBundle, StackSource,
+    ComposeSource, InsertStack, Stack, StackComposeRow, StackHook, StackId, StackManifestBundle,
+    StackSource,
 };
 pub use tls_cert::{TlsCertMeta, UpsertTlsCertMeta};
 pub use tls_wildcard_cert::{UpsertWildcardCert, WildcardCertRow};

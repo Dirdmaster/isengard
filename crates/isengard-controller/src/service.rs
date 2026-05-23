@@ -26,6 +26,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::bus::EventBus;
 use crate::ca::Authority;
+use crate::compose_autoadopt::AutoAdoptionTracker;
 use crate::compose_broker::ComposeBroker;
 use crate::enrollment::{EnrollmentService, HostInfo};
 use crate::hook_ingest::HookLabelIngest;
@@ -97,6 +98,16 @@ pub struct ControllerService {
     /// `TrustedUserCAKeys` drop-in. Later phases use `sign_user_cert`
     /// to mint short-lived operator certs via the dashboard.
     pub ssh_ca: Arc<crate::ssh_ca::SshAuthority>,
+    /// Auto-adoption debouncer for compose synthesis.
+    ///
+    /// Tracks per-stack container-set stability across heartbeats so
+    /// the Sync handler can fire compose synthesis exactly once per
+    /// stack on the second consecutive stable heartbeat (spec
+    /// `2026-05-23-isd-compose-synthesize-design.md`).  In-memory only;
+    /// a controller restart re-establishes stability over two
+    /// heartbeats and re-fires synthesis iff the operator hasn't
+    /// written a compose in between.
+    pub auto_adoption: Arc<AutoAdoptionTracker>,
 }
 
 impl ControllerService {
@@ -117,6 +128,7 @@ impl ControllerService {
         secrets: Arc<SecretsStore>,
         scheduler: Option<Arc<crate::scheduler::Scheduler>>,
         ssh_ca: Arc<crate::ssh_ca::SshAuthority>,
+        auto_adoption: Arc<AutoAdoptionTracker>,
     ) -> Self {
         Self {
             inventory,
@@ -133,6 +145,7 @@ impl ControllerService {
             secrets,
             scheduler,
             ssh_ca,
+            auto_adoption,
         }
     }
 
@@ -164,6 +177,7 @@ impl ControllerService {
         // paths without writing key files in the test process.
         let secrets = Arc::new(SecretsStore::new_locked(inventory.clone()));
         let ssh_ca = Arc::new(crate::ssh_ca::SshAuthority::for_tests().expect("ssh_ca for_tests"));
+        let auto_adoption = Arc::new(AutoAdoptionTracker::new());
         Self {
             inventory,
             journal,
@@ -181,6 +195,7 @@ impl ControllerService {
             // wired in via `run_controller`.
             scheduler: None,
             ssh_ca,
+            auto_adoption,
         }
     }
 }
@@ -492,6 +507,7 @@ impl Controller for ControllerService {
         let log_fanout = self.log_fanout.clone();
         let compose_broker = self.compose_broker.clone();
         let scheduler = self.scheduler.clone();
+        let auto_adoption = self.auto_adoption.clone();
         let agent_hostname = host.hostname.clone();
 
         tokio::spawn(async move {
@@ -600,6 +616,57 @@ impl Controller for ControllerService {
                             tracing::error!(error = %e, agent = %agent_hostname, "process_heartbeat_containers failed");
                         }
 
+                        // Auto-adopt synthesis pass. Group the
+                        // heartbeat's containers by stack name, then
+                        // hand each (stack, container_ids) pair to
+                        // the tracker. The tracker enforces the
+                        // 2-stable-heartbeat debounce + the
+                        // rich-data gate + the already-has-compose
+                        // short-circuit. Synthesis itself is wired
+                        // via the closures below; the synthesizer
+                        // function and `containers_rich` DAO land
+                        // in the parallel PRs, at which point the
+                        // closures grow real bodies.
+                        let stacks_in_hb = crate::compose_autoadopt_wire::group_containers_by_stack(
+                            &agent_hostname,
+                            &hb.containers,
+                        );
+                        let _decisions = crate::compose_autoadopt::run_auto_adoption_pass(
+                            &auto_adoption,
+                            &inventory,
+                            host_id,
+                            &stacks_in_hb,
+                            // Rich-data lookup: the parallel
+                            // `agent-rich-container-snapshot` PR
+                            // adds a DAO that returns the subset of
+                            // container ids whose `containers_rich`
+                            // row exists. Until that lands, return
+                            // an empty list, which forces every
+                            // observation to MissingRichData (the
+                            // safe side: skip auto-adopt).
+                            |_ids: &[String]| async { Vec::<String>::new() },
+                            // Synth + write: same gating. The
+                            // synthesizer function is added by the
+                            // parallel `feat-controller-compose-synthesizer`
+                            // PR. Once both PRs land, this closure
+                            // calls `compose_synthesize::synthesize(...)`
+                            // and `inventory.set_stack_compose(...,
+                            // ComposeSource::AutoSynthesized)`, then
+                            // emits the `compose.auto_adopted` journal
+                            // event via `persist_and_broadcast`.
+                            |_stack_id, _stack_name, _rich_ids| async move {
+                                // No-op: this branch is unreachable
+                                // while the rich-data lookup above
+                                // always returns empty. Keeping the
+                                // closure signature in place keeps
+                                // `run_auto_adoption_pass` typed
+                                // exactly the way the followup PR
+                                // needs.
+                                Ok::<_, String>(())
+                            },
+                        )
+                        .await;
+
                         let pending_actions = match crate::pending_actions::collect_pending_actions(
                             &inventory, host_id,
                         )
@@ -707,6 +774,13 @@ impl Controller for ControllerService {
                         // v0.3c: persist the agent's reverse-engineered
                         // compose.yaml so `GET /api/v1/stacks/<id>/compose`
                         // can serve it without round-tripping to the host.
+                        //
+                        // The agent's StackComposeReport pre-dates auto-adoption.
+                        // It fires when the operator ran a compose-touching
+                        // verb (`isd stack deploy` / `isd stack edit`), so
+                        // mark the row as operator-written: that's the
+                        // intent the agent is mirroring back to the
+                        // controller.
                         match inventory
                             .set_stack_compose(
                                 host_id,
@@ -714,6 +788,7 @@ impl Controller for ControllerService {
                                 &report.compose_yaml,
                                 &report.sha256,
                                 &report.imported_at,
+                                isengard_storage::ComposeSource::OperatorWritten,
                             )
                             .await
                         {

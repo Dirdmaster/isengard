@@ -566,27 +566,65 @@ async fn get_stack(State(handles): State<Arc<ControllerHandles>>, Path(id): Path
     Json(json).into_response()
 }
 
-/// `GET /api/v1/stacks/:id/compose` (v0.3c).
+/// `GET /api/v1/stacks/:id/compose` (v0.3c, extended in v0.7 for the
+/// compose-synthesize feature).
 ///
-/// Returns the most recent `compose.yaml` the agent reverse-engineered
-/// from the running containers, plus its sha256 and import timestamp so
-/// the dashboard can show "imported at X" without a separate call.
+/// Returns the compose YAML stored on the stack row, plus its sha256,
+/// import timestamp, and `compose_source` tag. The source tag
+/// distinguishes operator-pushed content from content the controller
+/// auto-synthesized during the auto-adopt path; see spec
+/// `2026-05-23-isd-compose-synthesize-design.md`.
 ///
-/// Status codes:
-/// - `200`: stack exists and the agent has reported a compose.yaml.
+/// ## Query parameters
+///
+/// - `?source=synthesized`: forces a fresh live-synth regardless of
+///   what the stored row contains. Response carries
+///   `compose_source: "live_synthesized"`; the value is computed on
+///   read and never persisted. Used by `isd stack diff` to compare
+///   running-state-vs-stored. Returns 503 with a clear body when the
+///   synthesizer is not yet wired (the synthesis function lands in
+///   the parallel `feat-controller-compose-synthesizer` PR). The
+///   503 collapses to a 200 once that PR merges and the
+///   wire-through-to-storage is in place; until then, the stored
+///   path remains fully functional, only the live-synth query
+///   parameter returns 503.
+///
+/// ## Status codes
+///
+/// - `200`: stack exists and has either stored or freshly-synthesized
+///   compose.
+/// - `204`: stack exists but no compose has been recorded yet and
+///   `?source=synthesized` was not requested.
 /// - `404`: stack id doesn't exist.
-/// - `204`: stack exists but no import has been recorded yet (the agent
-///   hasn't run a sweep on this host since v0.3c shipped, or the stack
-///   isn't `isengard.enable=true`).
+/// - `503`: `?source=synthesized` requested but live-synth is not
+///   wired in this build. Operator should retry once the parallel
+///   PRs land.
 async fn get_stack_compose(
     State(handles): State<Arc<ControllerHandles>>,
     Path(id): Path<i64>,
+    Query(q): Query<GetComposeQuery>,
 ) -> Response {
     let stack = match handles.inventory.get_stack(StackId(id)).await {
         Ok(Some(s)) => s,
         Ok(None) => return json_err(StatusCode::NOT_FOUND, "stack not found"),
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("get_stack: {e}")),
     };
+
+    // `?source=synthesized`: caller wants a fresh live synth, not the
+    // stored row. The actual synth function lives in the parallel
+    // `feat-controller-compose-synthesizer` PR (controller's
+    // `compose_synthesize::synthesize`). Until it merges, return 503
+    // with a clear message so callers know the lever exists but
+    // isn't wired yet.
+    if matches!(q.source.as_deref(), Some("synthesized")) {
+        return json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live-synth (?source=synthesized) is not wired in this build; \
+             waiting on the controller compose-synthesizer to land. \
+             The stored compose (?source unset) remains available.",
+        );
+    }
+
     match handles.inventory.get_stack_compose(stack.id).await {
         Ok(Some(row)) => Json(serde_json::json!({
             "stack_id": stack.id,
@@ -594,6 +632,7 @@ async fn get_stack_compose(
             "compose_yaml": row.yaml,
             "sha256": row.sha256,
             "imported_at": row.imported_at,
+            "compose_source": row.source.as_str(),
         }))
         .into_response(),
         Ok(None) => StatusCode::NO_CONTENT.into_response(),
@@ -602,6 +641,16 @@ async fn get_stack_compose(
             format!("get_stack_compose: {e}"),
         ),
     }
+}
+
+/// Query parameters for `GET /api/v1/stacks/:id/compose`. See
+/// [`get_stack_compose`] for semantics.
+#[derive(Debug, Deserialize)]
+struct GetComposeQuery {
+    /// `synthesized` forces a fresh live-synth regardless of stored
+    /// content. Any other value is ignored; absent reads the stored
+    /// compose (the v0.3c behaviour).
+    source: Option<String>,
 }
 
 /// `PUT /api/v1/stacks/:id/compose` (v0.3d + wave 2.A follow-up).
