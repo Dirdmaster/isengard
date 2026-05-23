@@ -146,16 +146,21 @@ pub async fn run(args: UpgradeArgs, context: Option<&str>) -> Result<()> {
     compose_up(&docker_uri, &target_tag, backup_path.as_deref())?;
     sp.stop("containers recreated");
 
-    // 6. Health-check via discovery + GET /api/v1/hosts. Skipped
-    //    entirely when --no-wait is set.
+    // 6. Health-check via Session (which handles SSH tunneling and
+    //    TLS-pinned contexts) + GET /api/v1/hosts. Skipped entirely
+    //    when --no-wait is set.
     if args.no_wait {
         cliclack::log::warning(
             "readiness poll skipped (--no-wait); tail `isd logs isd-controller` to watch boot",
         )?;
         cliclack::outro(format!("Upgraded to {target_tag}."))?;
     } else {
-        match wait_for_controller_ready(&docker, std::time::Duration::from_secs(args.wait_secs))
-            .await
+        match wait_for_controller_ready(
+            &docker,
+            context,
+            std::time::Duration::from_secs(args.wait_secs),
+        )
+        .await
         {
             Ok(elapsed) => {
                 cliclack::outro(format!(
@@ -301,6 +306,7 @@ fn compose_up(
 /// `--wait-secs`.
 async fn wait_for_controller_ready(
     docker: &isd_runtime::DockerBackend,
+    context: Option<&str>,
     timeout: std::time::Duration,
 ) -> Result<u64> {
     use tokio::time::{Duration, Instant, sleep};
@@ -330,15 +336,19 @@ async fn wait_for_controller_ready(
                 "controller did not become ready within {total}s after upgrade (last log phase: {phase})"
             ));
         }
-        if let Ok(endpoint) = isd_runtime::discover(docker.client()).await {
-            let url = format!(
-                "http://{}:{}/api/v1/hosts",
-                endpoint.host_ip, endpoint.host_port
-            );
-            if let Ok(resp) = reqwest::get(&url).await {
-                if resp.status().is_success() {
-                    sp.stop("controller ready");
-                    return Ok(elapsed);
+        // Open a Session each iteration so the SSH tunnel is rebuilt
+        // when the controller comes up on a fresh container (port may
+        // have changed; the previous session's tunnel is stale). The
+        // probe goes through the same transport every other isd verb
+        // uses, so SSH-backed contexts work the same as direct ones.
+        if let Ok(session) = crate::session::Session::open(context).await {
+            if let Ok(url) = session.require_controller() {
+                let probe = format!("{url}/api/v1/hosts");
+                if let Ok(resp) = session.client.get(&probe).send().await {
+                    if resp.status().is_success() {
+                        sp.stop("controller ready");
+                        return Ok(elapsed);
+                    }
                 }
             }
         }
