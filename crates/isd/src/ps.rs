@@ -20,12 +20,12 @@ const ID_DISPLAY_WIDTH: usize = 12;
 /// CLI flags for `isd ps`.
 #[derive(Debug, Args, Default)]
 pub struct PsArgs {
-    /// Show every container, including stopped workloads and healthy
-    /// Isengard infrastructure (controller, agent). By default `isd ps`
-    /// hides healthy infrastructure to keep the table focused on the
-    /// operator's own workloads; errored or stopped infrastructure
-    /// still surfaces because that is the case the operator needs to
-    /// see.
+    /// Show every container (incl. stopped + healthy infrastructure).
+    ///
+    /// By default `isd ps` hides healthy Isengard infrastructure
+    /// (controller, agent) to keep the table focused on the operator's
+    /// own workloads. Errored or stopped infrastructure still surfaces
+    /// because that is the case the operator needs to see.
     #[arg(short = 'a', long)]
     pub all: bool,
 
@@ -41,13 +41,15 @@ pub struct PsArgs {
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
 
-    /// Force flat output (no per-host grouping). Default groups when
-    /// the controller has more than one enrolled host.
+    /// Force flat output (no per-host grouping).
+    ///
+    /// Default groups when the controller has more than one enrolled host.
     #[arg(long)]
     pub no_group: bool,
 
-    /// Filter to a single host by name. Implies flat output (grouping
-    /// only makes sense across multiple hosts).
+    /// Filter to a single host by name.
+    ///
+    /// Implies flat output (grouping only makes sense across multiple hosts).
     #[arg(long, value_name = "NAME")]
     pub host: Option<String>,
 }

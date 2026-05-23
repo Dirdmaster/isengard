@@ -36,8 +36,9 @@ use crate::session::Session;
 /// (lexicon spec interactive-mode contract).
 #[derive(Debug, Args)]
 pub struct InfoArgs {
-    /// Hostname, dial target, stack name, or container name / id
-    /// prefix. Omit to open the picker.
+    /// Hostname, dial target, stack name, or container name / id prefix.
+    ///
+    /// Omit to open the picker.
     pub id: Option<String>,
 }
 

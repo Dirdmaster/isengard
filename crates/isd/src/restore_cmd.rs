@@ -33,14 +33,15 @@ const STATE_VOLUME: &str = "isd-controller-state";
 /// CLI flags for `isd restore`.
 #[derive(Debug, Args)]
 pub struct RestoreArgs {
-    /// Backup source: filesystem path, `volume:<name>/<filename>`, or
-    /// `s3://bucket/key`.
+    /// Backup source (filesystem path, `volume:<name>/<filename>`, or `s3://bucket/key`).
     pub source: String,
     /// Decrypt with passphrase from file (overrides env + stored).
     #[arg(long)]
     pub passphrase_file: Option<PathBuf>,
-    /// Refuse if isd-controller-state already has content; --overwrite
-    /// is required to clobber a populated volume.
+    /// Clobber the state volume even when it already has content.
+    ///
+    /// Without this flag, `isd restore` refuses to write into a
+    /// populated `isd-controller-state` volume.
     #[arg(long)]
     pub overwrite: bool,
 }

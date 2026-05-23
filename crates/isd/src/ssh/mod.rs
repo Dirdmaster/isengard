@@ -68,20 +68,24 @@ pub enum SshCommand {
     Mint(MintArgs),
     /// Show the current cert's state.
     Status,
-    /// List hosts (`isd ssh hosts`) or override the dial target of a
-    /// single host (`isd ssh hosts set <agent> --dial <target>`).
+    /// List hosts, or override the dial target of a single host.
+    ///
+    /// Bare `isd ssh hosts` lists; `isd ssh hosts set <agent> --dial <target>`
+    /// overrides.
     Hosts(HostsArgs),
     /// CA introspection.
     #[command(subcommand)]
     Ca(CaCommand),
     /// Show recent SSH cert issuances.
     Audit(AuditArgs),
-    /// Bootstrap a non-Isengard server: install the controller CA via
-    /// the operator's existing SSH access, then record the host in
-    /// `~/.config/isd/trusted_hosts.toml`.
+    /// Bootstrap a non-Isengard server (install the controller CA).
+    ///
+    /// Uses the operator's existing SSH access to install the CA, then
+    /// records the host in `~/.config/isd/trusted_hosts.toml`.
     Trust(TrustArgs),
-    /// Remove a host from the local trusted_hosts.toml. Remote sshd
-    /// config is left alone (operator-managed).
+    /// Remove a host from the local trusted_hosts.toml.
+    ///
+    /// Remote sshd config is left alone (operator-managed).
     Untrust(UntrustArgs),
 }
 
@@ -111,6 +115,7 @@ pub struct HostsArgs {
 #[derive(Debug, Subcommand)]
 pub enum HostsCommand {
     /// Override the operator-facing dial target on an enrolled host.
+    ///
     /// `agent` accepts the host's reported hostname, the host id ULID,
     /// the existing `dial_target`, or a `#N` index from the last
     /// `isd ssh hosts` render.
@@ -120,23 +125,28 @@ pub enum HostsCommand {
 /// CLI flags for `isd ssh hosts set <agent>`.
 #[derive(Debug, Args, Clone)]
 pub struct HostsSetArgs {
-    /// Host selector: hostname, host id ULID, existing dial target, or
-    /// a `#N` index from the last `isd ssh hosts` render.
+    /// Host selector (hostname, host id, dial target, or `#N` index).
+    ///
+    /// Resolves against the host's reported hostname, the host id ULID,
+    /// the existing `dial_target`, or a `#N` index from the last
+    /// `isd ssh hosts` render.
     pub agent: String,
-    /// New dial target. Empty string clears the value (back to the
-    /// `(unset)` display). When neither `--dial`, `--clear`, nor
-    /// `--name` is passed the command errors so an operator never
-    /// accidentally no-ops the row.
+    /// New dial target. Empty string clears the value.
+    ///
+    /// Empty string clears the value (back to the `(unset)` display).
+    /// When neither `--dial`, `--clear`, nor `--name` is passed the
+    /// command errors so an operator never accidentally no-ops the row.
     #[arg(long)]
     pub dial: Option<String>,
     /// Clear the stored dial target (equivalent to `--dial ""`).
     #[arg(long, default_value_t = false)]
     pub clear: bool,
-    /// New operator-facing host name (the label rendered in
-    /// `isd ssh hosts`). Use this when the agent-reported value is a
-    /// container hash (docker-in-docker) or just unhelpful. Empty
-    /// string is rejected: the column has no `(unset)` render
-    /// fallback and an empty value would break the display path.
+    /// New operator-facing host name (label rendered in `isd ssh hosts`).
+    ///
+    /// Use this when the agent-reported value is a container hash
+    /// (docker-in-docker) or just unhelpful. Empty string is rejected:
+    /// the column has no `(unset)` render fallback and an empty value
+    /// would break the display path.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 }
@@ -145,11 +155,13 @@ pub struct HostsSetArgs {
 #[derive(Debug, Args, Clone)]
 pub struct AuditArgs {
     /// Show entries from this RFC3339 timestamp onward (inclusive).
+    ///
     /// Anything before the cutoff is dropped server-side.
     #[arg(long)]
     pub since: Option<String>,
-    /// Cap the number of entries returned. The dashboard further
-    /// clamps this against an internal 5000-row ceiling.
+    /// Cap the number of entries returned.
+    ///
+    /// The dashboard further clamps this against an internal 5000-row ceiling.
     #[arg(long, default_value_t = 50)]
     pub limit: u32,
 }
@@ -159,18 +171,21 @@ pub struct AuditArgs {
 /// know any host-side passwords.
 #[derive(Debug, Args, Clone)]
 pub struct TrustArgs {
-    /// The host to bootstrap (must already be SSH-reachable with the
-    /// operator's existing key).
+    /// Host to bootstrap (must already be SSH-reachable).
+    ///
+    /// Reachability is via the operator's existing key.
     pub host: String,
-    /// Override the SSH user for the bootstrap connection. Defaults to
-    /// `$USER` (via `whoami` then `$USER`).
+    /// Override the SSH user for the bootstrap connection.
+    ///
+    /// Defaults to `$USER` (via `whoami` then `$USER`).
     #[arg(long)]
     pub user: Option<String>,
     /// Override the SSH port for the bootstrap connection.
     #[arg(long, default_value_t = 22)]
     pub port: u16,
-    /// Skip the local `trusted_hosts.toml` write. The bootstrap script
-    /// still runs; only the local record is suppressed.
+    /// Skip the local `trusted_hosts.toml` write.
+    ///
+    /// The bootstrap script still runs; only the local record is suppressed.
     #[arg(long)]
     pub no_record: bool,
 }
@@ -187,22 +202,26 @@ pub struct UntrustArgs {
 /// path picks when `isd ssh <host>` decides the local cert is stale.
 #[derive(Debug, Args, Clone)]
 pub struct MintArgs {
-    /// Path to the SSH public key to sign. Defaults to
-    /// `~/.ssh/id_ed25519.pub`.
+    /// Path to the SSH public key to sign.
+    ///
+    /// Defaults to `~/.ssh/id_ed25519.pub`.
     #[arg(long)]
     pub pubkey: Option<PathBuf>,
-    /// Requested TTL in seconds. Server caps via
-    /// `ISENGARD_SSH_CERT_MAX_TTL` (default 1h, hard cap 24h).
+    /// Requested TTL in seconds.
+    ///
+    /// Server caps via `ISENGARD_SSH_CERT_MAX_TTL` (default 1h, hard cap 24h).
     #[arg(long, default_value_t = 3600)]
     pub ttl: u64,
-    /// Principal name baked into the cert (Unix username on the
-    /// target host). Repeatable. Defaults to the operator's laptop
-    /// username (`$USER`) via `default_user()` so `isd ssh host`
-    /// just works against the operator's account on every host.
+    /// Principal name baked into the cert (repeatable).
+    ///
+    /// Principals are Unix usernames on the target host. Defaults to the
+    /// operator's laptop username (`$USER`) via `default_user()` so
+    /// `isd ssh host` just works against the operator's account on every host.
     #[arg(long = "principal")]
     pub principals: Vec<String>,
-    /// Free-form key-id baked into the cert. Surfaces in `auditd`
-    /// and `last` on the agent host. Defaults to
+    /// Free-form key-id baked into the cert.
+    ///
+    /// Surfaces in `auditd` and `last` on the agent host. Defaults to
     /// `operator@<hostname> <UTC ISO8601>`.
     #[arg(long)]
     pub comment: Option<String>,

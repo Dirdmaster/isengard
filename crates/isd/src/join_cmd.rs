@@ -22,9 +22,10 @@ pub struct JoinArgs {
     #[arg(long)]
     pub token: String,
 
-    /// Operator-facing host name to record on the new agent's host
-    /// row. This is the label rendered in `isd ssh hosts`, NOT the
-    /// agent's container hostname (which is the Docker short hash on
+    /// Operator-facing host name for the new agent's host row.
+    ///
+    /// This is the label rendered in `isd ssh hosts`, NOT the agent's
+    /// container hostname (which is the Docker short hash on
     /// docker-in-docker setups). When omitted, the target daemon's
     /// `docker info` name is used; when that is also empty the
     /// agent-reported value (container hash) is kept and the

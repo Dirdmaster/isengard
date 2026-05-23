@@ -45,13 +45,15 @@ pub struct CreateArgs {
     /// Agent hostname (resolved to host_id).
     #[arg(long, conflicts_with = "host_id")]
     pub host: Option<String>,
-    /// Upstream container or service name. Prompted via a fuzzy
-    /// picker over the running containers when omitted.
+    /// Upstream container or service name (prompts via picker when omitted).
+    ///
+    /// Opens a fuzzy picker over the running containers when omitted.
     #[arg(long)]
     pub service: Option<String>,
-    /// Upstream port. Auto-detected from the container's exposed
-    /// ports when omitted (single port wins; if multiple, the first
-    /// common HTTP-ish port wins; else docker's first reported port).
+    /// Upstream port (auto-detected from exposed ports when omitted).
+    ///
+    /// Auto-detection: single port wins; if multiple, the first common
+    /// HTTP-ish port wins; else docker's first reported port.
     #[arg(long)]
     pub port: Option<u16>,
     /// Upstream protocol (http or https).

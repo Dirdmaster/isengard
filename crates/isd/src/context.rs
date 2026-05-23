@@ -52,8 +52,9 @@ pub struct ShowArgs {
 pub struct CreateArgs {
     /// Context name.
     pub name: String,
-    /// Docker endpoint URL (e.g. `ssh://user@host`, `tcp://host:2375`,
-    /// `unix:///var/run/docker.sock`). Passed straight to
+    /// Docker endpoint URL (e.g. `ssh://user@host`, `tcp://host:2375`).
+    ///
+    /// Also accepts `unix:///var/run/docker.sock`. Passed straight to
     /// `docker context create --docker host=<url>`.
     #[arg(long)]
     pub docker: String,
