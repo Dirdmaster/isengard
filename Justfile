@@ -176,14 +176,14 @@ prod:
 # Deploy just the `hello` stack from examples/stack-toml/. Assumes a
 # controller is reachable and an `isd context` is selected.
 example-deploy-hello:
-    cd examples/stack-toml && isd stack up ./hello
+    cd examples/stack-toml && isd stack deploy ./hello
 
 # Deploy every stack in examples/stack-toml/ (currently hello + monitoring).
 # Note: the monitoring stack binds `grafana_admin_password`; create it
 # first with `isd secret set grafana_admin_password` or POST /stacks
 # returns 422.
 example-deploy:
-    cd examples/stack-toml && isd stack up --all
+    cd examples/stack-toml && isd stack deploy --all
 
 # === Smoke / demo (full controller + agent end-to-end on Docker) ===
 

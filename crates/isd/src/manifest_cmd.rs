@@ -2,7 +2,7 @@
 //! deployed stack's `stack.toml`.
 //!
 //! Before this subcommand, the manifest was a write-only artifact from
-//! the operator's view: `isd stack up` shipped it to the controller, but
+//! the operator's view: `isd stack deploy` shipped it to the controller, but
 //! there was no way to read it back or change it after the fact short
 //! of redeploying from a fresh local file. That stranded operators who
 //! lost the local copy (worktree blew away, machine swap, fleet handoff)
@@ -254,7 +254,7 @@ async fn fetch_manifest(session: &Session, stack_id: &str) -> Result<ManifestRes
     if status == reqwest::StatusCode::NO_CONTENT {
         return Err(anyhow!(
             "stack has no manifest (legacy compose-only stack); \
-             `isd stack up` from a stack.toml first to install one"
+             `isd stack deploy` from a stack.toml first to install one"
         ));
     }
     if status == reqwest::StatusCode::NOT_FOUND {

@@ -1,7 +1,7 @@
-//! `isd stack up --watch`: stream a deploy's progress back to the operator's
+//! `isd stack deploy --watch`: stream a deploy's progress back to the operator's
 //! terminal.
 //!
-//! Today `isd stack up` is fire-and-forget: the PUT or POST that ships the
+//! Today `isd stack deploy` is fire-and-forget: the PUT or POST that ships the
 //! compose returns the moment the controller has persisted the YAML, and
 //! the operator stares at a blinking cursor while the agent pulls images,
 //! creates containers, and reports state back. `--watch` keeps the isd
@@ -17,7 +17,7 @@
 //! state the bar is finished with a success / failure glyph + colour.
 //! Modeled on `docker compose up`.
 //!
-//! The intro line (`┌  isd stack up --watch  servarr`) and the closing
+//! The intro line (`┌  isd stack deploy --watch  servarr`) and the closing
 //! summary still come from cliclack so the connector chrome matches the
 //! rest of isd's UX.
 //!
@@ -838,7 +838,7 @@ pub fn print_outro(outcome: &WatchOutcome) {
 /// prints the outro. Wraps the result so callers can `?` it directly.
 pub async fn run_watch(session: &Session, stack_id: &str) -> Result<()> {
     let header = fetch_stack_header(session, stack_id).await?;
-    cliclack::intro(format!("isd stack up --watch  {}", header.stack_name))?;
+    cliclack::intro(format!("isd stack deploy --watch  {}", header.stack_name))?;
     cliclack::log::step(format!(
         "Watching deployment {} on {}",
         header.stack_id, header.host_label
