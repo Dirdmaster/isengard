@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use isengard_proto::pb::{ContainerInfo, ServiceInfo, StackInfo};
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::runtime::{ContainerState, ListFilter, RuntimeBackend};
@@ -26,7 +27,16 @@ use crate::runtime::{ContainerState, ListFilter, RuntimeBackend};
 /// the backend's native handle (bollard container id, wisp handle).
 /// Pre-0.18 callers that consume only `name`/`image`/`state`/`labels`
 /// are unaffected.
-#[derive(Debug, Clone)]
+///
+/// 2026-05-23: widened with the rich-detail fields (`ports`, `env`,
+/// `mounts`, `networks`, `restart_policy`, `command`, `entrypoint`,
+/// `working_dir`, `user`, `healthcheck`) that the controller needs to
+/// synthesize a `compose.yaml` for stacks the operator brought up
+/// outside isengard. List-only paths (the docker-summary fallback)
+/// leave these empty; the inspect-driven path
+/// [`enrich_snapshot_from_inspect`] populates them from a bollard
+/// `ContainerInspectResponse`.
+#[derive(Debug, Clone, Default)]
 pub struct ContainerSnapshot {
     /// Container name, leading slash already trimmed.
     pub name: String,
@@ -46,6 +56,82 @@ pub struct ContainerSnapshot {
     /// Exit code reported by the runtime (only set for `exited` /
     /// `dead`). None for everything else.
     pub exit_code: Option<i32>,
+    /// Host -> container port mappings. Empty when the list path didn't
+    /// inspect or no ports are published.
+    pub ports: Vec<PortMapping>,
+    /// Environment as `KEY=value` entries, as docker reports them.
+    /// Empty when the runtime didn't expose env (list-only path).
+    pub env: Vec<String>,
+    /// Bind / named volume / tmpfs mounts attached to the container.
+    pub mounts: Vec<MountSpec>,
+    /// Network names the container is attached to.
+    pub networks: Vec<String>,
+    /// Effective restart policy string (`no`, `always`, `unless-stopped`,
+    /// `on-failure`, `on-failure:N`). `None` when the runtime didn't
+    /// record one or it's the default empty value.
+    pub restart_policy: Option<String>,
+    /// `cmd` override the container was created with. `None` keeps the
+    /// image-baked command.
+    pub command: Option<Vec<String>>,
+    /// `entrypoint` override. `None` keeps the image-baked entrypoint.
+    pub entrypoint: Option<Vec<String>>,
+    /// Container working directory override, when set.
+    pub working_dir: Option<String>,
+    /// `USER` override, when set.
+    pub user: Option<String>,
+    /// Healthcheck declaration, when the container has one.
+    pub healthcheck: Option<HealthcheckSpec>,
+}
+
+/// One host-side port -> container-side port mapping, including the
+/// transport protocol. Mirrors the docker / compose `ports:` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortMapping {
+    /// Host interface IP. Empty string when bound to all interfaces.
+    pub host_ip: String,
+    /// Host port number.
+    pub host_port: u16,
+    /// Container port number.
+    pub container_port: u16,
+    /// Transport protocol: `tcp`, `udp`, `sctp`.
+    pub protocol: String,
+}
+
+/// One mount entry attached to a container. Distinct from the
+/// runtime-side `crate::runtime::MountSpec` (which describes what the
+/// agent wants to create); this shape describes what the runtime
+/// reports as currently attached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountSpec {
+    /// Mount kind: `bind`, `volume`, `tmpfs`.
+    pub kind: String,
+    /// Host-side path (bind), volume name (volume), or empty (tmpfs).
+    pub source: String,
+    /// In-container target path.
+    pub target: String,
+    /// Read-only when true.
+    pub read_only: bool,
+}
+
+/// Container healthcheck as the runtime reports it. Distinct from the
+/// runtime-side `crate::runtime::HealthcheckSpec` (which carries typed
+/// `Duration` values for the create path); this shape mirrors the wire
+/// vocabulary the synthesizer eventually emits and survives a JSON
+/// round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthcheckSpec {
+    /// Command argv. First element is typically `"CMD"` or `"CMD-SHELL"`.
+    pub test: Vec<String>,
+    /// Interval between probes in nanoseconds, as docker records it.
+    /// 0 means "use the image default".
+    pub interval_ns: i64,
+    /// Per-probe timeout in nanoseconds. 0 means "use the image default".
+    pub timeout_ns: i64,
+    /// Consecutive failures before the container is marked unhealthy.
+    /// 0 means "use the image default".
+    pub retries: i64,
+    /// Start grace period in nanoseconds. 0 means "use the image default".
+    pub start_period_ns: i64,
 }
 
 /// Query the [`RuntimeBackend`] for all containers
@@ -82,6 +168,7 @@ pub async fn list_container_snapshots_via(backend: &dyn RuntimeBackend) -> Vec<C
                 id: s.id,
                 created_at_ms,
                 exit_code: s.exit_code,
+                ..Default::default()
             }
         })
         .collect()
@@ -138,6 +225,7 @@ pub async fn list_container_snapshots() -> Vec<ContainerSnapshot> {
                 id,
                 created_at_ms,
                 exit_code: None,
+                ..Default::default()
             }
         })
         .collect()
@@ -340,6 +428,7 @@ pub fn derive_containers(snapshots: &[ContainerSnapshot], now_ms: i64) -> Vec<Co
             let state = container_state_to_str(&s.state).to_string();
             let status_message =
                 render_status_message(&state, s.created_at_ms, s.exit_code, now_ms);
+            let rich = build_rich(s);
             ContainerInfo {
                 runtime_container_id: s.id.clone(),
                 image: s.image.clone(),
@@ -351,9 +440,71 @@ pub fn derive_containers(snapshots: &[ContainerSnapshot], now_ms: i64) -> Vec<Co
                 service,
                 created_at_ms: s.created_at_ms,
                 observed_at_ms: now_ms,
+                rich,
             }
         })
         .collect()
+}
+
+/// Translate the agent-side rich fields on `ContainerSnapshot` into the
+/// wire-format `ContainerRich`. Returns `None` when the snapshot has no
+/// rich data (list-only path / legacy fallback), so the controller sees
+/// `rich = None` and skips the containers_rich upsert.
+fn build_rich(s: &ContainerSnapshot) -> Option<isengard_proto::pb::ContainerRich> {
+    use isengard_proto::pb::{
+        ContainerHealthcheck as ProtoHc, ContainerMount as ProtoMount,
+        ContainerPortMapping as ProtoPort, ContainerRich,
+    };
+    // "No rich data at all" check: nothing inspect-driven was filled in.
+    let empty = s.ports.is_empty()
+        && s.env.is_empty()
+        && s.mounts.is_empty()
+        && s.networks.is_empty()
+        && s.restart_policy.is_none()
+        && s.command.is_none()
+        && s.entrypoint.is_none()
+        && s.working_dir.is_none()
+        && s.user.is_none()
+        && s.healthcheck.is_none();
+    if empty {
+        return None;
+    }
+    Some(ContainerRich {
+        ports: s
+            .ports
+            .iter()
+            .map(|p| ProtoPort {
+                host_ip: p.host_ip.clone(),
+                host_port: u32::from(p.host_port),
+                container_port: u32::from(p.container_port),
+                protocol: p.protocol.clone(),
+            })
+            .collect(),
+        env: s.env.clone(),
+        mounts: s
+            .mounts
+            .iter()
+            .map(|m| ProtoMount {
+                kind: m.kind.clone(),
+                source: m.source.clone(),
+                target: m.target.clone(),
+                read_only: m.read_only,
+            })
+            .collect(),
+        networks: s.networks.clone(),
+        restart_policy: s.restart_policy.clone().unwrap_or_default(),
+        command: s.command.clone().unwrap_or_default(),
+        entrypoint: s.entrypoint.clone().unwrap_or_default(),
+        working_dir: s.working_dir.clone().unwrap_or_default(),
+        user_spec: s.user.clone().unwrap_or_default(),
+        healthcheck: s.healthcheck.as_ref().map(|hc| ProtoHc {
+            test: hc.test.clone(),
+            interval_ns: hc.interval_ns,
+            timeout_ns: hc.timeout_ns,
+            retries: hc.retries,
+            start_period_ns: hc.start_period_ns,
+        }),
+    })
 }
 
 /// Convenience: stamp `observed_at_ms` from the system clock. Splits
@@ -365,6 +516,165 @@ pub fn derive_containers_now(snapshots: &[ContainerSnapshot]) -> Vec<ContainerIn
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     derive_containers(snapshots, now_ms)
+}
+
+/// Populate the rich-detail fields (`ports`, `env`, `mounts`,
+/// `networks`, `restart_policy`, `command`, `entrypoint`,
+/// `working_dir`, `user`, `healthcheck`) on a snapshot from the bollard
+/// `ContainerInspectResponse` for the same container.
+///
+/// The agent's list path returns only the heartbeat-required bits;
+/// `compose synthesize` on the controller needs the full inspect view.
+/// Callers per heartbeat: fetch the snapshot via the trait, inspect once
+/// per container, hand both into this helper.
+///
+/// Tolerant of missing fields: a half-populated inspect response just
+/// leaves the corresponding snapshot field empty / `None`.
+pub fn enrich_snapshot_from_inspect(
+    snap: &mut ContainerSnapshot,
+    inspect: &bollard::secret::ContainerInspectResponse,
+) {
+    let cfg = inspect.config.as_ref();
+    let host_cfg = inspect.host_config.as_ref();
+    let net = inspect.network_settings.as_ref();
+
+    // Env: pass through verbatim (KEY=value entries).
+    snap.env = cfg.and_then(|c| c.env.clone()).unwrap_or_default();
+
+    // Command / entrypoint: pass through as-is (None when image default).
+    snap.command = cfg.and_then(|c| c.cmd.clone());
+    snap.entrypoint = cfg.and_then(|c| c.entrypoint.clone());
+    snap.working_dir = cfg
+        .and_then(|c| c.working_dir.clone())
+        .filter(|s| !s.is_empty());
+    snap.user = cfg.and_then(|c| c.user.clone()).filter(|s| !s.is_empty());
+
+    // Healthcheck: every duration is in nanoseconds in the docker API.
+    snap.healthcheck = cfg.and_then(|c| c.healthcheck.as_ref()).and_then(|hc| {
+        let test = hc.test.clone().unwrap_or_default();
+        if test.is_empty() {
+            // Bollard yields Test=["NONE"] when the operator explicitly
+            // disabled the healthcheck; preserve that signal.
+            return None;
+        }
+        Some(HealthcheckSpec {
+            test,
+            interval_ns: hc.interval.unwrap_or(0),
+            timeout_ns: hc.timeout.unwrap_or(0),
+            retries: hc.retries.unwrap_or(0),
+            start_period_ns: hc.start_period.unwrap_or(0),
+        })
+    });
+
+    // Restart policy: docker reports it as a name + optional retry
+    // count. Map to the compose-style string the controller stores
+    // (`always`, `unless-stopped`, `no`, `on-failure[:N]`).
+    snap.restart_policy = host_cfg
+        .and_then(|h| h.restart_policy.as_ref())
+        .and_then(|rp| rp.name.map(|n| (n, rp.maximum_retry_count)))
+        .and_then(|(name, retries)| match name {
+            bollard::secret::RestartPolicyNameEnum::ALWAYS => Some("always".to_string()),
+            bollard::secret::RestartPolicyNameEnum::UNLESS_STOPPED => {
+                Some("unless-stopped".to_string())
+            }
+            bollard::secret::RestartPolicyNameEnum::NO => Some("no".to_string()),
+            bollard::secret::RestartPolicyNameEnum::ON_FAILURE => match retries {
+                Some(n) if n > 0 => Some(format!("on-failure:{n}")),
+                _ => Some("on-failure".to_string()),
+            },
+            bollard::secret::RestartPolicyNameEnum::EMPTY => None,
+        });
+
+    // Networks: prefer NetworkSettings.networks (covers attached-after-
+    // create networks). Fall back to HostConfig.network_mode when no
+    // explicit attachments are recorded.
+    snap.networks = if let Some(nets) = net.and_then(|n| n.networks.as_ref()) {
+        let mut names: Vec<String> = nets.keys().cloned().collect();
+        names.sort();
+        names
+    } else if let Some(mode) = host_cfg.and_then(|h| h.network_mode.clone()) {
+        if mode.is_empty() {
+            Vec::new()
+        } else {
+            vec![mode]
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Ports: walk HostConfig.port_bindings to capture the host:container
+    // mapping. NetworkSettings.ports also covers it but only for the
+    // bindings that actually got published; HostConfig is the operator's
+    // declared intent.
+    snap.ports = Vec::new();
+    if let Some(bindings) = host_cfg.and_then(|h| h.port_bindings.as_ref()) {
+        let mut keys: Vec<&String> = bindings.keys().collect();
+        keys.sort();
+        for cport in keys {
+            let (container_port, protocol) = parse_port_proto(cport);
+            let Some(Some(binds)) = bindings.get(cport).map(|v| v.as_ref()) else {
+                continue;
+            };
+            for b in binds {
+                let host_port = b
+                    .host_port
+                    .as_deref()
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(0);
+                let host_ip = b.host_ip.clone().unwrap_or_default();
+                snap.ports.push(PortMapping {
+                    host_ip,
+                    host_port,
+                    container_port,
+                    protocol: protocol.to_string(),
+                });
+            }
+        }
+    }
+
+    // Mounts: walk inspect.mounts (the runtime-attached list). Distinct
+    // from HostConfig.binds (which is the operator's intent string).
+    snap.mounts = Vec::new();
+    if let Some(mounts) = inspect.mounts.as_ref() {
+        for m in mounts {
+            let kind = m
+                .typ
+                .as_ref()
+                .map(|t| match t {
+                    bollard::secret::MountPointTypeEnum::BIND => "bind",
+                    bollard::secret::MountPointTypeEnum::VOLUME => "volume",
+                    bollard::secret::MountPointTypeEnum::TMPFS => "tmpfs",
+                    bollard::secret::MountPointTypeEnum::NPIPE => "npipe",
+                    bollard::secret::MountPointTypeEnum::CLUSTER => "cluster",
+                    bollard::secret::MountPointTypeEnum::EMPTY => "bind",
+                })
+                .unwrap_or("bind")
+                .to_string();
+            let source = match kind.as_str() {
+                "volume" => m.name.clone().unwrap_or_default(),
+                _ => m.source.clone().unwrap_or_default(),
+            };
+            snap.mounts.push(MountSpec {
+                kind,
+                source,
+                target: m.destination.clone().unwrap_or_default(),
+                read_only: !m.rw.unwrap_or(true),
+            });
+        }
+    }
+}
+
+/// Parse a bollard port-binding key like `"80/tcp"` into `(80, "tcp")`.
+/// Keys without a slash collapse to `(<port>, "tcp")`.
+fn parse_port_proto(key: &str) -> (u16, &'static str) {
+    let (port_str, proto) = match key.split_once('/') {
+        Some((p, "udp")) => (p, "udp"),
+        Some((p, "sctp")) => (p, "sctp"),
+        Some((p, _)) => (p, "tcp"),
+        None => (key, "tcp"),
+    };
+    let port = port_str.parse::<u16>().unwrap_or(0);
+    (port, proto)
 }
 
 #[cfg(test)]
@@ -421,6 +731,7 @@ mod tests {
             id: format!("rt-{name}"),
             created_at_ms: 0,
             exit_code: None,
+            ..Default::default()
         }
     }
 
@@ -476,6 +787,7 @@ mod tests {
                 id: "rt-web".into(),
                 created_at_ms: 0,
                 exit_code: None,
+                ..Default::default()
             },
             ContainerSnapshot {
                 name: "homer".into(),
@@ -485,6 +797,7 @@ mod tests {
                 id: "rt-homer".into(),
                 created_at_ms: 0,
                 exit_code: None,
+                ..Default::default()
             },
         ];
 
@@ -515,6 +828,7 @@ mod tests {
             id: id.into(),
             created_at_ms,
             exit_code: None,
+            ..Default::default()
         }
     }
 
@@ -606,6 +920,7 @@ mod tests {
             id: "rt-bare".into(),
             created_at_ms: 0,
             exit_code: None,
+            ..Default::default()
         };
         let infos = derive_containers(&[bare], 1_700_000_000_000);
         assert_eq!(infos[0].stack, "");
@@ -624,6 +939,7 @@ mod tests {
             id: "rt-labelled".into(),
             created_at_ms: 0,
             exit_code: None,
+            ..Default::default()
         };
         let infos = derive_containers(&[labelled], 1_700_000_000_000);
         assert_eq!(infos[0].stack, "override-name");
@@ -639,8 +955,219 @@ mod tests {
             id: String::new(),
             created_at_ms: 0,
             exit_code: None,
+            ..Default::default()
         };
         let infos = derive_containers(&[idless], 1_700_000_000_000);
         assert!(infos.is_empty());
+    }
+
+    /// A representative `ContainerInspectResponse` maps to the expected
+    /// rich-detail fields on `ContainerSnapshot`. Locks the bollard ->
+    /// snapshot translation so a compose synthesizer downstream gets the
+    /// shape it expects.
+    #[test]
+    fn enrich_from_inspect_populates_rich_fields() {
+        use bollard::secret::{
+            ContainerConfig, ContainerInspectResponse, EndpointSettings, HealthConfig, HostConfig,
+            MountPoint, MountPointTypeEnum, NetworkSettings as BollardNetworkSettings, PortBinding,
+            RestartPolicy as BollardRestartPolicy, RestartPolicyNameEnum,
+        };
+
+        let mut port_bindings: std::collections::HashMap<String, Option<Vec<PortBinding>>> =
+            std::collections::HashMap::new();
+        port_bindings.insert(
+            "80/tcp".to_string(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some("8080".to_string()),
+            }]),
+        );
+        port_bindings.insert(
+            "53/udp".to_string(),
+            Some(vec![PortBinding {
+                host_ip: Some("127.0.0.1".to_string()),
+                host_port: Some("5353".to_string()),
+            }]),
+        );
+
+        let mut networks: std::collections::HashMap<String, EndpointSettings> =
+            std::collections::HashMap::new();
+        networks.insert("frontend".to_string(), EndpointSettings::default());
+        networks.insert("backend".to_string(), EndpointSettings::default());
+
+        let inspect = ContainerInspectResponse {
+            id: Some("abc123".into()),
+            name: Some("/web".into()),
+            config: Some(ContainerConfig {
+                image: Some("nginx:1.25".into()),
+                env: Some(vec!["FOO=bar".into(), "PATH=/usr/bin".into()]),
+                cmd: Some(vec!["nginx".into(), "-g".into(), "daemon off;".into()]),
+                entrypoint: Some(vec!["/docker-entrypoint.sh".into()]),
+                working_dir: Some("/srv".into()),
+                user: Some("nginx".into()),
+                healthcheck: Some(HealthConfig {
+                    test: Some(vec!["CMD".into(), "curl".into(), "-f".into(), "/".into()]),
+                    interval: Some(30_000_000_000),
+                    timeout: Some(5_000_000_000),
+                    retries: Some(3),
+                    start_period: Some(10_000_000_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            host_config: Some(HostConfig {
+                port_bindings: Some(port_bindings),
+                restart_policy: Some(BollardRestartPolicy {
+                    name: Some(RestartPolicyNameEnum::ON_FAILURE),
+                    maximum_retry_count: Some(5),
+                }),
+                ..Default::default()
+            }),
+            network_settings: Some(BollardNetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            mounts: Some(vec![
+                MountPoint {
+                    typ: Some(MountPointTypeEnum::BIND),
+                    source: Some("/host/data".into()),
+                    destination: Some("/data".into()),
+                    rw: Some(false),
+                    ..Default::default()
+                },
+                MountPoint {
+                    typ: Some(MountPointTypeEnum::VOLUME),
+                    name: Some("dbvol".into()),
+                    destination: Some("/var/lib/mysql".into()),
+                    rw: Some(true),
+                    ..Default::default()
+                },
+                MountPoint {
+                    typ: Some(MountPointTypeEnum::TMPFS),
+                    destination: Some("/run".into()),
+                    rw: Some(true),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let mut snap = ContainerSnapshot {
+            name: "web".into(),
+            image: "nginx:1.25".into(),
+            state: "running".into(),
+            id: "abc123".into(),
+            ..Default::default()
+        };
+        enrich_snapshot_from_inspect(&mut snap, &inspect);
+
+        // Env: passed through verbatim, both entries present.
+        assert_eq!(snap.env.len(), 2);
+        assert!(snap.env.contains(&"FOO=bar".to_string()));
+        assert!(snap.env.contains(&"PATH=/usr/bin".to_string()));
+
+        // Command + entrypoint: clone preserves order.
+        assert_eq!(
+            snap.command,
+            Some(vec![
+                "nginx".to_string(),
+                "-g".to_string(),
+                "daemon off;".to_string()
+            ])
+        );
+        assert_eq!(
+            snap.entrypoint,
+            Some(vec!["/docker-entrypoint.sh".to_string()])
+        );
+        assert_eq!(snap.working_dir.as_deref(), Some("/srv"));
+        assert_eq!(snap.user.as_deref(), Some("nginx"));
+
+        // Healthcheck: nanoseconds preserved.
+        let hc = snap.healthcheck.as_ref().expect("healthcheck populated");
+        assert_eq!(hc.test, vec!["CMD", "curl", "-f", "/"]);
+        assert_eq!(hc.interval_ns, 30_000_000_000);
+        assert_eq!(hc.timeout_ns, 5_000_000_000);
+        assert_eq!(hc.retries, 3);
+        assert_eq!(hc.start_period_ns, 10_000_000_000);
+
+        // Restart: on-failure with N -> "on-failure:N".
+        assert_eq!(snap.restart_policy.as_deref(), Some("on-failure:5"));
+
+        // Networks: alphabetised.
+        assert_eq!(snap.networks, vec!["backend", "frontend"]);
+
+        // Ports: two mappings (one tcp, one udp). Order is by sorted key.
+        assert_eq!(snap.ports.len(), 2);
+        let udp = snap.ports.iter().find(|p| p.protocol == "udp").unwrap();
+        assert_eq!(udp.host_ip, "127.0.0.1");
+        assert_eq!(udp.host_port, 5353);
+        assert_eq!(udp.container_port, 53);
+        let tcp = snap.ports.iter().find(|p| p.protocol == "tcp").unwrap();
+        assert_eq!(tcp.host_ip, "0.0.0.0");
+        assert_eq!(tcp.host_port, 8080);
+        assert_eq!(tcp.container_port, 80);
+
+        // Mounts: bind / volume / tmpfs all distinct, source picked
+        // correctly for volume (the volume name, not the host path).
+        assert_eq!(snap.mounts.len(), 3);
+        let bind = snap.mounts.iter().find(|m| m.kind == "bind").unwrap();
+        assert_eq!(bind.source, "/host/data");
+        assert_eq!(bind.target, "/data");
+        assert!(bind.read_only);
+        let vol = snap.mounts.iter().find(|m| m.kind == "volume").unwrap();
+        assert_eq!(vol.source, "dbvol");
+        assert_eq!(vol.target, "/var/lib/mysql");
+        assert!(!vol.read_only);
+        let tmpfs = snap.mounts.iter().find(|m| m.kind == "tmpfs").unwrap();
+        assert_eq!(tmpfs.source, "");
+        assert_eq!(tmpfs.target, "/run");
+    }
+
+    /// Restart policy variants map to the expected compose-style
+    /// strings, including the unset case (`EMPTY` -> `None`) and the
+    /// retry-less `on-failure` (no suffix).
+    #[test]
+    fn enrich_restart_policy_variants() {
+        use bollard::secret::{
+            ContainerInspectResponse, HostConfig, RestartPolicy as BollardRestartPolicy,
+            RestartPolicyNameEnum,
+        };
+
+        let mk = |name: RestartPolicyNameEnum, retries: Option<i64>| ContainerInspectResponse {
+            host_config: Some(HostConfig {
+                restart_policy: Some(BollardRestartPolicy {
+                    name: Some(name),
+                    maximum_retry_count: retries,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        for (name, retries, expected) in [
+            (RestartPolicyNameEnum::ALWAYS, None, Some("always")),
+            (
+                RestartPolicyNameEnum::UNLESS_STOPPED,
+                None,
+                Some("unless-stopped"),
+            ),
+            (RestartPolicyNameEnum::NO, None, Some("no")),
+            (RestartPolicyNameEnum::ON_FAILURE, None, Some("on-failure")),
+            (
+                RestartPolicyNameEnum::ON_FAILURE,
+                Some(0),
+                Some("on-failure"),
+            ),
+            (RestartPolicyNameEnum::EMPTY, None, None),
+        ] {
+            let inspect = mk(name, retries);
+            let mut snap = ContainerSnapshot::default();
+            enrich_snapshot_from_inspect(&mut snap, &inspect);
+            assert_eq!(
+                snap.restart_policy.as_deref(),
+                expected,
+                "name={name:?} retries={retries:?}"
+            );
+        }
     }
 }

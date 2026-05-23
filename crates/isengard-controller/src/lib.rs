@@ -10,6 +10,7 @@ pub mod bus;
 pub mod ca;
 pub mod cloudflare;
 pub mod compose_broker;
+pub mod compose_synthesize;
 pub mod config;
 pub mod container_id;
 pub mod disconnect_monitor;
