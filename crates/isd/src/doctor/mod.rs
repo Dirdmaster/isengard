@@ -184,7 +184,24 @@ async fn resolve_compose(
         match crate::compose_cmd::fetch_compose_yaml_by_name(&session, t).await? {
             Some(yaml) => Ok((yaml, ComposeSource::Controller(t.to_string()))),
             None => Err(anyhow::anyhow!(
-                "stack {t:?} has no compose stored on the controller yet"
+                "stack {t:?} is tracked by the controller but has no compose stored.\n\
+                 \n\
+                 This usually means the stack was deployed outside isengard \
+                 (e.g. via `docker compose up` directly). The agent discovers it \
+                 from the `com.docker.compose.project={t}` label on the containers \
+                 but never received the compose YAML to audit.\n\
+                 \n\
+                 Two ways forward:\n\
+                 \n\
+                 - Point doctor at the local compose file you used:\n\
+                       isd stack doctor /path/to/your/compose.yaml\n\
+                 \n\
+                 - Or import the stack so future deploys + doctor runs see it:\n\
+                       isd stack deploy /path/to/your/compose.yaml\n\
+                 \n\
+                 Auto-synthesizing compose from running containers is on the roadmap \
+                 (needs the agent to ship ports/env/volumes); see\n\
+                 `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`."
             )),
         }
     } else {
