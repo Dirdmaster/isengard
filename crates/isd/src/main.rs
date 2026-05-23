@@ -10,6 +10,7 @@
 //!
 //!  - Containers: `ps`, `logs`, `stop`, `start`, `restart`, `rm`, `kill`.
 //!  - Stacks: `stack ls | ps | deploy | diff | edit | manifest`, `open`.
+//!    (`stack up` parses as a hidden alias for `stack deploy`.)
 //!  - Cluster: `hosts`, `service ls`, `route`, `secret`, `placement`,
 //!    `join`, `join-token`.
 //!  - Setup: `init`, `uninit`, `upgrade`, `context`, `update`.
@@ -140,7 +141,7 @@ enum Command {
     Info(info_cmd::InfoArgs),
     /// Self-update isd.
     Update(update_cmd::UpdateArgs),
-    /// Bring stacks up, diff, edit, and manage manifests.
+    /// Deploy, diff, edit stacks, and manage manifests.
     #[command(subcommand)]
     Stack(stack_cmd::StackCommand),
     /// List services across stacks.

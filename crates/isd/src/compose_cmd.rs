@@ -1,4 +1,4 @@
-//! `isd stack up` / `isd stack diff` / `isd stack edit` (v0.3d
+//! `isd stack deploy` / `isd stack diff` / `isd stack edit` (v0.3d
 //! compose-as-truth).
 //!
 //! Talk to the dashboard REST surface:
@@ -8,11 +8,11 @@
 //!  - `PUT  /api/v1/stacks/{id}/compose` (apply with optimistic concurrency)
 //!  - `POST /api/v1/stacks`              (create a fresh stack from compose)
 //!
-//! `isd stack up` is the operator's "ship this" verb: list stacks, find by
+//! `isd stack deploy` is the operator's "ship this" verb: list stacks, find by
 //! name, GET the current YAML for the diff, POST diff for the plan, prompt
 //! y/N, PUT the new YAML. If the stack doesn't exist yet, POST
 //! /stacks creates + writes in a single round-trip. `isd stack diff` stops
-//! at the plan render. `isd stack edit` is `isd stack up` driven from
+//! at the plan render. `isd stack edit` is `isd stack deploy` driven from
 //! `$EDITOR` against the controller's current YAML.
 //!
 //! Internal names still use the historical "deploy" terminology
@@ -31,7 +31,7 @@ use similar::TextDiff;
 use crate::session::Session;
 use crate::watch;
 
-/// CLI flags for `isd stack up`.
+/// CLI flags for `isd stack deploy`.
 #[derive(Debug, Args)]
 pub struct DeployArgs {
     /// Path to compose file or directory with stack.toml.
@@ -197,7 +197,7 @@ struct PutConflict {
     current_yaml: String,
 }
 
-/// Entry point for `isd stack up`. Classifies the args into one of three
+/// Entry point for `isd stack deploy`. Classifies the args into one of three
 /// modes (manifest, single compose, `--all`) and dispatches.
 ///
 /// # Errors
@@ -221,7 +221,7 @@ pub async fn run_deploy(args: DeployArgs, context: Option<&str>) -> Result<()> {
     }
 }
 
-/// Classify what `isd stack up` is being asked to do.
+/// Classify what `isd stack deploy` is being asked to do.
 #[derive(Debug)]
 pub enum DeployPlan {
     /// `--all`: walk immediate subdirs of `root` and deploy each
@@ -284,7 +284,7 @@ pub fn resolve_deploy_plan(args: &DeployArgs) -> Result<DeployPlan> {
                 })
             } else {
                 Err(anyhow!(
-                    "no stack.toml in cwd; pass a path or run `isd stack up` \
+                    "no stack.toml in cwd; pass a path or run `isd stack deploy` \
                      to deploy a single compose file"
                 ))
             }
@@ -351,8 +351,8 @@ fn resolve_positional_arg(p: &std::path::Path) -> Result<DeployPlan> {
     let display = p.display();
     Err(anyhow!(
         "no file or directory named {display:?} in cwd; \
-         did you mean `isd stack up ./{display}`? \
-         (bare names are not yet looked up as stack names by `isd stack up`; \
+         did you mean `isd stack deploy ./{display}`? \
+         (bare names are not yet looked up as stack names by `isd stack deploy`; \
          the path resolver expects a stack.toml, a compose file, or a \
          directory containing one)"
     ))
@@ -832,7 +832,7 @@ async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
 }
 
 /// Like [`resolve_stack_id`] but returns `Ok(None)` for the not-found
-/// case instead of erroring. Used by `isd stack up` so it can branch into
+/// case instead of erroring. Used by `isd stack deploy` so it can branch into
 /// the create-from-scratch path when the operator deploys a stack that
 /// isn't yet in the controller's inventory.
 async fn resolve_stack_id_opt(session: &Session, name: &str) -> Result<Option<String>> {
@@ -945,7 +945,7 @@ pub struct CreateStackManifestBody {
 /// names without an extra round-trip.
 /// POST a stack with the full manifest bundle (compose, TOML, secrets,
 /// hooks). Replaces the manifest-less `create_stack` path when
-/// `isd stack up` runs against a `stack.toml`.
+/// `isd stack deploy` runs against a `stack.toml`.
 async fn create_stack_with_manifest(
     session: &Session,
     body: &CreateStackManifestBody,
@@ -973,7 +973,7 @@ async fn create_stack_with_manifest(
 
 /// Body for the JSON content-type
 /// variant of `PUT /api/v1/stacks/:id/compose`. Mirrors the controller's
-/// `PutComposeJsonBody` shape. Used by `isd stack up` so a second deploy
+/// `PutComposeJsonBody` shape. Used by `isd stack deploy` so a second deploy
 /// with manifest changes actually propagates, instead of silently
 /// dropping the new bindings.
 #[derive(Debug, Serialize)]
@@ -1320,7 +1320,7 @@ mod tests {
         .unwrap();
         // Pass the directory path (not a bare-name resolved from cwd,
         // since cwd shouldn't be mutated in unit tests). The dir-probe
-        // path is what `isd stack up hello` exercises when `hello` is in
+        // path is what `isd stack deploy hello` exercises when `hello` is in
         // cwd: PathBuf::from("hello").is_dir() takes the same branch.
         let plan = resolve_deploy_plan(&args_with_path(Some(stack_dir))).unwrap();
         assert!(matches!(plan, DeployPlan::Manifest { .. }));

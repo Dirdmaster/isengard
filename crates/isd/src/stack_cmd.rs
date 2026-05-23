@@ -2,7 +2,7 @@
 //!
 //! Step 6. The pre-0.18 surface had no `isd stack` namespace:
 //! stack enumeration was buried inside the joined `isd ps` view and the
-//! verbs (`up`, `diff`, `edit`, `manifest`) lived at the top level
+//! verbs (`deploy`, `diff`, `edit`, `manifest`) lived at the top level
 //! with no shared parent. This module gives stacks their own namespace.
 //!
 //! - `isd stack ls`: one row per stack, with services and hosts counts
@@ -10,7 +10,7 @@
 //!   `GET /api/v1/services` and joins client-side.
 //! - `isd stack ps <name>`: services in the named stack. Mirrors
 //!   `docker stack ps`.
-//! - `isd stack up`: bring a stack up from compose.yaml.
+//! - `isd stack deploy` (alias `up`): bring a stack up from compose.yaml.
 //! - `isd stack diff`: print the reconcile plan without applying.
 //! - `isd stack edit`: open compose.yaml in $EDITOR, apply on save.
 //! - `isd stack manifest`: view / edit a stack's stack.toml.
@@ -41,8 +41,9 @@ pub enum StackCommand {
     Ls(LsArgs),
     /// List services in a stack.
     Ps(PsArgs),
-    /// Bring a stack up from compose.yaml.
-    Up(DeployArgs),
+    /// Deploy a stack from compose.yaml. `up` is a hidden alias.
+    #[command(alias = "up")]
+    Deploy(DeployArgs),
     /// Show the reconcile plan for a compose.yaml.
     Diff(DiffArgs),
     /// Open compose.yaml in $EDITOR and apply on save.
@@ -162,7 +163,7 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
     match args.command {
         StackCommand::Ls(a) => run_ls(a, context).await,
         StackCommand::Ps(a) => run_ps(a, context).await,
-        StackCommand::Up(a) => crate::compose_cmd::run_deploy(a, context).await,
+        StackCommand::Deploy(a) => crate::compose_cmd::run_deploy(a, context).await,
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
         StackCommand::Manifest(cmd) => {
