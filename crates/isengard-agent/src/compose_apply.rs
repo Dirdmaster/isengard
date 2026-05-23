@@ -168,7 +168,7 @@ pub async fn list_running_for_stack(
 const APPLY_PLAN_CONCURRENCY: usize = 8;
 
 /// Apply each op in `plan` concurrently and return one outcome per op,
-/// in plan-declaration order. Up to [`APPLY_PLAN_CONCURRENCY`] ops run
+/// in plan-declaration order. Up to `APPLY_PLAN_CONCURRENCY` ops run
 /// in parallel. Failures don't short-circuit: the operator gets the
 /// full summary at the end.
 ///
@@ -419,7 +419,7 @@ fn merge_secret_targets(
 /// understands.
 ///
 /// Wisp arc: this is the inverse of
-/// [`crate::runtime::bollard_backend::spec_to_config`]. The compose
+/// `crate::runtime::bollard_backend::spec_to_config`. The compose
 /// pipeline historically built `bollard::Config<String>` directly from a
 /// `DesiredService`; threading the trait through reconcile_stack means
 /// emitting a [`ContainerCreateSpec`] here and letting each backend's
@@ -435,7 +435,7 @@ fn merge_secret_targets(
 ///   target paths; the backend turns each into a bind-mount of the
 ///   agent-materialised tmpfs path.
 /// - Compose port strings are parsed into [`PortSpec`] entries via
-///   [`parse_port_mapping`]; protocol defaults to TCP, host_ip is set
+///   `parse_port_mapping`; protocol defaults to TCP, host_ip is set
 ///   when the operator wrote `127.0.0.1:8080:80`.
 /// - `restart:` strings translate to [`SpecRestartPolicy`] (default `No`).
 /// - Labels gain the compose project + isengard.stack pair so a later

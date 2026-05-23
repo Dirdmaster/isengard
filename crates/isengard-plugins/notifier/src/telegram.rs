@@ -329,7 +329,7 @@ impl TelegramChannel {
 /// `(bot_token, chat_id, message_id)` and no full
 /// [`TelegramChannel`] instance.
 ///
-/// `api_base` defaults to [`DEFAULT_API_BASE`] when `None`. Tests
+/// `api_base` defaults to `DEFAULT_API_BASE` when `None`. Tests
 /// override it to a `wiremock::MockServer`.
 ///
 /// # Errors

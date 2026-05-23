@@ -3,7 +3,7 @@
 //! Wraps `reqwest::Client` with bearer-auth, a fixed 30s per-request
 //! timeout, and a uniform `Result<T>` shape. Every method posts to or
 //! reads from a URL of the form `<base>/accounts/<id>/...` or
-//! `<base>/zones/<id>/...` and decodes through the [`CfResponse`]
+//! `<base>/zones/<id>/...` and decodes through the `CfResponse`
 //! envelope.
 
 use isengard_core::error::{CoreError, Result};

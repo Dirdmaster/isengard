@@ -171,7 +171,7 @@ impl RegistryClient {
     /// Auth dance mirrors `head_digest`: try anonymous, retry with the
     /// resolved bearer/Basic challenge on 401. Pagination follows the
     /// `Link: <...>; rel="next"` header (Docker registry v2 convention).
-    /// Capped at [`MAX_TAGS_LIST_PAGES`] / [`MAX_TAGS_LIST_ENTRIES`] so a
+    /// Capped at `MAX_TAGS_LIST_PAGES` / `MAX_TAGS_LIST_ENTRIES` so a
     /// pathological registry can't run away with us.
     pub async fn list_tags(&self, image: &ImageRef) -> anyhow::Result<Vec<String>> {
         self.list_tags_with_scheme(image, "https").await

@@ -37,7 +37,7 @@ const WORKER_BATCH: i64 = 100;
 /// Parsed `[plugins.webhooks]` config block.
 ///
 /// Both knobs are optional; operators rarely override them. The
-/// defaults match [`WORKER_TICK`] and [`WORKER_BATCH`].
+/// defaults match `WORKER_TICK` and `WORKER_BATCH`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WebhooksConfig {
     /// Override the worker tick interval, in seconds.

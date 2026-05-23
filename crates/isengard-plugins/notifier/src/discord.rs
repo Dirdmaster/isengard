@@ -347,7 +347,7 @@ fn button_style_for(callback_data: &str) -> u8 {
 /// [`DiscordInteractive`] instance. Mirrors
 /// [`crate::telegram::edit_telegram_message_text`].
 ///
-/// `api_base` defaults to [`DEFAULT_API_BASE`] when `None`. Tests
+/// `api_base` defaults to `DEFAULT_API_BASE` when `None`. Tests
 /// override it to a `wiremock::MockServer`.
 ///
 /// # Errors

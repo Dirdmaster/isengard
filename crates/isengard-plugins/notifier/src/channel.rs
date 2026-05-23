@@ -178,7 +178,7 @@ impl<C: NotifyChannel> RateLimited<C> {
     /// Builds a limiter around `inner` with the supplied refill rate.
     ///
     /// `tokens_per_minute <= 0.0` falls back to
-    /// [`DEFAULT_TOKENS_PER_MINUTE`].
+    /// `DEFAULT_TOKENS_PER_MINUTE`.
     pub fn new(inner: C, tokens_per_minute: f64) -> Self {
         let tpm = if tokens_per_minute > 0.0 {
             tokens_per_minute

@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{error, info, warn};
 
-/// Maximum number of restarts allowed inside [`RESTART_WINDOW`] before
+/// Maximum number of restarts allowed inside `RESTART_WINDOW` before
 /// the supervisor gives up.
 const MAX_RESTARTS: u32 = 5;
 
-/// Rolling window over which restart attempts count against [`MAX_RESTARTS`].
+/// Rolling window over which restart attempts count against `MAX_RESTARTS`.
 const RESTART_WINDOW: Duration = Duration::from_secs(300);
 
 /// Verifies the `cloudflared` binary is on `PATH`.
@@ -53,7 +53,7 @@ pub async fn spawn(token: String) -> Result<Child> {
 /// Supervises the `cloudflared` subprocess.
 ///
 /// Loops: spawn, wait, restart with exponential backoff. The restart
-/// budget is [`MAX_RESTARTS`] attempts inside [`RESTART_WINDOW`]; once
+/// budget is `MAX_RESTARTS` attempts inside `RESTART_WINDOW`; once
 /// exceeded the supervisor logs and returns, leaving the tunnel down
 /// until the operator restarts the agent.
 ///

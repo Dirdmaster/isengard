@@ -258,7 +258,7 @@ fn container_state_to_str(state: &str) -> &str {
 
 /// Render the per-container `STATUS` column the way docker
 /// ps does. Inputs are the container's state vocabulary (post
-/// [`container_state_to_str`]), the unix-ms creation time (0 when the
+/// `container_state_to_str`), the unix-ms creation time (0 when the
 /// runtime didn't record one), the optional exit code, and the
 /// reference `now` (unix ms) used to compute "Up 5m".
 pub fn render_status_message(
