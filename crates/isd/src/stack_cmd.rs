@@ -48,6 +48,10 @@ pub enum StackCommand {
     Diff(DiffArgs),
     /// Open compose.yaml in $EDITOR and apply on save.
     Edit(EditArgs),
+    /// Audit a compose file for missing Isengard idioms.
+    ///
+    /// Read-only in v0.1; v0.2 ships the interactive fixer.
+    Doctor(crate::doctor::DoctorArgs),
     /// View and edit a stack's stack.toml.
     #[command(subcommand)]
     Manifest(ManifestCommand),
@@ -166,6 +170,7 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
         StackCommand::Deploy(a) => crate::compose_cmd::run_deploy(a, context).await,
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
+        StackCommand::Doctor(a) => crate::doctor::run(a).await,
         StackCommand::Manifest(cmd) => {
             crate::manifest_cmd::run(crate::manifest_cmd::ManifestArgs { command: cmd }, context)
                 .await
