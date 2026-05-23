@@ -10,6 +10,7 @@ pub mod backup_run;
 pub mod ca;
 pub mod container_hooks;
 pub mod containers;
+pub mod containers_rich;
 pub mod deployment;
 pub mod deployment_group;
 pub mod enrollment_token;
@@ -41,6 +42,10 @@ pub use container_hooks::{ContainerHooks, UpsertContainerHooks};
 pub use containers::{
     ContainerListFilter, ContainerRow, get_container, list_containers, mark_containers_removed,
     reap_removed_before, upsert_container,
+};
+pub use containers_rich::{
+    ContainerRichRow, RichHealthcheck, RichMount, RichPortMapping, get_container_rich,
+    list_container_rich_for_host, upsert_container_rich,
 };
 pub use deployment_group::{DeploymentGroup, DeploymentGroupState, InsertDeploymentGroup};
 pub use enrollment_token::{EnrollmentTokenRecord, TokenRole};

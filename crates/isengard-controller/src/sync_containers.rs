@@ -13,6 +13,9 @@
 
 use isengard_proto::pb::ContainerInfo as ProtoContainerInfo;
 use isengard_storage::containers::{ContainerRow, mark_containers_removed, upsert_container};
+use isengard_storage::containers_rich::{
+    ContainerRichRow, RichHealthcheck, RichMount, RichPortMapping, upsert_container_rich,
+};
 use isengard_storage::host::HostId;
 use sqlx::SqlitePool;
 
@@ -88,11 +91,76 @@ pub async fn process_heartbeat_containers(
         };
 
         upsert_container(pool, &row).await?;
+
+        // If the agent shipped the optional `rich` block, mirror it
+        // into containers_rich. Older agents (no rich block) skip this
+        // entirely: the FK from containers_rich.container_id back to
+        // containers(id) means the row would land in a vacuum anyway.
+        if let Some(rich) = info.rich.as_ref() {
+            let rich_row = ContainerRichRow {
+                container_id: id.clone(),
+                host_id,
+                ports: rich
+                    .ports
+                    .iter()
+                    .map(|p| RichPortMapping {
+                        host_ip: p.host_ip.clone(),
+                        host_port: clamp_u16(p.host_port),
+                        container_port: clamp_u16(p.container_port),
+                        protocol: p.protocol.clone(),
+                    })
+                    .collect(),
+                env: rich.env.clone(),
+                mounts: rich
+                    .mounts
+                    .iter()
+                    .map(|m| RichMount {
+                        kind: m.kind.clone(),
+                        source: m.source.clone(),
+                        target: m.target.clone(),
+                        read_only: m.read_only,
+                    })
+                    .collect(),
+                networks: rich.networks.clone(),
+                restart_policy: opt_string(&rich.restart_policy),
+                command: opt_vec(&rich.command),
+                entrypoint: opt_vec(&rich.entrypoint),
+                working_dir: opt_string(&rich.working_dir),
+                user_spec: opt_string(&rich.user_spec),
+                healthcheck: rich.healthcheck.as_ref().map(|hc| RichHealthcheck {
+                    test: hc.test.clone(),
+                    interval_ns: hc.interval_ns,
+                    timeout_ns: hc.timeout_ns,
+                    retries: hc.retries,
+                    start_period_ns: hc.start_period_ns,
+                }),
+            };
+            upsert_container_rich(pool, &rich_row).await?;
+        }
+
         alive_ids.push(id);
     }
 
     mark_containers_removed(pool, host_id, &alive_ids, server_now_seconds).await?;
     Ok(())
+}
+
+/// Saturating cast from the proto's `uint32` to `u16`. Out-of-range
+/// values (no realistic docker port is >65535) clamp to `u16::MAX`
+/// rather than wrapping; downstream storage tolerates the clamp.
+fn clamp_u16(v: u32) -> u16 {
+    if v > u16::MAX as u32 {
+        u16::MAX
+    } else {
+        v as u16
+    }
+}
+
+/// Collapse an empty `Vec<String>` to `None`. Proto3 has no way to
+/// distinguish "absent" from "empty" on a repeated field, so we treat
+/// "empty" as "operator did not override" (image default wins).
+fn opt_vec(v: &[String]) -> Option<Vec<String>> {
+    if v.is_empty() { None } else { Some(v.to_vec()) }
 }
 
 /// Collapses empty strings to `None` so the storage row stores NULL
@@ -140,6 +208,7 @@ mod tests {
             service: "web".into(),
             created_at_ms: 1_700_000_000_000,
             observed_at_ms: 1_700_000_300_000,
+            rich: None,
         }
     }
 
@@ -199,5 +268,95 @@ mod tests {
         let id = derive_container_id(&host_display, "rt-future");
         let row = get_container(pool, &id).await.unwrap().unwrap();
         assert_eq!(row.last_seen_at, 1_700_000_300);
+    }
+
+    /// An agent that ships a `rich` block on a `ContainerInfo` causes
+    /// the controller to populate `containers_rich` alongside the
+    /// slim `containers` row. Every list / scalar field round-trips.
+    #[tokio::test]
+    async fn rich_block_mirrors_into_containers_rich() {
+        use isengard_proto::pb::{
+            ContainerHealthcheck, ContainerMount, ContainerPortMapping, ContainerRich,
+        };
+        use isengard_storage::containers_rich::get_container_rich;
+
+        let (inv, host_id) = setup().await;
+        let pool = inv.pool();
+
+        let mut info = sample("rt-rich", "running");
+        info.rich = Some(ContainerRich {
+            ports: vec![ContainerPortMapping {
+                host_ip: "0.0.0.0".into(),
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".into(),
+            }],
+            env: vec!["FOO=bar".into()],
+            mounts: vec![ContainerMount {
+                kind: "volume".into(),
+                source: "dbvol".into(),
+                target: "/var/lib/mysql".into(),
+                read_only: false,
+            }],
+            networks: vec!["frontend".into()],
+            restart_policy: "always".into(),
+            command: vec!["nginx".into()],
+            entrypoint: Vec::new(),
+            working_dir: "/srv".into(),
+            user_spec: "nginx".into(),
+            healthcheck: Some(ContainerHealthcheck {
+                test: vec!["CMD".into(), "true".into()],
+                interval_ns: 1_000_000_000,
+                timeout_ns: 500_000_000,
+                retries: 2,
+                start_period_ns: 0,
+            }),
+        });
+
+        process_heartbeat_containers(pool, host_id, &[info], 1_700_000_300)
+            .await
+            .unwrap();
+
+        let host_display = host_id.to_string();
+        let cid = derive_container_id(&host_display, "rt-rich");
+        let rich = get_container_rich(pool, &cid).await.unwrap().unwrap();
+        assert_eq!(rich.ports.len(), 1);
+        assert_eq!(rich.ports[0].host_port, 8080);
+        assert_eq!(rich.env, vec!["FOO=bar".to_string()]);
+        assert_eq!(rich.mounts.len(), 1);
+        assert_eq!(rich.mounts[0].source, "dbvol");
+        assert_eq!(rich.networks, vec!["frontend".to_string()]);
+        assert_eq!(rich.restart_policy.as_deref(), Some("always"));
+        // Non-empty cmd survives as Some(vec).
+        assert_eq!(rich.command, Some(vec!["nginx".to_string()]));
+        // Empty entrypoint collapses to None ("image default").
+        assert!(rich.entrypoint.is_none());
+        assert_eq!(rich.working_dir.as_deref(), Some("/srv"));
+        assert_eq!(rich.user_spec.as_deref(), Some("nginx"));
+        let hc = rich.healthcheck.unwrap();
+        assert_eq!(hc.test, vec!["CMD", "true"]);
+        assert_eq!(hc.interval_ns, 1_000_000_000);
+    }
+
+    /// An agent that does NOT ship a `rich` block leaves
+    /// `containers_rich` untouched. Older agents stay invisible to the
+    /// rich-row table.
+    #[tokio::test]
+    async fn no_rich_block_skips_containers_rich() {
+        use isengard_storage::containers_rich::get_container_rich;
+
+        let (inv, host_id) = setup().await;
+        let pool = inv.pool();
+
+        // `sample` already sets rich = None.
+        let info = sample("rt-thin", "running");
+        process_heartbeat_containers(pool, host_id, &[info], 1_700_000_300)
+            .await
+            .unwrap();
+
+        let host_display = host_id.to_string();
+        let cid = derive_container_id(&host_display, "rt-thin");
+        let rich = get_container_rich(pool, &cid).await.unwrap();
+        assert!(rich.is_none());
     }
 }

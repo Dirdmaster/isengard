@@ -313,6 +313,84 @@ message ContainerInfo {
   // uses min(server_now, observed_at_ms / 1000) for last_seen_at so a
   // wildly skewed agent clock can't bias staleness.
   int64  observed_at_ms       = 10;
+  // Optional rich-detail block carrying the bits a compose
+  // synthesizer needs: ports, env, mounts, networks, restart, command,
+  // entrypoint, working_dir, user, healthcheck. Older agents leave
+  // this unset; older controllers ignore unknown fields. Populated by
+  // inspect-driven agents on hosts running the `containers_rich_v1`
+  // capability.
+  optional ContainerRich rich = 11;
+}
+
+// Rich-detail block riding alongside ContainerInfo on heartbeats so the
+// controller can synthesize a `compose.yaml` for stacks the operator
+// brought up outside isengard. All fields are inspect-derived;
+// list-only agents (older releases) leave this entire message unset.
+message ContainerRich {
+  // Host -> container port mappings.
+  repeated ContainerPortMapping ports        = 1;
+  // Environment as "KEY=value" entries as docker reports them.
+  repeated string               env          = 2;
+  // Bind / volume / tmpfs mounts attached to the container.
+  repeated ContainerMount       mounts       = 3;
+  // Network names the container is attached to.
+  repeated string               networks     = 4;
+  // Effective restart policy string: `no`, `always`, `unless-stopped`,
+  // `on-failure`, `on-failure:N`. Empty when the runtime did not
+  // record one.
+  string                        restart_policy = 5;
+  // `cmd` override the container was created with. Absent keeps the
+  // image-baked command. proto3 distinguishes "empty list" (operator
+  // explicitly cleared) from "absent" (image default) via the wrapping
+  // repeated; an empty list rides as no entries.
+  repeated string               command      = 6;
+  // `entrypoint` override. Empty keeps the image-baked entrypoint.
+  repeated string               entrypoint   = 7;
+  // Container working directory override. Empty means unset.
+  string                        working_dir  = 8;
+  // `USER` override. Empty means unset.
+  string                        user_spec    = 9;
+  // Healthcheck declaration, when the container has one.
+  optional ContainerHealthcheck healthcheck  = 10;
+}
+
+// One host:container port binding plus protocol.
+message ContainerPortMapping {
+  // Host interface IP. Empty string when bound to all interfaces.
+  string host_ip        = 1;
+  // Host port number.
+  uint32 host_port      = 2;
+  // Container port number.
+  uint32 container_port = 3;
+  // Transport protocol: `tcp`, `udp`, `sctp`.
+  string protocol       = 4;
+}
+
+// One mount entry attached to a container.
+message ContainerMount {
+  // Mount kind: `bind`, `volume`, `tmpfs`, `npipe`, `cluster`.
+  string kind      = 1;
+  // Host-side path (bind), volume name (volume), or empty (tmpfs).
+  string source    = 2;
+  // In-container target path.
+  string target    = 3;
+  // Read-only when true.
+  bool   read_only = 4;
+}
+
+// Container healthcheck. Durations are nanoseconds, matching docker's
+// inspect format. Zero means "use the image default".
+message ContainerHealthcheck {
+  // Command argv. First element is typically `CMD` or `CMD-SHELL`.
+  repeated string test            = 1;
+  // Interval between probes in nanoseconds.
+  int64           interval_ns     = 2;
+  // Per-probe timeout in nanoseconds.
+  int64           timeout_ns      = 3;
+  // Consecutive failures before unhealthy.
+  int64           retries         = 4;
+  // Start grace period in nanoseconds.
+  int64           start_period_ns = 5;
 }
 
 // Controller -> agent frame on the Sync stream.
