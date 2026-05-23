@@ -14,30 +14,18 @@
 //! get`, `NAME` for `isd secret rm`) and a list of row strings. The
 //! picker returns the picked string (or `Ok(None)` on Esc / Ctrl-C).
 
-use std::io::{Stdout, stdout};
+use std::io::Stdout;
 
 use anyhow::{Context as _, Result};
-use crossterm::{
-    cursor,
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt as _;
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::{
     Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, text::Text, widgets::Paragraph,
 };
 
+use crate::picker_term::{TermGuard, enter_raw_mode, install_panic_hook, picker_height};
 use crate::render::{Align, CellStyle, Column, InputRow, Table as RenderTable, render_to_lines};
-
-/// Compute the inline viewport height (rows) for `n_rows` source items.
-/// Mirrors `ssh::picker::picker_height` so the generic picker shares
-/// the same layout budget (chrome + filtered rows + divider + input).
-pub fn picker_height(n_rows: usize) -> u16 {
-    let raw = (n_rows as u16).saturating_add(6);
-    raw.clamp(8, 18)
-}
 
 /// Score one row against the filter query. Empty needle keeps every
 /// row in the original order (so the unfiltered list draws as the
@@ -110,8 +98,8 @@ pub async fn pick(
 ) -> Result<Option<String>> {
     install_panic_hook();
 
-    enable_raw_mode().context("enabling raw mode")?;
-    let backend = CrosstermBackend::new(stdout());
+    enter_raw_mode().context("enabling raw mode")?;
+    let backend = CrosstermBackend::new(std::io::stdout());
     let height = picker_height(rows.len());
     let opts = TerminalOptions {
         viewport: Viewport::Inline(height),
@@ -125,28 +113,6 @@ pub async fn pick(
     let _ = terminal.clear();
     drop(terminal);
     outcome
-}
-
-/// RAII: disable raw mode + restore cursor visibility on drop.
-struct TermGuard;
-
-impl Drop for TermGuard {
-    fn drop(&mut self) {
-        let mut out = stdout();
-        let _ = execute!(out, cursor::Show);
-        let _ = disable_raw_mode();
-    }
-}
-
-/// Restore the terminal in the panic path too.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let mut out = stdout();
-        let _ = execute!(out, cursor::Show);
-        let _ = disable_raw_mode();
-        previous(info);
-    }));
 }
 
 /// Drive the filter+pick event loop until the operator hits Enter or
@@ -436,15 +402,6 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn picker_height_clamps_to_eight_and_eighteen() {
-        assert_eq!(picker_height(0), 8);
-        assert_eq!(picker_height(2), 8);
-        assert_eq!(picker_height(3), 9);
-        assert_eq!(picker_height(12), 18);
-        assert_eq!(picker_height(100), 18);
-    }
 
     #[test]
     fn score_rows_empty_query_preserves_order() {
