@@ -31,6 +31,7 @@ pub struct LsArgs {
     #[arg(long, value_enum, default_value_t = crate::output::Format::Table)]
     pub format: crate::output::Format,
     /// Render the full 26-char ULID instead of the short suffix.
+    ///
     /// JSON output always carries the full id regardless of this flag.
     #[arg(long)]
     pub full_id: bool,

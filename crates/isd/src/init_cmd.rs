@@ -26,22 +26,24 @@ use clap::Args;
 /// CLI flags for `isd init`.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Tear down any existing isd-controller / isd-agent containers
-    /// before bringing up new ones. Preserves the isd-controller-state
-    /// docker volume (master key + SQLite kept). To wipe everything:
-    /// `docker volume rm isd-controller-state`.
+    /// Tear down any existing isd-controller / isd-agent before re-init.
+    ///
+    /// Preserves the isd-controller-state docker volume (master key +
+    /// SQLite kept). To wipe everything: `docker volume rm isd-controller-state`.
     #[arg(long)]
     pub force: bool,
 
-    /// Skip the local agent bootstrap (controller-only host). Default
-    /// is to bundle the agent, matching `docker swarm init` UX.
+    /// Skip the local agent bootstrap (controller-only host).
+    ///
+    /// Default is to bundle the agent, matching `docker swarm init` UX.
     #[arg(long)]
     pub no_agent: bool,
 
-    /// Operator-facing host name to record on the bundled agent's
-    /// host row. This is the label rendered in `isd ssh hosts`, NOT
-    /// the agent's container hostname (which is the Docker short
-    /// hash on docker-in-docker setups). When omitted, the daemon's
+    /// Operator-facing host name for the bundled agent's host row.
+    ///
+    /// This is the label rendered in `isd ssh hosts`, NOT the agent's
+    /// container hostname (which is the Docker short hash on
+    /// docker-in-docker setups). When omitted, the daemon's
     /// `docker info` name is used; when that is also empty the
     /// agent-reported value (container hash) is kept and the
     /// operator can override later via

@@ -76,16 +76,19 @@ async fn check_protection(
 /// CLI flags for `isd stop`.
 #[derive(Debug, Args)]
 pub struct StopArgs {
-    /// One or more container IDs, names, or index selectors (`2`,
-    /// `1-3,5`, mixed with literals).
+    /// One or more container IDs, names, or index selectors.
+    ///
+    /// Accepts selectors like `2`, `1-3,5`, mixed with literals.
     #[arg(required = true)]
     pub targets: Vec<String>,
-    /// Grace period in seconds before docker sends SIGKILL. Matches
-    /// `docker stop --time`.
+    /// Grace period in seconds before docker sends SIGKILL.
+    ///
+    /// Matches `docker stop --time`.
     #[arg(short = 't', long, default_value_t = 10)]
     pub time: i64,
-    /// Override the system-container protection (refuses on
-    /// io.isengard.role=controller|agent without this flag).
+    /// Override the system-container protection.
+    ///
+    /// Refuses on `io.isengard.role=controller|agent` without this flag.
     #[arg(long)]
     pub force_system: bool,
 }
@@ -144,11 +147,12 @@ pub struct RestartArgs {
     /// One or more container IDs, names, or index selectors.
     #[arg(required = true)]
     pub targets: Vec<String>,
-    /// Grace period in seconds before SIGKILL. Matches `docker restart --time`.
+    /// Grace period in seconds before SIGKILL (matches `docker restart --time`).
     #[arg(short = 't', long, default_value_t = 10)]
     pub time: i64,
-    /// Override the system-container protection (refuses on
-    /// io.isengard.role=controller|agent without this flag).
+    /// Override the system-container protection.
+    ///
+    /// Refuses on `io.isengard.role=controller|agent` without this flag.
     #[arg(long)]
     pub force_system: bool,
 }
@@ -181,10 +185,11 @@ pub struct RmArgs {
     /// Force-remove running containers (the `docker rm -f` form).
     #[arg(short = 'f', long)]
     pub force: bool,
-    /// Override the system-container protection (refuses on
-    /// io.isengard.role=controller|agent without this flag). Different
-    /// from `-f` / `--force` which only force-removes a running
-    /// container; this flag bypasses the role-label guard.
+    /// Override the system-container protection.
+    ///
+    /// Refuses on `io.isengard.role=controller|agent` without this flag.
+    /// Different from `-f` / `--force` which only force-removes a
+    /// running container; this flag bypasses the role-label guard.
     #[arg(long)]
     pub force_system: bool,
 }
@@ -220,16 +225,17 @@ pub struct KillArgs {
     /// One or more container IDs, names, or index selectors.
     #[arg(required = true)]
     pub targets: Vec<String>,
-    /// Signal to send. Matches `docker kill --signal`. Default SIGKILL.
+    /// Signal to send (matches `docker kill --signal`, default SIGKILL).
     #[arg(short = 's', long)]
     pub signal: Option<String>,
     /// Skip the confirmation prompt.
     #[arg(short = 'f', long)]
     pub force: bool,
-    /// Override the system-container protection (refuses on
-    /// io.isengard.role=controller|agent without this flag). Different
-    /// from `-f` / `--force` which only skips the confirm prompt; this
-    /// flag bypasses the role-label guard.
+    /// Override the system-container protection.
+    ///
+    /// Refuses on `io.isengard.role=controller|agent` without this flag.
+    /// Different from `-f` / `--force` which only skips the confirm
+    /// prompt; this flag bypasses the role-label guard.
     #[arg(long)]
     pub force_system: bool,
 }

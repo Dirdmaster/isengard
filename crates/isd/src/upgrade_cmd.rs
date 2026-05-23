@@ -33,12 +33,15 @@ const AGENT_IMAGE: &str = "ghcr.io/weavers-engineering/isengard-agent";
 /// CLI flags for `isd upgrade`.
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
-    /// Pin to a specific image tag. Default: re-pull the current tag
-    /// (refreshes a moving target like `:next` to the latest digest).
+    /// Pin to a specific image tag.
+    ///
+    /// Default: re-pull the current tag (refreshes a moving target
+    /// like `:next` to the latest digest).
     #[arg(long)]
     pub tag: Option<String>,
-    /// Skip the auto-backup before upgrade. Risks data loss if the
-    /// upgraded controller fails to come back up.
+    /// Skip the auto-backup before upgrade.
+    ///
+    /// Risks data loss if the upgraded controller fails to come back up.
     #[arg(long)]
     pub skip_backup: bool,
     /// Skip the confirm prompt.

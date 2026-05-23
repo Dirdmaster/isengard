@@ -29,8 +29,7 @@ use crate::ps;
 /// CLI flags for `isd logs`.
 #[derive(Debug, Args)]
 pub struct LogsArgs {
-    /// Container selector: #N from `isd ps`, container name, container ID,
-    /// or range like `0-3`.
+    /// Container selector (#N from `isd ps`, name, ID, or range like `0-3`).
     pub target: String,
     /// Follow log output.
     #[arg(short = 'f', long)]
