@@ -1,6 +1,6 @@
 //! v0.3d dashboard-side compose diff. Produces the same JSON shape the
 //! agent reports back through `compose_apply::reconcile_stack` so that
-//! the dashboard's "Apply preview" and `isd diff` can render a single
+//! the dashboard's "Apply preview" and `isd stack diff` can render a single
 //! consistent ops list.
 //!
 //! Why this lives in the dashboard crate: the agent reconciler pulls in

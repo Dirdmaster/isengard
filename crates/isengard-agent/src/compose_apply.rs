@@ -98,7 +98,7 @@ pub async fn reconcile_stack_with_stack_secrets(
 ) -> anyhow::Result<(ReconcilePlan, Vec<ApplyOutcome>)> {
     let desired = parse_compose(compose_yaml)?;
     // Fail loud at parse time if a service references an undeclared
-    // top-level secret. The dashboard / `isd diff` already caught this
+    // top-level secret. The dashboard / `isd stack diff` already caught this
     // for the common case, but the agent re-validates so a malformed
     // file written directly to disk can't slip through.
     desired.referenced_external_secrets()?;

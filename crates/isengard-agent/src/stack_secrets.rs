@@ -7,7 +7,7 @@
 //! secrets to mount into every container of the stack, but the watcher
 //! only sees the compose YAML. Pulling the list back out of the
 //! persisted manifest keeps the watcher self-contained: any reconcile
-//! (controller WriteCompose, hand edit, `isd deploy`) sees the same
+//! (controller WriteCompose, hand edit, `isd stack up`) sees the same
 //! stack-level secrets.
 //!
 //! The agent does NOT validate the full manifest here. The dashboard +

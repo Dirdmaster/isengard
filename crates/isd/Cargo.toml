@@ -68,13 +68,13 @@ similar.workspace = true
 tempfile.workspace = true
 
 # v0.5.2: cliclack drives both `isd update` (plan / confirm UX) and
-# `isd deploy --watch` (intro / outro chrome). Same renderer the
+# `isd stack up --watch` (intro / outro chrome). Same renderer the
 # `isengard init` wizard uses for visual consistency.
 cliclack.workspace = true
 # `isd route add` wizard: fuzzy-substring picker over the running
 # containers + Text/CustomType prompts for hostname/port.
 inquire.workspace = true
-# v0.5.3: `isd deploy --watch` renders one in-place progress line per
+# v0.5.3: `isd stack up --watch` renders one in-place progress line per
 # service (docker-compose-up style) via indicatif MultiProgress. console
 # is the underlying terminal abstraction (cursor / size / NO_COLOR).
 # Versions pinned to whatever cliclack 0.5 already transitively pulls so

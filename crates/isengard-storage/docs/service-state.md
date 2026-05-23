@@ -2,7 +2,7 @@ Lifecycle state for a service as observed by an agent's heartbeat.
 
 v0.5.3 extended this enum beyond `Running` / `Stopped` / `Restarting` /
 `Unknown` so mid-startup states surface correctly in `isd ps` and
-`isd deploy --watch` instead of collapsing to `Unknown`. Specifically,
+`isd stack up --watch` instead of collapsing to `Unknown`. Specifically,
 wisp's `ContainerState::Created` (bundle staged + cgroup ready,
 process not yet forked) used to map to `Unknown`; now it lands on
 `Creating`.
