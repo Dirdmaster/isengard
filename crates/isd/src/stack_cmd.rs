@@ -170,7 +170,7 @@ pub async fn run(args: StackArgs, context: Option<&str>) -> Result<()> {
         StackCommand::Deploy(a) => crate::compose_cmd::run_deploy(a, context).await,
         StackCommand::Diff(a) => crate::compose_cmd::run_diff(a, context).await,
         StackCommand::Edit(a) => crate::compose_cmd::run_edit(a, context).await,
-        StackCommand::Doctor(a) => crate::doctor::run(a).await,
+        StackCommand::Doctor(a) => crate::doctor::run(a, context).await,
         StackCommand::Manifest(cmd) => {
             crate::manifest_cmd::run(crate::manifest_cmd::ManifestArgs { command: cmd }, context)
                 .await

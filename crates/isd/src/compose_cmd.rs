@@ -914,7 +914,7 @@ fn stack_from_path(path: &std::path::Path) -> Result<String> {
 }
 
 /// Resolve a stack name to its id, erroring when not found.
-async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
+pub(crate) async fn resolve_stack_id(session: &Session, name: &str) -> Result<String> {
     resolve_stack_id_opt(session, name)
         .await?
         .ok_or_else(|| anyhow!("stack {name:?} not found on controller"))
@@ -1128,6 +1128,23 @@ async fn put_compose_json(
     }
     let ok: PutOk = resp.json().await.context("decoding 200 body")?;
     Ok(ok)
+}
+
+/// Fetch the controller's current compose YAML for a stack by name.
+/// Errors when the stack doesn't exist. Returns `Ok(None)` when the
+/// stack exists but has no compose stored (legacy or freshly created).
+///
+/// # Errors
+///
+/// Returns `Err` on stack-not-found or HTTP failure.
+pub(crate) async fn fetch_compose_yaml_by_name(
+    session: &Session,
+    stack_name: &str,
+) -> Result<Option<String>> {
+    let stack_id = resolve_stack_id(session, stack_name).await?;
+    Ok(fetch_compose(session, &stack_id)
+        .await?
+        .map(|c| c.compose_yaml))
 }
 
 /// `GET /api/v1/stacks/<id>/compose`. 204 means the stack has no
