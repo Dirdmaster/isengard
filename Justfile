@@ -20,6 +20,25 @@ release:
 isd-build:
     cargo build --release -p isd
 
+# Install `isd` to ~/.cargo/bin/ from the current checkout. Use after a
+# pull on `next` or while iterating on a feature branch. `--force`
+# overwrites any existing isd binary; `--path` makes cargo build from
+# THIS checkout (not crates.io). Same warm cache as `isd-build`.
+isd-install:
+    cargo install --path crates/isd --force
+
+# Watch mode for local-first design iteration: auto-reinstall `isd` on
+# every source change in `crates/isd/`. Requires `cargo-watch`
+# (`cargo install cargo-watch`). Leave running in a side terminal; any
+# edit you save triggers a rebuild + install. The operator's running
+# `isd` invocations will pick up the new binary on the next launch.
+isd-dev:
+    @if ! command -v cargo-watch >/dev/null 2>&1; then \
+        echo "ERROR: cargo-watch not installed. Run: cargo install cargo-watch"; \
+        exit 1; \
+    fi
+    cargo watch -w crates/isd -x 'install --path crates/isd --force'
+
 # === Test ===
 
 # Run all tests with cargo-nextest if available, fallback to cargo test
