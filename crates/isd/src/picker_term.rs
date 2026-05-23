@@ -39,14 +39,26 @@ impl Drop for TermGuard {
     }
 }
 
-/// Enter raw mode. Pairs with [`TermGuard`] which restores on drop.
+/// Enter raw mode and hide the hardware cursor. Pairs with
+/// [`TermGuard`] which restores both on drop.
+///
+/// Hiding the cursor matters even when the picker is in NORMAL mode
+/// (where ratatui's `set_cursor_position` is intentionally skipped):
+/// crossterm's `show_cursor: false` only suppresses ratatui's tracked
+/// cursor, leaving the OS terminal cursor at its last position. Tools
+/// that capture the terminal (cheese, asciinema) render that stray
+/// glyph. Explicit `cursor::Hide` shuts it off for the whole
+/// inline-viewport lifetime.
 ///
 /// # Errors
 ///
 /// Returns the underlying crossterm error if the terminal refuses raw
 /// mode (no controlling TTY, OS denial).
 pub fn enter_raw_mode() -> std::io::Result<()> {
-    enable_raw_mode()
+    enable_raw_mode()?;
+    let mut out = stdout();
+    let _ = execute!(out, cursor::Hide);
+    Ok(())
 }
 
 /// Install a panic hook that restores the terminal before delegating
