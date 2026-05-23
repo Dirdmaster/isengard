@@ -105,8 +105,7 @@ pub async fn serve_https(local_port: u16) -> Result<()> {
 
 /// Tears down the serve config on port 443 (path `/`).
 ///
-/// See the limitation note on
-/// [`TailscaleAdapter::unexpose`](crate::TailscaleAdapter::unexpose) for
+/// See the limitation note on `TailscaleAdapter::unexpose` for
 /// why this is global per port.
 ///
 /// # Errors

@@ -110,7 +110,7 @@ const DEFAULT_TOKENS_PER_MINUTE: f64 = 10.0;
 /// Token bucket backing [`RateLimited`].
 ///
 /// Refill rate is `tokens_per_minute / 60` per second. Capacity equals
-/// the configured `tokens_per_minute`. [`try_acquire`] returns true and
+/// the configured `tokens_per_minute`. `try_acquire` returns true and
 /// debits a token when one is available, false otherwise.
 struct Bucket {
     /// Tokens currently available.

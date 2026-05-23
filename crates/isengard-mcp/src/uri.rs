@@ -14,7 +14,7 @@
 //! The scheme prefix is `isengard://`. Parsers reject anything that
 //! does not start with that prefix or that uses an unknown segment.
 
-/// Parsed [`isengard://`] URI.
+/// Parsed `isengard://` URI.
 ///
 /// Constructed by [`ResourceUri::parse`]. Each variant holds the
 /// pieces needed to look up the corresponding file in the embedded
@@ -33,7 +33,7 @@ pub enum ResourceUri {
 }
 
 impl ResourceUri {
-    /// Parse an [`isengard://`] URI into a typed variant.
+    /// Parse an `isengard://` URI into a typed variant.
     ///
     /// Returns `None` when the scheme is wrong or the segment count
     /// does not match any of the three URI families.
@@ -63,14 +63,14 @@ impl ResourceUri {
     }
 }
 
-/// Build the canonical [`isengard://docs/`] URI for a relative doc
+/// Build the canonical `isengard://docs/` URI for a relative doc
 /// path. The `.md` extension is stripped to match the URI scheme.
 pub fn build_docs_uri(rel_path: &str) -> String {
     let stem = rel_path.strip_suffix(".md").unwrap_or(rel_path);
     format!("isengard://docs/{stem}")
 }
 
-/// Build the canonical [`isengard://api/`] URI for a per-crate API
+/// Build the canonical `isengard://api/` URI for a per-crate API
 /// doc. `krate` is the workspace member directory name; `symbol` is
 /// the `.md` stem under that crate's `docs/`.
 pub fn build_api_uri(krate: &str, symbol: &str) -> String {
@@ -78,7 +78,7 @@ pub fn build_api_uri(krate: &str, symbol: &str) -> String {
     format!("isengard://api/{krate}/{stem}")
 }
 
-/// Build the canonical [`isengard://skill/`] URI for a playbook.
+/// Build the canonical `isengard://skill/` URI for a playbook.
 /// `name` is the `.md` stem under `skills/`.
 pub fn build_skill_uri(name: &str) -> String {
     let stem = name.strip_suffix(".md").unwrap_or(name);

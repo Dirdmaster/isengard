@@ -3,8 +3,8 @@
 //!
 //! Mirrors `docker swarm join`. Usage:
 //!
-//!   isd join --controller https://controller.local:9417 \
-//!     --token TKxxxx.yyyy --context <target>
+//!   isd join --controller <https://controller.local:9417> \
+//!     --token TKxxxx.yyyy --context TARGET
 //!
 //! The command runs on the operator's machine (Mac); the agent
 //! container lives on `--context`'s host (via the docker context).
@@ -15,10 +15,10 @@ use clap::Args;
 /// CLI flags for `isd join`.
 #[derive(Debug, Args)]
 pub struct JoinArgs {
-    /// Controller URL (e.g. https://controller.local:9417).
+    /// Controller URL (e.g. `https://controller.local:9417`).
     #[arg(long)]
     pub controller: String,
-    /// Packed join-token (TK<bytes>.<fingerprint>) from `isd join-token`.
+    /// Packed join-token (`TK<bytes>.<fingerprint>`) from `isd join-token`.
     #[arg(long)]
     pub token: String,
 
