@@ -43,21 +43,17 @@
 //! prompt glyph itself: dim in NORMAL, bold cyan in INSERT.
 
 use std::collections::HashSet;
-use std::io::{Stdout, stdout};
+use std::io::Stdout;
 
 use anyhow::{Context as _, Result};
-use crossterm::{
-    cursor,
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt as _;
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::{
     Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, text::Text, widgets::Paragraph,
 };
 
+use crate::picker_term::{TermGuard, enter_raw_mode, install_panic_hook, picker_height};
 use crate::render::{Align, CellStyle, Column, InputRow, Table as RenderTable, render_to_lines};
 
 /// Source bucket for a picker row. The picker prints the bucket label
@@ -214,16 +210,6 @@ fn relative_time(rfc3339: Option<&str>) -> String {
 /// Layout budget for the boxed picker: top border (1) + header (1) +
 /// header rule (1) + N data rows + divider (1) + input row (1) +
 /// bottom border (1) = N + 6. The input row sits INSIDE the box,
-/// under a `┴`-joined divider, so the whole picker reads as one
-/// rounded widget. Cap at 18 so a long fleet does not eat the
-/// operator's scrollback. Floor at 8 so the picker still has a
-/// parseable shape (chrome + at least two data slots) with an empty
-/// / tiny fleet.
-pub fn picker_height(n_rows: usize) -> u16 {
-    let raw = (n_rows as u16).saturating_add(6);
-    raw.clamp(8, 18)
-}
-
 /// Picker public entry. Opens an inline ratatui viewport at the bottom
 /// of the current shell, lets the operator filter + pick, returns the
 /// chosen hostname (or `Ok(None)` on Esc / Ctrl-C / empty filter
@@ -240,9 +226,8 @@ pub async fn pick(rows: Vec<PickerRow>) -> Result<Option<String>> {
     // restores the terminal.
     install_panic_hook();
 
-    enable_raw_mode().context("enabling raw mode")?;
-    let stdout_handle = stdout();
-    let backend = CrosstermBackend::new(stdout_handle);
+    enter_raw_mode().context("enabling raw mode")?;
+    let backend = CrosstermBackend::new(std::io::stdout());
     let height = picker_height(rows.len());
     let opts = TerminalOptions {
         viewport: Viewport::Inline(height),
@@ -259,33 +244,6 @@ pub async fn pick(rows: Vec<PickerRow>) -> Result<Option<String>> {
     let _ = terminal.clear();
     drop(terminal);
     outcome
-}
-
-/// RAII guard that disables raw mode and restores cursor visibility
-/// on drop. Stack-allocated so unwinding through the TUI still
-/// restores the terminal. No alt-screen exit needed: inline rendering
-/// never entered one.
-struct TermGuard;
-
-impl Drop for TermGuard {
-    fn drop(&mut self) {
-        let mut out = stdout();
-        let _ = execute!(out, cursor::Show);
-        let _ = disable_raw_mode();
-    }
-}
-
-/// Install a panic hook that restores the terminal before delegating
-/// to the previous hook. Called once per `pick`; subsequent calls
-/// chain so multiple TUIs in one process still restore correctly.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let mut out = stdout();
-        let _ = execute!(out, cursor::Show);
-        let _ = disable_raw_mode();
-        previous(info);
-    }));
 }
 
 /// Drive the filter+pick event loop until the operator hits Enter or
@@ -761,32 +719,6 @@ mod tests {
         assert_eq!(st.selected, None);
         // Selecting on an empty list returns None, doesn't panic.
         assert_eq!(st.selected_hostname(), None);
-    }
-
-    #[test]
-    fn picker_height_floor_at_eight_rows() {
-        // N + 6 clamped to (8, 18). Empty / tiny lists clamp to 8 so
-        // the chrome still has room to breathe.
-        assert_eq!(picker_height(0), 8);
-        assert_eq!(picker_height(1), 8);
-        assert_eq!(picker_height(2), 8);
-    }
-
-    #[test]
-    fn picker_height_scales_with_row_count() {
-        // N + 6 past the floor: 3 -> 9, 5 -> 11, 10 -> 16.
-        assert_eq!(picker_height(3), 9);
-        assert_eq!(picker_height(5), 11);
-        assert_eq!(picker_height(10), 16);
-        assert_eq!(picker_height(12), 18);
-    }
-
-    #[test]
-    fn picker_height_caps_at_eighteen() {
-        // Large fleets cap at 18 so we never eat the operator's
-        // scrollback.
-        assert_eq!(picker_height(50), 18);
-        assert_eq!(picker_height(1_000), 18);
     }
 
     #[test]
