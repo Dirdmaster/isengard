@@ -4,9 +4,9 @@
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use crate::session::Session;
 
 /// CLI flags for `isd hosts`.
@@ -85,34 +85,52 @@ async fn run_list(args: LsArgs, context: Option<&str>) -> Result<()> {
         crate::output::Format::Json => {
             println!("{}", serde_json::to_string_pretty(&rows)?);
         }
-        crate::output::Format::Table => {
-            let out = render_table(&rows);
-            println!("{}", out.trim_end());
-        }
+        crate::output::Format::Table => print_hosts_table(&rows),
     }
     Ok(())
 }
 
-/// Render the rows as a kubectl-style ASCII table. Empty input prints
-/// just the header so scripts piping through `wc -l` get a stable shape.
-fn render_table(rows: &[HostRow]) -> String {
-    let mut t = Table::new();
-    t.load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec!["HOST ID", "NAME", "ENROLLED"]);
-    for row in rows {
-        t.add_row(vec![
-            row.id.as_str(),
-            row.hostname.as_str(),
-            // RFC 3339 / ISO 8601 with seconds, no fractional millis;
-            // matches the rest of isd's timestamp surface.
-            row.enrolled_at
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
-                .as_str(),
-        ]);
+/// Column layout for `isd hosts ls`: `#` dim + right-aligned, `HOST ID`
+/// dim, `NAME` emphasized (bold), `ENROLLED` dim.
+fn hosts_columns() -> Vec<Column> {
+    vec![
+        Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+        Column::new("HOST ID", Align::Left, CellStyle::Dim, 7, 12),
+        Column::new("NAME", Align::Left, CellStyle::Emphasis, 1, 8),
+        Column::new("ENROLLED", Align::Left, CellStyle::Dim, 4, 20),
+    ]
+}
+
+/// Build the display rows: `#` plus the three data columns. Timestamp
+/// is RFC 3339 with seconds (matches the rest of isd's surface).
+fn build_rows(rows: &[HostRow]) -> Vec<Vec<String>> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| {
+            vec![
+                i.to_string(),
+                r.id.clone(),
+                r.hostname.clone(),
+                r.enrolled_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            ]
+        })
+        .collect()
+}
+
+/// Print the hosts table: rounded-corner boxed renderer on a TTY, plain
+/// tab-separated when stdout is redirected so scripts stay clean.
+fn print_hosts_table(rows: &[HostRow]) {
+    let table = Table {
+        columns: hosts_columns(),
+        rows: build_rows(rows),
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        println!("{}", render(&table, width, console::colors_enabled()));
+    } else {
+        println!("{}", render_plain(&table));
     }
-    t.to_string()
 }
 
 #[cfg(test)]
@@ -128,13 +146,21 @@ mod tests {
         }
     }
 
+    fn render_for_test(rows: &[HostRow]) -> String {
+        let table = Table {
+            columns: hosts_columns(),
+            rows: build_rows(rows),
+        };
+        render_plain(&table)
+    }
+
     #[test]
     fn table_contains_header_and_each_row() {
         let rows = vec![
             host_row("01KRA25CW1F263ETCNTJCGJJ59", "iso-fresh-1"),
             host_row("01KRA25YV3HFJG2EKEKW5KFKY3", "iso-fresh-2"),
         ];
-        let t = render_table(&rows);
+        let t = render_for_test(&rows);
         assert!(t.contains("HOST ID"), "header has HOST ID column");
         assert!(t.contains("NAME"), "header has NAME column");
         assert!(t.contains("ENROLLED"), "header has ENROLLED column");
@@ -149,7 +175,7 @@ mod tests {
 
     #[test]
     fn empty_input_still_renders_header() {
-        let t = render_table(&[]);
+        let t = render_for_test(&[]);
         assert!(t.contains("HOST ID"));
     }
 

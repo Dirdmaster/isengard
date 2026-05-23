@@ -7,9 +7,9 @@
 //! aren't a managed stack (e.g., routing the controller dashboard itself
 //! through Pingora) or for operators who prefer the imperative path.
 
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
@@ -156,25 +156,41 @@ async fn run_list(context: Option<&str>) -> Result<()> {
         println!("No routing rules.");
         return Ok(());
     }
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_content_arrangement(ContentArrangement::Disabled)
-        .set_header(vec![
-            "ID", "HOSTNAME", "UPSTREAM", "PORT", "TLS", "STATE", "SRC",
-        ]);
-    for e in &entries {
-        table.add_row(vec![
-            e.id.to_string(),
-            e.public_hostname.clone(),
-            e.service_name.clone(),
-            e.container_port.to_string(),
-            e.tls_mode.clone(),
-            e.state.clone(),
-            e.source.clone(),
-        ]);
+    let table = Table {
+        columns: vec![
+            Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+            Column::new("ID", Align::Right, CellStyle::Dim, 8, 2),
+            Column::new("HOSTNAME", Align::Left, CellStyle::Emphasis, 1, 12),
+            Column::new("UPSTREAM", Align::Left, CellStyle::Cyan, 4, 10),
+            Column::new("PORT", Align::Right, CellStyle::Plain, 7, 4),
+            Column::new("TLS", Align::Left, CellStyle::Plain, 6, 3),
+            Column::new("STATE", Align::Left, CellStyle::State, 5, 5),
+            Column::new("SRC", Align::Left, CellStyle::Dim, 3, 3),
+        ],
+        rows: entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                vec![
+                    i.to_string(),
+                    e.id.to_string(),
+                    e.public_hostname.clone(),
+                    e.service_name.clone(),
+                    e.container_port.to_string(),
+                    e.tls_mode.clone(),
+                    e.state.clone(),
+                    e.source.clone(),
+                ]
+            })
+            .collect(),
+    };
+    let term = console::Term::stdout();
+    if term.is_term() {
+        let width = term.size().1 as usize;
+        println!("{}", render(&table, width, console::colors_enabled()));
+    } else {
+        println!("{}", render_plain(&table));
     }
-    println!("{table}");
     Ok(())
 }
 

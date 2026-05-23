@@ -1,9 +1,9 @@
 //! `isd placement show`: print the controller's placement grid.
 
+use crate::render::{Align, CellStyle, Column, Table, render, render_plain};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
-use comfy_table::{ContentArrangement, Table, presets::NOTHING};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
@@ -112,28 +112,43 @@ async fn run_show(args: ShowArgs, context: Option<&str>) -> Result<()> {
                 eprintln!("no placements");
                 return Ok(());
             }
-            let mut table = Table::new();
-            table
-                .load_preset(NOTHING)
-                .set_content_arrangement(ContentArrangement::Dynamic);
-            table.set_header(vec![
-                "STACK", "SERVICE", "REPLICA", "HOST", "STATE", "ASSIGNED",
-            ]);
-            for row in &rows {
-                table.add_row(vec![
-                    row.stack_id
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "-".into()),
-                    row.service_name
-                        .clone()
-                        .unwrap_or_else(|| row.service_id.to_string()),
-                    row.replica_index.to_string(),
-                    row.hostname.clone().unwrap_or_else(|| row.host_id.clone()),
-                    row.state.clone(),
-                    row.assigned_at.to_rfc3339(),
-                ]);
+            let table = Table {
+                columns: vec![
+                    Column::new("#", Align::Right, CellStyle::Dim, 9, 1),
+                    Column::new("STACK", Align::Right, CellStyle::Dim, 8, 3),
+                    Column::new("SERVICE", Align::Left, CellStyle::Emphasis, 1, 8),
+                    Column::new("REPLICA", Align::Right, CellStyle::Plain, 7, 3),
+                    Column::new("HOST", Align::Left, CellStyle::Cyan, 4, 8),
+                    Column::new("STATE", Align::Left, CellStyle::State, 5, 5),
+                    Column::new("ASSIGNED", Align::Left, CellStyle::Dim, 3, 20),
+                ],
+                rows: rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        vec![
+                            i.to_string(),
+                            row.stack_id
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            row.service_name
+                                .clone()
+                                .unwrap_or_else(|| row.service_id.to_string()),
+                            row.replica_index.to_string(),
+                            row.hostname.clone().unwrap_or_else(|| row.host_id.clone()),
+                            row.state.clone(),
+                            row.assigned_at.to_rfc3339(),
+                        ]
+                    })
+                    .collect(),
+            };
+            let term = console::Term::stdout();
+            if term.is_term() {
+                let width = term.size().1 as usize;
+                println!("{}", render(&table, width, console::colors_enabled()));
+            } else {
+                println!("{}", render_plain(&table));
             }
-            println!("{table}");
         }
     }
     Ok(())
