@@ -30,7 +30,7 @@ ALTER TABLE stacks ADD COLUMN deploy_strategy TEXT
         OR deploy_strategy IN ('auto','blue-green','rolling','recreate'));
 
 -- Source fleet binding from the manifest. Nullable. Future phases use
--- this to filter `isd deploy --all` against the operator's saved
+-- this to filter `isd stack up --all` against the operator's saved
 -- contexts; phase 0.13 captures the value but does not consume it.
 ALTER TABLE stacks ADD COLUMN manifest_fleet TEXT;
 

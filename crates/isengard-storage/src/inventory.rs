@@ -464,7 +464,7 @@ impl Inventory {
     }
 
     /// Write the manifest body + metadata + deploy strategy
-    /// for `stack_id`. Idempotent; called every time `isd deploy` ships
+    /// for `stack_id`. Idempotent; called every time `isd stack up` ships
     /// a stack with a manifest. Pass `None` for `deploy_strategy` when
     /// the manifest doesn't pin one.
     pub async fn update_stack_manifest(

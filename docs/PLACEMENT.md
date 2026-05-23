@@ -201,9 +201,9 @@ auto-places the service. No operator action required.
 | `spread: N` but eligible hosts < N | Place onto all available; emit `placement.degraded`. (No degradation emitted when round-robin still satisfies count.) |
 | `where:` matches zero hosts | Stay Pending. Emit `placement.no_eligible_hosts`. Auto-place when a host becomes eligible (decision #3). |
 | Pinned `on:` host disappears | Stay Pending. Emit `placement.host_gone` (or `placement.unknown_host` if it never enrolled). No relocation. |
-| Mixed `spread:` + `on:` in same service | Hard parse error at `isd deploy`. Pick one. |
+| Mixed `spread:` + `on:` in same service | Hard parse error at `isd stack up`. Pick one. |
 | Mixed native verb + `deploy:` in same service | Hard parse error. |
-| Selector grammar error | Hard parse error at `isd deploy`. |
+| Selector grammar error | Hard parse error at `isd stack up`. |
 
 ## CLI
 
@@ -264,7 +264,7 @@ where = "role==worker"
 ```
 
 ```
-$ isd deploy ./compose.toml
+$ isd stack up ./compose.toml
 $ isd placement show
 STACK  SERVICE  REPLICA  HOST  STATE   ASSIGNED
 1      web      0        bob   active  ...
