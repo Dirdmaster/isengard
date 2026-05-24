@@ -636,33 +636,31 @@ impl Controller for ControllerService {
                             &inventory,
                             host_id,
                             &stacks_in_hb,
-                            // Rich-data lookup: the parallel
-                            // `agent-rich-container-snapshot` PR
-                            // adds a DAO that returns the subset of
-                            // container ids whose `containers_rich`
-                            // row exists. Until that lands, return
-                            // an empty list, which forces every
-                            // observation to MissingRichData (the
-                            // safe side: skip auto-adopt).
-                            |_ids: &[String]| async { Vec::<String>::new() },
-                            // Synth + write: same gating. The
-                            // synthesizer function is added by the
-                            // parallel `feat-controller-compose-synthesizer`
-                            // PR. Once both PRs land, this closure
-                            // calls `compose_synthesize::synthesize(...)`
-                            // and `inventory.set_stack_compose(...,
-                            // ComposeSource::AutoSynthesized)`, then
-                            // emits the `compose.auto_adopted` journal
-                            // event via `persist_and_broadcast`.
-                            |_stack_id, _stack_name, _rich_ids| async move {
-                                // No-op: this branch is unreachable
-                                // while the rich-data lookup above
-                                // always returns empty. Keeping the
-                                // closure signature in place keeps
-                                // `run_auto_adoption_pass` typed
-                                // exactly the way the followup PR
-                                // needs.
-                                Ok::<_, String>(())
+                            |ids: &[String]| {
+                                let inventory = &inventory;
+                                let ids = ids.to_vec();
+                                async move {
+                                    crate::compose_autoadopt_synth::rich_ids_with_data(
+                                        inventory, &ids,
+                                    )
+                                    .await
+                                }
+                            },
+                            |_stack_id, stack_name, rich_ids| {
+                                let inventory = &inventory;
+                                let journal = &journal;
+                                let bus = &bus;
+                                async move {
+                                    crate::compose_autoadopt_synth::synthesize_and_persist(
+                                        inventory,
+                                        journal,
+                                        bus,
+                                        host_id,
+                                        &stack_name,
+                                        &rich_ids,
+                                    )
+                                    .await
+                                }
                             },
                         )
                         .await;
