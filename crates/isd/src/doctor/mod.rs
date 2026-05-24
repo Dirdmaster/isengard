@@ -34,9 +34,26 @@ pub enum Severity {
     Warning,
 }
 
+/// Machine-readable target for a finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindingTarget {
+    /// A compose service by name.
+    Service { name: String },
+}
+
+/// Machine-readable fix data attached by a check for a registered fixer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixSpec {
+    /// Add `isengard.expose` metadata to a service.
+    ExposeService {
+        service: String,
+        inferred_port: Option<u16>,
+    },
+}
+
 /// A single audit finding. Carries an id for filtering / muting, a
-/// severity, the human-readable message, and an optional hint line
-/// the doctor verb can print as guidance.
+/// severity, the human-readable message, an optional hint line the
+/// doctor verb can print as guidance, and optional structured metadata.
 #[derive(Debug, Clone)]
 pub struct Finding {
     /// Stable id (e.g. `EXPOSE_HOST_MISSING`) for muting and tests.
@@ -49,6 +66,12 @@ pub struct Finding {
     /// verb prints this; the deploy pre-flight prints it too so the
     /// operator knows what `isd stack doctor` would offer.
     pub hint: Option<String>,
+    /// Optional structured target for fixer dispatch.
+    #[allow(dead_code)]
+    pub target: Option<FindingTarget>,
+    /// Optional structured fix data for fixer dispatch.
+    #[allow(dead_code)]
+    pub fix: Option<FixSpec>,
 }
 
 /// Walk every registered check against the parsed compose YAML and
