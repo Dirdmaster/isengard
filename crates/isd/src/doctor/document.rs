@@ -182,6 +182,34 @@ mod tests {
     }
 
     #[test]
+    fn toml_expose_fix_serializes_quoted_label_keys() {
+        let mut doc = ComposeDocument::parse_path(
+            Path::new("compose.toml"),
+            "[services.plex]\nimage = \"plex\"\nports = [\"32400:32400\"]\n",
+        )
+        .unwrap();
+        crate::doctor::fixers::expose_host::apply_expose_host(
+            &mut doc.value,
+            &crate::doctor::fixers::expose_host::ExposeHostInput {
+                service: "plex".into(),
+                hostname: "plex.vallee.casa".into(),
+                port: Some(32400),
+            },
+        )
+        .unwrap();
+        let rendered = doc.to_string().unwrap();
+        assert!(rendered.contains("[services.plex.labels]"), "{rendered}");
+        assert!(
+            rendered.contains("\"isengard.expose\" = \"plex.vallee.casa\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"isengard.expose.port\" = \"32400\""),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn yaml_null_cannot_serialize_to_toml() {
         let doc = ComposeDocument {
             syntax: ComposeSyntax::Toml,

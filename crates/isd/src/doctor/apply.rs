@@ -137,6 +137,15 @@ mod tests {
     }
 
     #[test]
+    fn manifest_with_one_compose_resolves_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack = tmp.path().join("stack.toml");
+        std::fs::write(&stack, "name = \"demo\"\ncompose = [\"compose.toml\"]\n").unwrap();
+        let resolved = resolve_manifest_compose_path(&stack).unwrap();
+        assert_eq!(resolved, tmp.path().join("compose.toml"));
+    }
+
+    #[test]
     fn manifest_with_multiple_compose_files_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("stack.toml");
