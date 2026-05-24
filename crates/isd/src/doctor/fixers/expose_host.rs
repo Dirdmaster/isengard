@@ -65,7 +65,7 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
         if map
             .keys()
             .filter_map(Value::as_str)
-            .any(|k| k.starts_with("isengard.expose"))
+            .any(is_expose_hostname_label_key)
         {
             return Ok(false);
         }
@@ -82,13 +82,11 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
         return Ok(true);
     }
     if let Some(seq) = labels.as_sequence_mut() {
-        if seq.iter().filter_map(Value::as_str).any(|entry| {
-            entry
-                .split('=')
-                .next()
-                .unwrap_or(entry)
-                .starts_with("isengard.expose")
-        }) {
+        if seq
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|entry| is_expose_hostname_label_key(entry.split('=').next().unwrap_or(entry)))
+        {
             return Ok(false);
         }
         seq.push(Value::String(format!("isengard.expose={}", input.hostname)));
@@ -101,6 +99,20 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
         "services.{}.labels must be a map or list",
         input.service
     ))
+}
+
+fn is_expose_hostname_label_key(key: &str) -> bool {
+    if key == "isengard.expose" {
+        return true;
+    }
+
+    let Some(name) = key.strip_prefix("isengard.expose.") else {
+        return false;
+    };
+
+    !name.is_empty()
+        && !name.contains('.')
+        && !matches!(name, "port" | "tls" | "health" | "adapter" | "auth")
 }
 
 /// Add or replace `isengard.expose.port` while preserving the hostname label.
@@ -217,6 +229,55 @@ mod tests {
             labels
                 .iter()
                 .any(|v| v.as_str() == Some("isengard.expose.port=80"))
+        );
+    }
+
+    #[test]
+    fn adds_hostname_when_only_port_label_exists() {
+        let mut v = parse("services:\n  web:\n    labels:\n      isengard.expose.port: \"8080\"\n");
+
+        let changed = apply_expose_host(
+            &mut v,
+            &ExposeHostInput {
+                service: "web".into(),
+                hostname: "web.test".into(),
+                port: None,
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        let labels = &v["services"]["web"]["labels"];
+        assert_eq!(labels["isengard.expose"].as_str(), Some("web.test"));
+        assert_eq!(labels["isengard.expose.port"].as_str(), Some("8080"));
+    }
+
+    #[test]
+    fn appends_hostname_to_label_list_with_only_port_label() {
+        let mut v =
+            parse("services:\n  web:\n    labels:\n      - \"isengard.expose.port=8080\"\n");
+
+        let changed = apply_expose_host(
+            &mut v,
+            &ExposeHostInput {
+                service: "web".into(),
+                hostname: "web.test".into(),
+                port: None,
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        let labels = v["services"]["web"]["labels"].as_sequence().unwrap();
+        assert!(
+            labels
+                .iter()
+                .any(|v| v.as_str() == Some("isengard.expose.port=8080"))
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|v| v.as_str() == Some("isengard.expose=web.test"))
         );
     }
 
