@@ -198,15 +198,26 @@ mod tests {
         )
         .unwrap();
         let rendered = doc.to_string().unwrap();
-        assert!(rendered.contains("[services.plex.labels]"), "{rendered}");
-        assert!(
-            rendered.contains("\"isengard.expose\" = \"plex.vallee.casa\""),
-            "{rendered}"
+        let parsed: toml::Value = toml::from_str(&rendered).unwrap();
+        let labels = parsed
+            .get("services")
+            .and_then(|v| v.get("plex"))
+            .and_then(|v| v.get("labels"))
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert_eq!(
+            labels
+                .get("isengard.expose")
+                .and_then(toml::Value::as_str),
+            Some("plex.vallee.casa")
         );
-        assert!(
-            rendered.contains("\"isengard.expose.port\" = \"32400\""),
-            "{rendered}"
+        assert_eq!(
+            labels
+                .get("isengard.expose.port")
+                .and_then(toml::Value::as_str),
+            Some("32400")
         );
+        assert!(labels.get("isengard").is_none(), "{rendered}");
     }
 
     #[test]
