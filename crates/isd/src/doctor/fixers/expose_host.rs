@@ -1,13 +1,24 @@
+//! Mutations for the `EXPOSE_HOST_MISSING` doctor fixer.
+
 use anyhow::Result;
 use serde_yaml::Value;
 
+/// Input required to add Isengard expose metadata to a service.
+#[allow(dead_code)]
+// Wired into command flow by a later doctor fixer task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExposeHostInput {
+    /// Compose service name to mutate.
     pub service: String,
+    /// Hostname to publish through `isengard.expose`.
     pub hostname: String,
+    /// Optional service port to publish through `isengard.expose.port`.
     pub port: Option<u16>,
 }
 
+/// Add expose labels to a compose service without overwriting existing expose metadata.
+#[allow(dead_code)]
+// Wired into command flow by a later doctor fixer task.
 pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result<bool> {
     let services = compose
         .get_mut("services")

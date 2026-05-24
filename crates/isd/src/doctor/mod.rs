@@ -23,8 +23,13 @@ use serde_yaml::Value;
 
 use crate::session::Session;
 
+/// Registered read-only doctor checks.
+#[allow(clippy::missing_docs_in_private_items)]
 pub mod checks;
+/// Compose document parsing and round-trip rendering.
+#[allow(clippy::missing_docs_in_private_items)]
 pub mod document;
+/// Registered doctor fixers.
 pub mod fixers;
 
 /// Severity of a [`Finding`]. v0.1 only emits `Warning`s; `Error`
@@ -40,7 +45,10 @@ pub enum Severity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindingTarget {
     /// A compose service by name.
-    Service { name: String },
+    Service {
+        /// Service name from the compose document.
+        name: String,
+    },
 }
 
 /// Machine-readable fix data attached by a check for a registered fixer.
@@ -48,7 +56,9 @@ pub enum FindingTarget {
 pub enum FixSpec {
     /// Add `isengard.expose` metadata to a service.
     ExposeService {
+        /// Service that should receive expose metadata.
         service: String,
+        /// Port inferred from compose metadata, when unambiguous.
         inferred_port: Option<u16>,
     },
 }
