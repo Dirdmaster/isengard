@@ -19,12 +19,13 @@
 
 use anyhow::{Context as _, Result};
 use clap::Args;
-use isengard_manifest::{ManifestError, StackManifest};
 use serde_yaml::Value;
 use std::path::{Path, PathBuf};
 
 use crate::session::Session;
 
+/// Compose apply targets for doctor fixes.
+pub mod apply;
 /// Registered read-only doctor checks.
 #[allow(clippy::missing_docs_in_private_items)]
 pub mod checks;
@@ -218,7 +219,7 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
         if path.exists() {
             let mut resolved = resolve_local_path(path)?;
             if resolved.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
-                resolved = resolve_stack_toml_compose_path(&resolved)?;
+                resolved = apply::resolve_manifest_compose_path(&resolved)?;
             }
             let body = std::fs::read_to_string(&resolved)
                 .with_context(|| format!("reading compose file {}", resolved.display()))?;
@@ -264,7 +265,7 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
     } else {
         let mut resolved = resolve_local_path(Path::new("."))?;
         if resolved.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
-            resolved = resolve_stack_toml_compose_path(&resolved)?;
+            resolved = apply::resolve_manifest_compose_path(&resolved)?;
         }
         let body = std::fs::read_to_string(&resolved)
             .with_context(|| format!("reading compose file {}", resolved.display()))?;
@@ -298,35 +299,6 @@ fn resolve_local_path(target: &Path) -> Result<PathBuf> {
         "compose path {} does not exist",
         target.display()
     ))
-}
-
-/// Resolve a `stack.toml` manifest to its single compose file.
-fn resolve_stack_toml_compose_path(stack_toml: &Path) -> Result<PathBuf> {
-    let body = std::fs::read_to_string(stack_toml)
-        .with_context(|| format!("reading stack manifest {}", stack_toml.display()))?;
-    let root = stack_toml
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("stack manifest {} has no parent", stack_toml.display()))?
-        .to_path_buf();
-    let manifest = match StackManifest::from_str(&body, root.clone()) {
-        Ok(manifest) => manifest,
-        Err(ManifestError::EmptyCompose) => {
-            return Err(stack_toml_compose_count_error(stack_toml));
-        }
-        Err(err) => return Err(err).with_context(|| format!("parsing {}", stack_toml.display())),
-    };
-    if manifest.compose.len() != 1 {
-        return Err(stack_toml_compose_count_error(stack_toml));
-    }
-    Ok(root.join(&manifest.compose[0]))
-}
-
-/// Build the operator guidance used when doctor cannot choose one compose file.
-fn stack_toml_compose_count_error(stack_toml: &Path) -> anyhow::Error {
-    anyhow::anyhow!(
-        "stack manifest {} must declare exactly one compose file for doctor; pass the specific compose file to `isd stack doctor`",
-        stack_toml.display()
-    )
 }
 
 #[cfg(test)]
@@ -411,10 +383,13 @@ services:
         let stack_toml = tmp.path().join("stack.toml");
         std::fs::write(&stack_toml, "name = \"demo\"\ncompose = []\n").unwrap();
 
-        let err = resolve_stack_toml_compose_path(&stack_toml).unwrap_err();
+        let err = apply::resolve_manifest_compose_path(&stack_toml).unwrap_err();
         let message = err.to_string();
-        assert!(message.contains("exactly one compose file"), "{message}");
-        assert!(message.contains("isd stack doctor"), "{message}");
+        assert!(
+            message.contains("pass the specific compose file"),
+            "{message}"
+        );
+        assert!(message.contains("doctor --fix"), "{message}");
     }
 
     #[test]
@@ -427,9 +402,12 @@ services:
         )
         .unwrap();
 
-        let err = resolve_stack_toml_compose_path(&stack_toml).unwrap_err();
+        let err = apply::resolve_manifest_compose_path(&stack_toml).unwrap_err();
         let message = err.to_string();
-        assert!(message.contains("exactly one compose file"), "{message}");
-        assert!(message.contains("isd stack doctor"), "{message}");
+        assert!(
+            message.contains("pass the specific compose file"),
+            "{message}"
+        );
+        assert!(message.contains("doctor --fix"), "{message}");
     }
 }
