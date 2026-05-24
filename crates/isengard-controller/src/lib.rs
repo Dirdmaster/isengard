@@ -10,6 +10,7 @@ pub mod bus;
 pub mod ca;
 pub mod cloudflare;
 pub mod compose_autoadopt;
+pub mod compose_autoadopt_synth;
 pub mod compose_autoadopt_wire;
 pub mod compose_broker;
 pub mod compose_synthesize;
