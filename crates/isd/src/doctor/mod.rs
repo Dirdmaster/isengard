@@ -173,6 +173,8 @@ struct ResolvedCompose {
     document: document::ComposeDocument,
     /// Source label used in CLI output.
     source: ComposeSource,
+    /// Controller session used to fetch this compose document.
+    session: Option<Session>,
 }
 
 impl ComposeSource {
@@ -202,7 +204,7 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
         return run_fix(args, context).await;
     }
 
-    let resolved = resolve_compose(args.target.as_deref(), context).await?;
+    let resolved = resolve_compose(args.target.as_deref(), context, false).await?;
     let findings = audit(&resolved.document.value);
 
     if findings.is_empty() {
@@ -230,7 +232,7 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
 
 /// Run the interactive doctor fixer loop for supported findings.
 async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
-    let mut resolved = resolve_compose(args.target.as_deref(), context).await?;
+    let mut resolved = resolve_compose(args.target.as_deref(), context, true).await?;
     let original = resolved.body.clone();
     let findings = audit(&resolved.document.value);
     let changed = apply_fix_inputs(&mut resolved.document, findings, prompt_hostname)?;
@@ -247,7 +249,10 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    match resolved.source {
+    let ResolvedCompose {
+        source, session, ..
+    } = resolved;
+    match source {
         ComposeSource::Local(path) => {
             apply::ApplyTarget::LocalFile { path }
                 .apply(&proposed, args.force)
@@ -255,13 +260,12 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
             println!("Applied fixes locally.");
         }
         ComposeSource::Controller { name, id, sha256 } => {
-            let session = Session::open(context).await?;
             apply::ApplyTarget::ControllerStack {
                 stack_id: id,
                 stack_name: name.clone(),
                 sha256,
             }
-            .apply_with_session(Some(&session), &proposed, args.force)
+            .apply_with_session(session.as_ref(), &proposed, args.force)
             .await?;
             println!(
                 "Applied fixes to stack {:?}. Run `isd stack doctor {}` to verify.",
@@ -356,7 +360,11 @@ fn confirm_apply() -> Result<bool> {
 /// 1. `None` → the first supported compose document in the cwd.
 /// 2. A value that resolves to a file or directory on disk → load locally.
 /// 3. Otherwise → treat as a stack name and fetch from the controller.
-async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<ResolvedCompose> {
+async fn resolve_compose(
+    target: Option<&str>,
+    context: Option<&str>,
+    fix_mode: bool,
+) -> Result<ResolvedCompose> {
     if let Some(t) = target {
         let path = std::path::Path::new(t);
         if path.exists() {
@@ -371,6 +379,7 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
                 body,
                 document,
                 source: ComposeSource::Local(resolved),
+                session: None,
             });
         }
         // Not on disk; assume stack name.
@@ -387,11 +396,10 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
                         id,
                         sha256: row.sha256,
                     },
+                    session: Some(session),
                 })
             }
-            None => Err(anyhow::anyhow!(
-                "stack {t:?} has no stored compose; doctor --fix cannot mutate missing compose"
-            )),
+            None => Err(missing_controller_compose_message(t, fix_mode)),
         }
     } else {
         let mut resolved = resolve_local_path(Path::new("."))?;
@@ -405,8 +413,38 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
             body,
             document,
             source: ComposeSource::Local(resolved),
+            session: None,
         })
     }
+}
+
+/// Build the missing-compose guidance for read-only and fix doctor modes.
+fn missing_controller_compose_message(stack_name: &str, fix_mode: bool) -> anyhow::Error {
+    let fix_line = if fix_mode {
+        "\n\ndoctor --fix cannot mutate missing compose."
+    } else {
+        ""
+    };
+    anyhow::anyhow!(
+        "stack {stack_name:?} is tracked by the controller but has no compose stored.{fix_line}\n\
+         \n\
+         This usually means the stack was deployed outside isengard \
+         (e.g. via `docker compose up` directly). The agent discovers it \
+         from the `com.docker.compose.project={stack_name}` label on the containers \
+         but never received the compose YAML to audit.\n\
+         \n\
+         Two ways forward:\n\
+         \n\
+         - Point doctor at the local compose file you used:\n\
+               isd stack doctor /path/to/your/compose.yaml\n\
+         \n\
+         - Or import the stack so future deploys + doctor runs see it:\n\
+               isd stack deploy /path/to/your/compose.yaml\n\
+         \n\
+         Auto-synthesizing compose from running containers is on the roadmap \
+         (needs the agent to ship ports/env/volumes); see\n\
+         `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`."
+    )
 }
 
 /// Resolve a local path or directory into a concrete compose file.
@@ -506,6 +544,22 @@ services:
     }
 
     #[test]
+    fn missing_controller_compose_message_keeps_read_only_guidance() {
+        let message = missing_controller_compose_message("demo", false).to_string();
+        assert!(message.contains("stack \"demo\" is tracked by the controller"));
+        assert!(message.contains("isd stack doctor /path/to/your/compose.yaml"));
+        assert!(!message.contains("doctor --fix cannot mutate missing compose"));
+    }
+
+    #[test]
+    fn missing_controller_compose_message_explains_fix_limitation() {
+        let message = missing_controller_compose_message("demo", true).to_string();
+        assert!(message.contains("stack \"demo\" is tracked by the controller"));
+        assert!(message.contains("doctor --fix cannot mutate missing compose"));
+        assert!(message.contains("isd stack deploy /path/to/your/compose.yaml"));
+    }
+
+    #[test]
     fn local_directory_prefers_stack_then_toml_then_yaml() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("compose.yaml"), "services:\n").unwrap();
@@ -540,7 +594,7 @@ services:
         )
         .unwrap();
 
-        let resolved = resolve_compose(Some(tmp.path().to_str().unwrap()), None)
+        let resolved = resolve_compose(Some(tmp.path().to_str().unwrap()), None, false)
             .await
             .unwrap();
         let findings = audit(&resolved.document.value);

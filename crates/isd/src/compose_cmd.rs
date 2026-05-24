@@ -1180,16 +1180,13 @@ pub(crate) async fn put_compose(
     force: bool,
 ) -> Result<PutOk> {
     let controller_url = session.require_controller()?;
-    let mut url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
-    if force {
-        url.push_str("?force=true");
-    }
+    let url = compose_put_url(controller_url, stack_id, force);
     let mut req = session
         .client
         .put(&url)
         .header("Content-Type", "application/yaml")
         .body(body.to_string());
-    if !force && !expected_sha256.is_empty() {
+    if should_send_if_match(expected_sha256, force) {
         req = req.header("If-Match", expected_sha256);
     }
     let resp = req.send().await.with_context(|| format!("PUT {url}"))?;
@@ -1204,6 +1201,21 @@ pub(crate) async fn put_compose(
     }
     let ok: PutOk = resp.error_for_status()?.json().await?;
     Ok(ok)
+}
+
+/// Build the controller compose PUT URL for normal and forced writes.
+pub(crate) fn compose_put_url(controller_url: &str, stack_id: &str, force: bool) -> String {
+    let mut url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
+    if force {
+        url.push_str("?force=true");
+    }
+    url
+}
+
+/// Whether compose PUT should include optimistic concurrency through
+/// `If-Match` instead of force mode.
+fn should_send_if_match(expected_sha256: &str, force: bool) -> bool {
+    !force && !expected_sha256.is_empty()
 }
 
 /// Print a compact unified diff: skip equal lines, prefix
@@ -1294,6 +1306,25 @@ mod tests {
     fn stack_from_path_rejects_stdin() {
         let p = std::path::PathBuf::from("-");
         assert!(stack_from_path(&p).is_err());
+    }
+
+    #[test]
+    fn compose_put_url_adds_force_query_only_when_requested() {
+        assert_eq!(
+            compose_put_url("http://ctrl", "42", false),
+            "http://ctrl/api/v1/stacks/42/compose"
+        );
+        assert_eq!(
+            compose_put_url("http://ctrl", "42", true),
+            "http://ctrl/api/v1/stacks/42/compose?force=true"
+        );
+    }
+
+    #[test]
+    fn compose_put_uses_if_match_only_for_non_force_expected_sha() {
+        assert!(should_send_if_match("abc", false));
+        assert!(!should_send_if_match("abc", true));
+        assert!(!should_send_if_match("", false));
     }
 
     fn args_with_path(path: Option<PathBuf>) -> DeployArgs {
