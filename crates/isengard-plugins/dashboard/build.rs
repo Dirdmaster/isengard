@@ -8,7 +8,10 @@ use std::process::Command;
 use std::time::SystemTime;
 
 fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR")
+            .expect("Cargo must set CARGO_MANIFEST_DIR for build scripts"),
+    );
     let web_dir = manifest_dir.join("web");
     let output_index = web_dir.join(".output").join("public").join("index.html");
 

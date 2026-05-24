@@ -275,7 +275,12 @@ strip = true
 
 [profile.dev]
 opt-level = 0
-debug = true
+# Keep useful stack traces without storing full debugger metadata for every crate.
+debug = "line-tables-only"
+
+[profile.test]
+# Tests dominate local artifact churn; full debug info is rarely worth the disk.
+debug = "line-tables-only"
 
 # The profile that 'dist' will build with
 [profile.dist]
