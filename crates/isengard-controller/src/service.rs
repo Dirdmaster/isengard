@@ -628,7 +628,7 @@ impl Controller for ControllerService {
                         // in the parallel PRs, at which point the
                         // closures grow real bodies.
                         let stacks_in_hb = crate::compose_autoadopt_wire::group_containers_by_stack(
-                            &agent_hostname,
+                            host_id,
                             &hb.containers,
                         );
                         let _decisions = crate::compose_autoadopt::run_auto_adoption_pass(
