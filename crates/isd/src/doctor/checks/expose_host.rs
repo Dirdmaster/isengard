@@ -38,11 +38,6 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             continue;
         };
         let candidate_ports = http_ish_ports(svc);
-        let inferred_port = match candidate_ports.as_slice() {
-            [] => continue,
-            [port] => Some(*port),
-            _ => None,
-        };
         if has_expose_label(svc) {
             if let Some(port) = expose_port_label(svc) {
                 if port.parse::<u16>().is_err() {
@@ -85,6 +80,11 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             }
             continue;
         }
+        let inferred_port = match candidate_ports.as_slice() {
+            [] => continue,
+            [port] => Some(*port),
+            _ => None,
+        };
         out.push(Finding {
             id: "EXPOSE_HOST_MISSING",
             severity: Severity::Warning,
@@ -347,6 +347,23 @@ services:
     ports: ["32400:32400"]
     labels:
       isengard.expose: plex.vallee.casa
+      isengard.expose.port: nope
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_INVALID"));
+    }
+
+    #[test]
+    fn invalid_port_label_warns_even_without_candidate_ports() {
+        let v = parse(
+            r#"
+services:
+  custom:
+    image: custom
+    labels:
+      isengard.expose: custom.vallee.casa
       isengard.expose.port: nope
 "#,
         );
