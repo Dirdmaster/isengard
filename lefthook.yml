@@ -28,38 +28,20 @@
 # command in case other cargo subcommands grow git ops later.
 
 pre-push:
-  # Run sequentially so output is readable. All gates are fast (< 2 min total).
+  # Default push lane is intentionally light: catch obvious junk locally,
+  # let GitHub CI be the authoritative merge gate. Opt into the full local
+  # gate with `LEFTHOOK_FULL=1 git push` or `just ci-release`.
   parallel: false
   commands:
     fmt-check:
       run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo fmt --check
       tags: rust
 
-    clippy:
-      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo clippy --workspace --all-targets -- -D warnings
-      tags: rust
-
-    rustdoc:
-      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
-      tags: rust
-
-    test:
-      # Prefer nextest (faster, better output); fall back to cargo test.
-      run: |
-        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR sh -c '
-          if command -v cargo-nextest >/dev/null 2>&1; then
-            cargo nextest run --workspace
-          else
-            cargo test --workspace
-          fi
-        '
+    check:
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo check --workspace --all-targets
       tags: rust
 
     deny:
-      # cargo-deny MUST run locally: CI runs the same gate, and a silent
-      # local skip caused 3 red-CI pushes on 2026-04-30. If you don't have
-      # cargo-deny installed, run `just install-hooks` (it bootstraps it)
-      # or `cargo install cargo-deny`.
       run: |
         if ! command -v cargo-deny >/dev/null 2>&1; then
           echo "ERROR: cargo-deny is not installed."
@@ -70,26 +52,45 @@ pre-push:
         env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo deny check
       tags: rust
 
-    linux-mirror:
-      # Mac vs Linux divergence catches us repeatedly: cfg-gated unused
-      # imports, clippy lint differences, dashboard build env, tests
-      # that need docker.sock. Run the SAME gates inside the OrbStack
-      # `wisp` VM (Linux + matches CI's ubuntu-latest closely:
-      # docker.io installed, dockerd running) so we stop round-tripping
-      # through GitHub Actions to find Linux-only failures.
-      #
-      # VM bootstrap (one-time):
-      #   orb create ubuntu:noble wisp
-      #   orb -m wisp -u root bash -c 'apt update && apt install -y docker.io build-essential pkg-config libssl-dev curl'
-      #   orb -m wisp -u root bash -c 'systemctl enable --now docker && usermod -aG docker $(id -un 1000)'
-      #   orb -m wisp bash -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal'
-      #
-      # Skipped if OrbStack isn't installed or the `wisp` machine
-      # doesn't exist (lone-Mac contributors aren't blocked but also
-      # won't catch Linux-only issues; that risk is acceptable).
-      #
-      # Opt out for emergencies: LEFTHOOK_SKIP_LINUX_MIRROR=1 git push
+    full-clippy:
       run: |
+        if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
+          echo "full-clippy: skipped (set LEFTHOOK_FULL=1 for full local gate)"
+          exit 0
+        fi
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR cargo clippy --workspace --all-targets -- -D warnings
+      tags: rust
+
+    full-rustdoc:
+      run: |
+        if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
+          echo "full-rustdoc: skipped (set LEFTHOOK_FULL=1 for full local gate)"
+          exit 0
+        fi
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+      tags: rust
+
+    full-test:
+      run: |
+        if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
+          echo "full-test: skipped (set LEFTHOOK_FULL=1 for full local gate)"
+          exit 0
+        fi
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR sh -c '
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            cargo nextest run --workspace
+          else
+            cargo test --workspace
+          fi
+        '
+      tags: rust
+
+    linux-mirror:
+      run: |
+        if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
+          echo "linux-mirror: skipped (set LEFTHOOK_FULL=1 for full local gate)"
+          exit 0
+        fi
         if [ "${LEFTHOOK_SKIP_LINUX_MIRROR:-0}" = "1" ]; then
           echo "linux-mirror: skipped (LEFTHOOK_SKIP_LINUX_MIRROR=1)"
           exit 0
@@ -123,5 +124,8 @@ pre-push:
 #   LEFTHOOK=0 git push
 # (Don't make this a habit. The hooks exist for a reason.)
 #
-# Skip ONLY the Linux mirror (e.g., when wisp VM is unavailable):
-#   LEFTHOOK_SKIP_LINUX_MIRROR=1 git push
+# Run the full local gate:
+#   LEFTHOOK_FULL=1 git push
+#
+# Skip ONLY the Linux mirror when using the full gate:
+#   LEFTHOOK_FULL=1 LEFTHOOK_SKIP_LINUX_MIRROR=1 git push
