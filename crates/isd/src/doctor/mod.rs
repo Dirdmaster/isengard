@@ -24,6 +24,7 @@ use serde_yaml::Value;
 use crate::session::Session;
 
 pub mod checks;
+pub mod document;
 
 /// Severity of a [`Finding`]. v0.1 only emits `Warning`s; `Error`
 /// is reserved for future checks that would make the deploy fail
