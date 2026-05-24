@@ -206,9 +206,7 @@ mod tests {
             .and_then(toml::Value::as_table)
             .unwrap();
         assert_eq!(
-            labels
-                .get("isengard.expose")
-                .and_then(toml::Value::as_str),
+            labels.get("isengard.expose").and_then(toml::Value::as_str),
             Some("plex.vallee.casa")
         );
         assert_eq!(
