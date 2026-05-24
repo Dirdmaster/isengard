@@ -16,9 +16,20 @@ pub struct ExposeHostInput {
     pub port: Option<u16>,
 }
 
+/// Build expose-host fixer input from a doctor finding.
+pub fn input_from_finding(finding: &crate::doctor::Finding) -> Option<ExposeHostInput> {
+    let crate::doctor::FixSpec::ExposeService {
+        service,
+        inferred_port,
+    } = finding.fix.clone()?;
+    Some(ExposeHostInput {
+        service,
+        hostname: String::new(),
+        port: inferred_port,
+    })
+}
+
 /// Add expose labels to a compose service without overwriting existing expose metadata.
-#[allow(dead_code)]
-// Wired into command flow by a later doctor fixer task.
 pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result<bool> {
     let services = compose
         .get_mut("services")

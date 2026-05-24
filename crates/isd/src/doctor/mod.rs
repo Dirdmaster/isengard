@@ -129,6 +129,15 @@ pub fn print_warnings(findings: &[Finding]) {
 /// CLI flags for `isd stack doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
+    /// Interactively apply available fixes.
+    #[arg(long)]
+    pub fix: bool,
+    /// Skip final confirmation after printing the proposed diff.
+    #[arg(long)]
+    pub yes: bool,
+    /// Force local file writes where supported by the apply target.
+    #[arg(long)]
+    pub force: bool,
     /// Stack name (fetched from the controller) or a local path to a
     /// compose file or directory.
     ///
@@ -182,6 +191,10 @@ impl ComposeSource {
 /// Returns `Err` when the compose file / stack can't be located or
 /// when the document fails to parse.
 pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
+    if args.fix {
+        return run_fix(args, context).await;
+    }
+
     let resolved = resolve_compose(args.target.as_deref(), context).await?;
     let findings = audit(&resolved.document.value);
 
@@ -206,6 +219,107 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
         findings.len()
     );
     Ok(())
+}
+
+/// Run the interactive doctor fixer loop for supported findings.
+async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
+    let mut resolved = resolve_compose(args.target.as_deref(), context).await?;
+    let original = resolved.body.clone();
+    let findings = audit(&resolved.document.value);
+    let mut changed = false;
+
+    for finding in findings {
+        if finding.id != "EXPOSE_HOST_MISSING" {
+            continue;
+        }
+        let Some(mut input) = fixers::expose_host::input_from_finding(&finding) else {
+            continue;
+        };
+        input.hostname = prompt_hostname(&input.service)?;
+        changed |= fixers::expose_host::apply_expose_host(&mut resolved.document.value, &input)?;
+    }
+
+    if !changed {
+        println!("No fixes applied.");
+        return Ok(());
+    }
+
+    let proposed = resolved.document.to_string()?;
+    print_compact_diff(&original, &proposed);
+    if !args.yes && !confirm_apply()? {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    match resolved.source {
+        ComposeSource::Local(path) => {
+            apply::ApplyTarget::LocalFile { path }
+                .apply(&proposed, args.force)
+                .await?;
+            println!("Applied fixes locally.");
+        }
+        ComposeSource::Controller(_) => anyhow::bail!("controller apply lands in Task 7"),
+    }
+
+    Ok(())
+}
+
+/// Prompt for the hostname used by the expose-host fixer.
+fn prompt_hostname(service: &str) -> Result<String> {
+    let hostname = inquire::Text::new(&format!(
+        "Expose services.{service} through which hostname?"
+    ))
+    .with_validator(|input: &str| {
+        if input.trim().is_empty() {
+            Ok(inquire::validator::Validation::Invalid(
+                "hostname cannot be empty".into(),
+            ))
+        } else {
+            Ok(inquire::validator::Validation::Valid)
+        }
+    })
+    .prompt()
+    .map_err(|e| anyhow::anyhow!("hostname prompt cancelled: {e}"))?;
+
+    Ok(hostname.trim().to_string())
+}
+
+/// Print a compact diff of proposed fixes.
+fn print_compact_diff(current: &str, proposed: &str) {
+    let diff = similar::TextDiff::from_lines(current, proposed);
+    let mut wrote_anything = false;
+    for change in diff.iter_all_changes() {
+        let prefix = match change.tag() {
+            similar::ChangeTag::Delete => "-",
+            similar::ChangeTag::Insert => "+",
+            similar::ChangeTag::Equal => " ",
+        };
+        if matches!(change.tag(), similar::ChangeTag::Equal) {
+            continue;
+        }
+        wrote_anything = true;
+        print!("{prefix}{change}");
+    }
+    if !wrote_anything {
+        println!("(no textual changes)");
+    }
+}
+
+/// Confirm applying proposed fixes, refusing non-TTY prompts.
+fn confirm_apply() -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("no TTY for confirmation; pass --yes to apply fixes");
+    }
+    print!("Apply fixes? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    Ok(matches!(
+        buf.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Pick the compose document for the requested target.
@@ -304,6 +418,23 @@ fn resolve_local_path(target: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_args_parse_fix_yes_force() {
+        use clap::Parser;
+
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(flatten)]
+            args: DoctorArgs,
+        }
+
+        let w = Wrap::try_parse_from(["x", "--fix", "--yes", "--force", "servarr"]).unwrap();
+        assert!(w.args.fix);
+        assert!(w.args.yes);
+        assert!(w.args.force);
+        assert_eq!(w.args.target.as_deref(), Some("servarr"));
+    }
 
     #[test]
     fn audit_on_idiomatic_compose_returns_no_findings() {
