@@ -78,7 +78,7 @@ fn toml_to_json(value: toml::Value) -> Result<serde_json::Value> {
         toml::Value::Integer(i) => Json::Number(i.into()),
         toml::Value::Float(f) => serde_json::Number::from_f64(f)
             .map(Json::Number)
-            .unwrap_or(Json::Null),
+            .ok_or_else(|| anyhow!("non-finite TOML float is not supported in compose: {f}"))?,
         toml::Value::Boolean(b) => Json::Bool(b),
         toml::Value::Datetime(dt) => Json::String(dt.to_string()),
         toml::Value::Array(items) => {
@@ -96,7 +96,7 @@ fn toml_to_json(value: toml::Value) -> Result<serde_json::Value> {
 
 fn yaml_value_to_toml(value: &Value) -> Result<toml::Value> {
     Ok(match value {
-        Value::Null => toml::Value::String(String::new()),
+        Value::Null => return Err(anyhow!("null YAML values cannot be serialized to TOML")),
         Value::Bool(b) => toml::Value::Boolean(*b),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -156,5 +156,51 @@ mod tests {
         let rendered = doc.to_string().unwrap();
         assert!(rendered.contains("[services.web]"), "{rendered}");
         assert!(rendered.contains("image = \"nginx\""), "{rendered}");
+    }
+
+    #[test]
+    fn toml_dotted_label_key_stays_literal() {
+        let doc = ComposeDocument::parse_path(
+            Path::new("compose.toml"),
+            "[services.web]\nimage = \"nginx\"\n\n[services.web.labels]\n\"isengard.expose\" = \"web.test\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            doc.value["services"]["web"]["labels"]["isengard.expose"].as_str(),
+            Some("web.test")
+        );
+        let rendered = doc.to_string().unwrap();
+        assert!(rendered.contains("[services.web.labels]"), "{rendered}");
+        assert!(
+            rendered.contains("\"isengard.expose\" = \"web.test\""),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("[services.web.labels.isengard]"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn yaml_null_cannot_serialize_to_toml() {
+        let doc = ComposeDocument {
+            syntax: ComposeSyntax::Toml,
+            value: serde_yaml::from_str("services:\n  web:\n    labels:\n      maybe:\n").unwrap(),
+        };
+        let err = doc.to_string().unwrap_err().to_string();
+        assert!(err.contains("null"), "{err}");
+    }
+
+    #[test]
+    fn toml_non_finite_float_cannot_normalize_to_yaml_value() {
+        let result = ComposeDocument::parse_path(
+            Path::new("compose.toml"),
+            "[services.web]\nimage = \"nginx\"\nscale = nan\n",
+        );
+        let err = match result {
+            Ok(_) => panic!("expected non-finite float to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("non-finite"), "{err}");
     }
 }
