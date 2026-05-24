@@ -539,17 +539,34 @@ message WildcardCert {
 
 // Agent -> controller: container metadata snapshot.
 //
-// The label-driven router derives routing rules from these (e.g.
-// `isengard.proxy.host=blog.example.com`).
+// The label-driven router derives routing rules from these.
 message ContainerLabelsReport {
   // Runtime container id.
-  string              container_id   = 1;
+  string              container_id         = 1;
   // Container name.
-  string              container_name = 2;
+  string              container_name       = 2;
   // Image reference.
-  string              image          = 3;
+  string              image                = 3;
   // Full label map from the container's manifest.
-  map<string, string> labels         = 4;
+  map<string, string> labels               = 4;
+  // Agent-resolved route intents for `isengard.expose*` labels.
+  repeated LabelRouteIntent label_route_intents = 5;
+}
+
+// Agent-side interpretation of one `isengard.expose*` label rule.
+//
+// `name` is empty for the unnamed `isengard.expose` rule. `container_port`
+// is zero when the agent could not infer a single safe upstream port;
+// `unresolved_reason` then explains what doctor should surface.
+message LabelRouteIntent {
+  // Named expose rule, or empty for the default rule.
+  string name = 1;
+  // Public hostname parsed from the label.
+  string hostname = 2;
+  // Inferred or explicit container port. Zero means unresolved.
+  uint32 container_port = 3;
+  // Empty when resolved. Human-readable reason when unresolved.
+  string unresolved_reason = 4;
 }
 
 // Agent -> controller: previously reported container is gone. Drop
