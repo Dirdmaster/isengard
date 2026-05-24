@@ -25,7 +25,8 @@ pub struct LabelRule {
     /// Hostname the rule routes to. Required; rules with no hostname are
     /// dropped from the output of [`parse_labels`].
     pub hostname: String,
-    /// Upstream port. `None` falls through to the adapter's default.
+    /// Upstream port override. `None` means the agent must infer the port
+    /// from local runtime data before the controller inserts a route.
     pub port: Option<u16>,
     /// TLS strategy keyword (e.g. `"edge"`, `"passthrough"`).
     pub tls: Option<String>,
@@ -120,5 +121,59 @@ fn apply_prop(rule: &mut LabelRule, prop: &str, value: &str) {
         "adapter" => rule.adapter = Some(value.to_string()),
         "auth" => rule.auth = Some(value.to_string()),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(pairs: &[(&str, &str)]) -> Vec<LabelRule> {
+        let labels = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        parse_labels(&labels)
+    }
+
+    #[test]
+    fn hostname_only_rule_has_no_port_until_agent_infers_it() {
+        let rules = parse(&[("isengard.expose", "plex.vallee.casa")]);
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, None);
+        assert_eq!(rules[0].hostname, "plex.vallee.casa");
+        assert_eq!(rules[0].port, None);
+    }
+
+    #[test]
+    fn explicit_port_remains_an_override() {
+        let rules = parse(&[
+            ("isengard.expose", "plex.vallee.casa"),
+            ("isengard.expose.port", "32400"),
+        ]);
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].port, Some(32400));
+    }
+
+    #[test]
+    fn invalid_port_is_unresolved_not_zero_or_eighty() {
+        let rules = parse(&[
+            ("isengard.expose", "bad.vallee.casa"),
+            ("isengard.expose.port", "not-a-port"),
+        ]);
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].port, None);
+    }
+
+    #[test]
+    fn named_rule_without_port_stays_unresolved() {
+        let rules = parse(&[("isengard.expose.admin", "admin.vallee.casa")]);
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name.as_deref(), Some("admin"));
+        assert_eq!(rules[0].port, None);
     }
 }
