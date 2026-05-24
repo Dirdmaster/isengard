@@ -282,13 +282,21 @@ async fn run_wizard(mut args: CreateArgs, context: Option<&str>) -> Result<Creat
     };
 
     if args.port.is_none() {
-        let row = picked_row.as_ref().ok_or_else(|| {
+        let mut row = picked_row.as_ref().cloned().ok_or_else(|| {
             anyhow!(
                 "service {:?} not found among running containers on {docker_uri}; \
                  pass --port explicitly or pick from the wizard",
                 args.service.as_deref().unwrap_or("")
             )
         })?;
+        if row.private_ports.is_empty() {
+            let container_ref = if row.id.is_empty() {
+                row.service_name.as_str()
+            } else {
+                row.id.as_str()
+            };
+            row.private_ports = inspect_private_ports(&docker, container_ref).await?;
+        }
         let port = auto_detect_port(&row.private_ports).ok_or_else(|| {
             anyhow!(
                 "container {:?} exposes no ports; pass --port explicitly",
@@ -346,11 +354,75 @@ fn auto_detect_port(ports: &[u16]) -> Option<u16> {
         .or_else(|| ports.first().copied())
 }
 
+/// Inspect the selected container when Docker's list summary omitted
+/// ports. Some images, including host-networked services, can still
+/// declare exposed ports in the inspect payload.
+async fn inspect_private_ports(
+    docker: &isd_runtime::DockerBackend,
+    container_ref: &str,
+) -> Result<Vec<u16>> {
+    use bollard::container::InspectContainerOptions;
+
+    let inspect = docker
+        .client()
+        .inspect_container(container_ref, None::<InspectContainerOptions>)
+        .await
+        .with_context(|| format!("inspect container {container_ref:?}"))?;
+    Ok(private_ports_from_inspect(&inspect))
+}
+
+/// Extract distinct container-internal ports from an inspect response.
+/// Prefer explicit host bindings, then fall back to image-declared
+/// exposed ports for host-networked containers whose list summary is empty.
+fn private_ports_from_inspect(inspect: &bollard::models::ContainerInspectResponse) -> Vec<u16> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut push_key = |key: &str| {
+        let port = key.split('/').next().and_then(|s| s.parse::<u16>().ok());
+        if let Some(port) = port
+            && seen.insert(port)
+        {
+            out.push(port);
+        }
+    };
+
+    if let Some(bindings) = inspect
+        .host_config
+        .as_ref()
+        .and_then(|host_config| host_config.port_bindings.as_ref())
+    {
+        let mut keys: Vec<&String> = bindings.keys().collect();
+        keys.sort();
+        for key in keys {
+            push_key(key);
+        }
+    }
+
+    if let Some(exposed) = inspect
+        .config
+        .as_ref()
+        .and_then(|config| config.exposed_ports.as_ref())
+    {
+        let mut keys: Vec<&String> = exposed.keys().collect();
+        keys.sort();
+        for key in keys {
+            push_key(key);
+        }
+    }
+
+    out
+}
+
 /// Display row for the inquire `Select`. Carries both the displayed
 /// label and the structured fields the wizard needs after the user
 /// picks a row.
 #[derive(Clone)]
 struct ContainerRow {
+    /// Full runtime id. Used as the stable inspect target when list
+    /// summaries omit private ports.
+    id: String,
     /// Compose service name (preferred) or container name fallback.
     service_name: String,
     /// Container image string for the right-hand label.
@@ -370,6 +442,7 @@ impl From<isd_runtime::ContainerSummary> for ContainerRow {
             .cloned()
             .unwrap_or_else(|| c.names.clone());
         Self {
+            id: c.id,
             service_name,
             image: c.image,
             private_ports: c.private_ports,
@@ -557,6 +630,46 @@ mod tests {
     #[test]
     fn auto_detect_port_empty_is_none() {
         assert_eq!(auto_detect_port(&[]), None);
+    }
+
+    #[test]
+    fn inspect_ports_reads_host_config_bindings() {
+        use std::collections::HashMap;
+
+        let mut port_bindings = HashMap::new();
+        port_bindings.insert(
+            "32400/tcp".to_string(),
+            Some(vec![bollard::secret::PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some("32400".to_string()),
+            }]),
+        );
+        let inspect = bollard::models::ContainerInspectResponse {
+            host_config: Some(bollard::secret::HostConfig {
+                port_bindings: Some(port_bindings),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(private_ports_from_inspect(&inspect), vec![32400]);
+    }
+
+    #[test]
+    fn inspect_ports_falls_back_to_exposed_ports() {
+        use std::collections::HashMap;
+
+        let mut exposed_ports = HashMap::new();
+        exposed_ports.insert("32400/tcp".to_string(), HashMap::new());
+        let inspect = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::secret::ContainerConfig {
+                exposed_ports: Some(exposed_ports),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(private_ports_from_inspect(&inspect), vec![32400]);
     }
 
     #[test]
