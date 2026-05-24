@@ -101,6 +101,7 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
     ))
 }
 
+/// Returns true for expose hostname labels, excluding metadata-only labels.
 fn is_expose_hostname_label_key(key: &str) -> bool {
     if key == "isengard.expose" {
         return true;
