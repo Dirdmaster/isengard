@@ -52,6 +52,33 @@ test: (_disk-preflight min_free_gb)
         cargo test --workspace; \
     fi
 
+# Fast PR-loop checks. Mirrors the default pre-push hook.
+ci-fast: (_disk-preflight min_free_gb)
+    cargo fmt --check
+    cargo check --workspace --all-targets
+    @if ! command -v cargo-deny >/dev/null 2>&1; then \
+        echo "ERROR: cargo-deny is not installed. Run: cargo install cargo-deny"; \
+        exit 1; \
+    fi
+    cargo deny check
+
+# Full native confidence gate. Use before risky merges or live upgrades.
+ci-full: (_disk-preflight min_free_gb)
+    cargo fmt --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+    @if command -v cargo-nextest >/dev/null 2>&1; then \
+        cargo nextest run --workspace; \
+    else \
+        echo "(install cargo-nextest for faster runs: cargo install cargo-nextest)"; \
+        cargo test --workspace; \
+    fi
+    @if ! command -v cargo-deny >/dev/null 2>&1; then \
+        echo "ERROR: cargo-deny is not installed. Run: cargo install cargo-deny"; \
+        exit 1; \
+    fi
+    cargo deny check
+
 # === Lint / format ===
 
 # Run clippy with -D warnings
@@ -78,6 +105,9 @@ ci-linux: (_disk-preflight min_free_gb)
         echo "ERROR: no 'wisp' OrbStack machine; create with: orb create ubuntu:noble wisp"; exit 1; \
     fi
     orb -m wisp bash -lc "set -euo pipefail; source ~/.cargo/env; cd '$(pwd)'; export RUSTFLAGS='-D warnings'; cargo fmt --check; cargo clippy --workspace --all-targets -- -D warnings; if command -v cargo-nextest >/dev/null 2>&1; then cargo nextest run --workspace; else cargo test --workspace; fi"
+
+# Full native confidence gate plus Linux mirror. Use before release-grade work.
+ci-release: ci-full ci-linux
 
 # === Local dev ===
 

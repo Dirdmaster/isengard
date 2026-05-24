@@ -141,7 +141,7 @@ pre-push:
     full-test:
       run: |
         if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
-          echo "full-test: skipped (set LEFHOOK_FULL=1 for full local gate)"
+          echo "full-test: skipped (set LEFTHOOK_FULL=1 for full local gate)"
           exit 0
         fi
         env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_PREFIX -u GIT_EXEC_PATH -u GIT_EDITOR sh -c '
@@ -156,11 +156,11 @@ pre-push:
     linux-mirror:
       run: |
         if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
-          echo "linux-mirror: skipped (set LEFHOOK_FULL=1 for full local gate)"
+          echo "linux-mirror: skipped (set LEFTHOOK_FULL=1 for full local gate)"
           exit 0
         fi
-        if [ "${LEFHOOK_SKIP_LINUX_MIRROR:-0}" = "1" ]; then
-          echo "linux-mirror: skipped (LEFHOOK_SKIP_LINUX_MIRROR=1)"
+        if [ "${LEFTHOOK_SKIP_LINUX_MIRROR:-0}" = "1" ]; then
+          echo "linux-mirror: skipped (LEFTHOOK_SKIP_LINUX_MIRROR=1)"
           exit 0
         fi
         if ! command -v orb >/dev/null 2>&1; then
@@ -197,7 +197,7 @@ Expected: no matches. Every variable should be spelled `LEFTHOOK`.
 
 - [ ] **Step 3: Validate YAML enough to catch indentation mistakes**
 
-Run: `lefthook run pre-push --commands fmt-check`
+Run: `lefthook run pre-push --command fmt-check`
 
 Expected: command runs `cargo fmt --check` and exits 0.
 
@@ -221,7 +221,7 @@ git commit -m "chore: lighten pre-push gate"
 
 - [ ] **Step 1: Run a narrow full opt-in smoke**
 
-Run: `LEFTHOOK_FULL=1 LEFTHOOK_SKIP_LINUX_MIRROR=1 lefthook run pre-push --commands full-clippy`
+Run: `LEFTHOOK_FULL=1 LEFTHOOK_SKIP_LINUX_MIRROR=1 lefthook run pre-push --command full-clippy`
 
 Expected: workspace clippy runs and exits 0.
 
@@ -257,12 +257,12 @@ gh pr create --base next --head <branch-name> --title "chore: lighten dev loop g
 
 ## Verification
 - lefthook run pre-push
-- LEFHOOK_FULL=1 LEFHOOK_SKIP_LINUX_MIRROR=1 lefthook run pre-push --commands full-clippy
+- LEFTHOOK_FULL=1 LEFTHOOK_SKIP_LINUX_MIRROR=1 lefthook run pre-push --command full-clippy
 - just ci-fast
 EOF
 ```
 
-Before running, fix `LEFHOOK` typo in the body above to `LEFTHOOK`.
+Before running, confirm there are no `LEFHOOK` typos in the PR body.
 
 - [ ] **Step 3: Watch GitHub CI**
 
