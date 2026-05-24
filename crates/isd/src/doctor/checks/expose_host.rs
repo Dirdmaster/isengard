@@ -19,9 +19,9 @@ use crate::doctor::{Finding, Severity};
 /// Container-internal ports we treat as web traffic when deciding
 /// whether to emit the finding. Captures the common HTTP defaults
 /// (80, 443), Plex (32400), Node / Rails / Flask defaults (3000, 5000,
-/// 8000), the `:8080` convention, and grafana / prometheus / minio
-/// dashboards (9000 family).
-const HTTP_ISH_PORTS: &[u16] = &[80, 443, 3000, 5000, 8000, 8080, 9000, 32400];
+/// 8000), the `:8080` convention, qBittorrent (6881), and grafana /
+/// prometheus / minio dashboards (9000 family).
+const HTTP_ISH_PORTS: &[u16] = &[80, 443, 3000, 5000, 6881, 8000, 8080, 9000, 32400];
 
 /// Walk every `services.<name>` entry and emit findings for the
 /// services that publish HTTP-ish ports without an `isengard.expose`
@@ -37,10 +37,52 @@ pub fn check(compose: &Value) -> Vec<Finding> {
         let Some(svc) = svc.as_mapping() else {
             continue;
         };
-        let Some(inferred_port) = inferred_http_port(svc) else {
-            continue;
+        let candidate_ports = http_ish_ports(svc);
+        let inferred_port = match candidate_ports.as_slice() {
+            [] => continue,
+            [port] => Some(*port),
+            _ => None,
         };
         if has_expose_label(svc) {
+            if let Some(port) = expose_port_label(svc) {
+                if port.parse::<u16>().is_err() {
+                    out.push(Finding {
+                        id: "EXPOSE_PORT_INVALID",
+                        severity: Severity::Warning,
+                        message: format!(
+                            "services.{name} has an invalid `isengard.expose.port` label"
+                        ),
+                        hint: Some("choose a numeric container port".into()),
+                        target: Some(crate::doctor::FindingTarget::Service {
+                            name: name.to_string(),
+                        }),
+                        fix: Some(crate::doctor::FixSpec::SetExposePort {
+                            service: name.to_string(),
+                            candidate_ports,
+                        }),
+                    });
+                }
+                continue;
+            }
+            if candidate_ports.len() > 1 {
+                out.push(Finding {
+                    id: "EXPOSE_PORT_AMBIGUOUS",
+                    severity: Severity::Warning,
+                    message: format!(
+                        "services.{name} has an expose hostname but multiple candidate ports"
+                    ),
+                    hint: Some(
+                        "choose the upstream container port for `isengard.expose.port`".into(),
+                    ),
+                    target: Some(crate::doctor::FindingTarget::Service {
+                        name: name.to_string(),
+                    }),
+                    fix: Some(crate::doctor::FixSpec::SetExposePort {
+                        service: name.to_string(),
+                        candidate_ports,
+                    }),
+                });
+            }
             continue;
         }
         out.push(Finding {
@@ -64,16 +106,15 @@ pub fn check(compose: &Value) -> Vec<Finding> {
     out
 }
 
-/// Return the inferred port when unambiguous, `Some(None)` when web ports are ambiguous.
-fn inferred_http_port(svc: &serde_yaml::Mapping) -> Option<Option<u16>> {
-    let ports = svc.get("ports").and_then(Value::as_sequence)?;
-    let mut found = ports.iter().filter_map(http_ish_port);
-    let first = found.next()?;
-    if found.next().is_some() {
-        Some(None)
-    } else {
-        Some(Some(first))
-    }
+/// Return sorted unique HTTP-ish container ports for a service.
+fn http_ish_ports(svc: &serde_yaml::Mapping) -> Vec<u16> {
+    let Some(ports) = svc.get("ports").and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+    let mut found = ports.iter().filter_map(http_ish_port).collect::<Vec<_>>();
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// Return the container port when `spec` resolves to a port from
@@ -115,6 +156,23 @@ fn has_expose_label(svc: &serde_yaml::Mapping) -> bool {
         });
     }
     false
+}
+
+fn expose_port_label(svc: &serde_yaml::Mapping) -> Option<&str> {
+    let labels = svc.get("labels")?;
+    if let Some(map) = labels.as_mapping() {
+        return map
+            .get(Value::String("isengard.expose.port".to_string()))
+            .and_then(Value::as_str);
+    }
+    labels
+        .as_sequence()?
+        .iter()
+        .filter_map(Value::as_str)
+        .find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == "isengard.expose.port").then_some(value)
+        })
 }
 
 #[cfg(test)]
@@ -244,6 +302,57 @@ services:
 "#,
         );
         assert!(check(&v).is_empty());
+    }
+
+    #[test]
+    fn hostname_only_single_port_is_healthy() {
+        let v = parse(
+            r#"
+services:
+  plex:
+    image: plex
+    ports: ["32400:32400"]
+    labels:
+      isengard.expose: plex.vallee.casa
+"#,
+        );
+
+        assert!(check(&v).is_empty());
+    }
+
+    #[test]
+    fn hostname_only_ambiguous_ports_warns_for_port_override() {
+        let v = parse(
+            r#"
+services:
+  qbittorrent:
+    image: qbittorrent
+    ports: ["8080:8080", "6881:6881"]
+    labels:
+      isengard.expose: qb.vallee.casa
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_AMBIGUOUS"));
+    }
+
+    #[test]
+    fn invalid_port_label_warns_for_repair() {
+        let v = parse(
+            r#"
+services:
+  plex:
+    image: plex
+    ports: ["32400:32400"]
+    labels:
+      isengard.expose: plex.vallee.casa
+      isengard.expose.port: nope
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_INVALID"));
     }
 
     #[test]
