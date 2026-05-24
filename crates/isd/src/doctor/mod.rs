@@ -134,6 +134,7 @@ pub fn print_warnings(findings: &[Finding]) {
     }
 }
 
+/// Returns the static expose-label reference printed by `isd stack doctor labels`.
 fn label_reference_text() -> &'static str {
     "Required:\n  isengard.expose=<hostname>\n\nOptional:\n  isengard.expose.port=<container-port>\n  isengard.expose.tls=acme|edge|manual\n  isengard.expose.adapter=none|tailscale|cf-tunnel\n  isengard.expose.auth=none|...\n  isengard.expose.health=/path\n\nNamed:\n  isengard.expose.<name>=<hostname>\n  isengard.expose.<name>.port=<container-port>\n\nStart with only isengard.expose=<hostname>. Add optional labels only when doctor asks or when you want a non-default behavior.\n"
 }

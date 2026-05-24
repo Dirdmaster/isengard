@@ -182,6 +182,7 @@ fn snapshot_to_report(snap: &ContainerSnapshot) -> Option<ContainerLabelsReport>
     })
 }
 
+/// Builds route intents by combining expose labels with local runtime port facts.
 fn label_route_intents(snap: &ContainerSnapshot) -> Vec<LabelRouteIntent> {
     let labels: std::collections::HashMap<String, String> = snap
         .labels
@@ -220,6 +221,7 @@ fn label_route_intents(snap: &ContainerSnapshot) -> Vec<LabelRouteIntent> {
         .collect()
 }
 
+/// Returns sorted container-side ports advertised by Docker inspect data.
 fn infer_container_ports(snap: &ContainerSnapshot) -> Vec<u16> {
     let mut ports = Vec::new();
     for key in snap.network_settings.ports.keys() {
@@ -234,6 +236,7 @@ fn infer_container_ports(snap: &ContainerSnapshot) -> Vec<u16> {
     ports
 }
 
+/// Parses a Docker port key such as `32400/tcp` and appends the numeric port.
 fn push_port_key(out: &mut Vec<u16>, key: &str) {
     let Some(port_str) = key.split('/').next() else {
         return;

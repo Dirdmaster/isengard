@@ -459,6 +459,7 @@ impl RoutingPusher {
     }
 }
 
+/// Resolves a label rule to an explicit or agent-inferred upstream port.
 fn route_intent_port(
     report: &ContainerLabelsReport,
     rule: &isengard_core::labels::LabelRule,
