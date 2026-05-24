@@ -389,7 +389,7 @@ services:
             message.contains("pass the specific compose file"),
             "{message}"
         );
-        assert!(message.contains("doctor --fix"), "{message}");
+        assert!(message.contains("isd stack doctor"), "{message}");
     }
 
     #[test]
@@ -408,6 +408,6 @@ services:
             message.contains("pass the specific compose file"),
             "{message}"
         );
-        assert!(message.contains("doctor --fix"), "{message}");
+        assert!(message.contains("isd stack doctor"), "{message}");
     }
 }

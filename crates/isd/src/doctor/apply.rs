@@ -1,15 +1,27 @@
+//! Apply targets and path resolution for doctor fixes.
+
 use anyhow::Result;
 use isengard_manifest::{ManifestError, StackManifest};
 use std::path::Path;
 use std::path::PathBuf;
 
+/// Destination that a doctor fixer can write an updated compose body to.
 #[allow(dead_code)]
 pub enum ApplyTarget {
-    LocalFile { path: PathBuf },
+    /// A compose file on the local filesystem.
+    LocalFile {
+        /// Path to overwrite with the fixed compose body.
+        path: PathBuf,
+    },
 }
 
 #[allow(dead_code)]
 impl ApplyTarget {
+    /// Write an updated compose body to this target.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the target cannot be written.
     pub async fn apply(&self, body: &str, _force: bool) -> Result<()> {
         match self {
             ApplyTarget::LocalFile { path } => {
@@ -21,6 +33,12 @@ impl ApplyTarget {
     }
 }
 
+/// Resolve a stack manifest to its only compose file.
+///
+/// # Errors
+///
+/// Returns `Err` when the manifest cannot be read or parsed, or when
+/// the manifest does not identify exactly one compose file.
 pub fn resolve_manifest_compose_path(stack_toml: &Path) -> Result<PathBuf> {
     let text = std::fs::read_to_string(stack_toml)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", stack_toml.display()))?;
@@ -41,9 +59,10 @@ pub fn resolve_manifest_compose_path(stack_toml: &Path) -> Result<PathBuf> {
     Ok(root.join(&manifest.compose[0]))
 }
 
+/// Build the operator guidance used when a manifest has ambiguous compose files.
 fn manifest_compose_count_error(count: usize) -> anyhow::Error {
     anyhow::anyhow!(
-        "stack.toml has {} compose entries; pass the specific compose file to doctor --fix",
+        "stack.toml has {} compose entries; pass the specific compose file to isd stack doctor",
         count
     )
 }
