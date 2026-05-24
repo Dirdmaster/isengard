@@ -117,7 +117,9 @@ mod tests {
 
     #[test]
     fn appends_to_label_list() {
-        let mut v = parse("services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n    labels:\n      - \"foo=bar\"\n");
+        let mut v = parse(
+            "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n    labels:\n      - \"foo=bar\"\n",
+        );
         apply_expose_host(
             &mut v,
             &ExposeHostInput {
@@ -129,8 +131,16 @@ mod tests {
         .unwrap();
         let labels = v["services"]["web"]["labels"].as_sequence().unwrap();
         assert!(labels.iter().any(|v| v.as_str() == Some("foo=bar")));
-        assert!(labels.iter().any(|v| v.as_str() == Some("isengard.expose=web.test")));
-        assert!(labels.iter().any(|v| v.as_str() == Some("isengard.expose.port=80")));
+        assert!(
+            labels
+                .iter()
+                .any(|v| v.as_str() == Some("isengard.expose=web.test"))
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|v| v.as_str() == Some("isengard.expose.port=80"))
+        );
     }
 
     #[test]
@@ -146,6 +156,9 @@ mod tests {
         )
         .unwrap();
         assert!(!changed);
-        assert_eq!(v["services"]["web"]["labels"]["isengard.expose"].as_str(), Some("old.test"));
+        assert_eq!(
+            v["services"]["web"]["labels"]["isengard.expose"].as_str(),
+            Some("old.test")
+        );
     }
 }

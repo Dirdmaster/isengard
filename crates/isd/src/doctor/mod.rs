@@ -19,7 +19,9 @@
 
 use anyhow::{Context as _, Result};
 use clap::Args;
+use isengard_manifest::{ManifestError, StackManifest};
 use serde_yaml::Value;
+use std::path::{Path, PathBuf};
 
 use crate::session::Session;
 
@@ -101,7 +103,7 @@ pub fn audit(compose: &Value) -> Vec<Finding> {
 /// # Errors
 ///
 /// Returns `Err` when the file can't be read or the document isn't valid.
-pub fn load_compose(path: &std::path::Path) -> Result<Value> {
+pub fn load_compose(path: &Path) -> Result<Value> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading compose file {}", path.display()))?;
     let document = document::ComposeDocument::parse_path(path, &content)?;
@@ -140,15 +142,19 @@ pub struct DoctorArgs {
 /// header above the findings.
 enum ComposeSource {
     /// Read from a path on disk.
-    Local(std::path::PathBuf),
+    Local(PathBuf),
     /// Fetched from the controller for a named stack.
     Controller(String),
 }
 
-#[allow(dead_code)]
+/// Fully loaded compose input for a doctor run.
 struct ResolvedCompose {
+    /// Original document body, retained for future fixer round trips.
+    #[allow(dead_code)]
     body: String,
+    /// Parsed compose document normalized for read-only checks.
     document: document::ComposeDocument,
+    /// Source label used in CLI output.
     source: ComposeSource,
 }
 
@@ -210,7 +216,10 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
     if let Some(t) = target {
         let path = std::path::Path::new(t);
         if path.exists() {
-            let resolved = resolve_local_path(path)?;
+            let mut resolved = resolve_local_path(path)?;
+            if resolved.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
+                resolved = resolve_stack_toml_compose_path(&resolved)?;
+            }
             let body = std::fs::read_to_string(&resolved)
                 .with_context(|| format!("reading compose file {}", resolved.display()))?;
             let document = document::ComposeDocument::parse_path(&resolved, &body)?;
@@ -253,7 +262,10 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
             )),
         }
     } else {
-        let resolved = resolve_local_path(std::path::Path::new("."))?;
+        let mut resolved = resolve_local_path(Path::new("."))?;
+        if resolved.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
+            resolved = resolve_stack_toml_compose_path(&resolved)?;
+        }
         let body = std::fs::read_to_string(&resolved)
             .with_context(|| format!("reading compose file {}", resolved.display()))?;
         let document = document::ComposeDocument::parse_path(&resolved, &body)?;
@@ -266,7 +278,7 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
 }
 
 /// Resolve a local path or directory into a concrete compose file.
-fn resolve_local_path(target: &std::path::Path) -> Result<std::path::PathBuf> {
+fn resolve_local_path(target: &Path) -> Result<PathBuf> {
     if target.is_dir() {
         for name in ["stack.toml", "compose.toml", "compose.yaml", "compose.yml"] {
             let candidate = target.join(name);
@@ -286,6 +298,35 @@ fn resolve_local_path(target: &std::path::Path) -> Result<std::path::PathBuf> {
         "compose path {} does not exist",
         target.display()
     ))
+}
+
+/// Resolve a `stack.toml` manifest to its single compose file.
+fn resolve_stack_toml_compose_path(stack_toml: &Path) -> Result<PathBuf> {
+    let body = std::fs::read_to_string(stack_toml)
+        .with_context(|| format!("reading stack manifest {}", stack_toml.display()))?;
+    let root = stack_toml
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("stack manifest {} has no parent", stack_toml.display()))?
+        .to_path_buf();
+    let manifest = match StackManifest::from_str(&body, root.clone()) {
+        Ok(manifest) => manifest,
+        Err(ManifestError::EmptyCompose) => {
+            return Err(stack_toml_compose_count_error(stack_toml));
+        }
+        Err(err) => return Err(err).with_context(|| format!("parsing {}", stack_toml.display())),
+    };
+    if manifest.compose.len() != 1 {
+        return Err(stack_toml_compose_count_error(stack_toml));
+    }
+    Ok(root.join(&manifest.compose[0]))
+}
+
+/// Build the operator guidance used when doctor cannot choose one compose file.
+fn stack_toml_compose_count_error(stack_toml: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "stack manifest {} must declare exactly one compose file for doctor; pass the specific compose file to `isd stack doctor`",
+        stack_toml.display()
+    )
 }
 
 #[cfg(test)]
@@ -341,5 +382,54 @@ services:
             resolved.file_name().and_then(|s| s.to_str()),
             Some("stack.toml")
         );
+    }
+
+    #[tokio::test]
+    async fn stack_toml_target_audits_referenced_compose() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("stack.toml"),
+            "name = \"demo\"\ncompose = [\"compose.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("compose.toml"),
+            "[services.web]\nimage = \"nginx\"\nports = [\"8080:80\"]\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_compose(Some(tmp.path().to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let findings = audit(&resolved.document.value);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
+    }
+
+    #[test]
+    fn stack_toml_with_zero_compose_files_tells_operator_to_pass_compose_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_toml = tmp.path().join("stack.toml");
+        std::fs::write(&stack_toml, "name = \"demo\"\ncompose = []\n").unwrap();
+
+        let err = resolve_stack_toml_compose_path(&stack_toml).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("exactly one compose file"), "{message}");
+        assert!(message.contains("isd stack doctor"), "{message}");
+    }
+
+    #[test]
+    fn stack_toml_with_multiple_compose_files_tells_operator_to_pass_compose_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_toml = tmp.path().join("stack.toml");
+        std::fs::write(
+            &stack_toml,
+            "name = \"demo\"\ncompose = [\"compose.toml\", \"compose.override.toml\"]\n",
+        )
+        .unwrap();
+
+        let err = resolve_stack_toml_compose_path(&stack_toml).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("exactly one compose file"), "{message}");
+        assert!(message.contains("isd stack doctor"), "{message}");
     }
 }
