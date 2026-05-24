@@ -162,14 +162,14 @@ mod tests {
             &ExposeHostInput {
                 service: "plex".into(),
                 hostname: "plex.vallee.casa".into(),
-                port: Some(32400),
+                port: None,
             },
         )
         .unwrap();
         assert!(changed);
         let labels = &v["services"]["plex"]["labels"];
         assert_eq!(labels["isengard.expose"].as_str(), Some("plex.vallee.casa"));
-        assert_eq!(labels["isengard.expose.port"].as_str(), Some("32400"));
+        assert!(labels["isengard.expose.port"].is_null());
     }
 
     #[test]

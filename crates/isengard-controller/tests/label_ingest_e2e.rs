@@ -2,7 +2,7 @@
 //! `ingest_labels_removed` directly and verify the storage side ends up in
 //! the expected shape.
 
-use isengard_proto::pb::{ContainerLabelsRemoved, ContainerLabelsReport};
+use isengard_proto::pb::{ContainerLabelsRemoved, ContainerLabelsReport, LabelRouteIntent};
 use isengard_storage::{
     EnrollHost, InsertRoutingRule, Inventory, RoutingRuleSource, RoutingRuleState, TlsMode,
 };
@@ -83,7 +83,12 @@ async fn labels_removed_event_deletes_label_rules_for_container() {
                 container_name: "web".into(),
                 image: "n:1".into(),
                 labels,
-                label_route_intents: Vec::new(),
+                label_route_intents: vec![LabelRouteIntent {
+                    name: String::new(),
+                    hostname: "x.test".into(),
+                    container_port: 8080,
+                    unresolved_reason: String::new(),
+                }],
             },
         )
         .await

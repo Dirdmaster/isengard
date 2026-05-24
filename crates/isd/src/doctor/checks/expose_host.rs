@@ -8,9 +8,9 @@
 //! and just forgot the label.
 //!
 //! Heuristic: emit a finding when a service publishes any port from
-//! [`HTTP_ISH_PORTS`] AND carries no key under `labels` that starts
-//! with `isengard.expose`. The hint suggests adding the label and
-//! points at `isd stack doctor` for the interactive fix (v0.2).
+//! [`HTTP_ISH_PORTS`] AND carries no expose hostname label. The hint
+//! suggests adding the label and points at `isd stack doctor` for the
+//! interactive fix (v0.2).
 
 use serde_yaml::Value;
 
@@ -81,11 +81,9 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             continue;
         }
         let candidate_ports = http_ish_ports(svc);
-        let inferred_port = match candidate_ports.as_slice() {
-            [] => continue,
-            [port] => Some(*port),
-            _ => None,
-        };
+        if candidate_ports.is_empty() {
+            continue;
+        }
         out.push(Finding {
             id: "EXPOSE_HOST_MISSING",
             severity: Severity::Warning,
@@ -100,7 +98,7 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             }),
             fix: Some(crate::doctor::FixSpec::ExposeService {
                 service: name.to_string(),
-                inferred_port,
+                inferred_port: None,
             }),
         });
     }
@@ -151,10 +149,9 @@ fn http_ish_port(spec: &Value) -> Option<u16> {
     HTTP_ISH_PORTS.contains(&port).then_some(port)
 }
 
-/// True when `services.<name>.labels` carries any key under the
-/// `isengard.expose*` namespace (`isengard.expose`, `isengard.expose.host`,
-/// `isengard.expose.port`, etc.). Accepts both the map form (`labels:
-/// { isengard.expose: foo }`) and the list form (`labels: ["isengard.expose=foo"]`).
+/// True when `services.<name>.labels` carries an expose hostname label.
+/// Accepts both the map form (`labels: { isengard.expose: foo }`) and the
+/// list form (`labels: ["isengard.expose=foo"]`).
 fn has_expose_label(svc: &serde_yaml::Mapping) -> bool {
     let Some(labels) = svc.get("labels") else {
         return false;
@@ -163,15 +160,28 @@ fn has_expose_label(svc: &serde_yaml::Mapping) -> bool {
         return map
             .keys()
             .filter_map(Value::as_str)
-            .any(|k| k.starts_with("isengard.expose"));
+            .any(is_expose_hostname_label);
     }
     if let Some(seq) = labels.as_sequence() {
         return seq.iter().filter_map(Value::as_str).any(|entry| {
             let key = entry.split('=').next().unwrap_or(entry);
-            key.starts_with("isengard.expose")
+            is_expose_hostname_label(key)
         });
     }
     false
+}
+
+fn is_expose_hostname_label(key: &str) -> bool {
+    const KNOWN_PROPS: &[&str] = &["port", "tls", "health", "adapter", "auth"];
+
+    if key == "isengard.expose" {
+        return true;
+    }
+    let Some(rest) = key.strip_prefix("isengard.expose.") else {
+        return false;
+    };
+    let segments = rest.split('.').collect::<Vec<_>>();
+    matches!(segments.as_slice(), [name] if !KNOWN_PROPS.contains(name))
 }
 
 fn expose_port_label(svc: &serde_yaml::Mapping) -> Option<&str> {
@@ -256,7 +266,7 @@ services:
             f[0].fix,
             Some(crate::doctor::FixSpec::ExposeService {
                 service: "plex".to_string(),
-                inferred_port: Some(32400),
+                inferred_port: None,
             })
         );
     }
@@ -386,6 +396,23 @@ services:
 
         let findings = check(&v);
         assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_INVALID"));
+    }
+
+    #[test]
+    fn port_only_label_does_not_satisfy_expose_host_contract() {
+        let v = parse(
+            r#"
+services:
+  web:
+    image: nginx
+    ports: ["8080:8080"]
+    labels:
+      isengard.expose.port: "8080"
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
     }
 
     #[test]
