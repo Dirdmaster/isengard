@@ -353,7 +353,15 @@ impl RoutingPusher {
 
         let parsed = isengard_core::labels::parse_labels(&report.labels);
         for rule in parsed {
-            let port = rule.port.unwrap_or(80);
+            let Some(port) = route_intent_port(&report, &rule) else {
+                tracing::warn!(
+                    host_id = %host_id,
+                    container_id = %report.container_id,
+                    hostname = %rule.hostname,
+                    "ingest_labels: skipping expose label with unresolved port"
+                );
+                continue;
+            };
             let tls_mode = match rule.tls.as_deref() {
                 Some("edge") => isengard_storage::TlsMode::Edge,
                 Some("manual") => isengard_storage::TlsMode::Manual,
@@ -451,6 +459,22 @@ impl RoutingPusher {
     }
 }
 
+fn route_intent_port(
+    report: &ContainerLabelsReport,
+    rule: &isengard_core::labels::LabelRule,
+) -> Option<u16> {
+    if let Some(port) = rule.port {
+        return Some(port);
+    }
+    let expected_name = rule.name.as_deref().unwrap_or("");
+    report
+        .label_route_intents
+        .iter()
+        .find(|intent| intent.name == expected_name && intent.hostname == rule.hostname)
+        .and_then(|intent| u16::try_from(intent.container_port).ok())
+        .filter(|port| *port != 0)
+}
+
 /// Converts a storage `RoutingRule` into its proto wire form.
 fn to_proto(r: StorageRule) -> ProtoRule {
     ProtoRule {
@@ -510,8 +534,8 @@ async fn hash_rules_and_wildcards(
         }
     }
     // Hash wildcard certs too: a freshly-issued or renewed cert must bump
-    // the generation so agents see it. Using `cert_pem` is enough — issuance
-    // / renewal always produces new cert bytes.
+    // the generation so agents see it. Using `cert_pem` is enough because
+    // issuance / renewal always produces new cert bytes.
     for w in wildcards {
         for id in &w.identifiers {
             id.hash(&mut h);
@@ -519,4 +543,97 @@ async fn hash_rules_and_wildcards(
         w.cert_pem.hash(&mut h);
     }
     Ok(h.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isengard_proto::pb::LabelRouteIntent;
+    use isengard_storage::{EnrollHost, Inventory};
+    use std::collections::HashMap;
+
+    async fn setup() -> (Arc<Inventory>, HostId, RoutingPusher) {
+        let inv = Arc::new(Inventory::open_in_memory().await.unwrap());
+        let host = inv
+            .enroll_host(EnrollHost {
+                fingerprint: "fp".into(),
+                hostname: "lausanne".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                agent_version: "0".into(),
+                docker_version: "27".into(),
+            })
+            .await
+            .unwrap();
+        let routing = RoutingPusher::new(inv.clone());
+        (inv, host, routing)
+    }
+
+    fn report(pairs: &[(&str, &str)], intents: Vec<LabelRouteIntent>) -> ContainerLabelsReport {
+        let labels: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        ContainerLabelsReport {
+            container_id: "cid-plex".into(),
+            container_name: "plex".into(),
+            image: "plex".into(),
+            labels,
+            label_route_intents: intents,
+        }
+    }
+
+    #[tokio::test]
+    async fn hostname_only_without_resolved_intent_does_not_default_to_80() {
+        let (inv, host, routing) = setup().await;
+        let r = report(&[("isengard.expose", "plex.vallee.casa")], Vec::new());
+
+        routing.ingest_labels(host, r).await.unwrap();
+
+        assert!(
+            inv.list_routing_rules_for_host(host)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn hostname_only_with_agent_intent_inserts_inferred_port() {
+        let (inv, host, routing) = setup().await;
+        let r = report(
+            &[("isengard.expose", "plex.vallee.casa")],
+            vec![LabelRouteIntent {
+                name: String::new(),
+                hostname: "plex.vallee.casa".into(),
+                container_port: 32400,
+                unresolved_reason: String::new(),
+            }],
+        );
+
+        routing.ingest_labels(host, r).await.unwrap();
+
+        let rules = inv.list_routing_rules_for_host(host).await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].public_hostname, "plex.vallee.casa");
+        assert_eq!(rules[0].container_port, 32400);
+    }
+
+    #[tokio::test]
+    async fn explicit_port_label_still_inserts_without_agent_intent() {
+        let (inv, host, routing) = setup().await;
+        let r = report(
+            &[
+                ("isengard.expose", "plex.vallee.casa"),
+                ("isengard.expose.port", "32400"),
+            ],
+            Vec::new(),
+        );
+
+        routing.ingest_labels(host, r).await.unwrap();
+
+        let rules = inv.list_routing_rules_for_host(host).await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].container_port, 32400);
+    }
 }
