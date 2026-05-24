@@ -134,6 +134,10 @@ pub fn print_warnings(findings: &[Finding]) {
     }
 }
 
+fn label_reference_text() -> &'static str {
+    "Required:\n  isengard.expose=<hostname>\n\nOptional:\n  isengard.expose.port=<container-port>\n  isengard.expose.tls=acme|edge|manual\n  isengard.expose.adapter=none|tailscale|cf-tunnel\n  isengard.expose.auth=none|...\n  isengard.expose.health=/path\n\nNamed:\n  isengard.expose.<name>=<hostname>\n  isengard.expose.<name>.port=<container-port>\n\nStart with only isengard.expose=<hostname>. Add optional labels only when doctor asks or when you want a non-default behavior.\n"
+}
+
 /// CLI flags for `isd stack doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
@@ -208,6 +212,11 @@ impl ComposeSource {
 /// Returns `Err` when the compose file / stack can't be located or
 /// when the document fails to parse.
 pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
+    if args.target.as_deref() == Some("labels") {
+        print!("{}", label_reference_text());
+        return Ok(());
+    }
+
     if args.fix {
         return run_fix(args, context).await;
     }
@@ -597,6 +606,37 @@ mod tests {
         assert!(w.args.yes);
         assert!(w.args.force);
         assert_eq!(w.args.target.as_deref(), Some("servarr"));
+    }
+
+    #[test]
+    fn label_reference_lists_required_optional_and_named_labels() {
+        let text = label_reference_text();
+
+        assert!(text.contains("Required:"));
+        assert!(text.contains("isengard.expose=<hostname>"));
+        assert!(text.contains("Optional:"));
+        assert!(text.contains("isengard.expose.port=<container-port>"));
+        assert!(text.contains("Named:"));
+        assert!(text.contains("isengard.expose.<name>=<hostname>"));
+    }
+
+    #[test]
+    fn doctor_args_parse_labels_target() {
+        use clap::Parser;
+
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: crate::stack_cmd::StackCommand,
+        }
+
+        let w = Wrap::try_parse_from(["x", "doctor", "labels"]).unwrap();
+        match w.c {
+            crate::stack_cmd::StackCommand::Doctor(args) => {
+                assert_eq!(args.target.as_deref(), Some("labels"));
+            }
+            other => panic!("expected doctor, got {other:?}"),
+        }
     }
 
     #[test]
