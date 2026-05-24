@@ -224,20 +224,10 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
 /// Run the interactive doctor fixer loop for supported findings.
 async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
     let mut resolved = resolve_compose(args.target.as_deref(), context).await?;
+    ensure_fixable_source(&resolved.source)?;
     let original = resolved.body.clone();
     let findings = audit(&resolved.document.value);
-    let mut changed = false;
-
-    for finding in findings {
-        if finding.id != "EXPOSE_HOST_MISSING" {
-            continue;
-        }
-        let Some(mut input) = fixers::expose_host::input_from_finding(&finding) else {
-            continue;
-        };
-        input.hostname = prompt_hostname(&input.service)?;
-        changed |= fixers::expose_host::apply_expose_host(&mut resolved.document.value, &input)?;
-    }
+    let changed = apply_fix_inputs(&mut resolved.document, findings, prompt_hostname)?;
 
     if !changed {
         println!("No fixes applied.");
@@ -258,10 +248,42 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
                 .await?;
             println!("Applied fixes locally.");
         }
-        ComposeSource::Controller(_) => anyhow::bail!("controller apply lands in Task 7"),
+        ComposeSource::Controller(_) => unreachable!("checked before applying fixes"),
     }
 
     Ok(())
+}
+
+/// Ensure the compose source can be fixed by the Task 6 local apply path.
+fn ensure_fixable_source(source: &ComposeSource) -> Result<()> {
+    match source {
+        ComposeSource::Local(_) => Ok(()),
+        ComposeSource::Controller(_) => {
+            anyhow::bail!(
+                "controller stack fixes are not wired yet; use a local compose file for now"
+            )
+        }
+    }
+}
+
+/// Apply supported fix inputs, collecting interactive values through a callback.
+fn apply_fix_inputs(
+    document: &mut document::ComposeDocument,
+    findings: Vec<Finding>,
+    mut hostname_for_service: impl FnMut(&str) -> Result<String>,
+) -> Result<bool> {
+    let mut changed = false;
+    for finding in findings {
+        if fixers::fixer_id_for(&finding) != Some("EXPOSE_HOST_MISSING") {
+            continue;
+        }
+        let Some(mut input) = fixers::expose_host::input_from_finding(&finding) else {
+            continue;
+        };
+        input.hostname = hostname_for_service(&input.service)?;
+        changed |= fixers::expose_host::apply_expose_host(&mut document.value, &input)?;
+    }
+    Ok(changed)
 }
 
 /// Prompt for the hostname used by the expose-host fixer.
@@ -464,6 +486,38 @@ services:
         let findings = audit(&compose);
         assert!(!findings.is_empty());
         assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
+    }
+
+    #[test]
+    fn apply_fix_inputs_uses_hostname_callback() {
+        let mut document = document::ComposeDocument::parse_path(
+            std::path::Path::new("compose.yaml"),
+            "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n",
+        )
+        .unwrap();
+        let findings = audit(&document.value);
+
+        let changed = apply_fix_inputs(&mut document, findings, |service| {
+            assert_eq!(service, "web");
+            Ok("web.test".to_string())
+        })
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            document.value["services"]["web"]["labels"]["isengard.expose"].as_str(),
+            Some("web.test")
+        );
+    }
+
+    #[test]
+    fn fix_mode_rejects_controller_source() {
+        let source = ComposeSource::Controller("demo".to_string());
+        let err = ensure_fixable_source(&source).unwrap_err().to_string();
+        assert!(
+            err.contains("controller stack fixes are not wired yet"),
+            "{err}"
+        );
     }
 
     #[test]
