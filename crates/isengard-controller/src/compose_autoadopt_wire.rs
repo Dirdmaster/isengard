@@ -28,6 +28,7 @@
 use std::collections::BTreeMap;
 
 use isengard_proto::pb::ContainerInfo;
+use isengard_storage::host::HostId;
 
 use crate::container_id::derive_container_id;
 
@@ -35,16 +36,18 @@ use crate::container_id::derive_container_id;
 /// [`crate::compose_autoadopt::run_auto_adoption_pass`].
 ///
 /// Containers without a stack name are dropped; containers with an
-/// empty `runtime_container_id` are dropped. The resulting outer
-/// `Vec` is sorted by stack name so the iteration order is
-/// deterministic (mainly useful in tests; production callers don't
-/// rely on the order).
+/// empty `runtime_container_id` are dropped. Container IDs are derived
+/// from the stable host id because `sync_containers` keys
+/// `containers_rich` the same way. The resulting outer `Vec` is sorted
+/// by stack name so the iteration order is deterministic (mainly useful
+/// in tests; production callers don't rely on the order).
 #[must_use]
 pub fn group_containers_by_stack(
-    host_hostname: &str,
+    host_id: HostId,
     containers: &[ContainerInfo],
 ) -> Vec<(String, Vec<String>)> {
     let mut by_stack: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let host_display = host_id.to_string();
     for info in containers {
         if info.runtime_container_id.is_empty() {
             continue;
@@ -52,7 +55,7 @@ pub fn group_containers_by_stack(
         if info.stack.is_empty() {
             continue;
         }
-        let derived = derive_container_id(host_hostname, &info.runtime_container_id);
+        let derived = derive_container_id(&host_display, &info.runtime_container_id);
         by_stack
             .entry(info.stack.clone())
             .or_default()
@@ -64,6 +67,7 @@ pub fn group_containers_by_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container_id::derive_container_id;
 
     fn ci(rid: &str, stack: &str) -> ContainerInfo {
         ContainerInfo {
@@ -83,7 +87,7 @@ mod tests {
 
     #[test]
     fn groups_containers_by_stack_name() {
-        let host = "iso-1";
+        let host = HostId::from_bytes([1; 16]);
         let containers = vec![
             ci("aaaa1", "servarr"),
             ci("bbbb2", "servarr"),
@@ -100,12 +104,13 @@ mod tests {
 
     #[test]
     fn drops_containers_without_runtime_id_or_stack() {
+        let host = HostId::from_bytes([1; 16]);
         let containers = vec![
             ci("", "servarr"),      // no runtime id
             ci("aaaa1", ""),        // no stack
             ci("bbbb2", "servarr"), // keeps
         ];
-        let groups = group_containers_by_stack("h", &containers);
+        let groups = group_containers_by_stack(host, &containers);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "servarr");
         assert_eq!(groups[0].1.len(), 1);
@@ -113,8 +118,20 @@ mod tests {
 
     #[test]
     fn empty_input_yields_empty_groups() {
-        let groups = group_containers_by_stack("h", &[]);
+        let groups = group_containers_by_stack(HostId::from_bytes([1; 16]), &[]);
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn derives_ids_from_stable_host_id() {
+        let host = HostId::from_bytes([2; 16]);
+        let groups = group_containers_by_stack(host, &[ci("rt-a", "servarr")]);
+
+        assert_eq!(
+            groups[0].1[0],
+            derive_container_id(&host.to_string(), "rt-a")
+        );
+        assert_ne!(groups[0].1[0], derive_container_id("lausanne", "rt-a"));
     }
 
     #[test]
@@ -123,7 +140,7 @@ mod tests {
         // sync_containers uses, so a future rich-data lookup keyed on
         // `containers.id` finds the right row. We assert that the
         // derived id is non-empty and deterministic.
-        let host = "iso-2";
+        let host = HostId::from_bytes([3; 16]);
         let containers = vec![ci("deadbeef", "media")];
         let g1 = group_containers_by_stack(host, &containers);
         let g2 = group_containers_by_stack(host, &containers);
