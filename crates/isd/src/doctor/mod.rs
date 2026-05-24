@@ -96,17 +96,16 @@ pub fn audit(compose: &Value) -> Vec<Finding> {
 
 /// Parse a compose file at `path` into a `serde_yaml::Value` ready for
 /// [`audit`]. Surfaces a friendly error when the file is missing or the
-/// YAML doesn't parse.
+/// document doesn't parse.
 ///
 /// # Errors
 ///
-/// Returns `Err` when the file can't be read or the bytes aren't
-/// valid YAML.
+/// Returns `Err` when the file can't be read or the document isn't valid.
 pub fn load_compose(path: &std::path::Path) -> Result<Value> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading compose file {}", path.display()))?;
-    serde_yaml::from_slice(&bytes)
-        .with_context(|| format!("parsing compose YAML at {}", path.display()))
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading compose file {}", path.display()))?;
+    let document = document::ComposeDocument::parse_path(path, &content)?;
+    Ok(document.value)
 }
 
 /// Print a slice of findings as `warning:` lines on stderr. The deploy
@@ -146,6 +145,13 @@ enum ComposeSource {
     Controller(String),
 }
 
+#[allow(dead_code)]
+struct ResolvedCompose {
+    body: String,
+    document: document::ComposeDocument,
+    source: ComposeSource,
+}
+
 impl ComposeSource {
     /// Operator-facing label for the source: a filesystem path or a
     /// `stack "<name>" (controller)` tag.
@@ -167,19 +173,17 @@ impl ComposeSource {
 /// # Errors
 ///
 /// Returns `Err` when the compose file / stack can't be located or
-/// when the YAML fails to parse.
+/// when the document fails to parse.
 pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
-    let (yaml, source) = resolve_compose(args.target.as_deref(), context).await?;
-    let compose: Value = serde_yaml::from_str(&yaml)
-        .with_context(|| format!("parsing compose from {}", source.label()))?;
-    let findings = audit(&compose);
+    let resolved = resolve_compose(args.target.as_deref(), context).await?;
+    let findings = audit(&resolved.document.value);
 
     if findings.is_empty() {
-        println!("{} looks healthy. No findings.", source.label());
+        println!("{} looks healthy. No findings.", resolved.source.label());
         return Ok(());
     }
 
-    println!("{}:", source.label());
+    println!("{}:", resolved.source.label());
     for f in &findings {
         let tag = match f.severity {
             Severity::Warning => "warning",
@@ -197,27 +201,36 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Pick the compose YAML for the requested target.
+/// Pick the compose document for the requested target.
 ///
-/// 1. `None` → `./compose.yaml` (or `compose.yml`) in the cwd.
+/// 1. `None` → the first supported compose document in the cwd.
 /// 2. A value that resolves to a file or directory on disk → load locally.
 /// 3. Otherwise → treat as a stack name and fetch from the controller.
-async fn resolve_compose(
-    target: Option<&str>,
-    context: Option<&str>,
-) -> Result<(String, ComposeSource)> {
+async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<ResolvedCompose> {
     if let Some(t) = target {
         let path = std::path::Path::new(t);
         if path.exists() {
             let resolved = resolve_local_path(path)?;
-            let yaml = std::fs::read_to_string(&resolved)
+            let body = std::fs::read_to_string(&resolved)
                 .with_context(|| format!("reading compose file {}", resolved.display()))?;
-            return Ok((yaml, ComposeSource::Local(resolved)));
+            let document = document::ComposeDocument::parse_path(&resolved, &body)?;
+            return Ok(ResolvedCompose {
+                body,
+                document,
+                source: ComposeSource::Local(resolved),
+            });
         }
         // Not on disk; assume stack name.
         let session = Session::open(context).await?;
         match crate::compose_cmd::fetch_compose_yaml_by_name(&session, t).await? {
-            Some(yaml) => Ok((yaml, ComposeSource::Controller(t.to_string()))),
+            Some(yaml) => {
+                let document = document::ComposeDocument::parse_controller_yaml(&yaml)?;
+                Ok(ResolvedCompose {
+                    body: yaml,
+                    document,
+                    source: ComposeSource::Controller(t.to_string()),
+                })
+            }
             None => Err(anyhow::anyhow!(
                 "stack {t:?} is tracked by the controller but has no compose stored.\n\
                  \n\
@@ -241,25 +254,28 @@ async fn resolve_compose(
         }
     } else {
         let resolved = resolve_local_path(std::path::Path::new("."))?;
-        let yaml = std::fs::read_to_string(&resolved)
+        let body = std::fs::read_to_string(&resolved)
             .with_context(|| format!("reading compose file {}", resolved.display()))?;
-        Ok((yaml, ComposeSource::Local(resolved)))
+        let document = document::ComposeDocument::parse_path(&resolved, &body)?;
+        Ok(ResolvedCompose {
+            body,
+            document,
+            source: ComposeSource::Local(resolved),
+        })
     }
 }
 
 /// Resolve a local path or directory into a concrete compose file.
 fn resolve_local_path(target: &std::path::Path) -> Result<std::path::PathBuf> {
     if target.is_dir() {
-        let candidate = target.join("compose.yaml");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        let yml = target.join("compose.yml");
-        if yml.exists() {
-            return Ok(yml);
+        for name in ["stack.toml", "compose.toml", "compose.yaml", "compose.yml"] {
+            let candidate = target.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
         return Err(anyhow::anyhow!(
-            "no compose.yaml or compose.yml in {}",
+            "no stack.toml, compose.toml, compose.yaml, or compose.yml in {}",
             target.display()
         ));
     }
@@ -304,5 +320,26 @@ services:
         let findings = audit(&compose);
         assert!(!findings.is_empty());
         assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
+    }
+
+    #[test]
+    fn local_directory_prefers_stack_then_toml_then_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("compose.yaml"), "services:\n").unwrap();
+        std::fs::write(
+            tmp.path().join("compose.toml"),
+            "[services.web]\nimage = \"nginx\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("stack.toml"),
+            "name = \"demo\"\ncompose = [\"compose.toml\"]\n",
+        )
+        .unwrap();
+        let resolved = resolve_local_path(tmp.path()).unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|s| s.to_str()),
+            Some("stack.toml")
+        );
     }
 }
