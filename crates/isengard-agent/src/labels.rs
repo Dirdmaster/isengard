@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use isengard_proto::pb::{
-    AgentMessage, ContainerLabelsRemoved, ContainerLabelsReport, agent_message,
+    AgentMessage, ContainerLabelsRemoved, ContainerLabelsReport, LabelRouteIntent, agent_message,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -178,7 +178,69 @@ fn snapshot_to_report(snap: &ContainerSnapshot) -> Option<ContainerLabelsReport>
         container_name: snap.name.clone(),
         image: snap.image.clone(),
         labels,
+        label_route_intents: label_route_intents(snap),
     })
+}
+
+fn label_route_intents(snap: &ContainerSnapshot) -> Vec<LabelRouteIntent> {
+    let labels: std::collections::HashMap<String, String> = snap
+        .labels
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let candidates = infer_container_ports(snap);
+
+    isengard_core::labels::parse_labels(&labels)
+        .into_iter()
+        .map(|rule| {
+            let (container_port, unresolved_reason) = match rule.port {
+                Some(port) => (u32::from(port), String::new()),
+                None => match candidates.as_slice() {
+                    [only] => (u32::from(*only), String::new()),
+                    [] => (0, "no candidate ports from inspect".to_string()),
+                    many => (
+                        0,
+                        format!(
+                            "multiple candidate ports: {}",
+                            many.iter()
+                                .map(u16::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ),
+                },
+            };
+            LabelRouteIntent {
+                name: rule.name.unwrap_or_default(),
+                hostname: rule.hostname,
+                container_port,
+                unresolved_reason,
+            }
+        })
+        .collect()
+}
+
+fn infer_container_ports(snap: &ContainerSnapshot) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for key in snap.network_settings.ports.keys() {
+        push_port_key(&mut ports, key);
+    }
+    for binding in &snap.port_bindings {
+        let container_side = binding.rsplit(':').next().unwrap_or(binding.as_str());
+        push_port_key(&mut ports, container_side);
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+fn push_port_key(out: &mut Vec<u16>, key: &str) {
+    let Some(port_str) = key.split('/').next() else {
+        return;
+    };
+    if let Ok(port) = port_str.parse::<u16>() {
+        out.push(port);
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +404,61 @@ mod tests {
             port_bindings: Vec::new(),
             restart: None,
         }
+    }
+
+    #[test]
+    fn labels_report_includes_inferred_plex_port() {
+        let mut snap = snap_with_labels("plex", &[("isengard.expose", "plex.vallee.casa")]);
+        snap.network_settings
+            .ports
+            .insert("32400/tcp".into(), Vec::new());
+
+        let report = snapshot_to_report(&snap).expect("labels report");
+
+        assert_eq!(report.label_route_intents.len(), 1);
+        assert_eq!(report.label_route_intents[0].name, "");
+        assert_eq!(report.label_route_intents[0].hostname, "plex.vallee.casa");
+        assert_eq!(report.label_route_intents[0].container_port, 32400);
+        assert_eq!(report.label_route_intents[0].unresolved_reason, "");
+    }
+
+    #[test]
+    fn explicit_port_label_wins_over_runtime_candidates() {
+        let mut snap = snap_with_labels(
+            "plex",
+            &[
+                ("isengard.expose", "plex.vallee.casa"),
+                ("isengard.expose.port", "32400"),
+            ],
+        );
+        snap.network_settings
+            .ports
+            .insert("80/tcp".into(), Vec::new());
+
+        let report = snapshot_to_report(&snap).expect("labels report");
+
+        assert_eq!(report.label_route_intents[0].container_port, 32400);
+    }
+
+    #[test]
+    fn ambiguous_runtime_ports_report_unresolved_intent() {
+        let mut snap = snap_with_labels("qbittorrent", &[("isengard.expose", "qb.vallee.casa")]);
+        snap.network_settings
+            .ports
+            .insert("8080/tcp".into(), Vec::new());
+        snap.network_settings
+            .ports
+            .insert("6881/tcp".into(), Vec::new());
+
+        let report = snapshot_to_report(&snap).expect("labels report");
+
+        assert_eq!(report.label_route_intents.len(), 1);
+        assert_eq!(report.label_route_intents[0].container_port, 0);
+        assert!(
+            report.label_route_intents[0]
+                .unresolved_reason
+                .contains("multiple candidate ports")
+        );
     }
 
     #[tokio::test]

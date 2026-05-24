@@ -55,6 +55,7 @@ async fn labels_report_creates_routing_rule_with_label_source() {
                 container_name: "web".into(),
                 image: "nginx:1.25".into(),
                 labels,
+                label_route_intents: Vec::new(),
             },
         )
         .await
@@ -82,6 +83,7 @@ async fn labels_removed_event_deletes_label_rules_for_container() {
                 container_name: "web".into(),
                 image: "n:1".into(),
                 labels,
+                label_route_intents: Vec::new(),
             },
         )
         .await
@@ -146,6 +148,7 @@ async fn label_arriving_for_existing_ui_hostname_replaces_ui_rule() {
                 container_name: "newweb".into(),
                 image: "n:1".into(),
                 labels,
+                label_route_intents: Vec::new(),
             },
         )
         .await
@@ -202,6 +205,7 @@ async fn label_displacing_ui_rule_preserves_overrides() {
                 container_name: "web".into(),
                 image: "n".into(),
                 labels,
+                label_route_intents: Vec::new(),
             },
         )
         .await
@@ -241,6 +245,7 @@ async fn label_collision_between_containers_warns_and_skips_second() {
                 container_name: "web-a".into(),
                 image: "n:1".into(),
                 labels: labels_a,
+                label_route_intents: Vec::new(),
             },
         )
         .await
@@ -259,6 +264,7 @@ async fn label_collision_between_containers_warns_and_skips_second() {
                 container_name: "web-b".into(),
                 image: "n:1".into(),
                 labels: labels_b,
+                label_route_intents: Vec::new(),
             },
         )
         .await
