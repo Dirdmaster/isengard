@@ -19,9 +19,9 @@ use crate::doctor::{Finding, Severity};
 /// Container-internal ports we treat as web traffic when deciding
 /// whether to emit the finding. Captures the common HTTP defaults
 /// (80, 443), Plex (32400), Node / Rails / Flask defaults (3000, 5000,
-/// 8000), the `:8080` convention, qBittorrent (6881), and grafana /
-/// prometheus / minio dashboards (9000 family).
-const HTTP_ISH_PORTS: &[u16] = &[80, 443, 3000, 5000, 6881, 8000, 8080, 9000, 32400];
+/// 8000), the `:8080` convention, and grafana / prometheus / minio
+/// dashboards (9000 family).
+const HTTP_ISH_PORTS: &[u16] = &[80, 443, 3000, 5000, 8000, 8080, 9000, 32400];
 
 /// Walk every `services.<name>` entry and emit findings for the
 /// services that publish HTTP-ish ports without an `isengard.expose`
@@ -37,8 +37,8 @@ pub fn check(compose: &Value) -> Vec<Finding> {
         let Some(svc) = svc.as_mapping() else {
             continue;
         };
-        let candidate_ports = http_ish_ports(svc);
         if has_expose_label(svc) {
+            let candidate_ports = published_container_ports(svc);
             if let Some(port) = expose_port_label(svc) {
                 if port.parse::<u16>().is_err() {
                     out.push(Finding {
@@ -80,6 +80,7 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             }
             continue;
         }
+        let candidate_ports = http_ish_ports(svc);
         let inferred_port = match candidate_ports.as_slice() {
             [] => continue,
             [port] => Some(*port),
@@ -117,21 +118,36 @@ fn http_ish_ports(svc: &serde_yaml::Mapping) -> Vec<u16> {
     found
 }
 
+/// Return sorted unique published container ports for an exposed service.
+fn published_container_ports(svc: &serde_yaml::Mapping) -> Vec<u16> {
+    let Some(ports) = svc.get("ports").and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+    let mut found = ports.iter().filter_map(container_port).collect::<Vec<_>>();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+fn container_port(spec: &Value) -> Option<u16> {
+    if let Some(s) = spec.as_str() {
+        let container = s.rsplit(':').next().unwrap_or(s);
+        let container = container.split('/').next().unwrap_or(container);
+        container.parse::<u16>().ok()
+    } else if let Some(m) = spec.as_mapping() {
+        let n = m.get("target")?.as_u64()?;
+        u16::try_from(n).ok()
+    } else {
+        None
+    }
+}
+
 /// Return the container port when `spec` resolves to a port from
 /// [`HTTP_ISH_PORTS`]. Accepts the short form (`"HOST:CONTAINER"` or
 /// `"PORT"` strings, with an optional `/tcp` or `/udp` suffix) and
 /// the long form (a mapping with `target: N`).
 fn http_ish_port(spec: &Value) -> Option<u16> {
-    let port = if let Some(s) = spec.as_str() {
-        let container = s.rsplit(':').next().unwrap_or(s);
-        let container = container.split('/').next().unwrap_or(container);
-        container.parse::<u16>().ok()?
-    } else if let Some(m) = spec.as_mapping() {
-        let n = m.get("target")?.as_u64()?;
-        u16::try_from(n).ok()?
-    } else {
-        return None;
-    };
+    let port = container_port(spec)?;
     HTTP_ISH_PORTS.contains(&port).then_some(port)
 }
 
@@ -386,6 +402,21 @@ services:
 "#,
         );
         assert!(check(&v).is_empty());
+    }
+
+    #[test]
+    fn peer_only_bittorrent_port_does_not_need_expose_host() {
+        let v = parse(
+            r#"
+services:
+  qbittorrent:
+    image: qbittorrent
+    ports: ["6881:6881"]
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(!findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
     }
 
     #[test]
