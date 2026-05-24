@@ -127,6 +127,26 @@ mod tests {
     }
 
     #[test]
+    fn omits_port_label_when_port_is_unknown() {
+        let mut v =
+            parse("services:\n  web:\n    image: nginx\n    ports: [\"8080:80\", \"8443:443\"]\n");
+        let changed = apply_expose_host(
+            &mut v,
+            &ExposeHostInput {
+                service: "web".into(),
+                hostname: "web.test".into(),
+                port: None,
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        let labels = &v["services"]["web"]["labels"];
+        assert_eq!(labels["isengard.expose"].as_str(), Some("web.test"));
+        assert!(labels["isengard.expose.port"].is_null());
+    }
+
+    #[test]
     fn appends_to_label_list() {
         let mut v = parse(
             "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n    labels:\n      - \"foo=bar\"\n",

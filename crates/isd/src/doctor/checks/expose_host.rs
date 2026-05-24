@@ -57,20 +57,23 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             }),
             fix: Some(crate::doctor::FixSpec::ExposeService {
                 service: name.to_string(),
-                inferred_port: Some(inferred_port),
+                inferred_port,
             }),
         });
     }
     out
 }
 
-/// Return the first exposed container port from [`HTTP_ISH_PORTS`].
-fn inferred_http_port(svc: &serde_yaml::Mapping) -> Option<u16> {
+/// Return the inferred port when unambiguous, `Some(None)` when web ports are ambiguous.
+fn inferred_http_port(svc: &serde_yaml::Mapping) -> Option<Option<u16>> {
     let ports = svc.get("ports").and_then(Value::as_sequence)?;
-    ports
-        .iter()
-        .find(|spec| port_is_http_ish(spec))
-        .and_then(http_ish_port)
+    let mut found = ports.iter().filter_map(http_ish_port);
+    let first = found.next()?;
+    if found.next().is_some() {
+        Some(None)
+    } else {
+        Some(Some(first))
+    }
 }
 
 /// Return the container port when `spec` resolves to a port from
@@ -89,10 +92,6 @@ fn http_ish_port(spec: &Value) -> Option<u16> {
         return None;
     };
     HTTP_ISH_PORTS.contains(&port).then_some(port)
-}
-
-fn port_is_http_ish(spec: &Value) -> bool {
-    http_ish_port(spec).is_some()
 }
 
 /// True when `services.<name>.labels` carries any key under the
@@ -184,6 +183,32 @@ services:
             Some(crate::doctor::FixSpec::ExposeService {
                 service: "plex".to_string(),
                 inferred_port: Some(32400),
+            })
+        );
+    }
+
+    #[test]
+    fn ambiguous_http_ports_emit_finding_without_inferred_port() {
+        let v = parse(
+            r#"
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+      - "8443:443"
+"#,
+        );
+
+        let f = check(&v);
+
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, "EXPOSE_HOST_MISSING");
+        assert_eq!(
+            f[0].fix,
+            Some(crate::doctor::FixSpec::ExposeService {
+                service: "web".to_string(),
+                inferred_port: None,
             })
         );
     }

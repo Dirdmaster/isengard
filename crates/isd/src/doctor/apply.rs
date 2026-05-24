@@ -77,7 +77,22 @@ impl ApplyTarget {
 ///
 /// Returns `Err` when the manifest cannot be read or parsed, or when
 /// the manifest does not identify exactly one compose file.
+#[allow(dead_code)]
 pub fn resolve_manifest_compose_path(stack_toml: &Path) -> Result<PathBuf> {
+    let paths = resolve_manifest_compose_paths(stack_toml)?;
+    if paths.len() != 1 {
+        return Err(manifest_compose_count_error(paths.len()));
+    }
+    Ok(paths[0].clone())
+}
+
+/// Resolve a stack manifest to its declared compose files.
+///
+/// # Errors
+///
+/// Returns `Err` when the manifest cannot be read or parsed, or when
+/// the manifest has no compose files.
+pub fn resolve_manifest_compose_paths(stack_toml: &Path) -> Result<Vec<PathBuf>> {
     let text = std::fs::read_to_string(stack_toml)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", stack_toml.display()))?;
     let root = stack_toml
@@ -91,10 +106,11 @@ pub fn resolve_manifest_compose_path(stack_toml: &Path) -> Result<PathBuf> {
         }
         Err(err) => return Err(anyhow::anyhow!("parsing {}: {err}", stack_toml.display())),
     };
-    if manifest.compose.len() != 1 {
-        return Err(manifest_compose_count_error(manifest.compose.len()));
-    }
-    Ok(root.join(&manifest.compose[0]))
+    Ok(manifest
+        .compose
+        .iter()
+        .map(|compose| root.join(compose))
+        .collect())
 }
 
 /// Build the operator guidance used when a manifest has ambiguous compose files.

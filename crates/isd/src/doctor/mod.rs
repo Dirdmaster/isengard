@@ -247,7 +247,12 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let changed = apply_fix_inputs(&mut resolved.document, findings, prompt_hostname)?;
+    let changed = apply_fix_inputs(
+        &mut resolved.document,
+        findings,
+        prompt_should_fix,
+        prompt_hostname,
+    )?;
 
     if !changed {
         println!("No fixes applied.");
@@ -298,6 +303,7 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
 fn apply_fix_inputs(
     document: &mut document::ComposeDocument,
     findings: Vec<Finding>,
+    mut should_fix: impl FnMut(&str) -> Result<bool>,
     mut hostname_for_service: impl FnMut(&str) -> Result<String>,
 ) -> Result<bool> {
     let mut changed = false;
@@ -308,10 +314,21 @@ fn apply_fix_inputs(
         let Some(mut input) = fixers::expose_host::input_from_finding(&finding) else {
             continue;
         };
+        if !should_fix(&input.service)? {
+            continue;
+        }
         input.hostname = hostname_for_service(&input.service)?;
         changed |= fixers::expose_host::apply_expose_host(&mut document.value, &input)?;
     }
     Ok(changed)
+}
+
+/// Prompt whether to apply a fix for one service.
+fn prompt_should_fix(service: &str) -> Result<bool> {
+    inquire::Confirm::new(&format!("Fix services.{service}?"))
+        .with_default(true)
+        .prompt()
+        .map_err(|e| anyhow::anyhow!("fix prompt cancelled: {e}"))
 }
 
 /// Prompt for the hostname used by the expose-host fixer.
@@ -387,7 +404,7 @@ async fn resolve_compose(
         if path.exists() {
             let mut resolved = resolve_local_path(path)?;
             if resolved.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
-                resolved = apply::resolve_manifest_compose_path(&resolved)?;
+                resolved = resolve_manifest_compose_path_for_audit(&resolved)?;
             }
             let body = std::fs::read_to_string(&resolved)
                 .with_context(|| format!("reading compose file {}", resolved.display()))?;
@@ -421,7 +438,7 @@ async fn resolve_compose(
     } else {
         let mut resolved = resolve_local_path(Path::new("."))?;
         if resolved.file_name().and_then(|s| s.to_str()) == Some("stack.toml") {
-            resolved = apply::resolve_manifest_compose_path(&resolved)?;
+            resolved = resolve_manifest_compose_path_for_audit(&resolved)?;
         }
         let body = std::fs::read_to_string(&resolved)
             .with_context(|| format!("reading compose file {}", resolved.display()))?;
@@ -433,6 +450,38 @@ async fn resolve_compose(
             session: None,
         })
     }
+}
+
+/// Resolve a manifest compose target conservatively for doctor.
+fn resolve_manifest_compose_path_for_audit(stack_toml: &Path) -> Result<PathBuf> {
+    let paths = apply::resolve_manifest_compose_paths(stack_toml)?;
+    if paths.len() == 1 {
+        return Ok(paths[0].clone());
+    }
+
+    let mut paths_with_findings = Vec::new();
+    for path in &paths {
+        let body = std::fs::read_to_string(path)
+            .with_context(|| format!("reading compose file {}", path.display()))?;
+        let document = document::ComposeDocument::parse_path(path, &body)?;
+        if !audit(&document.value).is_empty() {
+            paths_with_findings.push(path.clone());
+        }
+    }
+
+    if paths_with_findings.len() == 1 {
+        return Ok(paths_with_findings.remove(0));
+    }
+
+    Err(manifest_doctor_compose_error(paths_with_findings.len()))
+}
+
+/// Build the operator guidance used when doctor cannot pick one manifest compose.
+fn manifest_doctor_compose_error(finding_compose_count: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "stack.toml has {} compose files with doctor findings; pass the specific compose file to isd stack doctor",
+        finding_compose_count
+    )
 }
 
 /// Build the missing-compose guidance for read-only and fix doctor modes.
@@ -547,10 +596,69 @@ services:
         .unwrap();
         let findings = audit(&document.value);
 
-        let changed = apply_fix_inputs(&mut document, findings, |service| {
-            assert_eq!(service, "web");
-            Ok("web.test".to_string())
-        })
+        let changed = apply_fix_inputs(
+            &mut document,
+            findings,
+            |service| {
+                assert_eq!(service, "web");
+                Ok(true)
+            },
+            |service| {
+                assert_eq!(service, "web");
+                Ok("web.test".to_string())
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            document.value["services"]["web"]["labels"]["isengard.expose"].as_str(),
+            Some("web.test")
+        );
+    }
+
+    #[test]
+    fn apply_fix_inputs_skips_service_without_prompting_for_hostname() {
+        let mut document = document::ComposeDocument::parse_path(
+            std::path::Path::new("compose.yaml"),
+            "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n",
+        )
+        .unwrap();
+        let findings = audit(&document.value);
+
+        let changed = apply_fix_inputs(
+            &mut document,
+            findings,
+            |_| Ok(false),
+            |_| panic!("hostname callback should not be called for skipped services"),
+        )
+        .unwrap();
+
+        assert!(!changed);
+        assert!(document.value["services"]["web"]["labels"].is_null());
+    }
+
+    #[test]
+    fn apply_fix_inputs_fixes_service_when_confirmed() {
+        let mut document = document::ComposeDocument::parse_path(
+            std::path::Path::new("compose.yaml"),
+            "services:\n  web:\n    image: nginx\n    ports: [\"8080:80\"]\n",
+        )
+        .unwrap();
+        let findings = audit(&document.value);
+
+        let changed = apply_fix_inputs(
+            &mut document,
+            findings,
+            |service| {
+                assert_eq!(service, "web");
+                Ok(true)
+            },
+            |service| {
+                assert_eq!(service, "web");
+                Ok("web.test".to_string())
+            },
+        )
         .unwrap();
 
         assert!(changed);
@@ -616,6 +724,69 @@ services:
             .unwrap();
         let findings = audit(&resolved.document.value);
         assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
+    }
+
+    #[tokio::test]
+    async fn stack_toml_with_one_finding_compose_resolves_that_compose() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("stack.toml"),
+            "name = \"demo\"\ncompose = [\"base.toml\", \"override.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("base.toml"),
+            "[services.web]\nimage = \"nginx\"\nports = [\"8080:80\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("override.toml"),
+            "[services.worker]\nimage = \"alpine\"\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_compose(Some(tmp.path().to_str().unwrap()), None, false)
+            .await
+            .unwrap();
+        let findings = audit(&resolved.document.value);
+
+        match resolved.source {
+            ComposeSource::Local(path) => assert_eq!(path, tmp.path().join("base.toml")),
+            ComposeSource::Controller { .. } => panic!("expected local compose source"),
+        }
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
+    }
+
+    #[tokio::test]
+    async fn stack_toml_with_multiple_finding_composes_errors_with_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("stack.toml"),
+            "name = \"demo\"\ncompose = [\"base.toml\", \"override.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("base.toml"),
+            "[services.web]\nimage = \"nginx\"\nports = [\"8080:80\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("override.toml"),
+            "[services.admin]\nimage = \"nginx\"\nports = [\"8081:80\"]\n",
+        )
+        .unwrap();
+
+        let err = match resolve_compose(Some(tmp.path().to_str().unwrap()), None, false).await {
+            Ok(_) => panic!("expected ambiguous manifest compose error"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+
+        assert!(
+            message.contains("pass the specific compose file"),
+            "{message}"
+        );
+        assert!(message.contains("isd stack doctor"), "{message}");
     }
 
     #[test]
