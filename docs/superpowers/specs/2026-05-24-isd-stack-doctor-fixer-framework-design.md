@@ -14,9 +14,9 @@ Build a small fixer framework behind `isd stack doctor --fix`.
 
 The framework separates three responsibilities:
 
-1. Checks detect findings against parsed compose YAML.
-2. Fixers turn selected findings into YAML mutations.
-3. Apply targets persist the mutated YAML to either a local file or the controller.
+1. Checks detect findings against parsed compose documents.
+2. Fixers turn selected findings into compose document mutations.
+3. Apply targets persist the mutated document to either a local file or the controller.
 
 `EXPOSE_HOST_MISSING` is the first fixer. It asks the operator for a hostname, adds `isengard.expose` labels to the affected service, shows the resulting diff, and applies the compose update after confirmation.
 
@@ -40,6 +40,23 @@ isd stack doctor --fix servarr
 isd stack doctor --fix ./compose.yaml
 isd stack doctor --fix --force servarr
 ```
+
+## Syntax Boundary
+
+Doctor fixers must work with both Isengard stack layouts:
+
+- Compose-only stacks: `compose.yaml`, `compose.yml`, or `compose.toml`.
+- Manifest stacks: `stack.toml` with one or more compose entries, including TOML compose files.
+
+Do not introduce a new `.isd` file or syntax in this pass. `stack.toml` already is the Isengard-native orchestration manifest, and `isengard.toml` already exists as the optional repo or fleet-level configuration file. A third syntax would split the model before there is evidence that `stack.toml` cannot carry the needed semantics.
+
+The implementation should treat TOML compose as an input syntax that normalizes into the same in-memory service model used by YAML compose. Fixers operate on that model, then serialize back to the original syntax where practical.
+
+If exact TOML round-trip preservation is too large for this pass, the minimum acceptable behavior is:
+
+1. Local `compose.toml`: mutate and write TOML back.
+2. `stack.toml` manifest: resolve the declared compose files, mutate the relevant compose source, and apply through the existing manifest-aware deploy path.
+3. Controller stored compose: continue to mutate stored YAML, because the controller stores the merged deployment compose, not the original local TOML sources.
 
 ## Data Model
 
@@ -90,7 +107,7 @@ The registry is intentionally small and static. There is no plugin system, dynam
 Unchanged:
 
 1. Resolve target.
-2. Load compose YAML.
+2. Load the compose document.
 3. Run `audit`.
 4. Print findings.
 
@@ -99,14 +116,14 @@ Unchanged:
 `isd stack doctor --fix <target>` runs:
 
 1. Resolve target into an `ApplyTarget`.
-2. Load compose YAML and source metadata.
+2. Load the compose document and source metadata.
 3. Run `audit`.
 4. Filter findings to those with registered fixers.
 5. For each fixable finding, prompt apply or skip.
 6. Run the fixer prompt for required input.
-7. Mutate an in-memory YAML tree.
-8. Re-run `audit` on the mutated YAML.
-9. Print a compact diff from original to proposed YAML.
+7. Mutate an in-memory compose document.
+8. Re-run `audit` on the mutated document.
+9. Print a compact diff from original to proposed document.
 10. Confirm apply unless `--yes` was passed.
 11. Persist through the apply target.
 12. Print a verification command.
@@ -122,10 +139,12 @@ Used when the target exists on disk.
 Resolution stays compatible with current doctor behavior:
 
 - file path: use that file
-- directory: use `compose.yaml`, then `compose.yml`
+- directory: use `stack.toml`, then `compose.toml`, then `compose.yaml`, then `compose.yml`
 - omitted target: use current directory compose file
 
-Apply writes the proposed YAML back to the same file after confirmation.
+Apply writes the proposed document back to the same file after confirmation.
+
+When the resolved target is `stack.toml`, apply should preserve the manifest and update the referenced compose source. If multiple compose files contribute to the same service, the first version may stop with a clear error telling the operator to pass the specific compose file. Silent mutation of the wrong overlay is worse than asking for a narrower target.
 
 ### Controller Stack Target
 
@@ -201,6 +220,14 @@ services:
       isengard.expose.port: "32400"
 ```
 
+For TOML compose, the equivalent should preserve TOML syntax:
+
+```toml
+[services.plex.labels]
+"isengard.expose" = "plex.vallee.casa"
+"isengard.expose.port" = "32400"
+```
+
 ## Error Handling
 
 - No findings: print healthy and exit zero.
@@ -220,6 +247,7 @@ Unit tests:
 - Expose fixer mutates label maps.
 - Expose fixer mutates label lists.
 - Expose fixer creates labels when absent.
+- Expose fixer mutates TOML compose without converting the local file to YAML.
 - Expose fixer preserves unrelated labels.
 - Expose fixer does not overwrite existing expose labels.
 - Audit is re-run after mutation and the original finding disappears.
@@ -227,7 +255,9 @@ Unit tests:
 
 Apply tests:
 
-- Local file target writes the proposed YAML after confirmation is bypassed.
+- Local file target writes the proposed document after confirmation is bypassed.
+- Local TOML target writes TOML after confirmation is bypassed.
+- Manifest target resolves `stack.toml` and refuses ambiguous multi-compose overlays with a clear error.
 - Controller apply builds a `PUT /api/v1/stacks/<id>/compose` request with `If-Match`.
 - Controller apply appends `?force=true` when requested.
 
@@ -237,6 +267,7 @@ Manual smoke:
 cargo fmt --check
 cargo test -p isd doctor --lib
 cargo test -p isd --test cli_test doctor
+isd stack doctor --fix ./compose.toml
 isd stack doctor --fix servarr
 isd stack doctor servarr
 ```
@@ -244,6 +275,7 @@ isd stack doctor servarr
 ## Out of Scope
 
 - Route-only repairs that create routing rules without editing compose.
+- A new `.isd` syntax. Revisit only if `stack.toml` and `isengard.toml` become clearly insufficient.
 - A generic TUI workflow engine.
 - Auto-generating hostnames from service names and base domains.
 - Full YAML style preservation beyond map-vs-list label shape.
@@ -254,5 +286,6 @@ isd stack doctor servarr
 - `isd stack doctor` remains read-only by default.
 - `isd stack doctor --fix servarr` can add missing expose labels and deploy the corrected stored compose.
 - Local compose files can be fixed without a controller.
+- TOML compose and manifest-backed stacks are first-class doctor inputs.
 - Adding the next fixer requires registering a new fixer and attaching a `FixSpec`, not rewriting doctor control flow.
 - The operator never has to choose between doctor and compose-as-truth.
