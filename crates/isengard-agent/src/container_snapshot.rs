@@ -187,6 +187,7 @@ pub async fn list_container_snapshots_via(backend: &dyn RuntimeBackend) -> Vec<C
     out
 }
 
+/// Convert a runtime snapshot into the heartbeat container snapshot shape.
 fn runtime_snapshot_to_heartbeat(s: crate::runtime::ContainerSnapshot) -> ContainerSnapshot {
     let created_at_ms = s
         .created_at
@@ -209,6 +210,7 @@ fn runtime_snapshot_to_heartbeat(s: crate::runtime::ContainerSnapshot) -> Contai
     }
 }
 
+/// Convert runtime-level host port bindings into heartbeat rich port mappings.
 fn runtime_ports_to_heartbeat(
     ports: std::collections::BTreeMap<String, Vec<crate::runtime::HostPort>>,
 ) -> Vec<PortMapping> {
