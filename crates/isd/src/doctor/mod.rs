@@ -224,7 +224,7 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "{} finding(s). Re-run with `isd stack doctor --fix <target>` once v0.2 ships the interactive fixer.",
+        "{} finding(s). Re-run with `isd stack doctor --fix <target>` to repair fixable findings.",
         findings.len()
     );
     Ok(())
@@ -235,11 +235,28 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
     let mut resolved = resolve_compose(args.target.as_deref(), context, true).await?;
     let original = resolved.body.clone();
     let findings = audit(&resolved.document.value);
+    if !findings.is_empty()
+        && findings
+            .iter()
+            .all(|finding| fixers::fixer_id_for(finding).is_none())
+    {
+        println!(
+            "{} finding(s), but none have registered fixers yet.",
+            findings.len()
+        );
+        return Ok(());
+    }
+
     let changed = apply_fix_inputs(&mut resolved.document, findings, prompt_hostname)?;
 
     if !changed {
         println!("No fixes applied.");
         return Ok(());
+    }
+
+    let remaining = audit(&resolved.document.value);
+    if remaining.iter().any(|f| f.id == "EXPOSE_HOST_MISSING") {
+        eprintln!("warning: some expose findings remain after selected fixes");
     }
 
     let proposed = resolved.document.to_string()?;
