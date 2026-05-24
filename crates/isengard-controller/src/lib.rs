@@ -17,6 +17,7 @@ pub mod config;
 pub mod container_id;
 pub mod disconnect_monitor;
 pub mod dns;
+pub mod dns_zone_source;
 pub mod enrollment;
 pub mod hook_ingest;
 pub mod log_fanout;

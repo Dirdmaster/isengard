@@ -3611,6 +3611,7 @@ dependencies = [
  "http 1.4.0",
  "instant-acme",
  "isengard-core",
+ "isengard-dns",
  "isengard-proto",
  "isengard-storage",
  "rand 0.8.6",
