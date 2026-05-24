@@ -110,6 +110,27 @@ jobs:
       - name: cargo nextest
         run: cargo nextest run --workspace --profile ci
 
+  migrations:
+    # Migrations are byte-immutable once shipped: sqlx checksums each file
+    # in `_sqlx_migrations` on first apply and refuses to boot if the
+    # on-disk content drifts. PR #287 (lexicon doc sweep) edited a single
+    # comment in `0028_stack_manifest.sql`; the next `isd upgrade` looped
+    # on `migration 28 was previously applied but has been modified` and
+    # required a manual `isd restore`. This job blocks that class of bug
+    # at PR time by failing if any migration file <= the latest applied
+    # version diverges from the base ref.
+    name: migrations immutable
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject edits to shipped migration files
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: bash scripts/ci/check_migrations_immutable.sh "origin/${BASE_REF}"
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
