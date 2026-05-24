@@ -20,7 +20,7 @@
 - Create `crates/isd/src/doctor/apply.rs`: local file, manifest, and controller apply targets.
 - Modify `crates/isd/src/compose_cmd.rs`: expose stack id/compose fetch/apply helpers for doctor.
 - Modify `crates/isd/Cargo.toml`: add dev/test dependencies only if an integration test needs a new one. Prefer existing `wiremock`.
-- Add tests in the new modules and existing `doctor` tests. Keep tests package-scoped with `cargo test -p isd doctor --lib`.
+- Add tests in the new modules and existing `doctor` tests. Keep tests package-scoped with `cargo test -p isd doctor` because `isd` is a binary crate with no library target.
 
 ## Implementation Notes
 
@@ -74,7 +74,7 @@ services:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p isd doctor::checks::expose_host::tests::bare_http_service_carries_structured_fix_data --lib`
+Run: `cargo test -p isd doctor::checks::expose_host::tests::bare_http_service_carries_structured_fix_data`
 
 Expected: FAIL because `FindingTarget` and `FixSpec` do not exist.
 
@@ -160,7 +160,7 @@ fix: Some(crate::doctor::FixSpec::ExposeService {
 
 - [ ] **Step 5: Run focused tests**
 
-Run: `cargo test -p isd doctor::checks::expose_host --lib`
+Run: `cargo test -p isd doctor::checks::expose_host`
 
 Expected: PASS.
 
@@ -231,7 +231,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p isd doctor::document --lib`
+Run: `cargo test -p isd doctor::document`
 
 Expected: FAIL because methods are missing and module is not exported.
 
@@ -365,7 +365,7 @@ fn yaml_value_to_toml(value: &Value) -> Result<toml::Value> {
 
 - [ ] **Step 5: Run document tests**
 
-Run: `cargo test -p isd doctor::document --lib`
+Run: `cargo test -p isd doctor::document`
 
 Expected: PASS.
 
@@ -477,7 +477,7 @@ Create `crates/isd/src/doctor/fixers/mod.rs`:
 pub mod expose_host;
 ```
 
-Run: `cargo test -p isd doctor::fixers::expose_host --lib`
+Run: `cargo test -p isd doctor::fixers::expose_host`
 
 Expected: FAIL because `todo!` panics.
 
@@ -560,7 +560,7 @@ Add `#[derive(Debug, Clone, PartialEq, Eq)]` to `ExposeHostInput`.
 
 - [ ] **Step 5: Run focused tests**
 
-Run: `cargo test -p isd doctor::fixers --lib`
+Run: `cargo test -p isd doctor::fixers`
 
 Expected: PASS.
 
@@ -595,7 +595,7 @@ fn local_directory_prefers_stack_then_toml_then_yaml() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p isd doctor::tests::local_directory_prefers_stack_then_toml_then_yaml --lib`
+Run: `cargo test -p isd doctor::tests::local_directory_prefers_stack_then_toml_then_yaml`
 
 Expected: FAIL because current resolver ignores `stack.toml` and `compose.toml`.
 
@@ -661,7 +661,7 @@ Update `load_compose` to use `ComposeDocument::parse_path(path, content)` and re
 
 - [ ] **Step 6: Run doctor tests**
 
-Run: `cargo test -p isd doctor --lib`
+Run: `cargo test -p isd doctor`
 
 Expected: PASS.
 
@@ -720,7 +720,7 @@ In `doctor/mod.rs`, add:
 pub mod apply;
 ```
 
-Run: `cargo test -p isd doctor::apply --lib`
+Run: `cargo test -p isd doctor::apply`
 
 Expected: FAIL because `todo!` panics.
 
@@ -773,7 +773,7 @@ If `StackManifest::from_str` signature differs, use the existing signature from 
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p isd doctor::apply --lib`
+Run: `cargo test -p isd doctor::apply`
 
 Expected: PASS.
 
@@ -814,7 +814,7 @@ fn doctor_args_parse_fix_yes_force() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p isd doctor::tests::doctor_args_parse_fix_yes_force --lib`
+Run: `cargo test -p isd doctor::tests::doctor_args_parse_fix_yes_force`
 
 Expected: FAIL because flags do not exist.
 
@@ -935,7 +935,7 @@ fn confirm_apply() -> Result<bool> {
 
 This task cannot fully automate prompt input without changing the design. Verify compile and unit coverage only here.
 
-Run: `cargo test -p isd doctor --lib`
+Run: `cargo test -p isd doctor`
 
 Expected: PASS.
 
@@ -1078,7 +1078,7 @@ The test should assert a PUT to `/api/v1/stacks/42/compose` with `If-Match: abc`
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p isd doctor --lib`
+Run: `cargo test -p isd doctor`
 
 Expected: PASS.
 
@@ -1126,7 +1126,7 @@ fn toml_expose_fix_serializes_quoted_label_keys() {
 
 - [ ] **Step 2: Run test**
 
-Run: `cargo test -p isd doctor::document::tests::toml_expose_fix_serializes_quoted_label_keys --lib`
+Run: `cargo test -p isd doctor::document::tests::toml_expose_fix_serializes_quoted_label_keys`
 
 Expected: PASS, or FAIL if `toml::to_string_pretty` does not quote dotted keys correctly.
 
@@ -1161,7 +1161,7 @@ fn manifest_with_one_compose_resolves_path() {
 
 - [ ] **Step 5: Run all doctor tests**
 
-Run: `cargo test -p isd doctor --lib`
+Run: `cargo test -p isd doctor`
 
 Expected: PASS.
 
@@ -1210,7 +1210,7 @@ if remaining.iter().any(|f| f.id == "EXPOSE_HOST_MISSING") {
 
 - [ ] **Step 4: Run fmt and focused tests**
 
-Run: `cargo fmt --check && cargo test -p isd doctor --lib`
+Run: `cargo fmt --check && cargo test -p isd doctor`
 
 Expected: PASS.
 
@@ -1234,7 +1234,7 @@ Expected: PASS.
 
 - [ ] **Step 2: Run doctor tests**
 
-Run: `cargo test -p isd doctor --lib`
+Run: `cargo test -p isd doctor`
 
 Expected: PASS.
 
@@ -1274,7 +1274,7 @@ gh pr create --base next --head doctor-fixer-framework --title "feat: add stack 
 
 ## Tests
 - cargo fmt --check
-- cargo test -p isd doctor --lib
+- cargo test -p isd doctor
 - cargo clippy -p isd --all-targets -- -D warnings
 - just ci-fast"
 ```
