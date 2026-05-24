@@ -123,11 +123,11 @@ struct StackDto {
 // imported_at; we just need the YAML and the sha for optimistic concurrency.
 /// Response shape of `GET /api/v1/stacks/<id>/compose`.
 #[derive(Debug, Deserialize)]
-struct ComposeResponse {
+pub(crate) struct ComposeResponse {
     /// The stack's compose YAML, verbatim.
-    compose_yaml: String,
+    pub compose_yaml: String,
     /// SHA-256 of the YAML. Used as the `If-Match` ETag.
-    sha256: String,
+    pub sha256: String,
 }
 
 /// Reconcile plan returned by `POST /api/v1/stacks/<id>/diff`.
@@ -189,9 +189,9 @@ impl ServiceOp {
 
 /// 2xx body from `PUT /compose`.
 #[derive(Debug, Deserialize)]
-struct PutOk {
+pub(crate) struct PutOk {
     /// SHA-256 of the YAML the controller has stored.
-    written_sha256: String,
+    pub written_sha256: String,
 }
 
 /// 409 body: concurrent edit detected.
@@ -1130,27 +1130,13 @@ async fn put_compose_json(
     Ok(ok)
 }
 
-/// Fetch the controller's current compose YAML for a stack by name.
-/// Errors when the stack doesn't exist. Returns `Ok(None)` when the
-/// stack exists but has no compose stored (legacy or freshly created).
-///
-/// # Errors
-///
-/// Returns `Err` on stack-not-found or HTTP failure.
-pub(crate) async fn fetch_compose_yaml_by_name(
-    session: &Session,
-    stack_name: &str,
-) -> Result<Option<String>> {
-    let stack_id = resolve_stack_id(session, stack_name).await?;
-    Ok(fetch_compose(session, &stack_id)
-        .await?
-        .map(|c| c.compose_yaml))
-}
-
 /// `GET /api/v1/stacks/<id>/compose`. 204 means the stack has no
 /// compose yet (legacy or freshly created); `Ok(None)` lets the caller
 /// drive an empty-base diff.
-async fn fetch_compose(session: &Session, stack_id: &str) -> Result<Option<ComposeResponse>> {
+pub(crate) async fn fetch_compose(
+    session: &Session,
+    stack_id: &str,
+) -> Result<Option<ComposeResponse>> {
     let controller_url = session.require_controller()?;
     let url = format!("{controller_url}/api/v1/stacks/{stack_id}/compose");
     let resp = session
@@ -1186,7 +1172,7 @@ async fn preview_diff(session: &Session, stack_id: &str, proposed: &str) -> Resu
 /// `PUT /api/v1/stacks/<id>/compose` with optimistic concurrency.
 /// 409 surfaces the controller's current sha so the caller can show
 /// the operator a `--force` retry hint.
-async fn put_compose(
+pub(crate) async fn put_compose(
     session: &Session,
     stack_id: &str,
     body: &str,
@@ -1203,7 +1189,7 @@ async fn put_compose(
         .put(&url)
         .header("Content-Type", "application/yaml")
         .body(body.to_string());
-    if !expected_sha256.is_empty() {
+    if !force && !expected_sha256.is_empty() {
         req = req.header("If-Match", expected_sha256);
     }
     let resp = req.send().await.with_context(|| format!("PUT {url}"))?;

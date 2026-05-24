@@ -154,7 +154,14 @@ enum ComposeSource {
     /// Read from a path on disk.
     Local(PathBuf),
     /// Fetched from the controller for a named stack.
-    Controller(String),
+    Controller {
+        /// Operator-facing stack name.
+        name: String,
+        /// Controller stack id.
+        id: String,
+        /// SHA-256 fetched with the stored compose body.
+        sha256: String,
+    },
 }
 
 /// Fully loaded compose input for a doctor run.
@@ -174,7 +181,7 @@ impl ComposeSource {
     fn label(&self) -> String {
         match self {
             Self::Local(p) => p.display().to_string(),
-            Self::Controller(name) => format!("stack {name:?} (controller)"),
+            Self::Controller { name, .. } => format!("stack {name:?} (controller)"),
         }
     }
 }
@@ -224,7 +231,6 @@ pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
 /// Run the interactive doctor fixer loop for supported findings.
 async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
     let mut resolved = resolve_compose(args.target.as_deref(), context).await?;
-    ensure_fixable_source(&resolved.source)?;
     let original = resolved.body.clone();
     let findings = audit(&resolved.document.value);
     let changed = apply_fix_inputs(&mut resolved.document, findings, prompt_hostname)?;
@@ -248,22 +254,23 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
                 .await?;
             println!("Applied fixes locally.");
         }
-        ComposeSource::Controller(_) => unreachable!("checked before applying fixes"),
+        ComposeSource::Controller { name, id, sha256 } => {
+            let session = Session::open(context).await?;
+            apply::ApplyTarget::ControllerStack {
+                stack_id: id,
+                stack_name: name.clone(),
+                sha256,
+            }
+            .apply_with_session(Some(&session), &proposed, args.force)
+            .await?;
+            println!(
+                "Applied fixes to stack {:?}. Run `isd stack doctor {}` to verify.",
+                name, name
+            );
+        }
     }
 
     Ok(())
-}
-
-/// Ensure the compose source can be fixed by the Task 6 local apply path.
-fn ensure_fixable_source(source: &ComposeSource) -> Result<()> {
-    match source {
-        ComposeSource::Local(_) => Ok(()),
-        ComposeSource::Controller(_) => {
-            anyhow::bail!(
-                "controller stack fixes are not wired yet; use a local compose file for now"
-            )
-        }
-    }
 }
 
 /// Apply supported fix inputs, collecting interactive values through a callback.
@@ -368,34 +375,22 @@ async fn resolve_compose(target: Option<&str>, context: Option<&str>) -> Result<
         }
         // Not on disk; assume stack name.
         let session = Session::open(context).await?;
-        match crate::compose_cmd::fetch_compose_yaml_by_name(&session, t).await? {
-            Some(yaml) => {
-                let document = document::ComposeDocument::parse_controller_yaml(&yaml)?;
+        let id = crate::compose_cmd::resolve_stack_id(&session, t).await?;
+        match crate::compose_cmd::fetch_compose(&session, &id).await? {
+            Some(row) => {
+                let document = document::ComposeDocument::parse_controller_yaml(&row.compose_yaml)?;
                 Ok(ResolvedCompose {
-                    body: yaml,
+                    body: row.compose_yaml,
                     document,
-                    source: ComposeSource::Controller(t.to_string()),
+                    source: ComposeSource::Controller {
+                        name: t.to_string(),
+                        id,
+                        sha256: row.sha256,
+                    },
                 })
             }
             None => Err(anyhow::anyhow!(
-                "stack {t:?} is tracked by the controller but has no compose stored.\n\
-                 \n\
-                 This usually means the stack was deployed outside isengard \
-                 (e.g. via `docker compose up` directly). The agent discovers it \
-                 from the `com.docker.compose.project={t}` label on the containers \
-                 but never received the compose YAML to audit.\n\
-                 \n\
-                 Two ways forward:\n\
-                 \n\
-                 - Point doctor at the local compose file you used:\n\
-                       isd stack doctor /path/to/your/compose.yaml\n\
-                 \n\
-                 - Or import the stack so future deploys + doctor runs see it:\n\
-                       isd stack deploy /path/to/your/compose.yaml\n\
-                 \n\
-                 Auto-synthesizing compose from running containers is on the roadmap \
-                 (needs the agent to ship ports/env/volumes); see\n\
-                 `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`."
+                "stack {t:?} has no stored compose; doctor --fix cannot mutate missing compose"
             )),
         }
     } else {
@@ -507,16 +502,6 @@ services:
         assert_eq!(
             document.value["services"]["web"]["labels"]["isengard.expose"].as_str(),
             Some("web.test")
-        );
-    }
-
-    #[test]
-    fn fix_mode_rejects_controller_source() {
-        let source = ComposeSource::Controller("demo".to_string());
-        let err = ensure_fixable_source(&source).unwrap_err().to_string();
-        assert!(
-            err.contains("controller stack fixes are not wired yet"),
-            "{err}"
         );
     }
 

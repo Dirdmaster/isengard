@@ -13,6 +13,15 @@ pub enum ApplyTarget {
         /// Path to overwrite with the fixed compose body.
         path: PathBuf,
     },
+    /// A compose document stored by the controller.
+    ControllerStack {
+        /// Controller stack id.
+        stack_id: String,
+        /// Operator-facing stack name.
+        stack_name: String,
+        /// SHA-256 fetched before mutation.
+        sha256: String,
+    },
 }
 
 #[allow(dead_code)]
@@ -27,6 +36,35 @@ impl ApplyTarget {
             ApplyTarget::LocalFile { path } => {
                 std::fs::write(path, body)
                     .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+                Ok(())
+            }
+            ApplyTarget::ControllerStack { .. } => {
+                anyhow::bail!("controller apply requires a session")
+            }
+        }
+    }
+
+    /// Write an updated compose body to this target, using `session` for
+    /// controller-backed stacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the target cannot be written or when a controller
+    /// target is applied without a session.
+    pub async fn apply_with_session(
+        &self,
+        session: Option<&crate::session::Session>,
+        body: &str,
+        force: bool,
+    ) -> Result<()> {
+        match self {
+            ApplyTarget::LocalFile { .. } => self.apply(body, force).await,
+            ApplyTarget::ControllerStack {
+                stack_id, sha256, ..
+            } => {
+                let session = session
+                    .ok_or_else(|| anyhow::anyhow!("controller apply requires a session"))?;
+                crate::compose_cmd::put_compose(session, stack_id, body, sha256, force).await?;
                 Ok(())
             }
         }
@@ -79,6 +117,23 @@ mod tests {
         let target = ApplyTarget::LocalFile { path: path.clone() };
         target.apply("new", false).await.unwrap();
         assert_eq!(std::fs::read_to_string(path).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn controller_stack_apply_requires_session() {
+        let target = ApplyTarget::ControllerStack {
+            stack_id: "42".to_string(),
+            stack_name: "demo".to_string(),
+            sha256: "abc".to_string(),
+        };
+
+        let err = target
+            .apply_with_session(None, "services: {}\n", false)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "controller apply requires a session");
     }
 
     #[test]
