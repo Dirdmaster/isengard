@@ -98,7 +98,8 @@ impl UpstreamRegistry {
 
     /// Insert or replace an unresolved route for a hostname.
     pub fn set_unresolved(&mut self, host: impl Into<String>, unresolved: UnresolvedUpstream) {
-        self.map.insert(host.into(), RouteTarget::Unresolved(unresolved));
+        self.map
+            .insert(host.into(), RouteTarget::Unresolved(unresolved));
     }
 
     /// Apply per-rule healthcheck config to an existing upstream. No-op if
