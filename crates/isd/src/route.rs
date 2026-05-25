@@ -289,20 +289,27 @@ async fn run_wizard(mut args: CreateArgs, context: Option<&str>) -> Result<Creat
                 args.service.as_deref().unwrap_or("")
             )
         })?;
+        let container_ref = if row.id.is_empty() {
+            row.service_name.as_str()
+        } else {
+            row.id.as_str()
+        };
         if row.private_ports.is_empty() {
-            let container_ref = if row.id.is_empty() {
-                row.service_name.as_str()
-            } else {
-                row.id.as_str()
-            };
             row.private_ports = inspect_private_ports(&docker, container_ref).await?;
         }
-        let port = auto_detect_port(&row.private_ports).ok_or_else(|| {
-            anyhow!(
-                "container {:?} exposes no ports; pass --port explicitly",
-                row.service_name
-            )
-        })?;
+        let env_hint = if row.private_ports.len() > 1 {
+            inspect_env_port_hint(&docker, container_ref, &row.private_ports).await?
+        } else {
+            None
+        };
+        let port = env_hint
+            .or_else(|| auto_detect_port(&row.private_ports))
+            .ok_or_else(|| {
+                anyhow!(
+                    "container {:?} exposes no ports; pass --port explicitly",
+                    row.service_name
+                )
+            })?;
         eprintln!("  using upstream port {port}");
         args.port = Some(port);
     }
@@ -369,6 +376,40 @@ async fn inspect_private_ports(
         .await
         .with_context(|| format!("inspect container {container_ref:?}"))?;
     Ok(private_ports_from_inspect(&inspect))
+}
+
+async fn inspect_env_port_hint(
+    docker: &isd_runtime::DockerBackend,
+    container_ref: &str,
+    candidates: &[u16],
+) -> Result<Option<u16>> {
+    use bollard::container::InspectContainerOptions;
+
+    let inspect = docker
+        .client()
+        .inspect_container(container_ref, None::<InspectContainerOptions>)
+        .await
+        .with_context(|| format!("inspect container {container_ref:?}"))?;
+    Ok(env_port_hint_from_inspect(&inspect, candidates))
+}
+
+fn env_port_hint_from_inspect(
+    inspect: &bollard::models::ContainerInspectResponse,
+    candidates: &[u16],
+) -> Option<u16> {
+    let env = inspect.config.as_ref()?.env.as_ref()?;
+    env.iter()
+        .find_map(|entry| env_port_hint(entry, candidates))
+}
+
+fn env_port_hint(entry: &str, candidates: &[u16]) -> Option<u16> {
+    let (key, value) = entry.split_once('=')?;
+    const WEB_PORT_KEYS: &[&str] = &["WEBUI_PORT", "WEB_UI_PORT", "WEB_PORT", "HTTP_PORT"];
+    if !WEB_PORT_KEYS.contains(&key) {
+        return None;
+    }
+    let port = value.parse::<u16>().ok()?;
+    candidates.contains(&port).then_some(port)
 }
 
 /// Extract distinct container-internal ports from an inspect response.
@@ -670,6 +711,51 @@ mod tests {
         };
 
         assert_eq!(private_ports_from_inspect(&inspect), vec![32400]);
+    }
+
+    #[test]
+    fn env_port_hint_prefers_webui_candidate() {
+        let inspect = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::secret::ContainerConfig {
+                env: Some(vec![
+                    "WEBUI_PORT=8069".to_string(),
+                    "TORRENTING_PORT=6881".to_string(),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            env_port_hint_from_inspect(&inspect, &[6881, 8069, 8080]),
+            Some(8069)
+        );
+    }
+
+    #[test]
+    fn env_port_hint_ignores_non_web_port() {
+        let inspect = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::secret::ContainerConfig {
+                env: Some(vec!["TORRENTING_PORT=6881".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(env_port_hint_from_inspect(&inspect, &[6881, 8080]), None);
+    }
+
+    #[test]
+    fn env_port_hint_requires_candidate_port() {
+        let inspect = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::secret::ContainerConfig {
+                env: Some(vec!["WEBUI_PORT=8069".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(env_port_hint_from_inspect(&inspect, &[6881, 8080]), None);
     }
 
     #[test]
