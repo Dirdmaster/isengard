@@ -378,6 +378,7 @@ async fn inspect_private_ports(
     Ok(private_ports_from_inspect(&inspect))
 }
 
+/// Inspect a container for env vars that identify the intended web UI port.
 async fn inspect_env_port_hint(
     docker: &isd_runtime::DockerBackend,
     container_ref: &str,
@@ -393,6 +394,7 @@ async fn inspect_env_port_hint(
     Ok(env_port_hint_from_inspect(&inspect, candidates))
 }
 
+/// Find the first web port env hint whose value is one of the candidate ports.
 fn env_port_hint_from_inspect(
     inspect: &bollard::models::ContainerInspectResponse,
     candidates: &[u16],
@@ -402,6 +404,7 @@ fn env_port_hint_from_inspect(
         .find_map(|entry| env_port_hint(entry, candidates))
 }
 
+/// Parse one `KEY=value` env entry when the key conventionally names a web port.
 fn env_port_hint(entry: &str, candidates: &[u16]) -> Option<u16> {
     let (key, value) = entry.split_once('=')?;
     const WEB_PORT_KEYS: &[&str] = &["WEBUI_PORT", "WEB_UI_PORT", "WEB_PORT", "HTTP_PORT"];
