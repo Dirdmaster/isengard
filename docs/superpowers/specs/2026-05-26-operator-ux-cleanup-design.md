@@ -17,6 +17,7 @@ The third gap is recovery ergonomics. `isd stack doctor` already knows important
 - Fill the onboarding spine with a verified, copyable path: install `isd`, run `isd init`, deploy a first stack, expose a service, run doctor, verify routes.
 - Add a short `Start here` block to root `isd` help.
 - Position `isd stack doctor` as the memory layer for label routing.
+- Use public, generic examples only: popular containers and `*.isengard.app` route hostnames.
 - Define follow-up behavior slices for host-aware `isd route add` and scriptable doctor fixes.
 
 ## Non-Goals
@@ -33,14 +34,14 @@ The canonical route label is:
 
 ```yaml
 labels:
-  isengard.expose: plex.vallee.casa
+  isengard.expose: jellyfin.isengard.app
 ```
 
-Meaning: expose this service at `plex.vallee.casa`. When the agent can infer one upstream web port, this single label is enough. When the port is ambiguous, doctor asks for the correct container port and writes:
+Meaning: expose this service at `jellyfin.isengard.app`. When the agent can infer one upstream web port, this single label is enough. When the port is ambiguous, doctor asks for the correct container port and writes:
 
 ```yaml
 labels:
-  isengard.expose: torrent.vallee.casa
+  isengard.expose: qbittorrent.isengard.app
   isengard.expose.port: "8069"
 ```
 
@@ -58,11 +59,13 @@ Named rules stay an escape hatch:
 
 ```yaml
 labels:
-  isengard.expose.web: app.vallee.casa
+  isengard.expose.web: grafana.isengard.app
   isengard.expose.web.port: "8080"
-  isengard.expose.admin: admin.vallee.casa
+  isengard.expose.admin: admin.isengard.app
   isengard.expose.admin.port: "9090"
 ```
+
+Examples must avoid personal domains, private hostnames, and real home-service names. Use popular containers such as `nginx`, `whoami`, `jellyfin`, `grafana`, `prometheus`, and `qbittorrent`. Every example route hostname should live under `isengard.app`, such as `whoami.isengard.app`.
 
 ## Phase A: Docs And Help Strike
 
@@ -135,6 +138,7 @@ Add a minimal docs guard that fails when public docs reintroduce known stale voc
 - `expose.host`
 - `isd login`
 - `credentials.toml`
+- personal route domains in public examples
 
 The guard should allow historical specs and release notes to keep old terms when needed. Scope it to current public docs, website content, README, and operator-facing reference pages.
 
@@ -164,7 +168,7 @@ Phase C is another behavior PR.
 Proposed shape:
 
 ```sh
-isd stack doctor servarr --fix --set qbittorrent=torrent.vallee.casa:8069 --yes
+isd stack doctor media --fix --set qbittorrent=qbittorrent.isengard.app:8069 --yes
 ```
 
 Rules:
