@@ -43,6 +43,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      - name: public docs vocabulary
+        run: bash scripts/ci/check_public_docs_vocabulary.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
