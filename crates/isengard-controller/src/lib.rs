@@ -311,8 +311,6 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
             }
         }
     }
-    let validated_acme = acme_with_token.validated();
-
     // Wildcard cert store always exists, regardless of ACME config. Certs
     // can come from ACME (via the scheduler), manual upload (future), or
     // be hydrated from SQLite at boot (migration 0026). The agent-facing
@@ -405,7 +403,7 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         secrets: secrets_store.clone(),
         ca: ca.clone(),
         ssh_ca: ssh_ca.clone(),
-        config_dispatcher,
+        config_dispatcher: config_dispatcher.clone(),
     });
     let mut controller_plugins =
         plugin_host::load_controller_plugins(handles, opts.config.clone()).await;
@@ -480,55 +478,18 @@ pub async fn run_controller(opts: ControllerOptions) -> Result<()> {
         }
     };
 
-    // ACME (DNS-01) wildcard cert scheduler. Spawns only when the validated
-    // config has email + token + domains. Misconfigured deployments fail
-    // closed: token verification at boot prints an explicit warning so the
-    // operator notices before the scheduler tries (and rate-limits) LE.
-    if let Some(cfg) = validated_acme.clone() {
-        let token = cfg.cf_api_token.clone();
-        let email = cfg.email.clone();
-        let directory = cfg.directory_url.clone();
-        let groups = cfg.groups.clone();
-        let inv_for_acme = inventory.clone();
-        let store_for_routing = wildcard_store.clone();
-        // Verify the CF token at boot in a separate task so a slow CF API
-        // doesn't delay gRPC bind. The scheduler still spawns; if the token
-        // is bad it'll fail in `present` with a clear error.
-        let token_for_verify = token.clone();
-        tokio::spawn(async move {
-            let api = acme::CloudflareApi::new(token_for_verify);
-            match api.verify_token().await {
-                Ok(()) => info!("acme: Cloudflare API token verified"),
-                Err(e) => tracing::warn!(error = %e, "acme: Cloudflare API token verify failed"),
-            }
-        });
-
-        let dns_provider = acme::CloudflareDnsProvider::new(token);
-        let acme_client = Arc::new(acme::AcmeDns01Client::new(
-            inv_for_acme,
-            email,
-            directory.clone(),
-            dns_provider,
-        ));
-        info!(
-            directory = %directory,
-            groups = groups.len(),
-            "acme: DNS-01 scheduler enabled",
-        );
-        // Hand the routing pusher to the scheduler so a freshly-issued or
-        // renewed wildcard cert kicks an immediate fan-out to every
-        // connected agent. The 5-minute sweeper this replaced was a
-        // placeholder; the right model is event-driven. Routing-rule edits
-        // (dashboard create/update/delete) also push synchronously from
-        // their handlers (see crates/isengard-plugins/dashboard/src/routing.rs).
-        acme::spawn_renewal_scheduler(
-            inventory.clone(),
-            store_for_routing.clone(),
-            acme_client.clone(),
-            groups,
-            Some(routing.clone()),
-        );
-    }
+    // ACME (DNS-01) wildcard cert scheduler. It resolves live
+    // `isd configure` state on every tick, with boot env / secret-loaded
+    // values as fallback. Routing-rule edits push synchronously from their
+    // handlers; wildcard issuance pushes from the scheduler after a cert
+    // lands or renews.
+    acme::configured::spawn_configured_scheduler(
+        inventory.clone(),
+        wildcard_store.clone(),
+        config_dispatcher.clone(),
+        acme_with_token,
+        routing.clone(),
+    );
 
     // Stack-level deployment orchestrator. Owns the
     // multi-host wave plan when a stack-wide update fans out to 2+ hosts.
