@@ -15,21 +15,90 @@
 //!      ends up with one routing rule for `e2e.test`
 //!   6. tear the container down
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, KillContainerOptions, RemoveContainerOptions,
+    Config, CreateContainerOptions, KillContainerOptions, ListContainersOptions,
+    RemoveContainerOptions,
 };
 use bollard::image::CreateImageOptions;
+use bollard::network::InspectNetworkOptions;
 use futures_util::StreamExt;
+use isengard_agent::proxy::SHARED_PROXY_NETWORK;
+use isengard_agent::runtime::bollard_backend::BollardBackend;
+use isengard_agent::runtime::{IngressEndpoint, IngressEndpointMode, RuntimeBackend};
 use isengard_proto::pb::{AgentMessage, agent_message::Payload};
 use isengard_storage::{EnrollHost, Inventory};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+
+const AUTOATTACH_TEST_LABEL_KEY: &str = "isengard.test";
+const AUTOATTACH_TEST_LABEL_VALUE: &str = "autoattach";
+const AUTOATTACH_TEST_LABEL: &str = "isengard.test=autoattach";
+const AUTOATTACH_TEST_NAME_PREFIX: &str = "isengard-e2e-autoattach-";
+
+async fn cleanup_autoattach_test_containers(docker: &Docker) {
+    let mut filters = HashMap::new();
+    filters.insert("label".to_string(), vec![AUTOATTACH_TEST_LABEL.to_string()]);
+
+    let mut ids = HashSet::new();
+
+    if let Ok(containers) = docker
+        .list_containers(Some(ListContainersOptions::<String> {
+            all: true,
+            filters,
+            ..Default::default()
+        }))
+        .await
+    {
+        for container in containers {
+            if let Some(id) = container.id {
+                ids.insert(id);
+            }
+        }
+    }
+
+    if let Ok(containers) = docker
+        .list_containers(Some(ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+    {
+        for container in containers {
+            let name_matches = container.names.as_ref().is_some_and(|names| {
+                names.iter().any(|name| {
+                    name.trim_start_matches('/')
+                        .starts_with(AUTOATTACH_TEST_NAME_PREFIX)
+                })
+            });
+            if name_matches {
+                if let Some(id) = container.id {
+                    ids.insert(id);
+                }
+            }
+        }
+    }
+
+    for id in ids {
+        let _ = docker
+            .kill_container(&id, None::<KillContainerOptions<String>>)
+            .await;
+        let _ = docker
+            .remove_container(
+                &id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+    }
+}
 
 #[tokio::test]
 #[ignore = "requires running dockerd; opt in via --ignored"]
@@ -160,4 +229,110 @@ async fn label_on_real_container_creates_routing_rule() {
         )
         .await;
     watcher.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires running dockerd; opt in via --ignored"]
+async fn auto_attach_route_container_to_ingress_network() {
+    // 1. Skip silently if no Docker socket / daemon.
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    if docker.ping().await.is_err() {
+        return;
+    }
+
+    let ingress_network_existed = docker
+        .inspect_network(SHARED_PROXY_NETWORK, None::<InspectNetworkOptions<String>>)
+        .await;
+    let ingress_network_existed = ingress_network_existed.is_ok();
+
+    let container_name = format!("{AUTOATTACH_TEST_NAME_PREFIX}{}", std::process::id());
+
+    // 2. Remove stale containers from previous interrupted runs, even when
+    //    their PID-based names differ from the current run.
+    cleanup_autoattach_test_containers(&docker).await;
+
+    // 3. Pull busybox if needed (often local already; ignore stream errors).
+    let mut pull = docker.create_image(
+        Some(CreateImageOptions::<&str> {
+            from_image: "busybox:latest",
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
+    while pull.next().await.is_some() {}
+
+    let mut labels: HashMap<String, String> = HashMap::new();
+    labels.insert("isengard.expose".to_string(), "autoattach.test".to_string());
+    labels.insert("isengard.expose.port".to_string(), "80".to_string());
+    labels.insert(
+        AUTOATTACH_TEST_LABEL_KEY.to_string(),
+        AUTOATTACH_TEST_LABEL_VALUE.to_string(),
+    );
+
+    let cont = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: container_name.clone(),
+                platform: None,
+            }),
+            Config {
+                image: Some("busybox:latest".to_string()),
+                cmd: Some(vec!["sleep".to_string(), "30".to_string()]),
+                labels: Some(labels),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create container");
+    let start_result = docker.start_container::<String>(&cont.id, None).await;
+    if let Err(e) = start_result {
+        cleanup_autoattach_test_containers(&docker).await;
+        panic!("start container: {e}");
+    }
+
+    let backend_state_dir = tempdir().unwrap();
+    let endpoint_result = match BollardBackend::from_env(backend_state_dir.path()).await {
+        Ok(backend) => backend
+            .ensure_ingress_attachment(&container_name)
+            .await
+            .map_err(|e| format!("ensure_ingress_attachment: {e}")),
+        Err(e) => Err(format!("BollardBackend::from_env: {e}")),
+    };
+    let inspect_result = docker.inspect_container(&container_name, None).await;
+
+    // Cleanup before assertions so endpoint regressions do not leave the test
+    // container running or a test-created ingress network behind.
+    cleanup_autoattach_test_containers(&docker).await;
+    if !ingress_network_existed {
+        let _ = docker.remove_network(SHARED_PROXY_NETWORK).await;
+    }
+
+    let endpoint = endpoint_result.expect("ensure_ingress_attachment");
+    assert!(
+        matches!(
+            endpoint,
+            IngressEndpoint::Ready {
+                mode: IngressEndpointMode::IsengardNetwork,
+                ..
+            }
+        ),
+        "expected isengard network endpoint, got {endpoint:?}"
+    );
+
+    let inspect = inspect_result.expect("inspect container after auto-attach");
+    let ingress_ip = inspect
+        .network_settings
+        .as_ref()
+        .and_then(|s| s.networks.as_ref())
+        .and_then(|nets| nets.get("isengard-proxy"))
+        .and_then(|s| s.ip_address.as_ref())
+        .filter(|ip| !ip.is_empty());
+    assert!(
+        ingress_ip.is_some(),
+        "expected non-empty isengard-proxy NetworkSettings.Networks IPAddress"
+    );
 }

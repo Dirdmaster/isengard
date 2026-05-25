@@ -11,21 +11,10 @@
 
 name: isengard
 
-# Shared external network. Pingora (in the agent) and every operator-managed
-# stack that wants to be routed must both join this network so they share an
-# L3 fabric. Without it, the agent's pingora is on `isengard_default` while
-# operator stacks (e.g. `hello-web` on `hello_default`) sit on a different
-# bridge: routing rules get an IP the proxy can't reach, healthchecks evict,
-# and clients get 503.
-#
-# This is the Traefik recipe (`proxy: external: true`). One-time setup on
-# any host:
-#
-#   docker network create isengard-proxy
-#   # or run `just net-up` (idempotent)
-#
-# Operator stacks opt-in by attaching to `isengard-proxy` via their own
-# top-level `networks:` block (see `hello-stack.yaml` for a worked example).
+# Agent-owned ingress network. The agent joins this network and auto-attaches
+# routed bridge-networked containers so pingora can reach them on a shared L3
+# fabric. Compose declares it external here so the agent can manage the
+# lifecycle instead of this project creating a namespaced bridge.
 networks:
   isengard-proxy:
     external: true
@@ -98,9 +87,8 @@ services:
       - controller
     # Two networks: `default` carries controller-talk (the Compose-managed
     # network where the controller alias `controller.local` resolves);
-    # `isengard-proxy` is the shared L3 fabric pingora uses to reach
-    # operator stacks. Without the second attachment, every routing rule
-    # would resolve a container IP that pingora can't reach across bridges.
+    # `isengard-proxy` is the agent-owned ingress fabric. The agent joins it
+    # here and auto-attaches routed bridge-networked containers as needed.
     networks:
       - default
       - isengard-proxy

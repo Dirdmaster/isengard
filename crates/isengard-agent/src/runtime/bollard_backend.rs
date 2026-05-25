@@ -31,9 +31,10 @@ use bollard::system::EventsOptions;
 use futures_util::{Stream, StreamExt};
 
 use super::{
-    ContainerCreateSpec, ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec, HostPort,
-    ListFilter, LogChunk, LogOptions, LogSource, NetworkSettings, PortProtocol, RestartPolicy,
-    RuntimeBackend, RuntimeError, RuntimeEvent, RuntimeEventType,
+    ContainerCreateSpec, ContainerNetworkMode, ContainerSnapshot, ContainerState, HealthState,
+    HealthcheckSpec, HostPort, IngressEndpoint, IngressEndpointMode, ListFilter, LogChunk,
+    LogOptions, LogSource, NetworkSettings, PortProtocol, RestartPolicy, RuntimeBackend,
+    RuntimeError, RuntimeEvent, RuntimeEventType, UnresolvedIngressReason,
 };
 
 /// Bollard-backed [`super::RuntimeBackend`]. Holds one shared
@@ -260,10 +261,17 @@ pub(crate) fn map_summary(summary: ContainerSummary) -> ContainerSnapshot {
         .as_ref()
         .and_then(|n| n.networks.as_ref())
     {
+        network_settings.mode = classify_network_mode(None, Some(nets));
         for (name, settings) in nets {
             if let Some(ip_str) = settings.ip_address.as_deref().filter(|s| !s.is_empty()) {
                 if let Ok(ip) = ip_str.parse() {
                     network_settings.ip_addresses.insert(name.clone(), ip);
+                }
+            } else if name == "host" {
+                if let Some(ip) = host_network_target_ip() {
+                    network_settings
+                        .ip_addresses
+                        .insert(name.clone(), ip.into());
                 }
             }
         }
@@ -371,11 +379,24 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
 
     let mut network_settings = NetworkSettings::default();
     if let Some(ns) = inspect.network_settings.as_ref() {
+        network_settings.mode = classify_network_mode(
+            inspect
+                .host_config
+                .as_ref()
+                .and_then(|h| h.network_mode.as_deref()),
+            ns.networks.as_ref(),
+        );
         if let Some(nets) = ns.networks.as_ref() {
             for (net_name, settings) in nets {
                 if let Some(ip_str) = settings.ip_address.as_deref().filter(|s| !s.is_empty()) {
                     if let Ok(ip) = ip_str.parse() {
                         network_settings.ip_addresses.insert(net_name.clone(), ip);
+                    }
+                } else if net_name == "host" {
+                    if let Some(ip) = host_network_target_ip() {
+                        network_settings
+                            .ip_addresses
+                            .insert(net_name.clone(), ip.into());
                     }
                 }
             }
@@ -498,11 +519,103 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
     }
 }
 
+/// Classify Docker's host config and network attachment map into a stable mode.
+fn classify_network_mode(
+    host_mode: Option<&str>,
+    networks: Option<&std::collections::HashMap<String, bollard::secret::EndpointSettings>>,
+) -> ContainerNetworkMode {
+    match host_mode.unwrap_or_default() {
+        "host" => return ContainerNetworkMode::Host,
+        "none" => return ContainerNetworkMode::None,
+        "bridge" => return ContainerNetworkMode::Bridge,
+        _ => {}
+    }
+    let Some(networks) = networks else {
+        return ContainerNetworkMode::Unknown;
+    };
+    if networks.contains_key("host") {
+        ContainerNetworkMode::Host
+    } else if networks.contains_key("none") {
+        ContainerNetworkMode::None
+    } else if !networks.is_empty() {
+        ContainerNetworkMode::Bridge
+    } else {
+        ContainerNetworkMode::Unknown
+    }
+}
+
 /// Internal helper: parse rfc3339.
 fn parse_rfc3339(s: &str) -> Option<SystemTime> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp() as u64))
+    chrono::DateTime::parse_from_rfc3339(s).ok().and_then(|dt| {
+        let secs = dt.timestamp();
+        if secs >= 0 {
+            SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
+        } else {
+            SystemTime::UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(secs.unsigned_abs()))
+        }
+    })
+}
+
+/// Address the proxy should dial for Docker host-networked target containers.
+///
+/// When the agent/proxy runs directly on the host, loopback reaches services
+/// sharing the host namespace. When the agent/proxy runs inside a container,
+/// the host side of the container's default route is the Docker host gateway.
+fn host_network_target_ip() -> Option<std::net::Ipv4Addr> {
+    if !agent_is_running_inside_container() {
+        return Some(std::net::Ipv4Addr::LOCALHOST);
+    }
+    let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+    select_host_network_target_ip(&routes, true)
+}
+
+/// Select the address a containerized or host-native agent should use for host networking.
+fn select_host_network_target_ip(
+    route_file_contents: &str,
+    inside_container: bool,
+) -> Option<std::net::Ipv4Addr> {
+    if !inside_container {
+        return Some(std::net::Ipv4Addr::LOCALHOST);
+    }
+    container_to_host_gateway_ip_from_routes(route_file_contents)
+}
+
+/// Best-effort Docker-host address from inside the agent container.
+///
+/// Returns the non-loopback gateway from the default route. If the route table
+/// lacks such a gateway, the proxy cannot safely infer a host-network target.
+fn container_to_host_gateway_ip_from_routes(routes: &str) -> Option<std::net::Ipv4Addr> {
+    for line in routes.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 || fields[1] != "00000000" {
+            continue;
+        }
+        let raw = u32::from_str_radix(fields[2], 16).ok()?;
+        let octets = raw.to_le_bytes();
+        let ip = std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
+        if !ip.is_unspecified() && !ip.is_loopback() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Return whether the current agent process appears to run inside a container.
+fn agent_is_running_inside_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        return true;
+    }
+
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|cgroup| {
+            cgroup.contains("docker")
+                || cgroup.contains("kubepods")
+                || cgroup.contains("containerd")
+                || cgroup.contains("libpod")
+        })
+        .unwrap_or(false)
 }
 
 /// Internal helper: map state str.
@@ -661,8 +774,53 @@ impl RuntimeBackend for BollardBackend {
         }
     }
 
+    async fn ensure_network(&self, network: &str) -> Result<(), RuntimeError> {
+        match self
+            .docker
+            .inspect_network(
+                network,
+                None::<bollard::network::InspectNetworkOptions<String>>,
+            )
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let s = e.to_string().to_lowercase();
+                if !(s.contains("404") || s.contains("no such network")) {
+                    return Err(RuntimeError::Network(format!(
+                        "inspect_network {network}: {e}"
+                    )));
+                }
+            }
+        }
+
+        match self
+            .docker
+            .create_network(bollard::network::CreateNetworkOptions {
+                name: network.to_string(),
+                driver: "bridge".to_string(),
+                check_duplicate: true,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let s = e.to_string().to_lowercase();
+                if s.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Network(format!(
+                        "create_network {network}: {e}"
+                    )))
+                }
+            }
+        }
+    }
+
     async fn connect_network(&self, container_id: &str, network: &str) -> Result<(), RuntimeError> {
-        self.docker
+        match self
+            .docker
             .connect_network(
                 network,
                 bollard::network::ConnectNetworkOptions {
@@ -671,9 +829,114 @@ impl RuntimeBackend for BollardBackend {
                 },
             )
             .await
-            .map_err(|e| {
-                RuntimeError::Network(format!("connect_network {network} -> {container_id}: {e}"))
-            })
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let s = e.to_string().to_lowercase();
+                if s.contains("already exists") || s.contains("already connected") {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Network(format!(
+                        "connect_network {network} -> {container_id}: {e}"
+                    )))
+                }
+            }
+        }
+    }
+
+    async fn ensure_ingress_attachment(
+        &self,
+        container_ref: &str,
+    ) -> Result<IngressEndpoint, RuntimeError> {
+        let Some(initial) = self.inspect_container(container_ref).await? else {
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::ContainerMissing,
+            ));
+        };
+        if initial.state != ContainerState::Running {
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::ContainerStopped,
+            ));
+        }
+
+        match initial.network_settings.mode {
+            ContainerNetworkMode::Host => {
+                let Some(ip) = host_network_target_ip() else {
+                    return Ok(IngressEndpoint::Unresolved(
+                        UnresolvedIngressReason::NoUsableContainerIp,
+                    ));
+                };
+                return Ok(IngressEndpoint::Ready {
+                    ip: ip.into(),
+                    mode: IngressEndpointMode::HostNetwork,
+                });
+            }
+            ContainerNetworkMode::None => {
+                return Ok(IngressEndpoint::Unresolved(
+                    UnresolvedIngressReason::UnsupportedNetworkModeNone,
+                ));
+            }
+            ContainerNetworkMode::Bridge | ContainerNetworkMode::Unknown => {}
+        }
+
+        if let Some(ip) = initial
+            .network_settings
+            .ip_addresses
+            .get(crate::proxy::SHARED_PROXY_NETWORK)
+        {
+            return Ok(IngressEndpoint::Ready {
+                ip: *ip,
+                mode: IngressEndpointMode::IsengardNetwork,
+            });
+        }
+
+        if let Err(e) = self
+            .ensure_network(crate::proxy::SHARED_PROXY_NETWORK)
+            .await
+        {
+            tracing::warn!(
+                container = %container_ref,
+                error = %e,
+                "ingress: failed to ensure isengard proxy network",
+            );
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::IngressNetworkCreateFailed,
+            ));
+        }
+
+        if let Err(e) = self
+            .connect_network(container_ref, crate::proxy::SHARED_PROXY_NETWORK)
+            .await
+        {
+            tracing::warn!(
+                container = %container_ref,
+                network = crate::proxy::SHARED_PROXY_NETWORK,
+                error = %e,
+                "ingress: failed to attach container to proxy network",
+            );
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::IngressNetworkAttachFailed,
+            ));
+        }
+
+        let Some(after) = self.inspect_container(container_ref).await? else {
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::ContainerMissing,
+            ));
+        };
+        if let Some(ip) = after
+            .network_settings
+            .ip_addresses
+            .get(crate::proxy::SHARED_PROXY_NETWORK)
+        {
+            return Ok(IngressEndpoint::Ready {
+                ip: *ip,
+                mode: IngressEndpointMode::IsengardNetwork,
+            });
+        }
+        Ok(IngressEndpoint::Unresolved(
+            UnresolvedIngressReason::NoUsableContainerIp,
+        ))
     }
 
     async fn disconnect_network(
@@ -990,5 +1253,109 @@ mod tests {
         assert_eq!(snap.state, ContainerState::Running);
         assert_eq!(snap.stack.as_deref(), Some("hello"));
         assert_eq!(snap.service.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn map_inspect_marks_host_network_mode() {
+        use bollard::secret::{
+            ContainerConfig, ContainerInspectResponse, HostConfig,
+            NetworkSettings as BollardNetworkSettings,
+        };
+        let inspect = ContainerInspectResponse {
+            id: Some("c1".into()),
+            name: Some("/plex".into()),
+            config: Some(ContainerConfig {
+                image: Some("plex:latest".into()),
+                ..Default::default()
+            }),
+            host_config: Some(HostConfig {
+                network_mode: Some("host".into()),
+                ..Default::default()
+            }),
+            network_settings: Some(BollardNetworkSettings {
+                networks: Some(std::collections::HashMap::from([(
+                    "host".into(),
+                    bollard::secret::EndpointSettings::default(),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let snap = map_inspect(inspect);
+        assert_eq!(
+            snap.network_settings.mode,
+            crate::runtime::ContainerNetworkMode::Host
+        );
+    }
+
+    #[test]
+    fn map_inspect_marks_none_network_mode() {
+        use bollard::secret::{
+            ContainerConfig, ContainerInspectResponse, HostConfig,
+            NetworkSettings as BollardNetworkSettings,
+        };
+        let inspect = ContainerInspectResponse {
+            id: Some("c1".into()),
+            name: Some("/isolated".into()),
+            config: Some(ContainerConfig {
+                image: Some("alpine:latest".into()),
+                ..Default::default()
+            }),
+            host_config: Some(HostConfig {
+                network_mode: Some("none".into()),
+                ..Default::default()
+            }),
+            network_settings: Some(BollardNetworkSettings {
+                networks: Some(std::collections::HashMap::from([(
+                    "none".into(),
+                    bollard::secret::EndpointSettings::default(),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let snap = map_inspect(inspect);
+        assert_eq!(
+            snap.network_settings.mode,
+            crate::runtime::ContainerNetworkMode::None
+        );
+    }
+
+    #[test]
+    fn host_network_target_is_loopback_outside_container() {
+        let routes = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+
+        assert_eq!(
+            select_host_network_target_ip(routes, false),
+            Some(std::net::Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn host_network_target_uses_gateway_inside_container() {
+        let routes = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+
+        assert_eq!(
+            select_host_network_target_ip(routes, true),
+            Some(std::net::Ipv4Addr::new(172, 17, 0, 1))
+        );
+    }
+
+    #[test]
+    fn host_network_target_rejects_loopback_gateway_inside_container() {
+        let routes = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+lo\t00000000\t0100007F\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+
+        assert_eq!(select_host_network_target_ip(routes, true), None);
     }
 }

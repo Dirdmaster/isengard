@@ -8,10 +8,10 @@ mod spec;
 
 pub use error::RuntimeError;
 pub use spec::{
-    ContainerCreateSpec, ContainerSnapshot, ContainerState, HealthState, HealthcheckSpec, HostPort,
-    LinuxResources, ListFilter, LogChunk, LogOptions, LogSource, MountKind, MountSpec,
-    NetworkSettings, PortProtocol, PortSpec, RestartPolicy, RuntimeEvent, RuntimeEventType,
-    SecretMount,
+    ContainerCreateSpec, ContainerNetworkMode, ContainerSnapshot, ContainerState, HealthState,
+    HealthcheckSpec, HostPort, IngressEndpoint, IngressEndpointMode, LinuxResources, ListFilter,
+    LogChunk, LogOptions, LogSource, MountKind, MountSpec, NetworkSettings, PortProtocol, PortSpec,
+    RestartPolicy, RuntimeEvent, RuntimeEventType, SecretMount, UnresolvedIngressReason,
 };
 
 use std::pin::Pin;
@@ -70,6 +70,36 @@ pub trait RuntimeBackend: Send + Sync + std::fmt::Debug {
     /// re-checks the registry but the work is now a fast no-op.
     async fn ensure_network(&self, _network: &str) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    /// Ensure `container_ref` has a proxy-reachable ingress endpoint.
+    ///
+    /// The default implementation is conservative: it only inspects the container
+    /// and uses an existing `isengard-proxy` IP when present. Backends that can
+    /// mutate networking should override this method.
+    async fn ensure_ingress_attachment(
+        &self,
+        container_ref: &str,
+    ) -> Result<IngressEndpoint, RuntimeError> {
+        let Some(snapshot) = self.inspect_container(container_ref).await? else {
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::ContainerMissing,
+            ));
+        };
+        if snapshot.state != ContainerState::Running {
+            return Ok(IngressEndpoint::Unresolved(
+                UnresolvedIngressReason::ContainerStopped,
+            ));
+        }
+        if let Some(ip) = snapshot.network_settings.ip_addresses.get("isengard-proxy") {
+            return Ok(IngressEndpoint::Ready {
+                ip: *ip,
+                mode: IngressEndpointMode::IsengardNetwork,
+            });
+        }
+        Ok(IngressEndpoint::Unresolved(
+            UnresolvedIngressReason::NoUsableContainerIp,
+        ))
     }
 
     /// Stream container logs. Each frame keeps its native framing; the

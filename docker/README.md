@@ -14,11 +14,6 @@ Every recipe pins to `:next` images on GHCR. For a tagged release, swap `:next` 
 ## Quick start
 
 ```sh
-# 0. Create the shared proxy network (one-time, idempotent). Pingora and
-#    every routed container share this network so they have L3 reachability.
-#    See "Shared proxy network" below for the rationale (Traefik recipe).
-docker network create isengard-proxy 2>/dev/null || true
-
 # 1. Start the controller (it generates a self-signed CA on first boot)
 docker compose -f docker/compose.yaml up -d controller
 
@@ -130,44 +125,19 @@ OrbStack / Colima / Rancher Desktop users: export `DOCKER_SOCK=...` in the same 
 
 ## Shared proxy network
 
-The agent's pingora reaches operator stacks over a single shared external network: `isengard-proxy`. This is the same recipe Traefik documents for its `proxy: external: true` model.
+The agent owns the `isengard-proxy` ingress network. When a route targets a
+Docker bridge-networked container, the agent creates the network if needed,
+attaches the target container, and routes to the IP on that network.
 
-Why: by default the agent runs on its own compose-project bridge (`isengard_default`) and operator stacks on theirs (`hello_default`). Different bridges, no L3 reachability. Pingora gets a routing rule with a container IP it cannot reach, the healthcheck evicts the upstream, and clients see 503.
+Operators do not need to edit Compose files just to make a routed service
+reachable. Host-networked containers are routed through the Docker host
+gateway. Containers using Docker `none` networking cannot be routed and show
+an unresolved route reason.
 
-Joining a single shared network solves it: agent + every routed container sit on the same L3 fabric, the agent's container-IP discovery prefers that network's IP, and pingora has a path.
-
-### One-time setup (per host)
-
-```sh
-docker network create isengard-proxy
-```
-
-Or run `just net-up` (idempotent; safe to re-run). `just dev`, `just up`, and `just hello` all depend on this recipe so a fresh clone bootstraps the network automatically.
-
-### Opting a stack in
-
-Add a top-level `networks:` block declaring `isengard-proxy: external: true`, then attach each routed service to it. The `hello-stack.yaml` in this directory is a worked example:
-
-```yaml
-networks:
-  default:
-  isengard-proxy:
-    external: true
-    name: isengard-proxy
-
-services:
-  hello:
-    networks:
-      - default          # intra-stack talk
-      - isengard-proxy   # shared fabric for pingora
-```
-
-Stacks that don't join `isengard-proxy` are still discovered via `isengard.expose*` labels, but pingora can't reach them across bridges. The agent's discovery falls back to the first non-driver network IP and the healthcheck evicts the rule. The clear next step in that case is "join `isengard-proxy`."
-
-### Verify
+### Diagnose
 
 ```sh
-# Confirm the network exists and the agent + routed containers are on it
+# Inspect the ingress network when diagnosing routing reachability
 docker network inspect isengard-proxy --format '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}'
 
 # Hit the proxy from the host (assumes hello.local routing rule applied)
@@ -175,7 +145,8 @@ curl -sS -H "Host: hello.local" http://127.0.0.1/         # HTTP 200
 curl -sSk -H "Host: hello.local" https://127.0.0.1/       # HTTP 200 (-k for self-signed)
 ```
 
-If `curl` returns 503 with `no_route_for_host`, inspect the agent log: a line like `proxy: ProxyConfig rule has empty container_ip; falling back to 127.0.0.1` means discovery couldn't find an IP and the operator stack is probably not on `isengard-proxy`.
+If `curl` returns 503 with `no_route_for_host`, inspect the agent log for the
+route's unresolved reason.
 
 ## Conventions used
 

@@ -1,7 +1,156 @@
 //! Task 13: agent-side `apply_config` for `ProxyConfig` pushed by the
 //! controller. Covers the happy-path swap and the stale-generation drop.
 
+use std::collections::HashMap;
+use std::pin::Pin;
+
+use futures_util::Stream;
 use isengard_proto::pb::{Healthcheck, ProxyConfig, RoutingRule, TlsMode, Upstream};
+
+#[derive(Debug, Default)]
+struct MockBackend {
+    endpoints: HashMap<String, isengard_agent::runtime::IngressEndpoint>,
+}
+
+#[async_trait::async_trait]
+impl isengard_agent::runtime::RuntimeBackend for MockBackend {
+    async fn ensure_image(
+        &self,
+        _reference: &str,
+    ) -> Result<String, isengard_agent::runtime::RuntimeError> {
+        Ok(String::new())
+    }
+
+    async fn create_container(
+        &self,
+        _spec: &isengard_agent::runtime::ContainerCreateSpec,
+    ) -> Result<String, isengard_agent::runtime::RuntimeError> {
+        Ok(String::new())
+    }
+
+    async fn start_container(
+        &self,
+        _id: &str,
+    ) -> Result<(), isengard_agent::runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn stop_container(
+        &self,
+        _id: &str,
+        _timeout_s: u32,
+    ) -> Result<(), isengard_agent::runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn remove_container(
+        &self,
+        _id: &str,
+        _force: bool,
+    ) -> Result<(), isengard_agent::runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn list_containers(
+        &self,
+        _filter: isengard_agent::runtime::ListFilter,
+    ) -> Result<
+        Vec<isengard_agent::runtime::ContainerSnapshot>,
+        isengard_agent::runtime::RuntimeError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn inspect_container(
+        &self,
+        _id: &str,
+    ) -> Result<
+        Option<isengard_agent::runtime::ContainerSnapshot>,
+        isengard_agent::runtime::RuntimeError,
+    > {
+        Ok(None)
+    }
+
+    async fn connect_network(
+        &self,
+        _container_id: &str,
+        _network: &str,
+    ) -> Result<(), isengard_agent::runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn disconnect_network(
+        &self,
+        _container_id: &str,
+        _network: &str,
+    ) -> Result<(), isengard_agent::runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn ensure_ingress_attachment(
+        &self,
+        container_ref: &str,
+    ) -> Result<isengard_agent::runtime::IngressEndpoint, isengard_agent::runtime::RuntimeError>
+    {
+        Ok(self.endpoints.get(container_ref).cloned().unwrap_or(
+            isengard_agent::runtime::IngressEndpoint::Unresolved(
+                isengard_agent::runtime::UnresolvedIngressReason::ContainerMissing,
+            ),
+        ))
+    }
+
+    fn stream_logs(
+        &self,
+        _id: &str,
+        _opts: isengard_agent::runtime::LogOptions,
+    ) -> Pin<Box<dyn Stream<Item = isengard_agent::runtime::LogChunk> + Send>> {
+        Box::pin(futures_util::stream::empty())
+    }
+
+    fn stream_events(
+        &self,
+    ) -> Pin<Box<dyn Stream<Item = isengard_agent::runtime::RuntimeEvent> + Send>> {
+        Box::pin(futures_util::stream::empty())
+    }
+
+    async fn run_healthcheck(
+        &self,
+        _id: &str,
+        _hc: &isengard_agent::runtime::HealthcheckSpec,
+    ) -> Result<isengard_agent::runtime::HealthState, isengard_agent::runtime::RuntimeError> {
+        Ok(isengard_agent::runtime::HealthState::Healthy)
+    }
+
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+}
+
+fn cfg_with_empty_ip(
+    generation: u64,
+    container_id: &str,
+    container_port: u32,
+    public_hostname: &str,
+) -> ProxyConfig {
+    ProxyConfig {
+        host_id: "h".into(),
+        generation,
+        rules: vec![RoutingRule {
+            id: 1,
+            public_hostname: public_hostname.into(),
+            upstream: Some(Upstream {
+                container_id: container_id.into(),
+                container_ip: String::new(),
+                container_port,
+            }),
+            tls_mode: TlsMode::Acme as i32,
+            healthcheck: None,
+            adapter: "none".into(),
+        }],
+        settings: None,
+        wildcard_certs: vec![],
+    }
+}
 
 #[tokio::test]
 async fn apply_config_replaces_upstream_registry() {
@@ -37,6 +186,57 @@ async fn apply_config_replaces_upstream_registry() {
     let got = up.get("a.test").expect("rule applied");
     assert_eq!(got.container_id, "web");
     assert_eq!(got.addr.port(), 8080);
+}
+
+#[tokio::test]
+async fn apply_config_uses_runtime_ingress_endpoint_when_container_ip_empty() {
+    let state = isengard_agent::proxy::ProxyState::new();
+    let mut backend = MockBackend::default();
+    backend.endpoints.insert(
+        "web".into(),
+        isengard_agent::runtime::IngressEndpoint::Ready {
+            ip: "172.30.0.9".parse().unwrap(),
+            mode: isengard_agent::runtime::IngressEndpointMode::IsengardNetwork,
+        },
+    );
+
+    let cfg = cfg_with_empty_ip(1, "web", 8080, "web.test");
+    isengard_agent::proxy::apply_config_with_backend(&state, cfg, Some(&backend))
+        .await
+        .unwrap();
+
+    let up = state.upstreams.read().await;
+    let got = up.get("web.test").expect("ready route applied");
+    assert_eq!(got.addr.ip().to_string(), "172.30.0.9");
+}
+
+#[tokio::test]
+async fn apply_config_records_unresolved_route_without_localhost_fallback() {
+    let state = isengard_agent::proxy::ProxyState::new();
+    let mut backend = MockBackend::default();
+    backend.endpoints.insert(
+        "isolated".into(),
+        isengard_agent::runtime::IngressEndpoint::Unresolved(
+            isengard_agent::runtime::UnresolvedIngressReason::UnsupportedNetworkModeNone,
+        ),
+    );
+
+    let cfg = cfg_with_empty_ip(1, "isolated", 8080, "isolated.test");
+    isengard_agent::proxy::apply_config_with_backend(&state, cfg, Some(&backend))
+        .await
+        .unwrap();
+
+    let up = state.upstreams.read().await;
+    assert!(up.get("isolated.test").is_none());
+    match up.get_target("isolated.test").unwrap() {
+        isengard_agent::proxy::upstreams::RouteTarget::Unresolved(u) => {
+            assert_eq!(
+                u.reason,
+                isengard_agent::runtime::UnresolvedIngressReason::UnsupportedNetworkModeNone
+            );
+        }
+        _ => panic!("expected unresolved route"),
+    }
 }
 
 #[tokio::test]
