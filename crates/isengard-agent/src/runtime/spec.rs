@@ -328,6 +328,87 @@ pub struct NetworkSettings {
     pub ip_addresses: BTreeMap<String, std::net::IpAddr>,
     /// `"80/tcp" -> [host bindings]`.
     pub ports: BTreeMap<String, Vec<HostPort>>,
+    /// Runtime network mode. Docker fills this from HostConfig.network_mode or
+    /// NetworkSettings.Networks; Wisp can set it from its persisted spec.
+    pub mode: ContainerNetworkMode,
+}
+
+/// Result of reconciling a route target onto the runtime's ingress fabric.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngressEndpoint {
+    /// A reachable upstream IP and the network path used to reach it.
+    Ready {
+        /// IP address the proxy can dial.
+        ip: std::net::IpAddr,
+        /// Runtime network path used for the dial.
+        mode: IngressEndpointMode,
+    },
+    /// The route exists, but the runtime cannot currently provide a reachable endpoint.
+    Unresolved(UnresolvedIngressReason),
+}
+
+/// How the proxy reaches an ingress endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressEndpointMode {
+    /// Container is attached to the Isengard ingress network.
+    IsengardNetwork,
+    /// Container uses the host network namespace; proxy targets the Docker host gateway.
+    HostNetwork,
+    /// Caller supplied a literal container IP in ProxyConfig.
+    ProvidedIp,
+}
+
+/// Stable unresolved route reason surfaced in logs, proxy 503s, and later UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnresolvedIngressReason {
+    /// The runtime has no container matching the requested reference.
+    ContainerMissing,
+    /// The container exists but is not currently running.
+    ContainerStopped,
+    /// The ingress network could not be created.
+    IngressNetworkCreateFailed,
+    /// The container could not be attached to the ingress network.
+    IngressNetworkAttachFailed,
+    /// The runtime could not find an IP address usable by the proxy.
+    NoUsableContainerIp,
+    /// The container uses `network_mode: none`, so no ingress path is available.
+    UnsupportedNetworkModeNone,
+    /// The requested container port is invalid for proxy routing.
+    InvalidContainerPort,
+}
+
+impl UnresolvedIngressReason {
+    /// Return a stable snake_case identifier for external surfaces.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ContainerMissing => "container_missing",
+            Self::ContainerStopped => "container_stopped",
+            Self::IngressNetworkCreateFailed => "ingress_network_create_failed",
+            Self::IngressNetworkAttachFailed => "ingress_network_attach_failed",
+            Self::NoUsableContainerIp => "no_usable_container_ip",
+            Self::UnsupportedNetworkModeNone => "unsupported_network_mode_none",
+            Self::InvalidContainerPort => "invalid_container_port",
+        }
+    }
+}
+
+/// Docker/Wisp network mode classification used by ingress reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerNetworkMode {
+    /// Container uses a bridge-style network namespace.
+    Bridge,
+    /// Container shares the host network namespace.
+    Host,
+    /// Container has networking disabled.
+    None,
+    /// Runtime did not report a recognized network mode.
+    Unknown,
+}
+
+impl Default for ContainerNetworkMode {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 /// One host-side `host_ip:host_port` binding for a container port.
