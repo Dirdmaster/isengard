@@ -17,6 +17,8 @@ use tokio::time::timeout;
 pub struct HealthChecker {
     /// Optional HTTP path. `None` means TCP-only liveness.
     path: Option<String>,
+    /// HTTP Host header to send with probes when `path` is set.
+    host_header: String,
     /// Per-probe budget for both the connect and the GET.
     timeout: Duration,
 }
@@ -24,8 +26,14 @@ pub struct HealthChecker {
 impl HealthChecker {
     /// HTTP-mode checker: probes `GET <path>` and accepts any 2xx.
     pub fn new(path: String, timeout: Duration) -> Self {
+        Self::with_host(path, "healthcheck".into(), timeout)
+    }
+
+    /// HTTP-mode checker with an explicit Host header.
+    pub fn with_host(path: String, host_header: String, timeout: Duration) -> Self {
         Self {
             path: Some(path),
+            host_header,
             timeout,
         }
     }
@@ -34,6 +42,7 @@ impl HealthChecker {
     pub fn tcp_only(timeout: Duration) -> Self {
         Self {
             path: None,
+            host_header: String::new(),
             timeout,
         }
     }
@@ -49,8 +58,8 @@ impl HealthChecker {
             return true;
         };
         let req = format!(
-            "GET {} HTTP/1.1\r\nHost: healthcheck\r\nConnection: close\r\n\r\n",
-            path
+            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, self.host_header
         );
         if timeout(self.timeout, stream.write_all(req.as_bytes()))
             .await
@@ -109,7 +118,9 @@ pub fn spawn_loops(state: crate::proxy::ProxyState) {
                 let st = state.clone();
                 tokio::spawn(async move {
                     let hc = match path {
-                        Some(p) => HealthChecker::new(p, Duration::from_secs(2)),
+                        Some(p) => {
+                            HealthChecker::with_host(p, host.clone(), Duration::from_secs(2))
+                        }
                         None => HealthChecker::tcp_only(Duration::from_secs(2)),
                     };
                     let healthy = hc.check_once(addr).await;
