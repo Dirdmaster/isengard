@@ -106,11 +106,9 @@ impl ProxyState {
 ///
 /// Each `RoutingRule` becomes one entry in the registry, keyed by
 /// `public_hostname`. The controller leaves `container_ip` empty (it has no
-/// view of docker network IPs); the agent resolves it at apply-time via
-/// [`discovery::resolve_container_ip`] when a `docker` handle is present. If
-/// resolution fails or no Docker handle is wired (unit tests), the call
-/// falls back to `127.0.0.1` so the rule still installs and the healthcheck
-/// loop has a chance to evict it.
+/// view of runtime network IPs); the agent asks the runtime backend to ensure
+/// a proxy-reachable ingress endpoint. Routes without a usable endpoint are
+/// recorded as unresolved instead of being pointed at localhost.
 ///
 /// Health is initialized to `true`; the healthcheck loop flips it once it
 /// has a real signal.
@@ -125,11 +123,9 @@ pub async fn apply_config(
 /// discovery. The sync loop uses this entrypoint; tests stick with the
 /// no-backend [`apply_config`] form so they don't need a daemon.
 ///
-/// Discovery is now trait-driven. Both bollard and wisp
-/// backends resolve IPs via [`discovery::resolve_container_ip`] using
-/// `inspect_container` + `network_settings.ip_addresses` from
-/// `ContainerSnapshot`; the bollard-specific accessor is no longer used
-/// here.
+/// Ingress resolution is trait-driven. Backends decide how to attach or
+/// discover a proxy-reachable endpoint, and this function installs only ready
+/// endpoints into the forwardable upstream set.
 pub async fn apply_config_with_backend(
     state: &ProxyState,
     cfg: isengard_proto::pb::ProxyConfig,
@@ -152,30 +148,48 @@ pub async fn apply_config_with_backend(
             continue;
         };
 
-        // Discovery: prefer an IP shipped by the controller (test fixtures,
-        // future controller-side discovery), then ask the runtime backend
-        // (any backend: bollard or wisp), then fall back to 127.0.0.1.
-        let resolved_ip: Option<String> = if !up.container_ip.is_empty() {
-            Some(up.container_ip.clone())
+        let endpoint = if !up.container_ip.is_empty() {
+            let ip = up
+                .container_ip
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad container_ip {}: {e}", up.container_ip))?;
+            crate::runtime::IngressEndpoint::Ready {
+                ip,
+                mode: crate::runtime::IngressEndpointMode::ProvidedIp,
+            }
         } else if let Some(b) = backend {
-            discovery::resolve_container_ip(b, &up.container_id).await
+            b.ensure_ingress_attachment(&up.container_id).await?
         } else {
-            None
+            crate::runtime::IngressEndpoint::Unresolved(
+                crate::runtime::UnresolvedIngressReason::NoUsableContainerIp,
+            )
         };
 
-        let ip: std::net::IpAddr = match resolved_ip {
-            Some(s) => s
-                .parse()
-                .map_err(|e| anyhow::anyhow!("bad container_ip {s}: {e}"))?,
-            None => {
+        let ip = match endpoint {
+            crate::runtime::IngressEndpoint::Ready { ip, mode } => {
+                tracing::debug!(
+                    hostname = %rule.public_hostname,
+                    container_id = %up.container_id,
+                    ?mode,
+                    "proxy: resolved ingress endpoint",
+                );
+                ip
+            }
+            crate::runtime::IngressEndpoint::Unresolved(reason) => {
                 tracing::warn!(
                     hostname = %rule.public_hostname,
                     container_id = %up.container_id,
-                    "proxy: ProxyConfig rule has empty container_ip; falling back to 127.0.0.1 \
-                     (Docker discovery returned no IP: container likely not joined to \
-                      `isengard-proxy` and not on a non-driver bridge the agent can see)"
+                    reason = reason.as_str(),
+                    "proxy: route unresolved; not installing localhost fallback",
                 );
-                "127.0.0.1".parse().expect("127.0.0.1 is a valid IpAddr")
+                new_reg.set_unresolved(
+                    rule.public_hostname.clone(),
+                    upstreams::UnresolvedUpstream {
+                        container_id: up.container_id.clone(),
+                        reason,
+                    },
+                );
+                continue;
             }
         };
 
