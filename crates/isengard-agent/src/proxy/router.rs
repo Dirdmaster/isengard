@@ -79,12 +79,22 @@ impl ProxyHttp for IsengardProxy {
         }
 
         let upstreams = self.state.upstreams.read().await;
-        let Some(up) = upstreams.get(&host) else {
+        let Some(target) = upstreams.get_target(&host) else {
             return Err(pingora_core::Error::because(
                 pingora_core::ErrorType::HTTPStatus(404),
                 "no_route",
                 format!("no routing rule for {host}"),
             ));
+        };
+        let up = match target {
+            crate::proxy::upstreams::RouteTarget::Ready(up) => up,
+            crate::proxy::upstreams::RouteTarget::Unresolved(u) => {
+                return Err(pingora_core::Error::because(
+                    pingora_core::ErrorType::HTTPStatus(503),
+                    u.reason.as_str(),
+                    format!("route for {host} unresolved: {}", u.reason.as_str()),
+                ));
+            }
         };
         if !up.healthy {
             return Err(pingora_core::Error::because(
