@@ -25,6 +25,8 @@ use bollard::container::{
 };
 use bollard::image::CreateImageOptions;
 use futures_util::StreamExt;
+use isengard_agent::runtime::bollard_backend::BollardBackend;
+use isengard_agent::runtime::{IngressEndpoint, IngressEndpointMode, RuntimeBackend};
 use isengard_proto::pb::{AgentMessage, agent_message::Payload};
 use isengard_storage::{EnrollHost, Inventory};
 use tempfile::tempdir;
@@ -160,4 +162,116 @@ async fn label_on_real_container_creates_routing_rule() {
         )
         .await;
     watcher.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires running dockerd; opt in via --ignored"]
+async fn auto_attach_route_container_to_ingress_network() {
+    // 1. Skip silently if no Docker socket / daemon.
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    if docker.ping().await.is_err() {
+        return;
+    }
+
+    let container_name = format!("isengard-e2e-autoattach-{}", std::process::id());
+
+    // 2. Remove any stale container from a previous interrupted run.
+    let _ = docker
+        .kill_container(&container_name, None::<KillContainerOptions<String>>)
+        .await;
+    let _ = docker
+        .remove_container(
+            &container_name,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+
+    // 3. Pull busybox if needed (often local already; ignore stream errors).
+    let mut pull = docker.create_image(
+        Some(CreateImageOptions::<&str> {
+            from_image: "busybox:latest",
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
+    while pull.next().await.is_some() {}
+
+    let mut labels: HashMap<String, String> = HashMap::new();
+    labels.insert("isengard.expose".to_string(), "autoattach.test".to_string());
+    labels.insert("isengard.expose.port".to_string(), "80".to_string());
+
+    let cont = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: container_name.clone(),
+                platform: None,
+            }),
+            Config {
+                image: Some("busybox:latest".to_string()),
+                cmd: Some(vec!["sleep".to_string(), "30".to_string()]),
+                labels: Some(labels),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create container");
+    docker
+        .start_container::<String>(&cont.id, None)
+        .await
+        .expect("start container");
+
+    let backend_state_dir = tempdir().unwrap();
+    let backend = BollardBackend::from_env(backend_state_dir.path())
+        .await
+        .expect("BollardBackend::from_env");
+
+    let endpoint_result = backend.ensure_ingress_attachment(&container_name).await;
+    let inspect_result = docker.inspect_container(&container_name, None).await;
+
+    // Cleanup before assertions so endpoint regressions do not leave the test
+    // container running.
+    let _ = docker
+        .kill_container(&container_name, None::<KillContainerOptions<String>>)
+        .await;
+    let _ = docker
+        .remove_container(
+            &container_name,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+
+    let endpoint = endpoint_result.expect("ensure_ingress_attachment");
+    assert!(
+        matches!(
+            endpoint,
+            IngressEndpoint::Ready {
+                mode: IngressEndpointMode::IsengardNetwork,
+                ..
+            }
+        ),
+        "expected isengard network endpoint, got {endpoint:?}"
+    );
+
+    let inspect = inspect_result.expect("inspect container after auto-attach");
+    let ingress_ip = inspect
+        .network_settings
+        .as_ref()
+        .and_then(|s| s.networks.as_ref())
+        .and_then(|nets| nets.get("isengard-proxy"))
+        .and_then(|s| s.ip_address.as_ref())
+        .filter(|ip| !ip.is_empty());
+    assert!(
+        ingress_ip.is_some(),
+        "expected non-empty isengard-proxy NetworkSettings.Networks IPAddress"
+    );
 }

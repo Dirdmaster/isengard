@@ -545,9 +545,14 @@ fn classify_network_mode(
 
 /// Internal helper: parse rfc3339.
 fn parse_rfc3339(s: &str) -> Option<SystemTime> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp() as u64))
+    chrono::DateTime::parse_from_rfc3339(s).ok().and_then(|dt| {
+        let secs = dt.timestamp();
+        if secs >= 0 {
+            SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
+        } else {
+            SystemTime::UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(secs.unsigned_abs()))
+        }
+    })
 }
 
 /// Address the proxy should dial for Docker host-networked target containers.
