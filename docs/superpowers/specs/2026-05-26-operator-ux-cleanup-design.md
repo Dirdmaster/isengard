@@ -17,7 +17,7 @@ The third gap is recovery ergonomics. `isd stack doctor` already knows important
 - Fill the onboarding spine with a verified, copyable path: install `isd`, run `isd init`, deploy a first stack, expose a service, run doctor, verify routes.
 - Add a short `Start here` block to root `isd` help.
 - Position `isd stack doctor` as the memory layer for label routing.
-- Use public, generic examples only: popular containers and `*.isengard.app` route hostnames.
+- Use public, generic examples only: popular tech/dev containers and `*.isengard.app` route hostnames.
 - Define follow-up behavior slices for host-aware `isd route add` and scriptable doctor fixes.
 
 ## Non-Goals
@@ -34,15 +34,15 @@ The canonical route label is:
 
 ```yaml
 labels:
-  isengard.expose: jellyfin.isengard.app
+  isengard.expose: whoami.isengard.app
 ```
 
-Meaning: expose this service at `jellyfin.isengard.app`. When the agent can infer one upstream web port, this single label is enough. When the port is ambiguous, doctor asks for the correct container port and writes:
+Meaning: expose this service at `whoami.isengard.app`. When the agent can infer one upstream web port, this single label is enough. When the port is ambiguous, doctor asks for the correct container port and writes:
 
 ```yaml
 labels:
-  isengard.expose: qbittorrent.isengard.app
-  isengard.expose.port: "8069"
+  isengard.expose: gitea.isengard.app
+  isengard.expose.port: "3000"
 ```
 
 Optional labels stay advanced:
@@ -65,7 +65,7 @@ labels:
   isengard.expose.admin.port: "9090"
 ```
 
-Examples must avoid personal domains, private hostnames, and real home-service names. Use popular containers such as `nginx`, `whoami`, `jellyfin`, `grafana`, `prometheus`, and `qbittorrent`. Every example route hostname should live under `isengard.app`, such as `whoami.isengard.app`.
+Examples must avoid personal domains, private hostnames, real home-service names, and consumer-entertainment apps. Use popular tech/dev containers such as `nginx`, `whoami`, `gitea`, `grafana`, `prometheus`, and `adminer`. Every example route hostname should live under `isengard.app`, such as `whoami.isengard.app`.
 
 ## Phase A: Docs And Help Strike
 
@@ -168,7 +168,7 @@ Phase C is another behavior PR.
 Proposed shape:
 
 ```sh
-isd stack doctor media --fix --set qbittorrent=qbittorrent.isengard.app:8069 --yes
+isd stack doctor observability --fix --set grafana=grafana.isengard.app:3000 --yes
 ```
 
 Rules:
