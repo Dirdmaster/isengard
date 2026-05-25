@@ -118,7 +118,9 @@ pub fn spawn_loops(state: crate::proxy::ProxyState) {
                 let st = state.clone();
                 tokio::spawn(async move {
                     let hc = match path {
-                        Some(p) => HealthChecker::with_host(p, host.clone(), Duration::from_secs(2)),
+                        Some(p) => {
+                            HealthChecker::with_host(p, host.clone(), Duration::from_secs(2))
+                        }
                         None => HealthChecker::tcp_only(Duration::from_secs(2)),
                     };
                     let healthy = hc.check_once(addr).await;

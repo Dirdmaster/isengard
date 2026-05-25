@@ -44,7 +44,9 @@ async fn spawn_host_validating_responder(expected_host: &'static str) -> SocketA
                     let mut buf = [0u8; 1024];
                     let n = s.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
-                    let host_ok = req.lines().any(|line| line == format!("Host: {expected_host}"));
+                    let host_ok = req
+                        .lines()
+                        .any(|line| line == format!("Host: {expected_host}"));
                     let resp = if host_ok {
                         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
                     } else {
