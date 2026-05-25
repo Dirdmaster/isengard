@@ -33,6 +33,31 @@ async fn spawn(toggle: tokio::sync::watch::Receiver<bool>) -> SocketAddr {
     addr
 }
 
+async fn spawn_host_validating_responder(expected_host: &'static str) -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut s, _)) = l.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let host_ok = req.lines().any(|line| line == format!("Host: {expected_host}"));
+                    let resp = if host_ok {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                    } else {
+                        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+                    let _ = s.write_all(resp.as_bytes()).await;
+                });
+            }
+        }
+    });
+    addr
+}
+
 #[tokio::test]
 async fn eviction_after_three_failures_then_recovery_after_one_success() {
     let (tx, rx) = tokio::sync::watch::channel(true);
@@ -83,4 +108,38 @@ async fn eviction_after_three_failures_then_recovery_after_one_success() {
         assert!(entry.healthy, "should be healthy again after one success");
         assert_eq!(entry.consecutive_failures, 0);
     }
+}
+
+#[tokio::test]
+async fn healthcheck_uses_public_hostname_as_host_header() {
+    let host = "torrent.vallee.casa";
+    let addr = spawn_host_validating_responder(host).await;
+
+    let state = ProxyState::new();
+    {
+        let mut up = state.upstreams.write().await;
+        up.set(
+            host,
+            Upstream {
+                container_id: "qbittorrent".into(),
+                addr,
+                healthy: true,
+                health_path: Some("/".into()),
+                health_interval: Duration::from_millis(50),
+                consecutive_failures: 0,
+                state: UpstreamState::Active,
+            },
+        );
+    }
+
+    isengard_agent::proxy::healthcheck::spawn_loops(state.clone());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let up = state.upstreams.read().await;
+    let entry = up.get(host).unwrap();
+    assert!(
+        entry.healthy,
+        "healthcheck should stay healthy when the origin accepts the real public hostname"
+    );
+    assert_eq!(entry.consecutive_failures, 0);
 }
