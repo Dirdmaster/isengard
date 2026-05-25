@@ -268,7 +268,7 @@ pub(crate) fn map_summary(summary: ContainerSummary) -> ContainerSnapshot {
                     network_settings.ip_addresses.insert(name.clone(), ip);
                 }
             } else if name == "host" {
-                if let Some(ip) = docker_host_gateway_ip() {
+                if let Some(ip) = host_network_target_ip() {
                     network_settings
                         .ip_addresses
                         .insert(name.clone(), ip.into());
@@ -393,7 +393,7 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
                         network_settings.ip_addresses.insert(net_name.clone(), ip);
                     }
                 } else if net_name == "host" {
-                    if let Some(ip) = docker_host_gateway_ip() {
+                    if let Some(ip) = host_network_target_ip() {
                         network_settings
                             .ip_addresses
                             .insert(net_name.clone(), ip.into());
@@ -550,13 +550,34 @@ fn parse_rfc3339(s: &str) -> Option<SystemTime> {
         .map(|dt| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp() as u64))
 }
 
+/// Address the proxy should dial for Docker host-networked target containers.
+///
+/// When the agent/proxy runs directly on the host, loopback reaches services
+/// sharing the host namespace. When the agent/proxy runs inside a container,
+/// the host side of the container's default route is the Docker host gateway.
+fn host_network_target_ip() -> Option<std::net::Ipv4Addr> {
+    if !agent_is_running_inside_container() {
+        return Some(std::net::Ipv4Addr::LOCALHOST);
+    }
+    let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+    select_host_network_target_ip(&routes, true)
+}
+
+fn select_host_network_target_ip(
+    route_file_contents: &str,
+    inside_container: bool,
+) -> Option<std::net::Ipv4Addr> {
+    if !inside_container {
+        return Some(std::net::Ipv4Addr::LOCALHOST);
+    }
+    container_to_host_gateway_ip_from_routes(route_file_contents)
+}
+
 /// Best-effort Docker-host address from inside the agent container.
 ///
-/// Host-networked target containers do not have a per-container IP in Docker's
-/// inspect response. From the agent container, the host side of the default
-/// route is the address that reaches services bound in the host namespace.
-fn docker_host_gateway_ip() -> Option<std::net::Ipv4Addr> {
-    let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+/// Returns the non-loopback gateway from the default route. If the route table
+/// lacks such a gateway, the proxy cannot safely infer a host-network target.
+fn container_to_host_gateway_ip_from_routes(routes: &str) -> Option<std::net::Ipv4Addr> {
     for line in routes.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 3 || fields[1] != "00000000" {
@@ -570,6 +591,23 @@ fn docker_host_gateway_ip() -> Option<std::net::Ipv4Addr> {
         }
     }
     None
+}
+
+fn agent_is_running_inside_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        return true;
+    }
+
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|cgroup| {
+            cgroup.contains("docker")
+                || cgroup.contains("kubepods")
+                || cgroup.contains("containerd")
+                || cgroup.contains("libpod")
+        })
+        .unwrap_or(false)
 }
 
 /// Internal helper: map state str.
@@ -815,7 +853,7 @@ impl RuntimeBackend for BollardBackend {
 
         match initial.network_settings.mode {
             ContainerNetworkMode::Host => {
-                let Some(ip) = docker_host_gateway_ip() else {
+                let Some(ip) = host_network_target_ip() else {
                     return Ok(IngressEndpoint::Unresolved(
                         UnresolvedIngressReason::NoUsableContainerIp,
                     ));
@@ -1275,5 +1313,41 @@ mod tests {
             snap.network_settings.mode,
             crate::runtime::ContainerNetworkMode::None
         );
+    }
+
+    #[test]
+    fn host_network_target_is_loopback_outside_container() {
+        let routes = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+
+        assert_eq!(
+            select_host_network_target_ip(routes, false),
+            Some(std::net::Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn host_network_target_uses_gateway_inside_container() {
+        let routes = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+
+        assert_eq!(
+            select_host_network_target_ip(routes, true),
+            Some(std::net::Ipv4Addr::new(172, 17, 0, 1))
+        );
+    }
+
+    #[test]
+    fn host_network_target_rejects_loopback_gateway_inside_container() {
+        let routes = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+lo\t00000000\t0100007F\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+
+        assert_eq!(select_host_network_target_ip(routes, true), None);
     }
 }
