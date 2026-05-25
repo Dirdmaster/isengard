@@ -21,7 +21,10 @@ pub fn input_from_finding(finding: &crate::doctor::Finding) -> Option<ExposeHost
     let crate::doctor::FixSpec::ExposeService {
         service,
         inferred_port,
-    } = finding.fix.clone()?;
+    } = finding.fix.clone()?
+    else {
+        return None;
+    };
     Some(ExposeHostInput {
         service,
         hostname: String::new(),
@@ -62,7 +65,7 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
         if map
             .keys()
             .filter_map(Value::as_str)
-            .any(|k| k.starts_with("isengard.expose"))
+            .any(is_expose_hostname_label_key)
         {
             return Ok(false);
         }
@@ -79,13 +82,11 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
         return Ok(true);
     }
     if let Some(seq) = labels.as_sequence_mut() {
-        if seq.iter().filter_map(Value::as_str).any(|entry| {
-            entry
-                .split('=')
-                .next()
-                .unwrap_or(entry)
-                .starts_with("isengard.expose")
-        }) {
+        if seq
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|entry| is_expose_hostname_label_key(entry.split('=').next().unwrap_or(entry)))
+        {
             return Ok(false);
         }
         seq.push(Value::String(format!("isengard.expose={}", input.hostname)));
@@ -97,6 +98,64 @@ pub fn apply_expose_host(compose: &mut Value, input: &ExposeHostInput) -> Result
     Err(anyhow::anyhow!(
         "services.{}.labels must be a map or list",
         input.service
+    ))
+}
+
+/// Returns true for expose hostname labels, excluding metadata-only labels.
+fn is_expose_hostname_label_key(key: &str) -> bool {
+    if key == "isengard.expose" {
+        return true;
+    }
+
+    let Some(name) = key.strip_prefix("isengard.expose.") else {
+        return false;
+    };
+
+    !name.is_empty()
+        && !name.contains('.')
+        && !matches!(name, "port" | "tls" | "health" | "adapter" | "auth")
+}
+
+/// Add or replace `isengard.expose.port` while preserving the hostname label.
+pub fn apply_expose_port(compose: &mut Value, service_name: &str, port: u16) -> Result<bool> {
+    let services = compose
+        .get_mut("services")
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| anyhow::anyhow!("compose has no services mapping"))?;
+    let service = services
+        .get_mut(Value::String(service_name.to_string()))
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| anyhow::anyhow!("service {:?} not found", service_name))?;
+    let labels_key = Value::String("labels".to_string());
+    let labels = service
+        .get_mut(&labels_key)
+        .ok_or_else(|| anyhow::anyhow!("service {:?} has no labels", service_name))?;
+    if let Some(map) = labels.as_mapping_mut() {
+        let key = Value::String("isengard.expose.port".into());
+        let new_value = Value::String(port.to_string());
+        let changed = map.get(&key) != Some(&new_value);
+        map.insert(key, new_value);
+        return Ok(changed);
+    }
+    if let Some(seq) = labels.as_sequence_mut() {
+        let wanted = format!("isengard.expose.port={port}");
+        for entry in seq.iter_mut() {
+            if entry
+                .as_str()
+                .and_then(|s| s.split_once('=').map(|(key, _)| key))
+                == Some("isengard.expose.port")
+            {
+                let changed = entry.as_str() != Some(wanted.as_str());
+                *entry = Value::String(wanted);
+                return Ok(changed);
+            }
+        }
+        seq.push(Value::String(wanted));
+        return Ok(true);
+    }
+    Err(anyhow::anyhow!(
+        "services.{}.labels must be a map or list",
+        service_name
     ))
 }
 
@@ -116,14 +175,14 @@ mod tests {
             &ExposeHostInput {
                 service: "plex".into(),
                 hostname: "plex.vallee.casa".into(),
-                port: Some(32400),
+                port: None,
             },
         )
         .unwrap();
         assert!(changed);
         let labels = &v["services"]["plex"]["labels"];
         assert_eq!(labels["isengard.expose"].as_str(), Some("plex.vallee.casa"));
-        assert_eq!(labels["isengard.expose.port"].as_str(), Some("32400"));
+        assert!(labels["isengard.expose.port"].is_null());
     }
 
     #[test]
@@ -175,6 +234,55 @@ mod tests {
     }
 
     #[test]
+    fn adds_hostname_when_only_port_label_exists() {
+        let mut v = parse("services:\n  web:\n    labels:\n      isengard.expose.port: \"8080\"\n");
+
+        let changed = apply_expose_host(
+            &mut v,
+            &ExposeHostInput {
+                service: "web".into(),
+                hostname: "web.test".into(),
+                port: None,
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        let labels = &v["services"]["web"]["labels"];
+        assert_eq!(labels["isengard.expose"].as_str(), Some("web.test"));
+        assert_eq!(labels["isengard.expose.port"].as_str(), Some("8080"));
+    }
+
+    #[test]
+    fn appends_hostname_to_label_list_with_only_port_label() {
+        let mut v =
+            parse("services:\n  web:\n    labels:\n      - \"isengard.expose.port=8080\"\n");
+
+        let changed = apply_expose_host(
+            &mut v,
+            &ExposeHostInput {
+                service: "web".into(),
+                hostname: "web.test".into(),
+                port: None,
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        let labels = v["services"]["web"]["labels"].as_sequence().unwrap();
+        assert!(
+            labels
+                .iter()
+                .any(|v| v.as_str() == Some("isengard.expose.port=8080"))
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|v| v.as_str() == Some("isengard.expose=web.test"))
+        );
+    }
+
+    #[test]
     fn refuses_to_overwrite_existing_expose_label() {
         let mut v = parse("services:\n  web:\n    labels:\n      isengard.expose: old.test\n");
         let changed = apply_expose_host(
@@ -190,6 +298,25 @@ mod tests {
         assert_eq!(
             v["services"]["web"]["labels"]["isengard.expose"].as_str(),
             Some("old.test")
+        );
+    }
+
+    #[test]
+    fn writes_port_override_without_rewriting_hostname() {
+        let mut v = parse(
+            "services:\n  qbittorrent:\n    labels:\n      isengard.expose: qb.vallee.casa\n",
+        );
+
+        let changed = apply_expose_port(&mut v, "qbittorrent", 8080).unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            v["services"]["qbittorrent"]["labels"]["isengard.expose"].as_str(),
+            Some("qb.vallee.casa")
+        );
+        assert_eq!(
+            v["services"]["qbittorrent"]["labels"]["isengard.expose.port"].as_str(),
+            Some("8080")
         );
     }
 }

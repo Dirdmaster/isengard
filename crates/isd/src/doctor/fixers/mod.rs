@@ -18,8 +18,9 @@ pub enum FixInput {
 #[allow(dead_code)]
 // Wired into command flow by a later doctor fixer task.
 pub fn fixer_id_for(finding: &Finding) -> Option<&'static str> {
-    match finding.fix {
+    match &finding.fix {
         Some(FixSpec::ExposeService { .. }) => Some("EXPOSE_HOST_MISSING"),
+        Some(FixSpec::SetExposePort { .. }) => Some(finding.id),
         None => None,
     }
 }

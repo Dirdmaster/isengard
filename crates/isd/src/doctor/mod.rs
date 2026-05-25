@@ -64,6 +64,14 @@ pub enum FixSpec {
         /// Port inferred from compose metadata, when unambiguous.
         inferred_port: Option<u16>,
     },
+    /// Add or replace `isengard.expose.port` for a service that already
+    /// has a hostname label.
+    SetExposePort {
+        /// Service that should receive the port override.
+        service: String,
+        /// Candidate upstream container ports the operator may choose from.
+        candidate_ports: Vec<u16>,
+    },
 }
 
 /// A single audit finding. Carries an id for filtering / muting, a
@@ -124,6 +132,11 @@ pub fn print_warnings(findings: &[Finding]) {
             eprintln!("  hint: {hint}");
         }
     }
+}
+
+/// Returns the static expose-label reference printed by `isd stack doctor labels`.
+fn label_reference_text() -> &'static str {
+    "Required:\n  isengard.expose=<hostname>\n\nOptional:\n  isengard.expose.port=<container-port>\n  isengard.expose.tls=acme|edge|manual\n  isengard.expose.adapter=none|tailscale|cf-tunnel\n  isengard.expose.auth=none|...\n  isengard.expose.health=/path\n\nNamed:\n  isengard.expose.<name>=<hostname>\n  isengard.expose.<name>.port=<container-port>\n\nStart with only isengard.expose=<hostname>. Add optional labels only when doctor asks or when you want a non-default behavior.\n"
 }
 
 /// CLI flags for `isd stack doctor`.
@@ -200,6 +213,11 @@ impl ComposeSource {
 /// Returns `Err` when the compose file / stack can't be located or
 /// when the document fails to parse.
 pub async fn run(args: DoctorArgs, context: Option<&str>) -> Result<()> {
+    if args.target.as_deref() == Some("labels") {
+        print!("{}", label_reference_text());
+        return Ok(());
+    }
+
     if args.fix {
         return run_fix(args, context).await;
     }
@@ -252,6 +270,7 @@ async fn run_fix(args: DoctorArgs, context: Option<&str>) -> Result<()> {
         findings,
         prompt_should_fix,
         prompt_hostname,
+        prompt_expose_port,
     )?;
 
     if !changed {
@@ -305,20 +324,43 @@ fn apply_fix_inputs(
     findings: Vec<Finding>,
     mut should_fix: impl FnMut(&str) -> Result<bool>,
     mut hostname_for_service: impl FnMut(&str) -> Result<String>,
+    mut expose_port_for_service: impl FnMut(&str, &[u16]) -> Result<u16>,
 ) -> Result<bool> {
     let mut changed = false;
     for finding in findings {
-        if fixers::fixer_id_for(&finding) != Some("EXPOSE_HOST_MISSING") {
-            continue;
+        match finding.fix.clone() {
+            Some(FixSpec::ExposeService { .. }) => {
+                if fixers::fixer_id_for(&finding) != Some("EXPOSE_HOST_MISSING") {
+                    continue;
+                }
+                let Some(mut input) = fixers::expose_host::input_from_finding(&finding) else {
+                    continue;
+                };
+                if !should_fix(&input.service)? {
+                    continue;
+                }
+                input.hostname = hostname_for_service(&input.service)?;
+                changed |= fixers::expose_host::apply_expose_host(&mut document.value, &input)?;
+            }
+            Some(FixSpec::SetExposePort {
+                service,
+                candidate_ports,
+            }) => {
+                if !should_fix(&service)? {
+                    continue;
+                }
+                let port = match candidate_ports.as_slice() {
+                    [] => anyhow::bail!(
+                        "services.{service} has no candidate ports for isengard.expose.port"
+                    ),
+                    [port] => *port,
+                    ports => expose_port_for_service(&service, ports)?,
+                };
+                changed |=
+                    fixers::expose_host::apply_expose_port(&mut document.value, &service, port)?;
+            }
+            None => continue,
         }
-        let Some(mut input) = fixers::expose_host::input_from_finding(&finding) else {
-            continue;
-        };
-        if !should_fix(&input.service)? {
-            continue;
-        }
-        input.hostname = hostname_for_service(&input.service)?;
-        changed |= fixers::expose_host::apply_expose_host(&mut document.value, &input)?;
     }
     Ok(changed)
 }
@@ -349,6 +391,16 @@ fn prompt_hostname(service: &str) -> Result<String> {
     .map_err(|e| anyhow::anyhow!("hostname prompt cancelled: {e}"))?;
 
     Ok(hostname.trim().to_string())
+}
+
+/// Prompt for the upstream port used by the expose-port fixer.
+fn prompt_expose_port(service: &str, candidate_ports: &[u16]) -> Result<u16> {
+    inquire::Select::new(
+        &format!("Use which upstream container port for services.{service}?"),
+        candidate_ports.to_vec(),
+    )
+    .prompt()
+    .map_err(|e| anyhow::anyhow!("port prompt cancelled: {e}"))
 }
 
 /// Print a compact diff of proposed fixes.
@@ -558,6 +610,37 @@ mod tests {
     }
 
     #[test]
+    fn label_reference_lists_required_optional_and_named_labels() {
+        let text = label_reference_text();
+
+        assert!(text.contains("Required:"));
+        assert!(text.contains("isengard.expose=<hostname>"));
+        assert!(text.contains("Optional:"));
+        assert!(text.contains("isengard.expose.port=<container-port>"));
+        assert!(text.contains("Named:"));
+        assert!(text.contains("isengard.expose.<name>=<hostname>"));
+    }
+
+    #[test]
+    fn doctor_args_parse_labels_target() {
+        use clap::Parser;
+
+        #[derive(Parser, Debug)]
+        struct Wrap {
+            #[command(subcommand)]
+            c: crate::stack_cmd::StackCommand,
+        }
+
+        let w = Wrap::try_parse_from(["x", "doctor", "labels"]).unwrap();
+        match w.c {
+            crate::stack_cmd::StackCommand::Doctor(args) => {
+                assert_eq!(args.target.as_deref(), Some("labels"));
+            }
+            other => panic!("expected doctor, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn audit_on_idiomatic_compose_returns_no_findings() {
         let yaml = r#"
 services:
@@ -607,6 +690,7 @@ services:
                 assert_eq!(service, "web");
                 Ok("web.test".to_string())
             },
+            |_, _| panic!("port callback should not be called for hostname fixes"),
         )
         .unwrap();
 
@@ -631,6 +715,7 @@ services:
             findings,
             |_| Ok(false),
             |_| panic!("hostname callback should not be called for skipped services"),
+            |_, _| panic!("port callback should not be called for skipped services"),
         )
         .unwrap();
 
@@ -658,6 +743,7 @@ services:
                 assert_eq!(service, "web");
                 Ok("web.test".to_string())
             },
+            |_, _| panic!("port callback should not be called for hostname fixes"),
         )
         .unwrap();
 
@@ -665,6 +751,50 @@ services:
         assert_eq!(
             document.value["services"]["web"]["labels"]["isengard.expose"].as_str(),
             Some("web.test")
+        );
+    }
+
+    #[test]
+    fn apply_fix_inputs_sets_single_candidate_expose_port() {
+        let mut document = document::ComposeDocument::parse_path(
+            std::path::Path::new("compose.yaml"),
+            "services:\n  qbittorrent:\n    labels:\n      isengard.expose: qb.vallee.casa\n",
+        )
+        .unwrap();
+        let findings = vec![Finding {
+            id: "EXPOSE_PORT_AMBIGUOUS",
+            severity: Severity::Warning,
+            message: "ambiguous".into(),
+            hint: None,
+            target: Some(FindingTarget::Service {
+                name: "qbittorrent".into(),
+            }),
+            fix: Some(FixSpec::SetExposePort {
+                service: "qbittorrent".into(),
+                candidate_ports: vec![8080],
+            }),
+        }];
+
+        let changed = apply_fix_inputs(
+            &mut document,
+            findings,
+            |service| {
+                assert_eq!(service, "qbittorrent");
+                Ok(true)
+            },
+            |_| panic!("hostname callback should not be called for port fixes"),
+            |_, _| panic!("port callback should not be called with one candidate"),
+        )
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            document.value["services"]["qbittorrent"]["labels"]["isengard.expose"].as_str(),
+            Some("qb.vallee.casa")
+        );
+        assert_eq!(
+            document.value["services"]["qbittorrent"]["labels"]["isengard.expose.port"].as_str(),
+            Some("8080")
         );
     }
 

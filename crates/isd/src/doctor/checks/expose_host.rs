@@ -8,9 +8,9 @@
 //! and just forgot the label.
 //!
 //! Heuristic: emit a finding when a service publishes any port from
-//! [`HTTP_ISH_PORTS`] AND carries no key under `labels` that starts
-//! with `isengard.expose`. The hint suggests adding the label and
-//! points at `isd stack doctor` for the interactive fix (v0.2).
+//! [`HTTP_ISH_PORTS`] AND carries no expose hostname label. The hint
+//! suggests adding the label and points at `isd stack doctor` for the
+//! interactive fix (v0.2).
 
 use serde_yaml::Value;
 
@@ -37,10 +37,51 @@ pub fn check(compose: &Value) -> Vec<Finding> {
         let Some(svc) = svc.as_mapping() else {
             continue;
         };
-        let Some(inferred_port) = inferred_http_port(svc) else {
-            continue;
-        };
         if has_expose_label(svc) {
+            let candidate_ports = published_container_ports(svc);
+            if let Some(port) = expose_port_label(svc) {
+                if port.parse::<u16>().is_err() {
+                    out.push(Finding {
+                        id: "EXPOSE_PORT_INVALID",
+                        severity: Severity::Warning,
+                        message: format!(
+                            "services.{name} has an invalid `isengard.expose.port` label"
+                        ),
+                        hint: Some("choose a numeric container port".into()),
+                        target: Some(crate::doctor::FindingTarget::Service {
+                            name: name.to_string(),
+                        }),
+                        fix: Some(crate::doctor::FixSpec::SetExposePort {
+                            service: name.to_string(),
+                            candidate_ports,
+                        }),
+                    });
+                }
+                continue;
+            }
+            if candidate_ports.len() > 1 {
+                out.push(Finding {
+                    id: "EXPOSE_PORT_AMBIGUOUS",
+                    severity: Severity::Warning,
+                    message: format!(
+                        "services.{name} has an expose hostname but multiple candidate ports"
+                    ),
+                    hint: Some(
+                        "choose the upstream container port for `isengard.expose.port`".into(),
+                    ),
+                    target: Some(crate::doctor::FindingTarget::Service {
+                        name: name.to_string(),
+                    }),
+                    fix: Some(crate::doctor::FixSpec::SetExposePort {
+                        service: name.to_string(),
+                        candidate_ports,
+                    }),
+                });
+            }
+            continue;
+        }
+        let candidate_ports = http_ish_ports(svc);
+        if candidate_ports.is_empty() {
             continue;
         }
         out.push(Finding {
@@ -57,22 +98,45 @@ pub fn check(compose: &Value) -> Vec<Finding> {
             }),
             fix: Some(crate::doctor::FixSpec::ExposeService {
                 service: name.to_string(),
-                inferred_port,
+                inferred_port: None,
             }),
         });
     }
     out
 }
 
-/// Return the inferred port when unambiguous, `Some(None)` when web ports are ambiguous.
-fn inferred_http_port(svc: &serde_yaml::Mapping) -> Option<Option<u16>> {
-    let ports = svc.get("ports").and_then(Value::as_sequence)?;
-    let mut found = ports.iter().filter_map(http_ish_port);
-    let first = found.next()?;
-    if found.next().is_some() {
-        Some(None)
+/// Return sorted unique HTTP-ish container ports for a service.
+fn http_ish_ports(svc: &serde_yaml::Mapping) -> Vec<u16> {
+    let Some(ports) = svc.get("ports").and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+    let mut found = ports.iter().filter_map(http_ish_port).collect::<Vec<_>>();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+/// Return sorted unique published container ports for an exposed service.
+fn published_container_ports(svc: &serde_yaml::Mapping) -> Vec<u16> {
+    let Some(ports) = svc.get("ports").and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+    let mut found = ports.iter().filter_map(container_port).collect::<Vec<_>>();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+fn container_port(spec: &Value) -> Option<u16> {
+    if let Some(s) = spec.as_str() {
+        let container = s.rsplit(':').next().unwrap_or(s);
+        let container = container.split('/').next().unwrap_or(container);
+        container.parse::<u16>().ok()
+    } else if let Some(m) = spec.as_mapping() {
+        let n = m.get("target")?.as_u64()?;
+        u16::try_from(n).ok()
     } else {
-        Some(Some(first))
+        None
     }
 }
 
@@ -81,23 +145,13 @@ fn inferred_http_port(svc: &serde_yaml::Mapping) -> Option<Option<u16>> {
 /// `"PORT"` strings, with an optional `/tcp` or `/udp` suffix) and
 /// the long form (a mapping with `target: N`).
 fn http_ish_port(spec: &Value) -> Option<u16> {
-    let port = if let Some(s) = spec.as_str() {
-        let container = s.rsplit(':').next().unwrap_or(s);
-        let container = container.split('/').next().unwrap_or(container);
-        container.parse::<u16>().ok()?
-    } else if let Some(m) = spec.as_mapping() {
-        let n = m.get("target")?.as_u64()?;
-        u16::try_from(n).ok()?
-    } else {
-        return None;
-    };
+    let port = container_port(spec)?;
     HTTP_ISH_PORTS.contains(&port).then_some(port)
 }
 
-/// True when `services.<name>.labels` carries any key under the
-/// `isengard.expose*` namespace (`isengard.expose`, `isengard.expose.host`,
-/// `isengard.expose.port`, etc.). Accepts both the map form (`labels:
-/// { isengard.expose: foo }`) and the list form (`labels: ["isengard.expose=foo"]`).
+/// True when `services.<name>.labels` carries an expose hostname label.
+/// Accepts both the map form (`labels: { isengard.expose: foo }`) and the
+/// list form (`labels: ["isengard.expose=foo"]`).
 fn has_expose_label(svc: &serde_yaml::Mapping) -> bool {
     let Some(labels) = svc.get("labels") else {
         return false;
@@ -106,15 +160,45 @@ fn has_expose_label(svc: &serde_yaml::Mapping) -> bool {
         return map
             .keys()
             .filter_map(Value::as_str)
-            .any(|k| k.starts_with("isengard.expose"));
+            .any(is_expose_hostname_label);
     }
     if let Some(seq) = labels.as_sequence() {
         return seq.iter().filter_map(Value::as_str).any(|entry| {
             let key = entry.split('=').next().unwrap_or(entry);
-            key.starts_with("isengard.expose")
+            is_expose_hostname_label(key)
         });
     }
     false
+}
+
+fn is_expose_hostname_label(key: &str) -> bool {
+    const KNOWN_PROPS: &[&str] = &["port", "tls", "health", "adapter", "auth"];
+
+    if key == "isengard.expose" {
+        return true;
+    }
+    let Some(rest) = key.strip_prefix("isengard.expose.") else {
+        return false;
+    };
+    let segments = rest.split('.').collect::<Vec<_>>();
+    matches!(segments.as_slice(), [name] if !KNOWN_PROPS.contains(name))
+}
+
+fn expose_port_label(svc: &serde_yaml::Mapping) -> Option<&str> {
+    let labels = svc.get("labels")?;
+    if let Some(map) = labels.as_mapping() {
+        return map
+            .get(Value::String("isengard.expose.port".to_string()))
+            .and_then(Value::as_str);
+    }
+    labels
+        .as_sequence()?
+        .iter()
+        .filter_map(Value::as_str)
+        .find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == "isengard.expose.port").then_some(value)
+        })
 }
 
 #[cfg(test)]
@@ -182,7 +266,7 @@ services:
             f[0].fix,
             Some(crate::doctor::FixSpec::ExposeService {
                 service: "plex".to_string(),
-                inferred_port: Some(32400),
+                inferred_port: None,
             })
         );
     }
@@ -247,6 +331,91 @@ services:
     }
 
     #[test]
+    fn hostname_only_single_port_is_healthy() {
+        let v = parse(
+            r#"
+services:
+  plex:
+    image: plex
+    ports: ["32400:32400"]
+    labels:
+      isengard.expose: plex.vallee.casa
+"#,
+        );
+
+        assert!(check(&v).is_empty());
+    }
+
+    #[test]
+    fn hostname_only_ambiguous_ports_warns_for_port_override() {
+        let v = parse(
+            r#"
+services:
+  qbittorrent:
+    image: qbittorrent
+    ports: ["8080:8080", "6881:6881"]
+    labels:
+      isengard.expose: qb.vallee.casa
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_AMBIGUOUS"));
+    }
+
+    #[test]
+    fn invalid_port_label_warns_for_repair() {
+        let v = parse(
+            r#"
+services:
+  plex:
+    image: plex
+    ports: ["32400:32400"]
+    labels:
+      isengard.expose: plex.vallee.casa
+      isengard.expose.port: nope
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_INVALID"));
+    }
+
+    #[test]
+    fn invalid_port_label_warns_even_without_candidate_ports() {
+        let v = parse(
+            r#"
+services:
+  custom:
+    image: custom
+    labels:
+      isengard.expose: custom.vallee.casa
+      isengard.expose.port: nope
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_PORT_INVALID"));
+    }
+
+    #[test]
+    fn port_only_label_does_not_satisfy_expose_host_contract() {
+        let v = parse(
+            r#"
+services:
+  web:
+    image: nginx
+    ports: ["8080:8080"]
+    labels:
+      isengard.expose.port: "8080"
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
+    }
+
+    #[test]
     fn non_http_port_is_skipped() {
         // SSH (22) shouldn't trigger the heuristic; it's not a web
         // service.
@@ -260,6 +429,21 @@ services:
 "#,
         );
         assert!(check(&v).is_empty());
+    }
+
+    #[test]
+    fn peer_only_bittorrent_port_does_not_need_expose_host() {
+        let v = parse(
+            r#"
+services:
+  qbittorrent:
+    image: qbittorrent
+    ports: ["6881:6881"]
+"#,
+        );
+
+        let findings = check(&v);
+        assert!(!findings.iter().any(|f| f.id == "EXPOSE_HOST_MISSING"));
     }
 
     #[test]

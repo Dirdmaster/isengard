@@ -10,9 +10,9 @@
 //! 1. [`pick_container_ip`]: pure function that ranks candidate IPs from a
 //!    `network_settings.networks` map (the bollard-shaped surface). Pure
 //!    so it's exhaustively testable without a Docker daemon.
-//! 2. [`resolve_container_ip`]: thin async wrapper that calls
-//!    [`crate::runtime::RuntimeBackend::inspect_container`] and feeds the
-//!    result into a sibling picker over the trait's
+//! 2. [`resolve_container_ip`]: thin async wrapper that reads
+//!    `list_containers` summaries and feeds the matching snapshot into a
+//!    sibling picker over the trait's
 //!    `ContainerSnapshot.network_settings.ip_addresses` map. Wisp
 //!    moved this off the bollard-direct path so it can serve discovery
 //!    too.
@@ -47,7 +47,7 @@ use std::collections::HashMap;
 use bollard::secret::EndpointSettings;
 use tracing::{debug, warn};
 
-use crate::runtime::RuntimeBackend;
+use crate::runtime::{ListFilter, RuntimeBackend};
 
 /// The shared external network name that pingora and routed containers must
 /// both join for cross-stack reachability. Mirrors the Traefik `proxy:
@@ -127,16 +127,15 @@ fn pick_snapshot_ip(
     None
 }
 
-/// Resolve the container IP for a routing rule by calling
-/// [`crate::runtime::RuntimeBackend::inspect_container`]. The agent gets
-/// the container reference (name or id) from
+/// Resolve the container IP for a routing rule from container summaries. The
+/// agent gets the container reference (name or id) from
 /// `RoutingRule.upstream.container_id`, which the controller populates
 /// from the labels report's container name.
 ///
 /// Returns `None` (with a WARN log) on any of:
 /// - The backend call errors (container exited between report and apply,
 ///   daemon unreachable, etc.)
-/// - Inspect returns `None` (container gone)
+/// - No matching container is present in the summary list
 /// - The picker finds no usable IP across the snapshot's network attachments
 ///
 /// The caller decides what to do with `None`: today the proxy logs and
@@ -146,23 +145,26 @@ pub async fn resolve_container_ip(
     backend: &dyn RuntimeBackend,
     container_ref: &str,
 ) -> Option<String> {
-    let snap = match backend.inspect_container(container_ref).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            warn!(
-                container = %container_ref,
-                "discovery: inspect returned None (container gone?)",
-            );
-            return None;
-        }
+    let containers = match backend.list_containers(ListFilter::default()).await {
+        Ok(containers) => containers,
         Err(e) => {
             warn!(
                 container = %container_ref,
                 error = %e,
-                "discovery: inspect_container failed",
+                "discovery: list_containers failed",
             );
             return None;
         }
+    };
+    let Some(snap) = containers
+        .into_iter()
+        .find(|snap| snapshot_matches_ref(snap, container_ref))
+    else {
+        warn!(
+            container = %container_ref,
+            "discovery: container not present in summary list",
+        );
+        return None;
     };
 
     if let Some(ip) = pick_snapshot_ip(&snap.network_settings.ip_addresses) {
@@ -173,6 +175,17 @@ pub async fn resolve_container_ip(
         "discovery: no usable IP found in NetworkSettings",
     );
     None
+}
+
+/// Return true when a container summary matches the routing rule's upstream
+/// reference, accepting Docker names, full ids, and shortened ids.
+fn snapshot_matches_ref(snap: &crate::runtime::ContainerSnapshot, container_ref: &str) -> bool {
+    let needle = container_ref.trim_start_matches('/');
+    let name = snap.name.trim_start_matches('/');
+    name == needle
+        || snap.id == needle
+        || (!needle.is_empty() && snap.id.starts_with(needle))
+        || (!snap.id.is_empty() && needle.starts_with(&snap.id))
 }
 
 #[cfg(test)]
@@ -325,7 +338,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct MockBackend {
-        snapshots: std::collections::HashMap<String, ContainerSnapshot>,
+        snapshots: Vec<ContainerSnapshot>,
     }
 
     #[async_trait]
@@ -352,13 +365,13 @@ mod tests {
             &self,
             _f: ListFilter,
         ) -> Result<Vec<ContainerSnapshot>, RuntimeError> {
-            Ok(Vec::new())
+            Ok(self.snapshots.clone())
         }
         async fn inspect_container(
             &self,
             id: &str,
         ) -> Result<Option<ContainerSnapshot>, RuntimeError> {
-            Ok(self.snapshots.get(id).cloned())
+            panic!("proxy discovery should use summaries, not inspect_container({id})")
         }
         async fn connect_network(&self, _c: &str, _n: &str) -> Result<(), RuntimeError> {
             Ok(())
@@ -416,17 +429,14 @@ mod tests {
     #[tokio::test]
     async fn discovery_resolves_to_named_network_first() {
         let mut mock = MockBackend::default();
-        mock.snapshots.insert(
-            "web".into(),
-            snap_with_networks(
-                "web",
-                &[
-                    ("alpha", "10.0.0.1"),
-                    (SHARED_PROXY_NETWORK, "192.168.99.10"),
-                    ("zeta", "10.0.0.99"),
-                ],
-            ),
-        );
+        mock.snapshots.push(snap_with_networks(
+            "web",
+            &[
+                ("alpha", "10.0.0.1"),
+                (SHARED_PROXY_NETWORK, "192.168.99.10"),
+                ("zeta", "10.0.0.99"),
+            ],
+        ));
         let resolved = resolve_container_ip(&mock, "web").await;
         assert_eq!(resolved.as_deref(), Some("192.168.99.10"));
     }
@@ -434,20 +444,30 @@ mod tests {
     #[tokio::test]
     async fn discovery_falls_back_to_alphabetical_non_driver() {
         let mut mock = MockBackend::default();
-        mock.snapshots.insert(
-            "legacy".into(),
-            snap_with_networks(
-                "legacy",
-                &[
-                    ("bridge", "172.17.0.2"),
-                    ("zeta", "10.0.0.99"),
-                    ("hello_default", "172.20.0.5"),
-                ],
-            ),
-        );
+        mock.snapshots.push(snap_with_networks(
+            "legacy",
+            &[
+                ("bridge", "172.17.0.2"),
+                ("zeta", "10.0.0.99"),
+                ("hello_default", "172.20.0.5"),
+            ],
+        ));
         let resolved = resolve_container_ip(&mock, "legacy").await;
         // BTreeMap sorts alphabetically: hello_default < zeta, bridge skipped.
         assert_eq!(resolved.as_deref(), Some("172.20.0.5"));
+    }
+
+    #[tokio::test]
+    async fn discovery_matches_short_container_id_from_summary() {
+        let mut mock = MockBackend::default();
+        mock.snapshots.push(snap_with_networks(
+            "abc123def456",
+            &[(SHARED_PROXY_NETWORK, "192.168.99.10")],
+        ));
+
+        let resolved = resolve_container_ip(&mock, "abc123").await;
+
+        assert_eq!(resolved.as_deref(), Some("192.168.99.10"));
     }
 
     #[tokio::test]
