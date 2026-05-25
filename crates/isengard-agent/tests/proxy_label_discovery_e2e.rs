@@ -15,7 +15,7 @@
 //!      ends up with one routing rule for `e2e.test`
 //!   6. tear the container down
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,12 +39,15 @@ use tokio::time::timeout;
 const AUTOATTACH_TEST_LABEL_KEY: &str = "isengard.test";
 const AUTOATTACH_TEST_LABEL_VALUE: &str = "autoattach";
 const AUTOATTACH_TEST_LABEL: &str = "isengard.test=autoattach";
+const AUTOATTACH_TEST_NAME_PREFIX: &str = "isengard-e2e-autoattach-";
 
 async fn cleanup_autoattach_test_containers(docker: &Docker) {
     let mut filters = HashMap::new();
     filters.insert("label".to_string(), vec![AUTOATTACH_TEST_LABEL.to_string()]);
 
-    let containers = match docker
+    let mut ids = HashSet::new();
+
+    if let Ok(containers) = docker
         .list_containers(Some(ListContainersOptions::<String> {
             all: true,
             filters,
@@ -52,14 +55,36 @@ async fn cleanup_autoattach_test_containers(docker: &Docker) {
         }))
         .await
     {
-        Ok(containers) => containers,
-        Err(_) => return,
-    };
+        for container in containers {
+            if let Some(id) = container.id {
+                ids.insert(id);
+            }
+        }
+    }
 
-    for container in containers {
-        let Some(id) = container.id else {
-            continue;
-        };
+    if let Ok(containers) = docker
+        .list_containers(Some(ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+    {
+        for container in containers {
+            let name_matches = container.names.as_ref().is_some_and(|names| {
+                names.iter().any(|name| {
+                    name.trim_start_matches('/')
+                        .starts_with(AUTOATTACH_TEST_NAME_PREFIX)
+                })
+            });
+            if name_matches {
+                if let Some(id) = container.id {
+                    ids.insert(id);
+                }
+            }
+        }
+    }
+
+    for id in ids {
         let _ = docker
             .kill_container(&id, None::<KillContainerOptions<String>>)
             .await;
@@ -223,7 +248,7 @@ async fn auto_attach_route_container_to_ingress_network() {
         .await;
     let ingress_network_existed = ingress_network_existed.is_ok();
 
-    let container_name = format!("isengard-e2e-autoattach-{}", std::process::id());
+    let container_name = format!("{AUTOATTACH_TEST_NAME_PREFIX}{}", std::process::id());
 
     // 2. Remove stale containers from previous interrupted runs, even when
     //    their PID-based names differ from the current run.
