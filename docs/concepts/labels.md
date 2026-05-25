@@ -25,7 +25,7 @@ Drive `Pingora` routing rules. Multiple named rules supported per container.
 
 | Label | What it does | Values |
 |---|---|---|
-| `isengard.expose` | Default rule: public hostname | e.g. `plex.vallee.casa` |
+| `isengard.expose` | Default rule: public hostname | e.g. `whoami.isengard.app` |
 | `isengard.expose.port` | Default rule: upstream port | `1..=65535` |
 | `isengard.expose.tls` | Default rule: TLS termination mode | `acme` / `edge` / `manual` |
 | `isengard.expose.health` | Default rule: healthcheck path | e.g. `/healthz` |
@@ -43,11 +43,11 @@ Drive `Pingora` routing rules. Multiple named rules supported per container.
 Example:
 ```yaml
 labels:
-  isengard.expose.web: plex.vallee.casa
-  isengard.expose.web.port: "32400"
-  isengard.expose.api: api.plex.vallee.casa
-  isengard.expose.api.port: "32400"
-  isengard.expose.api.auth: oncall
+  isengard.expose.web: grafana.isengard.app
+  isengard.expose.web.port: "3000"
+  isengard.expose.admin: admin.isengard.app
+  isengard.expose.admin.port: "9090"
+  isengard.expose.admin.auth: oncall
 ```
 
 Parser: `crates/isengard-core/src/labels.rs::parse_labels`.

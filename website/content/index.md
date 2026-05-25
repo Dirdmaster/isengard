@@ -80,7 +80,7 @@ What you get
   Label-driven routing
   
   #description
-  Tag a service with `isengard.route.public=true` and the controller wires it into your reverse proxy. Same vocabulary for Tailscale and Cloudflare Tunnel.
+  Add `isengard.expose=whoami.isengard.app` to a service and the agent reports the route to the controller. The common case needs one label; doctor asks only when the port is ambiguous.
   :::
 
   :::u-page-feature
