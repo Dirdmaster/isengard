@@ -16,7 +16,7 @@
 - Create: `crates/isengard-controller/src/acme/configured.rs`
 - Modify: `crates/isengard-controller/src/acme/mod.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests for `resolve_desired_config`:
 
@@ -25,23 +25,23 @@ Add tests for `resolve_desired_config`:
 - configure values override fallback env config
 - fallback env config still works when configure is unset
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run: `cargo test -p isengard-controller configured_acme --lib`
 
 Expected: fail because `acme::configured` does not exist.
 
-- [ ] **Step 3: Implement resolver**
+- [x] **Step 3: Implement resolver**
 
 Create `configured.rs` with a `DesiredAcmeConfig` struct and async resolver using `ConfigDispatcher::get`.
 
-- [ ] **Step 4: Verify tests pass**
+- [x] **Step 4: Verify tests pass**
 
 Run: `cargo test -p isengard-controller configured_acme --lib`
 
 Expected: pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/isengard-controller/src/acme/configured.rs crates/isengard-controller/src/acme/mod.rs docs/superpowers/specs/2026-05-25-configured-wildcard-acme-design.md docs/superpowers/plans/2026-05-25-configured-wildcard-acme.md
@@ -54,25 +54,25 @@ git commit -m "docs: design configured wildcard acme"
 - Modify: `crates/isengard-controller/src/acme/configured.rs`
 - Modify: `crates/isengard-controller/src/lib.rs`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 Add a test proving the reconciler tick calls the scheduler path only when configured wildcard groups exist.
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 Run: `cargo test -p isengard-controller configured_acme --lib`
 
 Expected: fail because the tick function is not implemented.
 
-- [ ] **Step 3: Implement minimal reconciler**
+- [x] **Step 3: Implement minimal reconciler**
 
 Add `spawn_configured_scheduler` and `tick_configured_scheduler`. Build an `AcmeDns01Client` from current config and call `scheduler::tick`.
 
-- [ ] **Step 4: Wire controller boot**
+- [x] **Step 4: Wire controller boot**
 
 Replace the static env-only scheduler block in `run_controller` with the configured scheduler. Pass the existing boot `AcmeConfig` as fallback.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `cargo test -p isengard-controller configured_acme acme::scheduler --lib`
 
