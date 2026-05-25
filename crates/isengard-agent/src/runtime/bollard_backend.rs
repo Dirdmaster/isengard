@@ -66,6 +66,35 @@ impl BollardBackend {
     pub fn docker(&self) -> std::sync::Arc<bollard::Docker> {
         self.docker.clone()
     }
+
+    /// Resolve a route upstream reference into an inspect snapshot.
+    ///
+    /// Routes often store compose service names, while Docker inspect only
+    /// accepts container names or ids. Try direct inspect first, then fall
+    /// back to the summary list where compose labels are visible.
+    async fn resolve_ingress_container(
+        &self,
+        container_ref: &str,
+    ) -> Result<Option<ContainerSnapshot>, RuntimeError> {
+        if let Some(snap) = self.inspect_container(container_ref).await? {
+            return Ok(Some(snap));
+        }
+
+        let containers = self.list_containers(ListFilter::default()).await?;
+        let Some(summary) = containers
+            .into_iter()
+            .find(|snap| snapshot_matches_ingress_ref(snap, container_ref))
+        else {
+            return Ok(None);
+        };
+
+        let inspect_ref = if summary.id.is_empty() {
+            summary.name.as_str()
+        } else {
+            summary.id.as_str()
+        };
+        self.inspect_container(inspect_ref).await
+    }
 }
 
 /// Translate a backend-agnostic [`ContainerCreateSpec`] into the bollard
@@ -323,6 +352,21 @@ pub(crate) fn map_summary(summary: ContainerSummary) -> ContainerSnapshot {
         port_bindings: Vec::new(),
         restart: None,
     }
+}
+
+/// Return true when a route upstream reference points at this container.
+///
+/// Accept Docker names, full or shortened ids, and compose service labels.
+/// Compose service matching is required because `isd route add` presents
+/// service names in the picker, while Docker inspect accepts only names or ids.
+fn snapshot_matches_ingress_ref(snap: &ContainerSnapshot, container_ref: &str) -> bool {
+    let needle = container_ref.trim_start_matches('/');
+    let name = snap.name.trim_start_matches('/');
+    name == needle
+        || snap.id == needle
+        || (!needle.is_empty() && snap.id.starts_with(needle))
+        || (!snap.id.is_empty() && needle.starts_with(&snap.id))
+        || snap.service.as_deref() == Some(needle)
 }
 
 /// Map a bollard `ContainerInspectResponse` to a [`ContainerSnapshot`].
@@ -848,10 +892,15 @@ impl RuntimeBackend for BollardBackend {
         &self,
         container_ref: &str,
     ) -> Result<IngressEndpoint, RuntimeError> {
-        let Some(initial) = self.inspect_container(container_ref).await? else {
+        let Some(initial) = self.resolve_ingress_container(container_ref).await? else {
             return Ok(IngressEndpoint::Unresolved(
                 UnresolvedIngressReason::ContainerMissing,
             ));
+        };
+        let resolved_ref = if initial.id.is_empty() {
+            initial.name.clone()
+        } else {
+            initial.id.clone()
         };
         if initial.state != ContainerState::Running {
             return Ok(IngressEndpoint::Unresolved(
@@ -905,7 +954,7 @@ impl RuntimeBackend for BollardBackend {
         }
 
         if let Err(e) = self
-            .connect_network(container_ref, crate::proxy::SHARED_PROXY_NETWORK)
+            .connect_network(&resolved_ref, crate::proxy::SHARED_PROXY_NETWORK)
             .await
         {
             tracing::warn!(
@@ -919,7 +968,7 @@ impl RuntimeBackend for BollardBackend {
             ));
         }
 
-        let Some(after) = self.inspect_container(container_ref).await? else {
+        let Some(after) = self.inspect_container(&resolved_ref).await? else {
             return Ok(IngressEndpoint::Unresolved(
                 UnresolvedIngressReason::ContainerMissing,
             ));
@@ -1321,6 +1370,35 @@ mod tests {
             snap.network_settings.mode,
             crate::runtime::ContainerNetworkMode::None
         );
+    }
+
+    #[test]
+    fn ingress_ref_matches_compose_service_label() {
+        let mut snap = ContainerSnapshot {
+            id: "abc123".into(),
+            name: "servarr-overseer-1".into(),
+            image: "sctx/overseerr".into(),
+            state: ContainerState::Running,
+            stack: Some("servarr".into()),
+            service: Some("overseer".into()),
+            labels: BTreeMap::new(),
+            created_at: SystemTime::UNIX_EPOCH,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            restart_count: 0,
+            network_settings: NetworkSettings::default(),
+            env: BTreeMap::new(),
+            port_bindings: Vec::new(),
+            restart: None,
+        };
+
+        assert!(snapshot_matches_ingress_ref(&snap, "overseer"));
+        assert!(snapshot_matches_ingress_ref(&snap, "servarr-overseer-1"));
+        assert!(snapshot_matches_ingress_ref(&snap, "abc123"));
+
+        snap.service = None;
+        assert!(!snapshot_matches_ingress_ref(&snap, "overseer"));
     }
 
     #[test]
