@@ -152,26 +152,81 @@ pub async fn list_container_snapshots_via(backend: &dyn RuntimeBackend) -> Vec<C
             return Vec::new();
         }
     };
-    snaps
-        .into_iter()
-        .map(|s| {
-            let created_at_ms = s
-                .created_at
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            ContainerSnapshot {
-                name: s.name,
-                image: s.image,
-                state: state_to_str(s.state).to_string(),
-                labels: s.labels.into_iter().collect(),
-                id: s.id,
-                created_at_ms,
-                exit_code: s.exit_code,
-                ..Default::default()
+    let docker = backend.as_bollard();
+    let mut out = Vec::with_capacity(snaps.len());
+    for listed in snaps {
+        let mut snap = runtime_snapshot_to_heartbeat(listed);
+
+        if let Some(docker) = docker.as_ref() {
+            if !snap.id.is_empty() {
+                match docker
+                    .inspect_container(
+                        &snap.id,
+                        None::<bollard::container::InspectContainerOptions>,
+                    )
+                    .await
+                {
+                    Ok(inspect) => enrich_snapshot_from_inspect(&mut snap, &inspect),
+                    Err(e) => {
+                        warn!(error = %e, id = %snap.id, "container_snapshot: inspect_container failed");
+                    }
+                }
             }
-        })
-        .collect()
+        } else if !snap.id.is_empty() {
+            match backend.inspect_container(&snap.id).await {
+                Ok(Some(inspected)) => snap = runtime_snapshot_to_heartbeat(inspected),
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(error = %e, id = %snap.id, backend = %backend.name(), "container_snapshot: inspect_container failed");
+                }
+            }
+        }
+
+        out.push(snap);
+    }
+    out
+}
+
+/// Convert a runtime snapshot into the heartbeat container snapshot shape.
+fn runtime_snapshot_to_heartbeat(s: crate::runtime::ContainerSnapshot) -> ContainerSnapshot {
+    let created_at_ms = s
+        .created_at
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    ContainerSnapshot {
+        name: s.name,
+        image: s.image,
+        state: state_to_str(s.state).to_string(),
+        labels: s.labels.into_iter().collect(),
+        id: s.id,
+        created_at_ms,
+        exit_code: s.exit_code,
+        env: s.env.into_iter().map(|(k, v)| format!("{k}={v}")).collect(),
+        networks: s.network_settings.ip_addresses.into_keys().collect(),
+        ports: runtime_ports_to_heartbeat(s.network_settings.ports),
+        restart_policy: s.restart,
+        ..Default::default()
+    }
+}
+
+/// Convert runtime-level host port bindings into heartbeat rich port mappings.
+fn runtime_ports_to_heartbeat(
+    ports: std::collections::BTreeMap<String, Vec<crate::runtime::HostPort>>,
+) -> Vec<PortMapping> {
+    let mut out = Vec::new();
+    for (key, bindings) in ports {
+        let (container_port, protocol) = parse_port_proto(&key);
+        for binding in bindings {
+            out.push(PortMapping {
+                host_ip: binding.host_ip.to_string(),
+                host_port: binding.host_port,
+                container_port,
+                protocol: protocol.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// Back-compat wrapper for callers that don't have a backend handle.
@@ -680,6 +735,15 @@ fn parse_port_proto(key: &str) -> (u16, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, HashMap};
+    use std::pin::Pin;
+
+    use futures_util::Stream;
+
+    use crate::runtime::{
+        self, ContainerCreateSpec, HealthState, HostPort, LogChunk, LogOptions, NetworkSettings,
+        RuntimeError, RuntimeEvent,
+    };
 
     /// v0.5.3: `state_to_str` now maps `Created` -> `"creating"` and
     /// `Exited` / `Dead` -> `"stopped"` / `"failed"` so the controller's
@@ -717,6 +781,157 @@ mod tests {
                 "ContainerState::{cs:?} -> {s:?} -> Unknown (regression)"
             );
         }
+    }
+
+    #[derive(Debug)]
+    struct InspectingBackend {
+        listed: Vec<runtime::ContainerSnapshot>,
+        inspected: HashMap<String, runtime::ContainerSnapshot>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeBackend for InspectingBackend {
+        async fn ensure_image(&self, _reference: &str) -> Result<String, RuntimeError> {
+            Err(RuntimeError::Image("unused".into()))
+        }
+
+        async fn create_container(
+            &self,
+            _spec: &ContainerCreateSpec,
+        ) -> Result<String, RuntimeError> {
+            Err(RuntimeError::Container("unused".into()))
+        }
+
+        async fn start_container(&self, _id: &str) -> Result<(), RuntimeError> {
+            Err(RuntimeError::Container("unused".into()))
+        }
+
+        async fn stop_container(&self, _id: &str, _timeout_s: u32) -> Result<(), RuntimeError> {
+            Err(RuntimeError::Container("unused".into()))
+        }
+
+        async fn remove_container(&self, _id: &str, _force: bool) -> Result<(), RuntimeError> {
+            Err(RuntimeError::Container("unused".into()))
+        }
+
+        async fn list_containers(
+            &self,
+            _filter: ListFilter,
+        ) -> Result<Vec<runtime::ContainerSnapshot>, RuntimeError> {
+            Ok(self.listed.clone())
+        }
+
+        async fn inspect_container(
+            &self,
+            id: &str,
+        ) -> Result<Option<runtime::ContainerSnapshot>, RuntimeError> {
+            Ok(self.inspected.get(id).cloned())
+        }
+
+        async fn connect_network(
+            &self,
+            _container_id: &str,
+            _network: &str,
+        ) -> Result<(), RuntimeError> {
+            Err(RuntimeError::Network("unused".into()))
+        }
+
+        async fn disconnect_network(
+            &self,
+            _container_id: &str,
+            _network: &str,
+        ) -> Result<(), RuntimeError> {
+            Err(RuntimeError::Network("unused".into()))
+        }
+
+        fn stream_logs(
+            &self,
+            _id: &str,
+            _opts: LogOptions,
+        ) -> Pin<Box<dyn Stream<Item = LogChunk> + Send>> {
+            Box::pin(futures_util::stream::empty())
+        }
+
+        fn stream_events(&self) -> Pin<Box<dyn Stream<Item = RuntimeEvent> + Send>> {
+            Box::pin(futures_util::stream::empty())
+        }
+
+        async fn run_healthcheck(
+            &self,
+            _id: &str,
+            _hc: &runtime::HealthcheckSpec,
+        ) -> Result<HealthState, RuntimeError> {
+            Err(RuntimeError::Healthcheck("unused".into()))
+        }
+
+        fn name(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    fn runtime_snap(id: &str) -> runtime::ContainerSnapshot {
+        runtime::ContainerSnapshot {
+            id: id.into(),
+            name: "web".into(),
+            image: "nginx:latest".into(),
+            state: ContainerState::Running,
+            stack: Some("hello".into()),
+            service: Some("web".into()),
+            labels: BTreeMap::from([
+                ("com.docker.compose.project".into(), "hello".into()),
+                ("com.docker.compose.service".into(), "web".into()),
+            ]),
+            created_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(100),
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            restart_count: 0,
+            network_settings: NetworkSettings::default(),
+            env: BTreeMap::new(),
+            port_bindings: Vec::new(),
+            restart: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_via_backend_inspects_containers_for_rich_heartbeat_data() {
+        let listed = runtime_snap("rt-web");
+        let mut inspected = runtime_snap("rt-web");
+        inspected.env.insert("PUID".into(), "1000".into());
+        inspected.restart = Some("unless-stopped".into());
+        inspected
+            .network_settings
+            .ip_addresses
+            .insert("frontend".into(), "172.20.0.10".parse().unwrap());
+        inspected.network_settings.ports.insert(
+            "80/tcp".into(),
+            vec![HostPort {
+                host_ip: "0.0.0.0".parse().unwrap(),
+                host_port: 8080,
+            }],
+        );
+
+        let backend = InspectingBackend {
+            listed: vec![listed],
+            inspected: HashMap::from([("rt-web".into(), inspected)]),
+        };
+
+        let snapshots = list_container_snapshots_via(&backend).await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].env, vec!["PUID=1000"]);
+        assert_eq!(
+            snapshots[0].restart_policy.as_deref(),
+            Some("unless-stopped")
+        );
+        assert_eq!(snapshots[0].networks, vec!["frontend"]);
+        assert_eq!(snapshots[0].ports.len(), 1);
+
+        let infos = derive_containers(&snapshots, 1_700_000_000_000);
+        let rich = infos[0].rich.as_ref().expect("rich heartbeat block");
+        assert_eq!(rich.env, vec!["PUID=1000"]);
+        assert_eq!(rich.restart_policy, "unless-stopped");
+        assert_eq!(rich.networks, vec!["frontend"]);
+        assert_eq!(rich.ports[0].host_port, 8080);
     }
 
     fn snap(name: &str, labels: &[(&str, &str)]) -> ContainerSnapshot {

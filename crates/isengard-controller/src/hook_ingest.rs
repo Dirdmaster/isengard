@@ -154,6 +154,7 @@ mod tests {
             container_name: name.into(),
             image: "test".into(),
             labels,
+            label_route_intents: Vec::new(),
         }
     }
 

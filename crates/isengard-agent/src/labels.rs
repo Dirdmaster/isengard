@@ -16,7 +16,7 @@
 //!
 //! Rewritten to drive off [`crate::runtime::RuntimeBackend`]
 //! instead of bollard directly. The dockerd code path is unchanged in
-//! shape (BollardBackend wraps `Docker::events` + `inspect_container`); the
+//! shape (BollardBackend wraps `Docker::events` + container summaries); the
 //! watcher feeds Pingora's label-derived routing through that.
 //!
 //! Behavioral deltas vs the pre-0.5 bollard-direct watcher (documented for
@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use isengard_proto::pb::{
-    AgentMessage, ContainerLabelsRemoved, ContainerLabelsReport, agent_message,
+    AgentMessage, ContainerLabelsRemoved, ContainerLabelsReport, LabelRouteIntent, agent_message,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -52,7 +52,7 @@ pub async fn watch(
     let mut events = backend.stream_events();
     while let Some(ev) = events.next().await {
         match ev.event_type {
-            RuntimeEventType::Start => match inspect_to_report(backend.as_ref(), &ev.container_id)
+            RuntimeEventType::Start => match event_to_report(backend.as_ref(), &ev.container_id)
                 .await
             {
                 Ok(Some(report)) => {
@@ -69,7 +69,7 @@ pub async fn watch(
                     );
                 }
                 Err(e) => {
-                    warn!(error = %e, cid = %ev.container_id, "labels: inspect failed");
+                    warn!(error = %e, cid = %ev.container_id, "labels: event refresh failed");
                 }
             },
             RuntimeEventType::Stop | RuntimeEventType::Die { .. } => {
@@ -103,22 +103,11 @@ async fn initial_scan(
         .map_err(|e| anyhow::anyhow!("labels: initial list_containers failed: {e}"))?;
     for snap in containers {
         // list_containers populates labels from the summary, so we can
-        // pre-filter without a full inspect for the common case (the
-        // overwhelming majority of containers carry no isengard labels).
+        // pre-filter without a full inspect. This avoids letting one wedged
+        // Docker inspect call block every label-source route on the host.
         if !snap.labels.keys().any(|k| is_reportable_label_key(k)) {
             continue;
         }
-        // Re-inspect to pick up any inspect-only fields the summary might
-        // miss (and to keep the build path identical to the event-driven
-        // one). Fall back to the summary if inspect 404s mid-scan.
-        let snap = match backend.inspect_container(&snap.id).await {
-            Ok(Some(s)) => s,
-            Ok(None) => snap,
-            Err(e) => {
-                warn!(error = %e, cid = %snap.id, "labels: initial inspect failed");
-                continue;
-            }
-        };
         if let Some(report) = snapshot_to_report(&snap) {
             let _ = out
                 .send(AgentMessage {
@@ -141,25 +130,30 @@ pub(crate) fn is_reportable_label_key(key: &str) -> bool {
     key.starts_with("isengard.expose") || key.starts_with("isengard.policy.")
 }
 
-/// Internal helper: inspect to report.
-async fn inspect_to_report(
+/// Internal helper: event container id to report.
+async fn event_to_report(
     backend: &dyn RuntimeBackend,
     cid: &str,
 ) -> anyhow::Result<Option<ContainerLabelsReport>> {
-    let snap = match backend
-        .inspect_container(cid)
+    let containers = backend
+        .list_containers(ListFilter::default())
         .await
-        .map_err(|e| anyhow::anyhow!("inspect_container {cid}: {e}"))?
-    {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    Ok(snapshot_to_report(&snap))
+        .map_err(|e| anyhow::anyhow!("list_containers after event {cid}: {e}"))?;
+    Ok(containers
+        .into_iter()
+        .find(|snap| same_container_id(&snap.id, cid))
+        .and_then(|snap| snapshot_to_report(&snap)))
+}
+
+/// Docker events usually carry the full runtime id, but prefix matching keeps
+/// the watcher tolerant of backends that report shortened ids.
+fn same_container_id(left: &str, right: &str) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Build a `ContainerLabelsReport` from a [`ContainerSnapshot`], or `None`
 /// if the snapshot's labels carry no reportable key. Mirrors the pre-0.5
-/// `inspect_to_report` body; the only shape difference is that fields are
+/// inspect-based report body; the only shape difference is that fields are
 /// already mapped (we don't walk
 /// `bollard::secret::ContainerInspectResponse` ourselves).
 fn snapshot_to_report(snap: &ContainerSnapshot) -> Option<ContainerLabelsReport> {
@@ -178,7 +172,72 @@ fn snapshot_to_report(snap: &ContainerSnapshot) -> Option<ContainerLabelsReport>
         container_name: snap.name.clone(),
         image: snap.image.clone(),
         labels,
+        label_route_intents: label_route_intents(snap),
     })
+}
+
+/// Builds route intents by combining expose labels with local runtime port facts.
+fn label_route_intents(snap: &ContainerSnapshot) -> Vec<LabelRouteIntent> {
+    let labels: std::collections::HashMap<String, String> = snap
+        .labels
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let candidates = infer_container_ports(snap);
+
+    isengard_core::labels::parse_labels(&labels)
+        .into_iter()
+        .map(|rule| {
+            let (container_port, unresolved_reason) = match rule.port {
+                Some(port) => (u32::from(port), String::new()),
+                None => match candidates.as_slice() {
+                    [only] => (u32::from(*only), String::new()),
+                    [] => (0, "no candidate ports from runtime summary".to_string()),
+                    many => (
+                        0,
+                        format!(
+                            "multiple candidate ports: {}",
+                            many.iter()
+                                .map(u16::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ),
+                },
+            };
+            LabelRouteIntent {
+                name: rule.name.unwrap_or_default(),
+                hostname: rule.hostname,
+                container_port,
+                unresolved_reason,
+            }
+        })
+        .collect()
+}
+
+/// Returns sorted container-side ports advertised by Docker inspect data.
+fn infer_container_ports(snap: &ContainerSnapshot) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for key in snap.network_settings.ports.keys() {
+        push_port_key(&mut ports, key);
+    }
+    for binding in &snap.port_bindings {
+        let container_side = binding.rsplit(':').next().unwrap_or(binding.as_str());
+        push_port_key(&mut ports, container_side);
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// Parses a Docker port key such as `32400/tcp` and appends the numeric port.
+fn push_port_key(out: &mut Vec<u16>, key: &str) {
+    let Some(port_str) = key.split('/').next() else {
+        return;
+    };
+    if let Ok(port) = port_str.parse::<u16>() {
+        out.push(port);
+    }
 }
 
 #[cfg(test)]
@@ -229,7 +288,6 @@ mod tests {
     #[derive(Debug)]
     struct ScriptedBackend {
         events: Mutex<Option<Vec<RuntimeEvent>>>,
-        snapshots: std::collections::HashMap<String, ContainerSnapshot>,
         list: Vec<ContainerSnapshot>,
     }
 
@@ -237,7 +295,6 @@ mod tests {
         fn new() -> Self {
             Self {
                 events: Mutex::new(Some(Vec::new())),
-                snapshots: Default::default(),
                 list: Vec::new(),
             }
         }
@@ -247,8 +304,8 @@ mod tests {
             self
         }
 
-        fn with_snapshot(mut self, snap: ContainerSnapshot) -> Self {
-            self.snapshots.insert(snap.id.clone(), snap);
+        fn with_list_snapshot(mut self, snap: ContainerSnapshot) -> Self {
+            self.list.push(snap);
             self
         }
     }
@@ -283,7 +340,7 @@ mod tests {
             &self,
             id: &str,
         ) -> Result<Option<ContainerSnapshot>, RuntimeError> {
-            Ok(self.snapshots.get(id).cloned())
+            panic!("labels watcher should use summaries, not inspect_container({id})")
         }
         async fn connect_network(&self, _c: &str, _n: &str) -> Result<(), RuntimeError> {
             Ok(())
@@ -344,12 +401,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn labels_report_includes_inferred_plex_port() {
+        let mut snap = snap_with_labels("plex", &[("isengard.expose", "plex.vallee.casa")]);
+        snap.network_settings
+            .ports
+            .insert("32400/tcp".into(), Vec::new());
+
+        let report = snapshot_to_report(&snap).expect("labels report");
+
+        assert_eq!(report.label_route_intents.len(), 1);
+        assert_eq!(report.label_route_intents[0].name, "");
+        assert_eq!(report.label_route_intents[0].hostname, "plex.vallee.casa");
+        assert_eq!(report.label_route_intents[0].container_port, 32400);
+        assert_eq!(report.label_route_intents[0].unresolved_reason, "");
+    }
+
+    #[test]
+    fn explicit_port_label_wins_over_runtime_candidates() {
+        let mut snap = snap_with_labels(
+            "plex",
+            &[
+                ("isengard.expose", "plex.vallee.casa"),
+                ("isengard.expose.port", "32400"),
+            ],
+        );
+        snap.network_settings
+            .ports
+            .insert("80/tcp".into(), Vec::new());
+
+        let report = snapshot_to_report(&snap).expect("labels report");
+
+        assert_eq!(report.label_route_intents[0].container_port, 32400);
+    }
+
+    #[test]
+    fn ambiguous_runtime_ports_report_unresolved_intent() {
+        let mut snap = snap_with_labels("qbittorrent", &[("isengard.expose", "qb.vallee.casa")]);
+        snap.network_settings
+            .ports
+            .insert("8080/tcp".into(), Vec::new());
+        snap.network_settings
+            .ports
+            .insert("6881/tcp".into(), Vec::new());
+
+        let report = snapshot_to_report(&snap).expect("labels report");
+
+        assert_eq!(report.label_route_intents.len(), 1);
+        assert_eq!(report.label_route_intents[0].container_port, 0);
+        assert!(
+            report.label_route_intents[0]
+                .unresolved_reason
+                .contains("multiple candidate ports")
+        );
+    }
+
     #[tokio::test]
     async fn labels_watch_emits_report_on_container_start_with_isengard_labels() {
         let snap = snap_with_labels("abc123", &[("isengard.expose", "demo.test")]);
         let backend = Arc::new(
             ScriptedBackend::new()
-                .with_snapshot(snap.clone())
+                .with_list_snapshot(snap.clone())
                 .with_event(RuntimeEvent {
                     container_id: "abc123".into(),
                     event_type: RuntimeEventType::Start,
@@ -358,16 +470,39 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::channel::<AgentMessage>(8);
         watch(backend, tx).await.unwrap();
+        for _ in 0..2 {
+            let msg = rx.recv().await.expect("expected labels report");
+            match msg.payload {
+                Some(agent_message::Payload::ContainerLabelsReport(r)) => {
+                    assert_eq!(r.container_id, "abc123");
+                    assert_eq!(r.container_name, "abc123-name");
+                    assert_eq!(r.image, "nginx");
+                    assert_eq!(
+                        r.labels.get("isengard.expose").map(String::as_str),
+                        Some("demo.test")
+                    );
+                }
+                other => panic!("expected ContainerLabelsReport, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn labels_watch_initial_scan_emits_from_list_summary_without_inspect() {
+        let mut snap = snap_with_labels("abc123", &[("isengard.expose", "demo.test")]);
+        snap.network_settings
+            .ports
+            .insert("8080/tcp".into(), Vec::new());
+        let backend = Arc::new(ScriptedBackend::new().with_list_snapshot(snap));
+        let (tx, mut rx) = mpsc::channel::<AgentMessage>(8);
+
+        watch(backend, tx).await.unwrap();
+
         let msg = rx.recv().await.expect("expected one labels report");
         match msg.payload {
             Some(agent_message::Payload::ContainerLabelsReport(r)) => {
                 assert_eq!(r.container_id, "abc123");
-                assert_eq!(r.container_name, "abc123-name");
-                assert_eq!(r.image, "nginx");
-                assert_eq!(
-                    r.labels.get("isengard.expose").map(String::as_str),
-                    Some("demo.test")
-                );
+                assert_eq!(r.label_route_intents[0].container_port, 8080);
             }
             other => panic!("expected ContainerLabelsReport, got {other:?}"),
         }
@@ -402,7 +537,7 @@ mod tests {
                 ("traefik.http.routers.x.rule", "Host(`example`)"),
             ],
         );
-        let backend = Arc::new(ScriptedBackend::new().with_snapshot(snap).with_event(
+        let backend = Arc::new(ScriptedBackend::new().with_list_snapshot(snap).with_event(
             RuntimeEvent {
                 container_id: "noisy".into(),
                 event_type: RuntimeEventType::Start,

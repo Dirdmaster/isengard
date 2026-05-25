@@ -2,6 +2,8 @@
 
 set shell := ["bash", "-cu"]
 
+min_free_gb := "50"
+
 # Default: list available commands
 default:
     @just --list
@@ -9,22 +11,22 @@ default:
 # === Build ===
 
 # Build all workspace crates (debug)
-build:
+build: (_disk-preflight min_free_gb)
     cargo build --workspace
 
 # Build the release binary
-release:
+release: (_disk-preflight min_free_gb)
     cargo build --release -p isengard
 
 # Build the operator CLI (`isd`) in release mode (v0.3a)
-isd-build:
+isd-build: (_disk-preflight min_free_gb)
     cargo build --release -p isd
 
 # Install `isd` to ~/.cargo/bin/ from the current checkout. Use after a
 # pull on `next` or while iterating on a feature branch. `--force`
 # overwrites any existing isd binary; `--path` makes cargo build from
 # THIS checkout (not crates.io). Same warm cache as `isd-build`.
-isd-install:
+isd-install: (_disk-preflight min_free_gb)
     cargo install --path crates/isd --force
 
 # Watch mode for local-first design iteration: auto-reinstall `isd` on
@@ -32,7 +34,7 @@ isd-install:
 # (`cargo install cargo-watch`). Leave running in a side terminal; any
 # edit you save triggers a rebuild + install. The operator's running
 # `isd` invocations will pick up the new binary on the next launch.
-isd-dev:
+isd-dev: (_disk-preflight min_free_gb)
     @if ! command -v cargo-watch >/dev/null 2>&1; then \
         echo "ERROR: cargo-watch not installed. Run: cargo install cargo-watch"; \
         exit 1; \
@@ -42,7 +44,7 @@ isd-dev:
 # === Test ===
 
 # Run all tests with cargo-nextest if available, fallback to cargo test
-test:
+test: (_disk-preflight min_free_gb)
     @if command -v cargo-nextest >/dev/null 2>&1; then \
         cargo nextest run --workspace; \
     else \
@@ -50,10 +52,37 @@ test:
         cargo test --workspace; \
     fi
 
+# Fast PR-loop checks. Mirrors the default pre-push hook.
+ci-fast: (_disk-preflight min_free_gb)
+    cargo fmt --check
+    cargo check --workspace --all-targets
+    @if ! command -v cargo-deny >/dev/null 2>&1; then \
+        echo "ERROR: cargo-deny is not installed. Run: cargo install cargo-deny"; \
+        exit 1; \
+    fi
+    cargo deny check
+
+# Full native confidence gate. Use before risky merges or live upgrades.
+ci-full: (_disk-preflight min_free_gb)
+    cargo fmt --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+    @if command -v cargo-nextest >/dev/null 2>&1; then \
+        cargo nextest run --workspace; \
+    else \
+        echo "(install cargo-nextest for faster runs: cargo install cargo-nextest)"; \
+        cargo test --workspace; \
+    fi
+    @if ! command -v cargo-deny >/dev/null 2>&1; then \
+        echo "ERROR: cargo-deny is not installed. Run: cargo install cargo-deny"; \
+        exit 1; \
+    fi
+    cargo deny check
+
 # === Lint / format ===
 
 # Run clippy with -D warnings
-lint:
+lint: (_disk-preflight min_free_gb)
     cargo clippy --workspace --all-targets -- -D warnings
 
 # Check formatting (no writes)
@@ -68,7 +97,7 @@ fmt:
 # Mac-vs-Linux divergence (cfg-gated unused imports, clippy lint
 # differences, dashboard build env). Same checks the pre-push
 # `linux-mirror` hook runs.
-ci-linux:
+ci-linux: (_disk-preflight min_free_gb)
     @if ! command -v orb >/dev/null 2>&1; then \
         echo "ERROR: OrbStack not installed; install from https://orbstack.dev"; exit 1; \
     fi
@@ -76,6 +105,9 @@ ci-linux:
         echo "ERROR: no 'wisp' OrbStack machine; create with: orb create ubuntu:noble wisp"; exit 1; \
     fi
     orb -m wisp bash -lc "set -euo pipefail; source ~/.cargo/env; cd '$(pwd)'; export RUSTFLAGS='-D warnings'; cargo fmt --check; cargo clippy --workspace --all-targets -- -D warnings; if command -v cargo-nextest >/dev/null 2>&1; then cargo nextest run --workspace; else cargo test --workspace; fi"
+
+# Full native confidence gate plus Linux mirror. Use before release-grade work.
+ci-release: ci-full ci-linux
 
 # === Local dev ===
 
@@ -117,7 +149,7 @@ net-up:
 # Build local images + bring up controller + agent (compose dev override).
 # Depends on `net-up` so a fresh clone doesn't fail at compose-up time on a
 # missing external network.
-dev: net-up
+dev: (_disk-preflight min_free_gb) net-up
     docker compose {{compose_args}} up -d --build
     @echo ""
     @echo "Dashboard: http://127.0.0.1:9418"
@@ -162,7 +194,7 @@ logs-agent:
     docker logs -f iso-agent
 
 # Force-rebuild local images without bringing them up
-build-images:
+build-images: (_disk-preflight min_free_gb)
     docker compose {{compose_args}} build
 
 # Switch back to GHCR :next images. Useful for "is this a regression in my
@@ -209,8 +241,8 @@ smoke-pull:
     docker pull --platform linux/amd64 ghcr.io/dirdmaster/isengard-agent:next
 
 # Build both images locally from the working-tree Dockerfile (use when iterating
-# on uncommitted changes — no GHA round-trip)
-smoke-build:
+# on uncommitted changes; no GHA round-trip)
+smoke-build: (_disk-preflight min_free_gb)
     @echo "→ building isengard-controller:local"
     docker build --platform linux/amd64 --target controller -t isengard-controller:local .
     @echo "→ building isengard-agent:local"
@@ -272,13 +304,59 @@ smoke-local: smoke-clean smoke-build (_smoke-up "isengard-controller:local" "ise
 
 # === Maintenance ===
 
+# Show disk usage for Rust, Docker, and local generated outputs.
+disk:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target_dir=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+    echo "==> filesystem free space"
+    df -h .
+    df -h "$target_dir" 2>/dev/null || df -h "$(dirname "$target_dir")" 2>/dev/null || true
+    echo ""
+    echo "==> build output sizes"
+    du -sh "$target_dir" .cache www/.nuxt www/.output 2>/dev/null || true
+    echo ""
+    echo "==> docker usage"
+    docker system df 2>/dev/null || echo "docker unavailable"
+
+# Prune stale Rust build artifacts without deleting the whole target dir.
+rust-prune days="30":
+    @if ! command -v cargo-sweep >/dev/null 2>&1; then \
+        echo "ERROR: cargo-sweep is not installed."; \
+        echo "Install via: cargo install cargo-sweep"; \
+        exit 1; \
+    fi
+    cargo sweep --dry-run --time {{days}} .
+    @echo ""
+    @echo "Preview only. To actually prune: cargo sweep --time {{days}} ."
+
+[private]
+_disk-preflight min_gb:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+    check_path="$target"
+    if [ ! -e "$check_path" ]; then
+      check_path="$(dirname "$target")"
+    fi
+    free_kb=$(df -Pk "$check_path" | awk 'NR == 2 { print $4 }')
+    min_kb=$(({{min_gb}} * 1024 * 1024))
+    if [ "$free_kb" -lt "$min_kb" ]; then
+      echo "ERROR: low disk space for Rust builds."
+      echo "Need at least {{min_gb}} GiB free at $check_path."
+      echo "Current free: $((free_kb / 1024 / 1024)) GiB."
+      echo "Run: just disk"
+      echo "Then: just rust-prune"
+      exit 1
+    fi
+
 clean:
     cargo clean
     rm -rf www/.nuxt www/.output
 
 # Pre-commit gate: fmt + lint + test + cargo-deny (mirrors CI exactly).
 # cargo-deny is required — it's the gate that catches advisories CI blocks on.
-ci-local: fmt-check lint test
+ci-local: (_disk-preflight min_free_gb) fmt-check lint test
     @if ! command -v cargo-deny >/dev/null 2>&1; then \
         echo "ERROR: cargo-deny is not installed. Run: cargo install cargo-deny"; \
         echo "       (or: just install-hooks  — bootstraps it)"; \

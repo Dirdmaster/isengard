@@ -29,6 +29,7 @@
 //! merged store.
 
 pub mod cf_api;
+pub mod configured;
 pub mod dns01_cf;
 pub mod scheduler;
 pub mod store;
