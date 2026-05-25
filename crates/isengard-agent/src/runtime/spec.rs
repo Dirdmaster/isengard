@@ -393,7 +393,7 @@ impl UnresolvedIngressReason {
 }
 
 /// Docker/Wisp network mode classification used by ingress reconciliation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ContainerNetworkMode {
     /// Container uses a bridge-style network namespace.
     Bridge,
@@ -402,13 +402,8 @@ pub enum ContainerNetworkMode {
     /// Container has networking disabled.
     None,
     /// Runtime did not report a recognized network mode.
+    #[default]
     Unknown,
-}
-
-impl Default for ContainerNetworkMode {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// One host-side `host_ip:host_port` binding for a container port.

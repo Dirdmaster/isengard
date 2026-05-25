@@ -519,6 +519,7 @@ pub(crate) fn map_inspect(inspect: ContainerInspectResponse) -> ContainerSnapsho
     }
 }
 
+/// Classify Docker's host config and network attachment map into a stable mode.
 fn classify_network_mode(
     host_mode: Option<&str>,
     networks: Option<&std::collections::HashMap<String, bollard::secret::EndpointSettings>>,
@@ -568,6 +569,7 @@ fn host_network_target_ip() -> Option<std::net::Ipv4Addr> {
     select_host_network_target_ip(&routes, true)
 }
 
+/// Select the address a containerized or host-native agent should use for host networking.
 fn select_host_network_target_ip(
     route_file_contents: &str,
     inside_container: bool,
@@ -598,6 +600,7 @@ fn container_to_host_gateway_ip_from_routes(routes: &str) -> Option<std::net::Ip
     None
 }
 
+/// Return whether the current agent process appears to run inside a container.
 fn agent_is_running_inside_container() -> bool {
     if std::path::Path::new("/.dockerenv").exists()
         || std::path::Path::new("/run/.containerenv").exists()
