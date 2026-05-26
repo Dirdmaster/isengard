@@ -1,0 +1,18 @@
+name: showcase
+
+networks:
+  isengard-proxy:
+    external: true
+    name: isengard-proxy
+
+services:
+  whoami:
+    image: traefik/whoami:v1.10
+    container_name: showcase-whoami
+    networks:
+      - isengard-proxy
+    labels:
+      isengard.enable: "true"
+      isengard.expose: whoami.isengard.app
+      isengard.expose.port: "80"
+    restart: unless-stopped
