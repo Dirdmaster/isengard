@@ -8,6 +8,7 @@
 //!   `docs/concepts/labels.md`.
 //! - `isengard://api/<crate>/<symbol>` for per-crate API reference.
 //!   Resolves to `crates/<crate>/docs/<symbol>.md`.
+//!
 //! The scheme prefix is `isengard://`. Parsers reject anything that
 //! does not start with that prefix or that uses an unknown segment.
 

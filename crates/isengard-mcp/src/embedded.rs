@@ -14,6 +14,7 @@
 //!   stages the mirror under `$OUT_DIR/api_docs/` before this macro
 //!   runs, so the binary embeds only markdown reference, not the
 //!   surrounding Rust source.
+//!
 //! Future contributor workflow (out of scope for v1): a
 //! `$ISD_DOCS_DIR` override would let contributors hack on the
 //! markdown without recompiling. The plan tracks that as a Phase 5+
