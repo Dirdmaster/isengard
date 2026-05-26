@@ -89,6 +89,10 @@ lint: (_disk-preflight min_free_gb)
 fmt-check:
     cargo fmt --check
 
+# Check current public docs for stale operator vocabulary
+docs-check:
+    bash scripts/ci/check_public_docs_vocabulary.sh
+
 # Apply formatting
 fmt:
     cargo fmt
@@ -355,11 +359,11 @@ clean:
     rm -rf www/.nuxt www/.output
 
 # Pre-commit gate: fmt + lint + test + cargo-deny (mirrors CI exactly).
-# cargo-deny is required — it's the gate that catches advisories CI blocks on.
+# cargo-deny is required: it catches advisories CI blocks on.
 ci-local: (_disk-preflight min_free_gb) fmt-check lint test
     @if ! command -v cargo-deny >/dev/null 2>&1; then \
         echo "ERROR: cargo-deny is not installed. Run: cargo install cargo-deny"; \
-        echo "       (or: just install-hooks  — bootstraps it)"; \
+        echo "       (or: just install-hooks: bootstraps it)"; \
         exit 1; \
     fi
     cargo deny check

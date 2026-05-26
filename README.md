@@ -2,7 +2,7 @@
 
 > **Note (2026-04-29):** Isengard is being rewritten from the ground up as a container management platform: single binary with controller and agent modes, plugin model, multi-host support, web dashboard. The Rust rewrite is in progress on the `feat/platform-rewrite` branch. The Go implementation below remains the current stable release; it stays in [`legacy-go/`](./legacy-go/) on the rewrite branch as a reference. See [`docs/superpowers/specs/2026-04-29-platform-pivot-design.md`](./docs/superpowers/specs/2026-04-29-platform-pivot-design.md) for the design.
 >
-> **Phase 14 (2026-05-05) — BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
+> **Phase 14 (2026-05-05): BREAKING:** the shared `ISENGARD_TOKEN` bearer secret has been replaced with an internal CA + per-agent mTLS + short-lived enrollment tokens. See the [Rust rewrite quick start](#rust-rewrite-quick-start-controller--agent) below and [`docs/RELEASE_NOTES_PHASE_14.md`](./docs/RELEASE_NOTES_PHASE_14.md) for the migration recipe.
 
 ## Install
 
@@ -109,7 +109,18 @@ This reproduces the pre-Phase-15 behaviour. You'll need to handle CA distributio
 
 ## Operator CLI (`isd`)
 
-`isd` is the terminal companion to the dashboard. After the controller is up, run `cargo build -p isd --release` (or `just isd-build`) and `isd login https://controller.local:9417` once: the CLI captures the controller's TLS fingerprint, stores it alongside an API token in `~/.config/isengard/credentials.toml`, and pins both for subsequent calls. Day-to-day commands: `isd ps` (list stacks + services, `--json` for scripts), `isd open <stack>` (launch the stack's primary host in your default browser), and `isd logs <stack>/<service> -f` (stream logs over the controller WebSocket). More subcommands (`apply`, `forward`, `shell`) ship in v0.3c/d once the compose-store lands.
+`isd` is the terminal companion to the dashboard. Docker contexts are the target selector and credential source: `isd --context prod ps` talks to the Docker host named `prod`, discovers the controller container by `io.isengard.role=controller`, and uses the controller REST API for orchestration commands.
+
+For SSH-backed Docker contexts, `isd` reuses Docker's SSH transport and opens a local forward to the controller. No separate login step is required.
+
+Start with:
+
+```sh
+isd init
+isd ps
+isd stack doctor
+isd route ls
+```
 
 ## Wisp (runtime, Phase 0.1)
 

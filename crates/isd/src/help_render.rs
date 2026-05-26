@@ -58,6 +58,8 @@ pub fn render(cmd: &Command) -> String {
     out.push_str(": ");
     out.push_str(cmd.get_name());
     out.push_str(" [OPTIONS] <COMMAND>\n\n");
+    out.push_str(&start_here_block(color));
+    out.push('\n');
 
     // Build a name -> about map from the Command's subcommands.
     let about_by_name: std::collections::HashMap<String, String> = cmd
@@ -99,6 +101,28 @@ pub fn render(cmd: &Command) -> String {
         let long = arg.get_long().unwrap_or_default();
         let about = arg.get_help().map(|s| s.to_string()).unwrap_or_default();
         out.push_str(&format!("  --{long:<14} {about}\n"));
+    }
+    out
+}
+
+/// Render the first commands a new operator should try.
+fn start_here_block(color: bool) -> String {
+    let cmd_name = Style::new().bold();
+    let mut out = String::new();
+    out.push_str("Start here\n");
+    for (cmd, about) in [
+        ("isd init", "bootstrap controller and first agent"),
+        ("isd stack deploy", "deploy a compose stack"),
+        ("isd stack doctor", "check expose labels before routing"),
+        ("isd route ls", "inspect installed public routes"),
+    ] {
+        out.push_str("  ");
+        out.push_str(&style(&cmd_name, cmd, color));
+        for _ in cmd.len()..18 {
+            out.push(' ');
+        }
+        out.push_str(about);
+        out.push('\n');
     }
     out
 }
@@ -157,6 +181,11 @@ mod tests {
     fn render_contains_every_group_and_command() {
         let cmd = crate::Cli::command();
         let out = render(&cmd);
+        assert!(out.contains("Start here"));
+        assert!(out.contains("isd init"));
+        assert!(out.contains("isd stack deploy"));
+        assert!(out.contains("isd stack doctor"));
+        assert!(out.contains("isd route ls"));
         for (group, names) in GROUPS {
             assert!(out.contains(group), "missing group {group}");
             for n in *names {
