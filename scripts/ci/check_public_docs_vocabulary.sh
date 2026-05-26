@@ -4,16 +4,18 @@ set -euo pipefail
 public_paths=(
   README.md
   website
-  docs/getting-started
-  docs/reference/cli
-  docs/concepts
+  docs
   install/README.md
+  ':(exclude)docs/superpowers/**'
+  ':(exclude)docs/PLACEMENT.md'
+  ':(exclude)docs/RELEASES.md'
+  ':(exclude)docs/RELEASE_NOTES_*.md'
   ':(exclude)website/.output'
   ':(exclude)website/node_modules'
   ':(exclude)website/bun.lock'
 )
 
-stale_pattern='isengard\.route\.public|expose\.host|isengard\.expose\.host|isd login|credentials\.toml|vallee\.casa|dirdmaster|jellyfin|qbittorrent|(^|[^[:alnum:]_-])plex([^[:alnum:]_-]|$)|sonarr|radarr|servarr|overseer|(^|[^[:alnum:]_-])torrent([^[:alnum:]_-]|$)|immich|paperless|nextcloud|ghcr\.io/weavers-engineering/isengard-(controller|agent)|ghcr\.io/weavers-engineering/isengard(:|@)'
+stale_pattern='isengard\.route\.public|expose\.host|isengard\.expose\.host|isd login|credentials\.toml|join-token --role|vallee\.casa|dirdmaster|jellyfin|qbittorrent|(^|[^[:alnum:]_-])plex([^[:alnum:]_-]|$)|sonarr|radarr|servarr|overseer|(^|[^[:alnum:]_-])torrent([^[:alnum:]_-]|$)|immich|paperless|nextcloud|ghcr\.io/weavers-engineering/isengard-(controller|agent)|ghcr\.io/weavers-engineering/isengard(:|@)'
 
 check_forbidden() {
   local message="$1"
@@ -48,16 +50,10 @@ check_forbidden \
   "${public_paths[@]}"
 
 entrypoint_paths=(
-  README.md
-  website
-  docs/getting-started
-  install/README.md
-  ':(exclude)website/.output'
-  ':(exclude)website/node_modules'
-  ':(exclude)website/bun.lock'
+  "${public_paths[@]}"
 )
 
-placeholder_pattern='\[\[|TODO|TBD|Placeholder\.|placeholder text|lorem ipsum|coming soon|replace me'
+placeholder_pattern='\[\[[^]]*([[:space:]]|/)[^]]*\]\]|TODO|TBD|Placeholder\.|placeholder text|lorem ipsum|coming soon|replace me'
 
 check_forbidden \
   "public entrypoints contain placeholders or internal wikilinks" \

@@ -41,6 +41,6 @@ in-tree because it depends on Docus MDC blocks rather than plain prose.
 Cloudflare Pages deploys this site from `website/.output/public/`. This is the
 current public deploy target for `docs.isengard.dev`.
 
-The GitHub Pages workflow installs dependencies in `website`, runs
+The GitHub Actions Pages workflow installs dependencies in `website`, runs
 `bun run generate`, and deploys the generated static artifact on pushes to
 `main` and `next`.

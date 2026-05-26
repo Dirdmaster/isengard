@@ -18,7 +18,7 @@ Prerequisites:
 On the controller host:
 
 ```sh
-isd join-token --role agent
+isd join-token
 ```
 
 Copy the printed `isd join` command, paste it on the target host, wait for `agent enrolled`.
