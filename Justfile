@@ -123,15 +123,21 @@ agent *ARGS:
 controller *ARGS:
     cargo run -p isengard -- controller {{ARGS}}
 
-# === Marketing site ===
+# === Documentation site ===
 
-# Run the Nuxt landing site dev server (uses bun)
-www:
-    cd www && bun run dev
+# Run the current public Docus site dev server (uses bun)
+site:
+    cd website && bun run dev
 
-# Build the marketing site
-www-build:
-    cd www && bun run build
+# Generate the current public Docus site
+site-build:
+    cd website && bun run generate
+
+# Legacy command alias for the current public Docus site.
+www: site
+
+# Legacy command alias for the current public Docus site build.
+www-build: site-build
 
 # === Local dev (Docker compose stack) ===
 

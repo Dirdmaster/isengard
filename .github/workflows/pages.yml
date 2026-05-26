@@ -3,11 +3,24 @@ name: Pages
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths: [www/**]
+    branches: [main, next]
+    paths:
+      - .github/workflows/pages.yml
+      - README.md
+      - bun.lock
+      - bun.lockb
+      - docs/**
+      - package*.json
+      - website/**
   pull_request:
-    branches: [main]
-    paths: [www/**]
+    paths:
+      - .github/workflows/pages.yml
+      - README.md
+      - bun.lock
+      - bun.lockb
+      - docs/**
+      - package*.json
+      - website/**
 
 jobs:
   deploy:
@@ -23,14 +36,15 @@ jobs:
 
       - name: Install dependencies
         run: bun install
-        working-directory: www
+        working-directory: website
 
       - name: Build
-        run: bun run build
-        working-directory: www
+        run: bun run generate
+        working-directory: website
 
       - name: Deploy to Cloudflare Pages
-        run: bunx wrangler pages deploy www/dist --project-name=isengard
+        if: github.event_name != 'pull_request'
+        run: bunx wrangler pages deploy website/.output/public --project-name=isengard
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

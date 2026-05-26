@@ -15,7 +15,7 @@ bun run dev    # http://localhost:3000
 ## Build
 
 ```bash
-bun run build  # outputs to .output/
+bun run generate  # outputs to .output/public/
 ```
 
 ## Content sources
@@ -38,5 +38,9 @@ in-tree because it depends on Docus MDC blocks rather than plain prose.
 
 ## Deploy
 
-Cloudflare Pages deploy lands in Phase 7 of the docs+AI plan. The current
-build artifact (`.output/public/`) is hosted-static-ready.
+Cloudflare Pages deploys this site from `website/.output/public/`. This is the
+current public deploy target for `docs.isengard.dev`.
+
+The GitHub Pages workflow installs dependencies in `website`, runs
+`bun run generate`, and deploys the generated static artifact on pushes to
+`main` and `next`.
