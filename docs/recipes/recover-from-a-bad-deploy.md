@@ -17,7 +17,7 @@ If the compose file is wrong, check the last known-good version before redeployi
 
 ```sh
 isd stack doctor ./compose.yaml
-isd stack diff ./compose.yaml
+isd stack diff observability ./compose.yaml
 isd stack deploy ./compose.yaml
 ```
 

@@ -14,7 +14,7 @@ Install `isd` on the machine you use to operate Docker hosts.
 
 | Channel | Command |
 |---|---|
-| Shell installer | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Weavers-Engineering/Isengard/releases/latest/download/isd-installer.sh | sh` |
+| Shell installer | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Weavers-Engineering/Isengard/releases/latest/download/isd-installer.sh \| sh` |
 | Homebrew | `brew tap weavers-engineering/isengard && brew install isd` |
 | Docker | `docker run --rm ghcr.io/weavers-engineering/isd:latest --version` |
 | Cargo | `cargo install --git https://github.com/Weavers-Engineering/Isengard isd` |

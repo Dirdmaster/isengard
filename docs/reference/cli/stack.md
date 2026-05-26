@@ -26,7 +26,7 @@ isd stack deploy ./compose.yaml
 Run a dry plan first:
 
 ```sh
-isd stack diff ./compose.yaml
+isd stack diff observability ./compose.yaml
 ```
 
 ## Check a stack with doctor
