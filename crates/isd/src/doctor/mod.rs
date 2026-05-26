@@ -14,8 +14,7 @@
 //! Each check is a pure function `(compose: &Value) -> Vec<Finding>`.
 //! `audit` is the union of every registered check.
 //!
-//! See the design spec:
-//! `3 Resources/Superpowers/specs/2026-05-23-isd-stack-doctor-design.md`.
+//! Stack doctor checks compose files before deploy.
 
 use anyhow::{Context as _, Result};
 use clap::Args;
@@ -561,7 +560,7 @@ fn missing_controller_compose_message(stack_name: &str, fix_mode: bool) -> anyho
          \n\
          Auto-synthesizing compose from running containers is on the roadmap \
          (needs the agent to ship ports/env/volumes); see\n\
-         `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`."
+         run `isd stack doctor --fix` after adoption."
     )
 }
 

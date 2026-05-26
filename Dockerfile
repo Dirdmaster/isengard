@@ -90,7 +90,7 @@ RUN cargo build --release \
 # (mode 0600 root) and the agent needs root for the host docker.sock.
 # ---------------------------------------------------------------------------
 FROM scratch AS runtime
-LABEL org.opencontainers.image.source="https://github.com/Dirdmaster/isengard"
+LABEL org.opencontainers.image.source="https://github.com/Weavers-Engineering/Isengard"
 LABEL org.opencontainers.image.description="Isengard: a container and fleet manager for your servers"
 LABEL org.opencontainers.image.licenses="MIT"
 

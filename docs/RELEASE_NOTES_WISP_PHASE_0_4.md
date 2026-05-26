@@ -36,8 +36,8 @@ Verbatim output from a clean VM run:
 
 ```text
 $ orb -m wisp -u root bash
-$ PATH=/home/dirdmaster/.cargo/bin:$PATH
-$ cd /Users/dirdmaster/Projects/isengard/.worktrees/next
+$ PATH=~/.cargo/bin:$PATH
+$ cd /path/to/isengard
 $ CARGO_TARGET_DIR=/root/wisp-target cargo test -p isengard-agent \
     --test wisp_backend_smoke -- --ignored --nocapture wisp_backend_busybox_lifecycle
 
@@ -205,8 +205,7 @@ The release notes call this honestly: 0.4 ships the runtime swap, with the opera
 
 ## Spec + plan
 
-- Spec: [`docs/superpowers/specs/2026-05-10-wisp-phase-0-4-agent-integration-design.md`](superpowers/specs/2026-05-10-wisp-phase-0-4-agent-integration-design.md)
-- Plan: [`docs/superpowers/plans/2026-05-10-wisp-phase-0-4-agent-integration.md`](superpowers/plans/2026-05-10-wisp-phase-0-4-agent-integration.md)
+- Historical implementation notes are no longer kept in the public repository.
 - 0.1 release notes: [`docs/RELEASE_NOTES_WISP_PHASE_0_1.md`](RELEASE_NOTES_WISP_PHASE_0_1.md)
 - 0.2 release notes: [`docs/RELEASE_NOTES_WISP_PHASE_0_2.md`](RELEASE_NOTES_WISP_PHASE_0_2.md)
 - 0.3 release notes: [`docs/RELEASE_NOTES_WISP_PHASE_0_3.md`](RELEASE_NOTES_WISP_PHASE_0_3.md)

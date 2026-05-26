@@ -18,9 +18,8 @@
 //!   override, so any divergence between replicas is dropped on the
 //!   floor.
 //! - `build:`, build args, original `secrets:` / `configs:` intent, and
-//!   compose interpolation are not recoverable. See the spec at
-//!   `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`
-//!   for the full "what gets lost" accounting.
+//!   compose interpolation are not recoverable. The generated YAML is a
+//!   starting point for operator review, not a lossless export.
 //!
 //! Output is annotated with a header comment so the operator immediately
 //! sees that this YAML was generated rather than written by hand.

@@ -51,7 +51,6 @@ pub fn list_resources() -> Vec<ResourceEntry> {
 /// the URI is unknown or its referenced file is not present in the
 /// embedded tree.
 pub fn read_resource(uri: &str) -> Option<&'static str> {
-    use crate::embedded::SKILLS;
     use crate::uri::ResourceUri;
 
     match ResourceUri::parse(uri)? {
@@ -73,10 +72,6 @@ pub fn read_resource(uri: &str) -> Option<&'static str> {
             }
             let plugin = format!("isengard-plugins/{krate}/docs/{symbol}.md");
             API_DOCS.get_file(&plugin).and_then(|f| f.contents_utf8())
-        }
-        ResourceUri::Skill(name) => {
-            let file_path = format!("{name}.md");
-            SKILLS.get_file(&file_path).and_then(|f| f.contents_utf8())
         }
     }
 }

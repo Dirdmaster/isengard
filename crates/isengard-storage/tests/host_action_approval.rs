@@ -1,7 +1,7 @@
 //! Acceptance tests for the pending-approval DAO.
 //!
 //! See plan §"T1: Storage extensions for pending approvals" of
-//! `docs/superpowers/plans/2026-05-06-phase-9e-9f-approval-flow.md`.
+//! Approval queue storage tests.
 
 use chrono::{Duration, Utc};
 use isengard_storage::host_action::{

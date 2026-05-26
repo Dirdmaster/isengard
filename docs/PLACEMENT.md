@@ -7,8 +7,7 @@ host(s) should run each replica. When a host's eligibility changes
 (enroll, heartbeat label change, disconnect) the scheduler re-evaluates
 the affected services and emits `placement.*` events.
 
-This page is the operator-facing reference. The design spec is
-[`docs/superpowers/specs/2026-05-11-phase-0-14-placement-verbs-and-scheduler-design.md`](superpowers/specs/2026-05-11-phase-0-14-placement-verbs-and-scheduler-design.md).
+This page is the operator-facing reference. Historical design notes are no longer kept in the public repository.
 
 ## Scope cut for 0.14
 

@@ -178,4 +178,4 @@ There is no in-place migration step beyond starting the new binary; SQLite migra
 - Gate evaluation is sequential per cycle. Large fleets (~50+ services) will see cycle latency tied to gate response time. Parallelisation is a follow-up.
 - Lifecycle hook payload field set is fixed; templating / JSONata transformation is deferred to Phase 12g.
 
-See `docs/superpowers/specs/2026-05-06-phase-12bc-lifecycle-hooks-and-gates-design.md` for the full design.
+Historical implementation notes are no longer kept in the public repository.

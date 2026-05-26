@@ -12,7 +12,7 @@ name: Docker (isd)
 # the daemon binaries) plus a `workflow_dispatch` for emergencies. Branch
 # pushes do NOT rebuild the image; the isd image is release-only.
 #
-# Spec: 3 Resources/Superpowers/specs/2026-05-21-isengard-v0.6.0-distribution-design.md
+# Builds the standalone `isd` image published to GHCR.
 
 on:
   workflow_call:

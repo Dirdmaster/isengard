@@ -77,7 +77,10 @@ enum Command {
         #[arg(long, env = "ISENGARD_PUBLIC_ADDR")]
         public_addr: Option<String>,
         /// Agent image reference to embed in the join command.
-        #[arg(long, default_value = "ghcr.io/dirdmaster/isengard:next")]
+        #[arg(
+            long,
+            default_value = "ghcr.io/weavers-engineering/isengard-agent:next"
+        )]
         image: String,
         /// Output format. `text` prints the legacy join block, `token`
         /// prints just the packed token, `joincmd` prints a single-line
@@ -198,7 +201,10 @@ enum TokenOp {
         #[arg(long, env = "ISENGARD_PUBLIC_ADDR")]
         public_addr: Option<String>,
         /// Agent image reference to embed in the join command.
-        #[arg(long, default_value = "ghcr.io/dirdmaster/isengard:next")]
+        #[arg(
+            long,
+            default_value = "ghcr.io/weavers-engineering/isengard-agent:next"
+        )]
         image: String,
         /// Output format.
         #[arg(long, value_enum, default_value_t = MintFormat::Text)]

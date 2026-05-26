@@ -94,7 +94,7 @@ above.
 ## What's where
 
 - **Docker images on GHCR**: today's `install.sh` uses these. Pull
-  `ghcr.io/weavers-engineering/isengard-agent:latest` (or pin to a tag).
+  `ghcr.io/weavers-engineering/isengard-agent:<version>`.
   Built from `Dockerfile` in CI on every tag.
 - **Static binaries on GitHub Releases**: Phase 0.8's `install.sh` will use
   these. No docker dependency on the host: the binary runs against the host's

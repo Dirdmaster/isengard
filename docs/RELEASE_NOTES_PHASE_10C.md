@@ -71,6 +71,5 @@ Migration `0018_deployment_groups.sql`:
 
 ## References
 
-- Spec: `docs/superpowers/specs/2026-05-06-phase-10h-10i-blue-green-history-and-rolling-design.md`
-- Plan: `docs/superpowers/plans/2026-05-06-phase-10h-10i-blue-green-history-and-rolling.md`
+- Historical implementation notes are no longer kept in the public repository.
 - Issue: `Dirdmaster/isengard#50`

@@ -1,7 +1,7 @@
 //! Acceptance tests for the webhooks DAO.
 //!
 //! See plan §"T1: Storage migration 0020 + DAO" of
-//! `docs/superpowers/plans/2026-05-06-phase-12a-outbound-webhooks.md`.
+//! Webhook storage tests.
 
 use chrono::{Duration, Utc};
 use isengard_storage::Inventory;

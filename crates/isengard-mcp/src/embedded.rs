@@ -5,7 +5,7 @@
 //! statics at runtime to enumerate resources and prompts. There is
 //! no filesystem dependency at runtime; the binary is self-contained.
 //!
-//! Three trees:
+//! Two trees:
 //!
 //! - [`OPERATOR_DOCS`] is the operator-facing guide tree under
 //!   `docs/` (getting-started, concepts, reference, recipes).
@@ -14,8 +14,6 @@
 //!   stages the mirror under `$OUT_DIR/api_docs/` before this macro
 //!   runs, so the binary embeds only markdown reference, not the
 //!   surrounding Rust source.
-//! - [`SKILLS`] is the top-level `skills/` tree, one markdown file
-//!   per AI playbook.
 //!
 //! Future contributor workflow (out of scope for v1): a
 //! `$ISD_DOCS_DIR` override would let contributors hack on the
@@ -33,6 +31,3 @@ pub static OPERATOR_DOCS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../docs
 /// top-level crates and `<group>/<plugin>/docs/<file>.md` for nested
 /// plugin crates. Exposed at `isengard://api/<crate>/<symbol>`.
 pub static API_DOCS: Dir<'_> = include_dir!("$OUT_DIR/api_docs");
-
-/// AI playbooks. Mounted at `isengard://skill/<name>`.
-pub static SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../skills");

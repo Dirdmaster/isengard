@@ -99,6 +99,5 @@ The pull path is the only writer of `images/blobs`. Atomic rename via `tempfile:
 
 ## Spec + plan
 
-- Spec: [`docs/superpowers/specs/2026-05-09-wisp-phase-0-2-image-pulling-design.md`](superpowers/specs/2026-05-09-wisp-phase-0-2-image-pulling-design.md)
-- Plan: [`docs/superpowers/plans/2026-05-09-wisp-phase-0-2-image-pulling.md`](superpowers/plans/2026-05-09-wisp-phase-0-2-image-pulling.md)
+- Historical implementation notes are no longer kept in the public repository.
 - 0.1 release notes: [`docs/RELEASE_NOTES_WISP_PHASE_0_1.md`](RELEASE_NOTES_WISP_PHASE_0_1.md)

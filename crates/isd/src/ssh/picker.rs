@@ -652,8 +652,8 @@ mod tests {
     #[test]
     fn score_rows_filters_and_ranks() {
         let rows = vec![
-            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
-            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+            isen("lausanne", Some("alice@192.0.2.10"), None),
+            isen("edge-fra", Some("alice@192.0.2.42"), None),
             trust("media"),
         ];
         let out = score_rows_by_filter(&rows, "lau");
@@ -673,10 +673,10 @@ mod tests {
         // Operator types part of the IP; nucleo should find the host
         // by dial_target even when the hostname does not match.
         let rows = vec![
-            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
+            isen("lausanne", Some("alice@192.0.2.10"), None),
             isen("edge-fra", Some("ops@10.0.0.42"), None),
         ];
-        let out = score_rows_by_filter(&rows, "10.17");
+        let out = score_rows_by_filter(&rows, "192.0");
         assert!(!out.is_empty());
         assert_eq!(out[0].hostname, "lausanne");
     }
@@ -738,8 +738,8 @@ mod tests {
     fn picker_table_renders_selected_row_with_arrow_glyph_and_bold_name() {
         use ratatui::style::{Color, Modifier};
         let rows = vec![
-            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
-            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+            isen("lausanne", Some("alice@192.0.2.10"), None),
+            isen("edge-fra", Some("alice@192.0.2.42"), None),
         ];
         let table = picker_table(&rows);
         let (lines, _) = render_to_lines(&table, 80, Some(1), None);
@@ -795,8 +795,8 @@ mod tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let rows = vec![
-            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
-            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+            isen("lausanne", Some("alice@192.0.2.10"), None),
+            isen("edge-fra", Some("alice@192.0.2.42"), None),
         ];
         let mut st = PickerState::new(rows);
         st.filter.push_str("lau");
@@ -847,8 +847,8 @@ mod tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let rows = vec![
-            isen("lausanne", Some("dirdmaster@10.17.0.125"), None),
-            isen("edge-fra", Some("dirdmaster@10.0.0.42"), None),
+            isen("lausanne", Some("alice@192.0.2.10"), None),
+            isen("edge-fra", Some("alice@192.0.2.42"), None),
         ];
         let mut st = PickerState::new(rows);
         terminal.draw(|f| draw(f, &mut st)).unwrap();

@@ -5,7 +5,7 @@
 //! emphasized. Adaptive column widths; non-TTY output decays to
 //! tab-separated plain text.
 //!
-//! Design: `3 Resources/Superpowers/specs/2026-05-15-isd-table-renderer-design.md`.
+//! Shared table rendering for `isd` commands.
 
 /// Color bucket for a STATUS cell, derived from its text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

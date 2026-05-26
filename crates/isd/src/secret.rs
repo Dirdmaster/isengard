@@ -59,7 +59,7 @@ pub struct SecretArgs {
 }
 
 /// Sub-verbs under `isd secret`. Canonical verbs follow the lexicon
-/// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
+/// CLI lexicon:
 /// `set` / `ls` / `rm` / `get`.
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
@@ -284,7 +284,7 @@ fn print_boxed(table: &Table) {
 /// derived purely from coverage: a secret present in every reachable
 /// context is `global`; in some but not all is `partial`; in exactly
 /// one is `context`. This is name-only: values are not fetched (and
-/// couldn't be — secrets are write-only from the operator side), so
+/// couldn't be: secrets are write-only from the operator side), so
 /// "partial" does NOT detect value divergence; it only detects name
 /// coverage. The operator decides what to do.
 /// `secret ls --scope global`: walk every context, aggregate by name,

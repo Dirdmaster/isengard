@@ -1,7 +1,7 @@
 //! REST endpoints for outbound webhooks (#53).
 //!
 //! See spec §"REST endpoints" of
-//! `docs/superpowers/specs/2026-05-06-phase-12a-outbound-webhooks-design.md`.
+//! Dashboard routes for outbound webhook configuration.
 //!
 //! Mounted under `/api/v1` by `lib.rs`. Routes:
 //!

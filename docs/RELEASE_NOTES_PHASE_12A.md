@@ -67,4 +67,4 @@ There is no in-place migration step beyond starting the new binary; SQLite migra
 - No auto-pause after sustained failures (deferred to Phase 12h).
 - Lifecycle hooks (compose labels, Phase 12e) and external-action gates (Phase 12f) are not part of this slice.
 
-See `docs/superpowers/specs/2026-05-06-phase-12a-outbound-webhooks-design.md` for the full design.
+Historical implementation notes are no longer kept in the public repository.

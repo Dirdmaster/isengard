@@ -1,7 +1,7 @@
 //! REST endpoints for routing rules + adapter config.
 //!
 //! See spec §3 in
-//! `docs/superpowers/specs/2026-05-04-phase-8h-8i-settings-ui-and-atomic-swap-design.md`.
+//! Dashboard routes for routing rules and adapter configuration.
 //!
 //! PC-T2 wires the rules CRUD endpoints (list/create/update/delete) against
 //! `Inventory`. PC-T3 wires per-field overrides (list + upsert). PC-T4 wires

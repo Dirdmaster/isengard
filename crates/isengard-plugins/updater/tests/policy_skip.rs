@@ -1,7 +1,7 @@
 //! Integration tests for the updater's policy-skip path.
 //!
 //! See plan §"T3: Updater integration" of
-//! `docs/superpowers/plans/2026-05-06-phase-9a-9d-policy-foundation.md`.
+//! Policy skip tests.
 //!
 //! These tests do not run a real Docker daemon. The full `do_cycle` path
 //! requires bollard + a registry + actual containers; the existing

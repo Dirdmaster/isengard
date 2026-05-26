@@ -1,7 +1,7 @@
 //! Policy-aware skip helpers for the updater plugin.
 //!
 //! See spec §"Updater integration (9b)" of
-//! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
+//! Policy resolution for update gates, strategies, and maintenance windows.
 //!
 //! The updater pulls a `LoadedPolicy` snapshot once per cycle and, for each
 //! candidate container, builds a `PolicyContext` (fleet from the host row,

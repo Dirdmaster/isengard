@@ -235,7 +235,7 @@ impl Inventory {
     }
 
     /// Set the operator-facing dial target for a host (e.g.
-    /// `dirdmaster@10.17.0.125`). Captured by the CLI at enroll time
+    /// `alice@192.0.2.10`). Captured by the CLI at enroll time
     /// from the operator's active docker context URL, and overridable
     /// via `isd ssh hosts set <agent> --dial <target>`.
     ///
@@ -1231,12 +1231,12 @@ mod tests {
 
         // Set it.
         let ok = inv
-            .set_host_dial_target(id, Some("dirdmaster@10.17.0.125"))
+            .set_host_dial_target(id, Some("alice@192.0.2.10"))
             .await
             .unwrap();
         assert!(ok);
         let host = inv.get_host(id).await.unwrap().unwrap();
-        assert_eq!(host.dial_target.as_deref(), Some("dirdmaster@10.17.0.125"));
+        assert_eq!(host.dial_target.as_deref(), Some("alice@192.0.2.10"));
 
         // Overwrite.
         let ok = inv

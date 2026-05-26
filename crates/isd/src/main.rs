@@ -178,9 +178,8 @@ enum Command {
     Lsp,
     /// Run the Model Context Protocol server over stdio.
     ///
-    /// AI hosts (Claude Code, any MCP-capable LLM) invoke this via
-    /// `isd mcp` and consume the embedded operator docs, per-crate API
-    /// reference, and AI playbooks under `skills/`.
+    /// MCP-capable clients invoke this via `isd mcp` and consume the
+    /// embedded operator docs and per-crate API reference.
     Mcp,
 }
 

@@ -1,7 +1,7 @@
 //! REST endpoints for update policies.
 //!
 //! See spec §"REST API (9c)" of
-//! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
+//! Dashboard routes for policy configuration.
 //!
 //! Mounted under `/api/v1` by `lib.rs`. Routes:
 //!

@@ -13,7 +13,7 @@
 //! [`RealDriverDeps`].
 //!
 //! See spec
-//! `docs/superpowers/specs/2026-05-04-phase-10a-10d-blue-green-core-design.md`
+//! Blue-green deployment driver.
 //! §`driver.rs`.
 
 use crate::deployment::healthcheck::DeploymentHealthcheck;

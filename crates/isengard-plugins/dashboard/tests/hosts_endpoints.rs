@@ -83,7 +83,7 @@ async fn patch_host_sets_dial_target() {
         .method("PATCH")
         .uri(format!("/hosts/{host_id}"))
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"dial_target":"dirdmaster@10.17.0.125"}"#))
+        .body(Body::from(r#"{"dial_target":"alice@192.0.2.10"}"#))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -93,7 +93,7 @@ async fn patch_host_sets_dial_target() {
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         parsed.get("dial_target").and_then(|v| v.as_str()),
-        Some("dirdmaster@10.17.0.125")
+        Some("alice@192.0.2.10")
     );
 
     // GET reflects the same value.
@@ -113,7 +113,7 @@ async fn patch_host_sets_dial_target() {
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         parsed.get("dial_target").and_then(|v| v.as_str()),
-        Some("dirdmaster@10.17.0.125")
+        Some("alice@192.0.2.10")
     );
 }
 

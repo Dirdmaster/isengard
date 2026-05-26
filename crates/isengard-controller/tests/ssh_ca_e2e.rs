@@ -68,7 +68,7 @@ async fn sign_user_cert_produces_a_verifiable_openssh_cert() {
     let operator_pub: PublicKey = operator_priv.public_key().clone();
 
     let ttl = Duration::from_secs(3600);
-    let principals = vec!["dirdmaster".to_string()];
+    let principals = vec!["alice".to_string()];
     let before_unix = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
@@ -88,8 +88,8 @@ async fn sign_user_cert_produces_a_verifiable_openssh_cert() {
 
     assert_eq!(cert.cert_type(), CertType::User, "cert type");
     assert!(
-        cert.valid_principals().iter().any(|p| p == "dirdmaster"),
-        "principals missing dirdmaster: {:?}",
+        cert.valid_principals().iter().any(|p| p == "alice"),
+        "principals missing alice: {:?}",
         cert.valid_principals(),
     );
     assert_eq!(cert.key_id(), "macbook-air", "key_id");

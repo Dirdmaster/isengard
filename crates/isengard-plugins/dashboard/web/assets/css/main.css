@@ -1,5 +1,64 @@
-/* Import canonical design tokens — every iso-* CSS var lives here. */
-@import "../../../../../../design/tokens.css";
+/* Dashboard design tokens. Kept with the dashboard now that public design prototypes are not shipped. */
+:root {
+  --iso-bg-base: #0a0b0f;
+  --iso-bg-elevated: #14161b;
+  --iso-bg-overlay: #1a1d24;
+  --iso-bg-row-hover: #11151a;
+  --iso-bg-selected: #0f1a12;
+
+  --iso-terminal-bg: #050505;
+
+  --iso-text-primary: #e8ebf1;
+  --iso-text-secondary: #b8bfcc;
+  --iso-text-muted: #7a8194;
+  --iso-text-faint: #4f5462;
+
+  --iso-accent-success: #4ade80;
+  --iso-accent-success-soft: #1b2e22;
+  --iso-accent-warn: #fbbf24;
+  --iso-accent-warn-soft: #2e2410;
+  --iso-accent-error: #f87171;
+  --iso-accent-error-soft: #2e1818;
+  --iso-accent-info: #60a5fa;
+  --iso-accent-info-soft: #16242e;
+  --iso-accent-neutral: #94a3b8;
+
+  --iso-border-subtle: #1f222a;
+  --iso-border-strong: #2e323d;
+
+  --iso-space-1: 4px;
+  --iso-space-2: 8px;
+  --iso-space-3: 12px;
+  --iso-space-4: 16px;
+  --iso-space-5: 20px;
+  --iso-space-6: 24px;
+  --iso-space-8: 32px;
+
+  --iso-radius-sm: 4px;
+  --iso-radius-md: 6px;
+  --iso-radius-lg: 8px;
+  --iso-radius-xl: 12px;
+  --iso-radius-full: 9999px;
+
+  --iso-topbar-h: 64px;
+  --iso-bottombar-h: 64px;
+  --iso-modal-sm: 560px;
+  --iso-modal-lg: 760px;
+
+  --iso-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --iso-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+
+  --iso-font-size-xs: 13px;
+  --iso-line-height-xs: 17px;
+  --iso-font-size-sm: 14px;
+  --iso-line-height-sm: 19px;
+  --iso-font-size-base: 15px;
+  --iso-line-height-base: 22px;
+  --iso-font-size-md: 17px;
+  --iso-line-height-md: 24px;
+  --iso-font-size-lg: 19px;
+  --iso-line-height-lg: 26px;
+}
 
 @tailwind base;
 @tailwind components;
@@ -8,9 +67,8 @@
 @layer base {
   :root {
     /*
-     * Map shadcn tokens onto our iso-* palette. Values are HSL triplets,
-     * derived from the hex values in design/tokens.css. Update both if
-     * the hex changes.
+     * Map shadcn tokens onto our iso-* palette. Values are HSL triplets
+     * derived from the hex values above.
      */
     --background:           228 20% 5%;     /* iso-bg-base #0A0B0F */
     --foreground:           220 24% 93%;    /* iso-text-primary #E8EBF1 */
@@ -38,7 +96,7 @@
 
     --border:               224 15% 14%;    /* iso-border-subtle #1F222A */
     --input:                224 15% 14%;    /* iso-border-subtle */
-    --ring:                 142 69% 58%;    /* iso-accent-success #4ADE80 — focus ring */
+    --ring:                 142 69% 58%;    /* iso-accent-success #4ade80: focus ring */
 
     --radius: 0.5rem;
   }

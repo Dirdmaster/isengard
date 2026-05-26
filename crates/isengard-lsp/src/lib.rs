@@ -14,7 +14,7 @@
 //! by [`document::DocKind`]. Phase 4 layers hover docs on the registry;
 //! Phase 5 layers completion.
 //!
-//! Design: `3 Resources/Superpowers/specs/2026-05-20-isengard-lsp-design.md`
+//! Language server support for Isengard manifests and compose labels.
 //! in the operator's vault.
 
 #![forbid(unsafe_code)]

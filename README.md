@@ -1,5 +1,12 @@
 # Isengard
 
+[![CI](https://github.com/Weavers-Engineering/Isengard/actions/workflows/ci.yml/badge.svg?branch=next)](https://github.com/Weavers-Engineering/Isengard/actions/workflows/ci.yml)
+[![Docker](https://github.com/Weavers-Engineering/Isengard/actions/workflows/docker.yml/badge.svg?branch=next)](https://github.com/Weavers-Engineering/Isengard/actions/workflows/docker.yml)
+[![Docs](https://github.com/Weavers-Engineering/Isengard/actions/workflows/pages.yml/badge.svg?branch=next)](https://github.com/Weavers-Engineering/Isengard/actions/workflows/pages.yml)
+[![Release](https://img.shields.io/github/v/release/Weavers-Engineering/Isengard?sort=semver)](https://github.com/Weavers-Engineering/Isengard/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.86-orange.svg)](rust-toolchain.toml)
+
 Isengard is a small self-hosting control plane for deploying Docker Compose stacks, routing public hostnames, and operating a fleet from the `isd` CLI.
 
 - Bootstrap a controller and first agent with one command.
@@ -14,10 +21,12 @@ Install `isd` on the machine you use to operate Docker hosts.
 
 | Channel | Command |
 |---|---|
-| Shell installer | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Weavers-Engineering/Isengard/releases/latest/download/isd-installer.sh \| sh` |
+| Shell installer | `curl -fsSL https://isd.sh \| sh` |
 | Homebrew | `brew tap weavers-engineering/isengard && brew install isd` |
 | Docker | `docker run --rm ghcr.io/weavers-engineering/isd:latest --version` |
 | Cargo | `cargo install --git https://github.com/Weavers-Engineering/Isengard isd` |
+
+Docs: <https://isengard.app>
 
 ## Five-minute quick start
 

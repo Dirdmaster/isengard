@@ -16,7 +16,7 @@ docker run -d --name isd-agent \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e ISENGARD_CONTROLLER_CA_PEM_PATH=/etc/isengard/ca.pem \
   -e ISENGARD_ENROLL_TOKEN=4N44VZ... \
-  ghcr.io/dirdmaster/isengard:next \
+  ghcr.io/weavers-engineering/isengard-agent:next \
   agent --controller https://controller.example.com:9417 --state-dir /var/lib/isengard
 ```
 
@@ -43,7 +43,7 @@ To enroll an agent, run on the host where you want it to live:
       -v /var/run/docker.sock:/var/run/docker.sock \
       -e ISENGARD_ENROLL_TOKEN=01HX... \
       -e ISENGARD_CONTROLLER_CA_PEM_BASE64=LS0t... \
-      ghcr.io/dirdmaster/isengard:next \
+      ghcr.io/weavers-engineering/isengard-agent:next \
       agent --controller https://controller.local:9417 --state-dir /var/lib/isengard
 
 Token expires at 2026-05-07T11:30:00Z. Mint a new one with:
@@ -76,7 +76,7 @@ Resolution order: `_PATH` > `_BASE64` > `_PEM` > caller-supplied path
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--public-addr <host:port>` | `controller.local:9417` | Public address agents will dial; embedded in the join command. Also reads `ISENGARD_PUBLIC_ADDR`. |
-| `--image <ref>` | `ghcr.io/dirdmaster/isengard:next` | Image reference to embed in the join command. |
+| `--image <ref>` | `ghcr.io/weavers-engineering/isengard-agent:next` | Image reference to embed in the join command. |
 | `--format <text\|token>` | `text` | `text` prints the join block (default). `token` prints just the bare token (legacy / scripts). |
 
 ### Compose stack
@@ -115,6 +115,5 @@ plausible-looking but broken one.
 
 ## Files
 
-- Spec: [`docs/superpowers/specs/2026-05-06-swarm-style-enrollment-design.md`](./superpowers/specs/2026-05-06-swarm-style-enrollment-design.md)
-- Plan: [`docs/superpowers/plans/2026-05-06-swarm-style-enrollment.md`](./superpowers/plans/2026-05-06-swarm-style-enrollment.md)
+- Historical implementation notes are no longer kept in the public repository.
 - Compose stack: [`docker/`](../docker/)

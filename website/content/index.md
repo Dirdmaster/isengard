@@ -47,7 +47,7 @@ What you get
   One binary, one install
   
   #description
-  `isd` is the CLI, the LSP server (`isd lsp`), the MCP server (`isd mcp`), and the embedded docs and skills. Install once, no extra services.
+  `isd` is the CLI, the LSP server (`isd lsp`), the MCP server (`isd mcp`), and the embedded operator docs. Install once, no extra services.
   :::
 
   :::u-page-feature
@@ -85,13 +85,13 @@ What you get
 
   :::u-page-feature
   ---
-  icon: i-lucide-bot
+  icon: i-lucide-book-open
   ---
   #title
-  AI-ready out of the box
+  MCP-ready docs
   
   #description
-  The local `isd mcp` server exposes the embedded docs and skill library to any MCP-capable LLM host. Same markdown that ships to the website.
+  The local `isd mcp` server exposes the same operator guides and API reference that ship to the website.
   :::
 
   :::u-page-feature

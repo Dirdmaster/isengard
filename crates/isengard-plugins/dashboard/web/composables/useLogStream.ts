@@ -2,7 +2,7 @@ import { ref, type Ref } from 'vue'
 
 /**
  * Phase 13B wire protocol. Server -> client frames are JSON text. See
- * `docs/superpowers/specs/2026-05-06-phase-13b-logs-streaming-design.md`.
+ * Service log streaming composable.
  */
 export interface LogLine {
   /** Frame timestamp (RFC3339). Empty for control frames. */

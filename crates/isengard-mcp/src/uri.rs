@@ -1,6 +1,6 @@
 //! `isengard://` URI parsing and construction.
 //!
-//! Three URI families, one per content tree:
+//! Two URI families, one per content tree:
 //!
 //! - `isengard://docs/<path>` for operator guides. Path is the
 //!   relative path under `docs/` with the `.md` extension stripped.
@@ -8,8 +8,6 @@
 //!   `docs/concepts/labels.md`.
 //! - `isengard://api/<crate>/<symbol>` for per-crate API reference.
 //!   Resolves to `crates/<crate>/docs/<symbol>.md`.
-//! - `isengard://skill/<name>` for AI playbooks. Name is the
-//!   filename stem under `skills/`. Resolves to `skills/<name>.md`.
 //!
 //! The scheme prefix is `isengard://`. Parsers reject anything that
 //! does not start with that prefix or that uses an unknown segment.
@@ -28,8 +26,6 @@ pub enum ResourceUri {
     /// directory name; symbol is the `.md` stem under that crate's
     /// `docs/` directory.
     Api { krate: String, symbol: String },
-    /// AI playbook. Name is the `.md` stem under `skills/`.
-    Skill(String),
 }
 
 impl ResourceUri {
@@ -52,12 +48,6 @@ impl ResourceUri {
                     symbol: symbol.to_string(),
                 })
             }
-            "skill" => {
-                if tail.is_empty() || tail.contains('/') {
-                    return None;
-                }
-                Some(Self::Skill(tail.to_string()))
-            }
             _ => None,
         }
     }
@@ -76,13 +66,6 @@ pub fn build_docs_uri(rel_path: &str) -> String {
 pub fn build_api_uri(krate: &str, symbol: &str) -> String {
     let stem = symbol.strip_suffix(".md").unwrap_or(symbol);
     format!("isengard://api/{krate}/{stem}")
-}
-
-/// Build the canonical `isengard://skill/` URI for a playbook.
-/// `name` is the `.md` stem under `skills/`.
-pub fn build_skill_uri(name: &str) -> String {
-    let stem = name.strip_suffix(".md").unwrap_or(name);
-    format!("isengard://skill/{stem}")
 }
 
 #[cfg(test)]
@@ -108,12 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_skill_uri() {
-        let parsed = ResourceUri::parse("isengard://skill/add-a-route");
-        assert_eq!(parsed, Some(ResourceUri::Skill("add-a-route".into())));
-    }
-
-    #[test]
     fn rejects_wrong_scheme() {
         assert_eq!(ResourceUri::parse("file:///etc/passwd"), None);
         assert_eq!(ResourceUri::parse("isengard://unknown/x"), None);
@@ -123,12 +100,6 @@ mod tests {
     fn rejects_malformed_api_uri() {
         // missing symbol segment
         assert_eq!(ResourceUri::parse("isengard://api/isengard-core"), None);
-    }
-
-    #[test]
-    fn rejects_skill_uri_with_slash() {
-        // skills/<name>.md is flat; nested skill paths are invalid
-        assert_eq!(ResourceUri::parse("isengard://skill/nested/path"), None);
     }
 
     #[test]
@@ -148,14 +119,6 @@ mod tests {
         assert_eq!(
             build_api_uri("isengard-core", "join-token.md"),
             "isengard://api/isengard-core/join-token",
-        );
-    }
-
-    #[test]
-    fn builds_skill_uri() {
-        assert_eq!(
-            build_skill_uri("add-a-route.md"),
-            "isengard://skill/add-a-route",
         );
     }
 }

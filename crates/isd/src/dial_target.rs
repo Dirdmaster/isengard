@@ -34,7 +34,7 @@ pub(crate) struct HostDtoSubset {
     pub id: String,
     /// Reported hostname (`uname -n` on the agent host).
     pub hostname: String,
-    /// Operator-facing dial target (e.g. `dirdmaster@10.17.0.125`).
+    /// Operator-facing dial target (e.g. `alice@192.0.2.10`).
     /// `None` for pre-PR-B rows or hosts where the operator never
     /// enrolled from an SSH-backed docker context.
     #[serde(default)]
@@ -142,12 +142,12 @@ mod tests {
     #[test]
     fn resolver_matches_hostname_to_dial_target() {
         let hosts = vec![
-            host("01HEDGE1", "edge-1", Some("dirdmaster@10.17.0.125")),
+            host("01HEDGE1", "edge-1", Some("alice@192.0.2.10")),
             host("01HEDGE2", "edge-2", None),
         ];
         assert_eq!(
             find_dial_target_for_token(&hosts, "edge-1"),
-            Some("dirdmaster@10.17.0.125".into())
+            Some("alice@192.0.2.10".into())
         );
     }
 

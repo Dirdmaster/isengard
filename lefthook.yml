@@ -85,47 +85,9 @@ pre-push:
         '
       tags: rust
 
-    linux-mirror:
-      run: |
-        if [ "${LEFTHOOK_FULL:-0}" != "1" ]; then
-          echo "linux-mirror: skipped (set LEFTHOOK_FULL=1 for full local gate)"
-          exit 0
-        fi
-        if [ "${LEFTHOOK_SKIP_LINUX_MIRROR:-0}" = "1" ]; then
-          echo "linux-mirror: skipped (LEFTHOOK_SKIP_LINUX_MIRROR=1)"
-          exit 0
-        fi
-        if ! command -v orb >/dev/null 2>&1; then
-          echo "linux-mirror: skipped (orb not installed; install OrbStack to catch Linux-only issues locally)"
-          exit 0
-        fi
-        if ! orbctl list 2>/dev/null | awk '{print $1}' | grep -qx 'wisp'; then
-          echo "linux-mirror: skipped (no 'wisp' OrbStack machine; see comment in lefthook.yml for bootstrap)"
-          exit 0
-        fi
-        WORKTREE="$(pwd)"
-        orb -m wisp bash -lc "
-          set -euo pipefail
-          source ~/.cargo/env
-          cd '$WORKTREE'
-          export RUSTFLAGS='-D warnings'
-          export CARGO_BUILD_JOBS=2
-          cargo fmt --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          if command -v cargo-nextest >/dev/null 2>&1; then
-            cargo nextest run --workspace
-          else
-            cargo test --workspace
-          fi
-        "
-      tags: rust
-
 # Skip hooks on a single push by setting LEFTHOOK=0:
 #   LEFTHOOK=0 git push
 # (Don't make this a habit. The hooks exist for a reason.)
 #
 # Run the full local gate:
 #   LEFTHOOK_FULL=1 git push
-#
-# Skip ONLY the Linux mirror when using the full gate:
-#   LEFTHOOK_FULL=1 LEFTHOOK_SKIP_LINUX_MIRROR=1 git push

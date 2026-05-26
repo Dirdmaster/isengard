@@ -30,8 +30,8 @@ Verbatim demo session:
 
 ```text
 $ orb -m wisp -u root bash
-$ PATH=/home/dirdmaster/.cargo/bin:$PATH
-$ cd /Users/dirdmaster/Projects/isengard/.worktrees/next
+$ PATH=~/.cargo/bin:$PATH
+$ cd /path/to/isengard
 
 === step 1: net create ===
 created: app (bridge wbr-app subnet 10.83.0.0/24 gateway 10.83.0.1)
@@ -159,7 +159,6 @@ iptables-side: every wisp rule carries a `wisp:<scope>:<purpose>` comment. Scope
 
 ## Spec + plan
 
-- Spec: [`docs/superpowers/specs/2026-05-09-wisp-phase-0-3-networking-design.md`](superpowers/specs/2026-05-09-wisp-phase-0-3-networking-design.md)
-- Plan: [`docs/superpowers/plans/2026-05-09-wisp-phase-0-3-networking.md`](superpowers/plans/2026-05-09-wisp-phase-0-3-networking.md)
+- Historical implementation notes are no longer kept in the public repository.
 - 0.1 release notes: [`docs/RELEASE_NOTES_WISP_PHASE_0_1.md`](RELEASE_NOTES_WISP_PHASE_0_1.md)
 - 0.2 release notes: [`docs/RELEASE_NOTES_WISP_PHASE_0_2.md`](RELEASE_NOTES_WISP_PHASE_0_2.md)
