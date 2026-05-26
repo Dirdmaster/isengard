@@ -267,6 +267,15 @@ smoke-build: (_disk-preflight min_free_gb)
 _smoke-up ctrl_img agent_img:
     #!/usr/bin/env bash
     set -euo pipefail
+    cleanup_on_error() {
+      status=$?
+      if [ "$status" -ne 0 ]; then
+        echo "ERROR: smoke startup failed; cleaning partial containers."
+        docker rm -f {{ctrl}} {{agent}} >/dev/null 2>&1 || true
+      fi
+      exit "$status"
+    }
+    trap cleanup_on_error EXIT
     DOCKER_SOCK="${DOCKER_SOCK:-/var/run/docker.sock}"
     docker network create isengard-proxy >/dev/null 2>&1 || true
     echo "→ starting controller ({{ctrl_img}})"
@@ -307,6 +316,7 @@ _smoke-up ctrl_img agent_img:
       sleep 1
       [ "$i" = "30" ] && { echo "agent didn't enroll; logs:"; docker logs {{agent}}; exit 1; }
     done
+    trap - EXIT
     echo ""
     echo "✓ smoke ready"
     echo "  dashboard:    http://localhost:{{http_port}}/"
@@ -353,7 +363,7 @@ demo: demo-clean _demo-preflight smoke-pull (_smoke-up "ghcr.io/weavers-engineer
         echo "  route:     curl -H 'Host: {{showcase_host}}' http://127.0.0.1/"
         echo "  stacks:    isd stack ls"
         echo "  routes:    isd route ls"
-        echo "  logs:      just logs-agent"
+        echo "  logs:      docker logs -f {{agent}}"
         echo "  cleanup:   just demo-clean"
         exit 0
       fi
