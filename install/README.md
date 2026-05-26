@@ -1,13 +1,23 @@
 # Isengard install
 
-Bring up a cluster with one command on your operator machine:
+Install `isd` on the machine you use to operate Docker hosts, then bootstrap
+the controller and first agent on your current Docker context:
 
-    isd init
+```sh
+isd init
+```
 
-This brings up the controller + first agent on the docker host your
-current docker context points at. To add more hosts:
+`isd init` discovers the active Docker context, starts the controller, and
+enrolls the first agent on that host. Use Docker contexts to choose a different
+target before running the command.
 
-    isd join-token        # mints a paste-able join command
-    isd join --controller <url> --token <packed> --context <new-host>
+To add another host, mint a join command from the controller and run it against
+the new Docker context:
 
-See [[2026-05-17-isd-init-and-no-controller-design]] for the design.
+```sh
+isd join-token
+isd join --controller <url> --token <packed> --context <new-host>
+```
+
+`isd join-token` creates a short-lived enrollment token. `isd join` uses that
+token to enroll an agent without an extra authentication ceremony.
