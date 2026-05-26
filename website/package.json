@@ -2,7 +2,7 @@
   "name": "isengard-docs",
   "private": true,
   "scripts": {
-    "dev": "nuxt dev",
+    "dev": "nuxt dev --no-fork",
     "build": "nuxt build",
     "generate": "nuxt generate",
     "preview": "nuxt preview"

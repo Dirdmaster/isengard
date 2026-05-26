@@ -12,6 +12,9 @@ bun install
 bun run dev    # http://localhost:3000
 ```
 
+The dev server runs Nuxt with `--no-fork` because Bun's `node` shim can stall
+the forked Nitro worker on local requests.
+
 ## Build
 
 ```bash
