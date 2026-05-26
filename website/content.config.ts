@@ -1,5 +1,6 @@
-import { fileURLToPath } from 'node:url'
+import { existsSync, readdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineCollection, defineContentConfig, z } from '@nuxt/content'
 
 /**
@@ -23,6 +24,43 @@ const websiteRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(websiteRoot, '..')
 const operatorDocsRoot = resolve(repoRoot, 'docs')
 const cratesRoot = resolve(repoRoot, 'crates')
+
+const ignoredApiDocDirs = new Set([
+  '.git',
+  '.nuxt',
+  '.output',
+  'dist',
+  'node_modules',
+  'target',
+])
+
+const discoverApiDocRoots = (root: string, prefix = ''): string[] => {
+  const current = resolve(root, prefix)
+  const roots: string[] = []
+
+  for (const entry of readdirSync(current, { withFileTypes: true })) {
+    if (!entry.isDirectory() || ignoredApiDocDirs.has(entry.name)) {
+      continue
+    }
+
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+    const absolutePath = resolve(root, relativePath)
+
+    if (existsSync(resolve(absolutePath, 'docs'))) {
+      roots.push(relativePath)
+    }
+
+    roots.push(...discoverApiDocRoots(root, relativePath))
+  }
+
+  return roots
+}
+
+const apiDocSources = discoverApiDocRoots(cratesRoot).map((cratePath) => ({
+  cwd: resolve(cratesRoot, cratePath),
+  include: 'docs/**/*.md',
+  prefix: `/api/${cratePath}/docs`,
+}))
 
 const createDocsSchema = () =>
   z.object({
@@ -58,11 +96,7 @@ export default defineContentConfig({
     }),
     api: defineCollection({
       type: 'page',
-      source: {
-        cwd: cratesRoot,
-        include: '**/docs/**/*.md',
-        prefix: '/api',
-      },
+      source: apiDocSources,
       schema: createDocsSchema(),
     }),
   },
