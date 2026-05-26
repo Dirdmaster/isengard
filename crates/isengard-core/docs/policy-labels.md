@@ -1,7 +1,7 @@
 Parse `isengard.policy.*` Docker labels into a [`super::Policy`] struct.
 
 See spec §"Label parser" of
-`docs/superpowers/specs/2026-05-06-phase-9b1-container-label-discovery-design.md`.
+Container labels are the bridge between Compose services and policy records.
 
 Pure module: `HashMap<String, String>` in, [`super::Policy`] out (or
 [`ParseLabelError`] on a malformed value). The ingest caller decides what

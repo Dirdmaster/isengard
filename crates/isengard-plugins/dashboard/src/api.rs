@@ -217,7 +217,7 @@ fn render_docker_run_command(controller_url: &str, token: &str) -> String {
         format!("  -e CONTROLLER_URL={controller_url} \\"),
         format!("  -e ENROLLMENT_TOKEN={token} \\"),
         "  --group-add $(stat -c %g /var/run/docker.sock) \\".to_string(),
-        "  ghcr.io/dirdmaster/isengard-agent:latest".to_string(),
+        "  ghcr.io/weavers-engineering/isengard-agent:next".to_string(),
     ]
     .join("\n")
 }
@@ -1543,7 +1543,7 @@ async fn create_stack(
         Kind::Conflict => json_err(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
-                "agent reported a hash conflict on a brand-new stack (current_sha256={}); this should be impossible — open an issue",
+                "agent reported a hash conflict on a brand-new stack (current_sha256={}); this should be impossible: open an issue",
                 ack.current_sha256
             ),
         ),

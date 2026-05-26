@@ -17,7 +17,7 @@
 //! schema, the read/write, and the staleness check; it does not do
 //! resolution.
 //!
-//! Design: `3 Resources/Superpowers/specs/2026-05-15-isd-table-renderer-design.md`.
+//! Caches row indices so follow-up commands can resolve operator shorthand.
 
 #![allow(dead_code)]
 

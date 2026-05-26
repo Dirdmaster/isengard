@@ -10,8 +10,7 @@ import { defineCollection, defineContentConfig, z } from '@nuxt/content'
  * - `docs`: operator-facing guides at `../docs/**`, served at `/`. Overrides
  *   the Docus default `docs` collection so the bundled theme picks it up.
  * - `api`: per-crate API reference at `../crates/<crate>/docs/**`, served
- *   at `/api/`. Populated by Phase 2 of the docs+AI plan. A custom page
- *   renderer for `/api/*` lands in a later PR.
+ *   at `/api/`. A custom page renderer for `/api/*` lands in a later PR.
  *
  * The `landing` collection stays pointed at `content/index.md` so the
  * homepage hero ships with the scaffold and can be edited in-tree.
@@ -53,7 +52,7 @@ export default defineContentConfig({
         cwd: operatorDocsRoot,
         include: '**/*.md',
         prefix: '/',
-        exclude: ['PLACEMENT.md', 'RELEASE_NOTES_*.md', 'RELEASES.md', 'superpowers/**'],
+        exclude: ['PLACEMENT.md', 'RELEASE_NOTES_*.md', 'RELEASES.md'],
       },
       schema: createDocsSchema(),
     }),

@@ -107,7 +107,7 @@ pub struct Host {
     /// Free-form JSON metadata. Defaults to `{}`.
     pub metadata: serde_json::Value,
     /// Address an operator types into `ssh` to reach this host
-    /// (e.g. `dirdmaster@10.17.0.125`). Captured at enroll time from
+    /// (e.g. `alice@192.0.2.10`). Captured at enroll time from
     /// the operator's active docker context URL. `None` for pre-0.7
     /// host rows that predate the column. The operator can override
     /// via `isd ssh hosts set <agent> --dial <target>`.

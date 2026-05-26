@@ -2,7 +2,7 @@
 //! the updater plugin.
 //!
 //! See spec §"Policy struct (in `isengard-core`)" of
-//! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
+//! Policy primitives shared by controller, plugins, and CLI clients.
 //!
 //! All [`Policy`] fields are `Option`. `None` means "inherit from a
 //! less-specific scope". The implicit root resolved value (when no rows

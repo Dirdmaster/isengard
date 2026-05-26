@@ -14,7 +14,7 @@ This is the v0.4 foundation: when wisp ships at 0.4 (agent integration), Isengar
 
 The runtime is the thinnest possible runc-equivalent. Image pulling, networking primitives beyond a netns, overlay storage, rootless mode, seccomp / AppArmor / SELinux, hooks (prestart / poststart / poststop), cgroup v1 fallback, and exec-into-running-container are all explicitly deferred:
 
-- 0.2 adds `wisp-image` (OCI distribution client + content store + layer extractor). Spec: `docs/superpowers/specs/2026-05-09-wisp-phase-0-2-image-pulling-design.md`.
+- 0.2 adds `wisp-image` (OCI distribution client + content store + layer extractor).
 - 0.3 adds `wisp-net` (bridge per agent, veth, IP allocation, port forwarding).
 - 0.4 wires it into the agent: the actual replacement of dockerd.
 - 0.5 polishes (cgroup-systemd integration, exec / logs / inspect, image GC).
@@ -94,8 +94,8 @@ To kick the tires:
 
 ```
 orb create ubuntu:noble wisp     # one-time VM setup
-orb -m wisp -u root bash -c "PATH=/home/dirdmaster/.cargo/bin:\$PATH; \
-  cd /Users/dirdmaster/Projects/isengard/.worktrees/next/crates/wisp && \
+orb -m wisp -u root bash -c "PATH=~/.cargo/bin:\$PATH; \
+  cd /path/to/isengard/crates/wisp && \
   bash examples/prepare-busybox.sh && \
   cargo run --example run-busybox"
 # expected: hello / wisp-demo
@@ -105,6 +105,4 @@ orb -m wisp -u root bash -c "PATH=/home/dirdmaster/.cargo/bin:\$PATH; \
 
 ## Spec + plan
 
-- Spec: `docs/superpowers/specs/2026-05-09-wisp-phase-0-1-runtime-mvp-design.md`
-- Plan: `docs/superpowers/plans/2026-05-09-wisp-phase-0-1-runtime-mvp.md`
-- 0.2 spec: `docs/superpowers/specs/2026-05-09-wisp-phase-0-2-image-pulling-design.md`
+- Historical implementation notes are no longer kept in the public repository.

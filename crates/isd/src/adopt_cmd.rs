@@ -12,7 +12,7 @@
 //! mode that drops stored compose entirely (returning the stack to
 //! discovery-only); that ships in v0.2 when a second operator asks.
 //!
-//! Spec: `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`,
+//! Commands for adopting live containers into Isengard-managed compose.
 //! "When `isd stack adopt` is still a verb".
 //!
 //! ## Flow with `--refresh`

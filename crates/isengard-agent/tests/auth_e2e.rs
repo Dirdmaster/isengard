@@ -1,7 +1,7 @@
 //! End-to-end auth lifecycle.
 //!
 //! In-process variant of the planned real-Docker test (see
-//! `docs/superpowers/plans/2026-05-05-phase-14-auth-and-identity.md` Task 15
+//! Agent enrollment auth e2e tests.
 //! for the container-based version). This test exercises the same code paths
 //! a real Docker e2e would: without the container build/pull cost: by
 //! booting a real tonic Controller server in-process with mTLS + the

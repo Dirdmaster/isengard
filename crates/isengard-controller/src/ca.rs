@@ -1,6 +1,6 @@
 //! Internal Certificate Authority that issues every Isengard mTLS leaf.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md`.
+//! Controller certificate authority for enrollment and agent identity.
 //!
 //! The CA is one self-signed ECDSA P-256 root persisted in the
 //! controller's SQLite (`ca` table, single row).

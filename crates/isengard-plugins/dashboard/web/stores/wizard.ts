@@ -21,7 +21,7 @@ export const useWizardStore = defineStore('wizard', () => {
   const startedAt = ref(0)
 
   // useMock can be flipped by the dev console (window.__wizardMock = true) or
-  // a future ?mock=1 query param. Production default is FALSE — wizard uses
+  // a future ?mock=1 query param. Production default is FALSE: wizard uses
   // the real /api/v1/hosts endpoint and watches the live event stream for
   // agent.enroll events matching its issued host id.
   const useMock = ref(false)
@@ -103,7 +103,7 @@ export const useWizardStore = defineStore('wizard', () => {
       `  -e CONTROLLER_URL=${opts.controllerUrl} \\`,
       `  -e ENROLLMENT_TOKEN=${opts.token} \\`,
       '  --group-add $(stat -c %g /var/run/docker.sock) \\',
-      '  ghcr.io/dirdmaster/isengard-agent:latest',
+      '  ghcr.io/weavers-engineering/isengard-agent:next',
     ]
     return lines.join('\n')
   }

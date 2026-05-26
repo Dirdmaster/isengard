@@ -313,7 +313,7 @@ mod tests {
     fn resolve_uri_reads_named_context() {
         let _lock = docker_env_lock();
         let tmp = tempfile::tempdir().unwrap();
-        write_docker_meta(tmp.path(), "lausanne", "ssh://dirdmaster@10.17.0.125");
+        write_docker_meta(tmp.path(), "lausanne", "ssh://alice@192.0.2.10");
         // SAFETY: serialized via docker_env_lock.
         unsafe {
             std::env::set_var("DOCKER_CONFIG", tmp.path());
@@ -324,7 +324,7 @@ mod tests {
         unsafe {
             std::env::remove_var("DOCKER_CONFIG");
         }
-        assert_eq!(uri, "ssh://dirdmaster@10.17.0.125");
+        assert_eq!(uri, "ssh://alice@192.0.2.10");
     }
 
     #[test]
@@ -508,8 +508,8 @@ mod tests {
     #[test]
     fn dial_target_for_ssh_user_host() {
         assert_eq!(
-            dial_target_from_docker_uri("ssh://dirdmaster@10.17.0.125"),
-            Some("dirdmaster@10.17.0.125".to_string())
+            dial_target_from_docker_uri("ssh://alice@192.0.2.10"),
+            Some("alice@192.0.2.10".to_string())
         );
     }
 

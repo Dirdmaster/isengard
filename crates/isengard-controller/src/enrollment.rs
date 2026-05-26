@@ -1,7 +1,7 @@
 //! Enrollment service: mint short-lived bootstrap tokens and redeem
 //! them for a per-agent leaf cert and bundle.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md`.
+//! Enrollment token issuance, verification, and agent identity state.
 //!
 //! # Mint flow
 //!

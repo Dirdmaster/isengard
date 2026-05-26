@@ -18,7 +18,7 @@
 //! over `serde_yaml::Value` trees so this crate stays dep-light.
 //!
 //! Schema rationale: see
-//! `docs/superpowers/specs/2026-05-11-phase-0-13-stack-toml-manifest-design.md`.
+//! Stack manifest parsing and validation.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

@@ -97,21 +97,8 @@ docs-check:
 fmt:
     cargo fmt
 
-# Run the EXACT CI gates inside the OrbStack `wisp` Linux VM. Catches
-# Mac-vs-Linux divergence (cfg-gated unused imports, clippy lint
-# differences, dashboard build env). Same checks the pre-push
-# `linux-mirror` hook runs.
-ci-linux: (_disk-preflight min_free_gb)
-    @if ! command -v orb >/dev/null 2>&1; then \
-        echo "ERROR: OrbStack not installed; install from https://orbstack.dev"; exit 1; \
-    fi
-    @if ! orbctl list 2>/dev/null | awk '{print $1}' | grep -qx 'wisp'; then \
-        echo "ERROR: no 'wisp' OrbStack machine; create with: orb create ubuntu:noble wisp"; exit 1; \
-    fi
-    orb -m wisp bash -lc "set -euo pipefail; source ~/.cargo/env; cd '$(pwd)'; export RUSTFLAGS='-D warnings'; cargo fmt --check; cargo clippy --workspace --all-targets -- -D warnings; if command -v cargo-nextest >/dev/null 2>&1; then cargo nextest run --workspace; else cargo test --workspace; fi"
-
-# Full native confidence gate plus Linux mirror. Use before release-grade work.
-ci-release: ci-full ci-linux
+# Full native confidence gate. Use before release-grade work.
+ci-release: ci-full
 
 # === Local dev ===
 
@@ -132,12 +119,6 @@ site:
 # Generate the current public Docus site
 site-build:
     cd website && bun run generate
-
-# Legacy command alias for the current public Docus site.
-www: site
-
-# Legacy command alias for the current public Docus site build.
-www-build: site-build
 
 # === Local dev (Docker compose stack) ===
 
@@ -324,7 +305,7 @@ disk:
     df -h "$target_dir" 2>/dev/null || df -h "$(dirname "$target_dir")" 2>/dev/null || true
     echo ""
     echo "==> build output sizes"
-    du -sh "$target_dir" .cache www/.nuxt www/.output 2>/dev/null || true
+    du -sh "$target_dir" .cache website/.nuxt website/.output 2>/dev/null || true
     echo ""
     echo "==> docker usage"
     docker system df 2>/dev/null || echo "docker unavailable"
@@ -362,7 +343,7 @@ _disk-preflight min_gb:
 
 clean:
     cargo clean
-    rm -rf www/.nuxt www/.output
+    rm -rf website/.nuxt website/.output
 
 # Pre-commit gate: fmt + lint + test + cargo-deny (mirrors CI exactly).
 # cargo-deny is required: it catches advisories CI blocks on.
@@ -388,32 +369,6 @@ install-hooks:
     fi
     lefthook install
     @echo "✓ pre-push hook installed (fmt-check + clippy + test + cargo-deny)"
-
-# === Design ===
-
-# Open the design concepts index in your default browser
-design:
-    @bash design/regen-index.sh
-    @open design/concepts/_index.html
-
-# Regenerate design/concepts/_index.html (after adding/removing a concept)
-design-index:
-    @bash design/regen-index.sh
-
-# Scaffold a new dated concept HTML file. Usage: just concept hosts
-concept name:
-    #!/usr/bin/env bash
-    DATE=$(date +%Y-%m-%d)
-    FILE="design/concepts/${DATE}-{{name}}-v1.html"
-    if [ -f "$FILE" ]; then
-        # If v1 exists, find next available version
-        N=2
-        while [ -f "design/concepts/${DATE}-{{name}}-v${N}.html" ]; do N=$((N+1)); done
-        FILE="design/concepts/${DATE}-{{name}}-v${N}.html"
-    fi
-    cp design/concepts/_shell.html "$FILE"
-    sed -i.bak "s/{{{{TITLE}}}}/{{name}}/g" "$FILE" && rm "$FILE.bak"
-    echo "Created $FILE"
 
 # Scaffold a new dated decision (ADR) markdown file. Usage: just decision bottom-bar
 decision name:

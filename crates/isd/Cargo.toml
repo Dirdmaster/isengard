@@ -9,10 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 description = "Isengard operator CLI (talks to a controller)"
 
-# cargo-dist (v0.6.0 distribution): `isd` is the only workspace crate
-# we publish through cargo-dist. See `dist-workspace.toml` at the repo
-# root and the design spec at
-# 3 Resources/Superpowers/specs/2026-05-21-isengard-v0.6.0-distribution-design.md.
+# cargo-dist distribution: `isd` is the only workspace crate we publish
+# through cargo-dist. See `dist-workspace.toml` at the repo root.
 [package.metadata.dist]
 dist = true
 
@@ -26,8 +24,8 @@ isengard-manifest.workspace = true
 # Editors point at `isd lsp` over stdio; no separate LSP install.
 isengard-lsp.workspace = true
 # `isd mcp` runs the Model Context Protocol server bundled with the
-# binary. AI hosts (Claude Code, any MCP-capable LLM) spawn it over
-# stdio to consume the embedded docs + skills tree.
+# binary. MCP-capable clients spawn it over stdio to consume the
+# embedded operator docs and API reference.
 isengard-mcp.workspace = true
 # Track F Phase 5: `isd join` pre-flight validates packed tokens via
 # `isengard_core::join_token::parse` before touching docker.

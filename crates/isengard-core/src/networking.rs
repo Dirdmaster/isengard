@@ -5,7 +5,7 @@
 //! and TLS termination. The adapter does NOT do hostname routing.
 //!
 //! See spec §3 in
-//! `docs/superpowers/specs/2026-05-03-phase-8-networking-and-proxy-design.md`.
+//! Networking adapter contracts shared by controller and plugins.
 
 use crate::context::PluginContext;
 use crate::error::Result;

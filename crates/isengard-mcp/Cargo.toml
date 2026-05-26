@@ -7,17 +7,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish = false
-description = "Model Context Protocol server for Isengard. Serves embedded operator docs, per-crate API reference, and AI skill playbooks over stdio."
+description = "Model Context Protocol server for Isengard. Serves embedded operator docs and per-crate API reference over stdio."
 
 [dependencies]
 anyhow.workspace = true
 include_dir.workspace = true
 rmcp.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_yaml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "io-std"] }
 tracing.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

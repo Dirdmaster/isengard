@@ -1,6 +1,6 @@
 //! Container-scope policy ingest from Docker labels.
 //!
-//! Spec: `docs/superpowers/specs/2026-05-06-phase-9b1-container-label-discovery-design.md`
+//! Ingest policy labels discovered from running containers.
 //! (`Discovery path` and `Cleanup`).
 //!
 //! The agent's label watcher ships `ContainerLabelsReport` and

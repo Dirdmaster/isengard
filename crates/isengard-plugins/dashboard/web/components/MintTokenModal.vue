@@ -38,7 +38,7 @@ const dockerRunCommand = computed(() => {
   -v isengard-agent-data:/var/lib/isengard \\
   -e ISENGARD_CONTROLLER=${controllerUrl.value} \\
   -e ISENGARD_ENROLL_TOKEN=${tokenValue} \\
-  ghcr.io/dirdmaster/isengard-agent:next`
+  ghcr.io/weavers-engineering/isengard-agent:next`
 })
 
 async function submit() {
@@ -48,7 +48,7 @@ async function submit() {
   try {
     minted.value = await mint('agent', ttlMinutes.value * 60)
     emit('minted')
-    toast.info(`Token minted. Expires in ${ttlMinutes.value} min — copy it now.`)
+    toast.info(`Token minted. Expires in ${ttlMinutes.value} min: copy it now.`)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     error.value = msg
@@ -112,7 +112,7 @@ function handleOpenChange(v: boolean) {
             class="font-mono bg-iso-bg-elevated border-iso-border-subtle"
           />
           <p class="text-xs text-iso-text-faint">
-            1–1440 minutes (max 24 h). Default 15 min.
+            1-1440 minutes (max 24 h). Default 15 min.
           </p>
         </div>
 

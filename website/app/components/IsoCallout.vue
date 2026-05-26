@@ -10,8 +10,7 @@
  *
  * Docus ships its own `::callout` shortcode (Nuxt UI's `UAlert`), so this
  * one stays scoped to Isengard-specific moments: the trust-on-first-use
- * fingerprint warning, the "this command nukes containers" red-flag block,
- * etc. Phase 6 (skill library) is the first heavy user.
+ * fingerprint warning and the "this command nukes containers" red-flag block.
  */
 const props = withDefaults(
   defineProps<{

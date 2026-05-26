@@ -87,7 +87,7 @@ pub struct ConfigureArgs {
 }
 
 /// Sub-verbs under `isd configure`. Canonical verbs follow the lexicon
-/// spec (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
+/// CLI lexicon:
 /// `get` / `set` / `rm` / `ls` / `schema`.
 #[derive(Debug, Subcommand)]
 pub enum ConfigureCommand {

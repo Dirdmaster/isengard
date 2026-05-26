@@ -1,7 +1,7 @@
 //! Integration tests for the maintenance-window decision path.
 //!
 //! See plan §"T3: do_cycle integration + event" of
-//! `docs/superpowers/plans/2026-05-06-phase-9d-maintenance-windows.md`.
+//! Maintenance window policy tests.
 //!
 //! Mirrors the harness used by `policy_skip.rs`: storage-backed
 //! `InventoryPolicyLoader`, no Docker, decision-only assertions. Real

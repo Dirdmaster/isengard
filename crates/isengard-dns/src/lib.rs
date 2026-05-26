@@ -1,7 +1,7 @@
 //! Foundation crate for the isengard DNS resolver.
 //!
 //! Step 1 of the per-host DNS plugin laid out in
-//! `3 Resources/Superpowers/specs/2026-05-23-isengard-dns-design.md`.
+//! Embedded DNS resolver for Isengard route hostnames.
 //!
 //! # Shape
 //!

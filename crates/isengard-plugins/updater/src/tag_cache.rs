@@ -1,7 +1,7 @@
 //! Per-image tag cache + semver helpers for the `Minor` update strategy
 //!
 //! See spec §"Per-image tag cache" + §"Semver compare" of
-//! `docs/superpowers/specs/2026-05-06-phase-9e-minor-strategy-design.md`.
+//! Used by the minor-version update strategy.
 //!
 //! Two surfaces:
 //!

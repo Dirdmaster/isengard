@@ -35,4 +35,4 @@ There is no in-place migration. To upgrade:
 - Dashboard HTTP still unauthenticated (Cloudflare Access integration is the planned answer).
 - Bootstrap-trust during the Enroll RPC: agent trusts whatever cert the controller presents during initial enrollment if `ISENGARD_CONTROLLER_CA_PEM_BASE64` / `_PEM` / `_PEM_PATH` is provided (which is correct), or relies on native roots if not (only works for LE-signed controllers; the agent logs a warning when falling back).
 
-See `docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md` for the full design.
+Historical implementation notes are no longer kept in the public repository.

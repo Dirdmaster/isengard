@@ -3,7 +3,7 @@
 //! known hosts, stacks, and the docker context's containers.
 //!
 //! Defined by the v0.7 CLI lexicon spec
-//! (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`):
+//! Info command surface:
 //! one canonical detail verb across every namespace. The deeper
 //! `isd stack info <name>` (also from PR E in the spec) is a more
 //! specific surface; this top-level form is the operator's "I have an

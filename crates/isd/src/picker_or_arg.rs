@@ -1,6 +1,6 @@
 //! Single-source-of-truth helper for the "positional or picker" pattern
 //! defined in the v0.7 CLI lexicon spec
-//! (`3 Resources/Superpowers/specs/2026-05-22-isd-cli-lexicon-design.md`).
+//! Shared picker-or-argument resolution for CLI commands.
 //!
 //! Every command of shape `isd <namespace> <verb> [<target>]` routes
 //! through [`pick_or_arg`]. The rule is:

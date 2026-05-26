@@ -35,7 +35,7 @@ pub struct HostDto {
     /// `metadata.runtime_backend` on the host row.
     pub runtime_backend: String,
     /// Operator-facing dial target (e.g.
-    /// `dirdmaster@10.17.0.125`). Captured by the CLI at enroll time
+    /// `alice@192.0.2.10`). Captured by the CLI at enroll time
     /// from the operator's active docker context URL; overridable
     /// via `isd ssh hosts set <agent> --dial <target>`. `None`
     /// for hosts that predate the column or were enrolled by an

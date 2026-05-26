@@ -1,7 +1,7 @@
 //! Integration tests for the updater's `gate=Approval` branch.
 //!
 //! See plan §"T2: Updater integration" of
-//! `docs/superpowers/plans/2026-05-06-phase-9e-9f-approval-flow.md`.
+//! Approval-gated policy tests.
 //!
 //! These tests do not run a real Docker daemon. The full `do_cycle` path
 //! requires bollard + a registry + actual containers; the existing

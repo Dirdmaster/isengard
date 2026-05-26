@@ -47,4 +47,4 @@ Pin a service from the Settings page:
 - The PolicyEditor modal currently uses a generic title for all scopes. Tighter scope-aware titles (e.g. `Edit FLEET: prod policy`) are queued behind 9e UI work.
 - Conflict detection (two rows for the same scope) is enforced by the storage UNIQUE constraint; the UI does not yet render a recovery banner because the constraint makes the case unreachable from the API. A defensive UI banner remains a follow-up.
 
-See `docs/superpowers/specs/` for the Phase 9 spec and plan, and `design/pages/settings-policies.md` for the page-level design.
+Historical implementation notes are no longer kept in the public repository.

@@ -285,7 +285,7 @@ struct HostRow {
     hostname: String,
     /// Last heartbeat we saw from this host's agent, if any.
     last_seen_at: Option<DateTime<Utc>>,
-    /// Operator-facing dial target (e.g. `dirdmaster@10.17.0.125`).
+    /// Operator-facing dial target (e.g. `alice@192.0.2.10`).
     /// `None` for hosts enrolled by a pre-PR-B CLI build or from a
     /// non-SSH docker context. Rendered as `(unset)` in the table.
     #[serde(default)]
@@ -531,7 +531,7 @@ async fn run_picker(context: Option<&str>) -> Result<()> {
 /// Return true when the cert at `cert_path` carries every principal in
 /// `want`. Used in `run_dial` to force a re-mint when the operator
 /// overrides the user with a name not already in the existing cert
-/// (e.g. cached cert covers `[dirdmaster]`, dial is `root@host`).
+/// (e.g. cached cert covers `[alice]`, dial is `root@host`).
 fn cert_covers_principals(cert_path: &Path, want: &[String]) -> bool {
     let Ok(raw) = ssh_keygen_dump(cert_path) else {
         return false;
@@ -1544,26 +1544,26 @@ mod tests {
 
     #[test]
     fn effective_principals_no_override_returns_default() {
-        let p = effective_principals(None, "dirdmaster");
-        assert_eq!(p, vec!["dirdmaster".to_string()]);
+        let p = effective_principals(None, "alice");
+        assert_eq!(p, vec!["alice".to_string()]);
     }
 
     #[test]
     fn effective_principals_with_override_returns_both() {
-        let p = effective_principals(Some("root"), "dirdmaster");
-        assert_eq!(p, vec!["dirdmaster".to_string(), "root".to_string()]);
+        let p = effective_principals(Some("root"), "alice");
+        assert_eq!(p, vec!["alice".to_string(), "root".to_string()]);
     }
 
     #[test]
     fn effective_principals_dedup_when_override_matches_default() {
-        let p = effective_principals(Some("dirdmaster"), "dirdmaster");
-        assert_eq!(p, vec!["dirdmaster".to_string()]);
+        let p = effective_principals(Some("alice"), "alice");
+        assert_eq!(p, vec!["alice".to_string()]);
     }
 
     #[test]
     fn effective_principals_drops_empty_override() {
-        let p = effective_principals(Some(""), "dirdmaster");
-        assert_eq!(p, vec!["dirdmaster".to_string()]);
+        let p = effective_principals(Some(""), "alice");
+        assert_eq!(p, vec!["alice".to_string()]);
     }
 
     /// Skip ssh-keygen-driven tests when the binary is absent so CI
@@ -1779,7 +1779,7 @@ mod tests {
                 last_seen_at: Some(
                     chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 5, 21, 10, 0, 0).unwrap(),
                 ),
-                dial_target: Some("dirdmaster@10.17.0.125".into()),
+                dial_target: Some("alice@192.0.2.10".into()),
             },
             HostRow {
                 id: "01HEDGE2".into(),
@@ -1792,7 +1792,7 @@ mod tests {
         assert!(t.contains("iso-edge-1"));
         assert!(t.contains("iso-edge-2"));
         assert!(t.contains("2026-05-21T10:00:00Z"));
-        assert!(t.contains("dirdmaster@10.17.0.125"));
+        assert!(t.contains("alice@192.0.2.10"));
         assert!(t.contains("(unset)"));
         // The dash placeholder lives in the LAST SEEN column for the
         // host with no heartbeat.
@@ -1810,8 +1810,8 @@ mod tests {
     /// without consuming a table column for it.
     #[test]
     fn hosts_footer_calls_out_default_user_and_override_recipe() {
-        let line = hosts_footer_line("dirdmaster");
-        assert!(line.contains("SSH user: dirdmaster"), "footer: {line}");
+        let line = hosts_footer_line("alice");
+        assert!(line.contains("SSH user: alice"), "footer: {line}");
         assert!(line.contains("isd ssh user@<host>"), "footer: {line}");
     }
 
@@ -1821,7 +1821,7 @@ mod tests {
                 id: "01HEDGE1".into(),
                 hostname: "edge-1".into(),
                 last_seen_at: None,
-                dial_target: Some("dirdmaster@10.17.0.125".into()),
+                dial_target: Some("alice@192.0.2.10".into()),
             },
             HostRow {
                 id: "01HEDGE2".into(),
@@ -1842,7 +1842,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].index, 0);
         assert_eq!(rows[0].context, "lausanne");
-        assert_eq!(rows[0].container_id, "dirdmaster@10.17.0.125");
+        assert_eq!(rows[0].container_id, "alice@192.0.2.10");
         assert_eq!(rows[0].name, "edge-1");
         // Row 1 has no dial target: fall back to hostname.
         assert_eq!(rows[1].container_id, "edge-2");
@@ -1858,7 +1858,7 @@ mod tests {
         assert_eq!(resolve_agent_token(&hosts, "edge-1").unwrap(), "01HEDGE1");
         assert_eq!(resolve_agent_token(&hosts, "01HEDGE2").unwrap(), "01HEDGE2");
         assert_eq!(
-            resolve_agent_token(&hosts, "dirdmaster@10.17.0.125").unwrap(),
+            resolve_agent_token(&hosts, "alice@192.0.2.10").unwrap(),
             "01HEDGE1"
         );
     }
@@ -2021,7 +2021,7 @@ mod tests {
                 IndexRow {
                     index: 0,
                     context: "lausanne".into(),
-                    container_id: "dirdmaster@10.17.0.125".into(),
+                    container_id: "alice@192.0.2.10".into(),
                     name: "edge-1".into(),
                 },
                 IndexRow {
@@ -2033,7 +2033,7 @@ mod tests {
             ],
         };
         crate::index_cache::write(&cache).unwrap();
-        assert_eq!(resolve_index_to_dial(0).unwrap(), "dirdmaster@10.17.0.125");
+        assert_eq!(resolve_index_to_dial(0).unwrap(), "alice@192.0.2.10");
         assert_eq!(resolve_index_to_dial(1).unwrap(), "edge-2");
         let err = resolve_index_to_dial(9).unwrap_err();
         assert!(format!("{err}").contains("out of range"));

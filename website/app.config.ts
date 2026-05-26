@@ -23,9 +23,8 @@ export default defineAppConfig({
   docus: {
     locale: 'en',
   },
-  // Phase 3 ships the scaffold only. The AI assistant surface is provided
-  // by `isd mcp` locally (see Phase 4), not the website. Disable the
-  // built-in Docus assistant so we don't ship a half-wired chat box.
+  // Disable Docus assistant widgets. Isengard exposes docs through
+  // the local `isd mcp` integration instead of a website chat box.
   assistant: {
     floatingInput: false,
     explainWithAi: false,

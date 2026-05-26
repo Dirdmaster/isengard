@@ -30,10 +30,8 @@
 //! again iff no operator wrote a compose in between (the
 //! `compose_source == operator_written` short-circuit still applies).
 //!
-//! Spec: `3 Resources/Superpowers/specs/2026-05-23-isd-compose-synthesize-design.md`,
-//! "Auto-adoption" section. Hard rule: **observation auto; mutation
-//! never.** Even after adoption, this module never overwrites an
-//! existing stored compose.
+//! Hard rule: observation auto, mutation never. Even after adoption,
+//! this module never overwrites an existing stored compose.
 //!
 //! ## What ships in this PR vs. the parallel work
 //!

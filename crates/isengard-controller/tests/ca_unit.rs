@@ -1,5 +1,5 @@
 //! Unit tests for `ca::Authority`. See spec
-//! docs/superpowers/specs/2026-05-05-phase-14-auth-and-identity-design.md.
+//! Controller CA unit tests.
 
 use chrono::Duration;
 use isengard_controller::ca::Authority;

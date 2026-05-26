@@ -29,7 +29,7 @@ edition = "2024"
 rust-version = "1.86"
 license = "MIT"
 authors = ["Dirdmaster"]
-repository = "https://github.com/Dirdmaster/isengard"
+repository = "https://github.com/Weavers-Engineering/Isengard"
 homepage = "https://isengard.app"
 
 [workspace.dependencies]
@@ -86,16 +86,14 @@ tower-lsp = "0.20"
 # manifests and locate each `labels:` entry.
 marked-yaml = "0.8"
 
-# MCP framework. `rmcp` is the official Anthropic-maintained Rust SDK for the
-# Model Context Protocol (modelcontextprotocol/rust-sdk). Powers `isd mcp`
-# which serves the embedded docs + skills tree to AI hosts (Claude Code, any
-# MCP-capable LLM) over stdio. Pinned to 1.7 because the resource + prompt
-# surface stabilised at that revision; bumping to 1.8+ requires re-auditing
-# the ServerHandler trait shape.
+# MCP framework. Powers `isd mcp`, which serves embedded operator docs and
+# per-crate API reference to MCP-capable clients over stdio. Pinned to 1.7
+# because the resource surface stabilised at that revision; bumping to 1.8+
+# requires re-auditing the ServerHandler trait shape.
 rmcp = { version = "1.7", default-features = false, features = ["server", "transport-io", "macros"] }
 
-# `include_dir` 0.7 bakes the operator docs tree, per-crate API docs, and
-# skills under the binary's data section so `isd mcp` ships self-contained.
+# `include_dir` 0.7 bakes the operator docs tree and per-crate API docs under
+# the binary's data section so `isd mcp` ships self-contained.
 include_dir = "0.7"
 
 # gRPC + protobuf
@@ -200,7 +198,7 @@ tempfile = "3.14.0"
 # HTTP mock server for tests
 wiremock = "0.6.2"
 
-# internal — path + version so cargo-deny doesn't flag these as wildcard deps
+# internal: path + version so cargo-deny doesn't flag these as wildcard deps
 isengard-core = { path = "crates/isengard-core", version = "0.6.0" }
 isengard-controller = { path = "crates/isengard-controller", version = "0.6.0" }
 isd-runtime = { path = "crates/isd-runtime", version = "0.6.0" }

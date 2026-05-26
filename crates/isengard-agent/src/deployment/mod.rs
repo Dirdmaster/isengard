@@ -1,5 +1,5 @@
 //! Blue-green deployment driver. See spec
-//! `docs/superpowers/specs/2026-05-04-phase-10a-10d-blue-green-core-design.md`.
+//! Deployment orchestration for agent-managed services.
 
 pub mod driver;
 pub mod eligibility;

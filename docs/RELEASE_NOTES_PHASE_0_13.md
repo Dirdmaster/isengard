@@ -1,8 +1,7 @@
 # Phase 0.13: `stack.toml` manifest + `isd deploy --all`
 
 > Phase 0.13 of the v0.4 foundation arc. Spec:
-> `docs/superpowers/specs/2026-05-11-phase-0-13-stack-toml-manifest-design.md`.
-> Plan: `docs/superpowers/plans/2026-05-11-phase-0-13-stack-toml-manifest.md`.
+> Historical implementation notes are no longer kept in the public repository.
 
 ## What this is
 

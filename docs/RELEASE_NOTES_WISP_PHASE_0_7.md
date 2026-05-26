@@ -52,7 +52,7 @@ rustc 1.95.0 (59807616e 2026-04-14)
 info: downloading component rust-std
 Setting up musl-tools (1.2.4-2) ...
 
-$ cd /Users/dirdmaster/Projects/isengard/.worktrees/next
+$ cd /path/to/isengard
 $ cargo build --release --target aarch64-unknown-linux-musl --bin isd
    Compiling tracing-serde v0.2.0
    Compiling chrono v0.4.44
@@ -60,14 +60,14 @@ $ cargo build --release --target aarch64-unknown-linux-musl --bin isd
    ...
    Compiling reqwest v0.12.28
    Compiling tokio-tungstenite v0.24.0
-   Compiling isd v0.1.0-alpha (/Users/dirdmaster/Projects/isengard/.worktrees/next/crates/isd)
+   Compiling isd v0.1.0-alpha (/path/to/isengard/crates/isd)
     Finished `release` profile [optimized] target(s) in 41.80s
 
 $ ldd target/aarch64-unknown-linux-musl/release/isd
 	not a dynamic executable
 
 $ ls -la target/aarch64-unknown-linux-musl/release/isd
--rwxr-xr-x 2 dirdmaster dirdmaster 6896056 May 10 13:18 target/aarch64-unknown-linux-musl/release/isd
+-rwxr-xr-x 2 runner runner 6896056 May 10 13:18 target/aarch64-unknown-linux-musl/release/isd
 
 $ ./target/aarch64-unknown-linux-musl/release/isd --version
 isd 0.1.0-alpha

@@ -1,6 +1,6 @@
 # Isengard documentation site
 
-Docus 5.10 / Nuxt 4 static site for `docs.isengard.dev`. Renders the same
+Docus 5.10 / Nuxt 4 static site for `isengard.app`. Renders the same
 markdown trees that the `isd` binary embeds for the LSP and MCP servers,
 so what you read on the web matches what ships with the binary.
 
@@ -23,8 +23,7 @@ bun run generate  # outputs to .output/public/
 The site mounts two trees from the repo, configured in `content.config.ts`:
 
 - `../docs/**`: operator-facing guides at `/`.
-- `../crates/<crate>/docs/**`: per-crate API reference at `/api/`. Populated
-  by Phase 2 of the docs+AI plan.
+- `../crates/<crate>/docs/**`: per-crate API reference at `/api/`.
 
 The Docus landing collection (`content/index.md`) ships the homepage hero
 in-tree because it depends on Docus MDC blocks rather than plain prose.
@@ -32,14 +31,14 @@ in-tree because it depends on Docus MDC blocks rather than plain prose.
 ## Brand polish
 
 - `app.config.ts`: theme tokens (primary colour, header title, GitHub link,
-  disabled built-in AI assistant).
+  disabled assistant widgets).
 - `app/components/IsoCallout.vue`: Isengard-flavoured callout for asides
   that need a coloured left border.
 
 ## Deploy
 
 Cloudflare Pages deploys this site from `website/.output/public/`. This is the
-current public deploy target for `docs.isengard.dev`.
+current public deploy target for `isengard.app`.
 
 The GitHub Actions Pages workflow installs dependencies in `website`, runs
 `bun run generate`, and deploys the generated static artifact on pushes to

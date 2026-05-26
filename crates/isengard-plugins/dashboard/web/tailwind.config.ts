@@ -1,9 +1,8 @@
 import type { Config } from 'tailwindcss'
 import animate from 'tailwindcss-animate'
 
-// All iso-* values come from /design/tokens.css (the canonical source),
-// imported by assets/css/main.css. Mirror tw-config.js — read CSS vars,
-// don't redeclare hex literals.
+// Dashboard design tokens. Read CSS vars from assets/css/main.css instead
+// of redeclaring hex literals here.
 export default {
   content: [
     './components/**/*.{vue,js,ts}',

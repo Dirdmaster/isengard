@@ -1,7 +1,7 @@
 //! Integration tests for the pure policy resolver.
 //!
 //! See spec §"Resolver" of
-//! `docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
+//! Policy resolution tests.
 
 use chrono::{TimeZone, Utc};
 use isengard_core::policy::{

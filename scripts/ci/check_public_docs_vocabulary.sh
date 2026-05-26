@@ -6,7 +6,6 @@ public_paths=(
   website
   docs
   install/README.md
-  ':(exclude)docs/superpowers/**'
   ':(exclude)docs/PLACEMENT.md'
   ':(exclude)docs/RELEASES.md'
   ':(exclude)docs/RELEASE_NOTES_*.md'
@@ -15,7 +14,7 @@ public_paths=(
   ':(exclude)website/bun.lock'
 )
 
-stale_pattern='isengard\.route\.public|expose\.host|isengard\.expose\.host|isd login|credentials\.toml|join-token --role|vallee\.casa|dirdmaster|jellyfin|qbittorrent|(^|[^[:alnum:]_-])plex([^[:alnum:]_-]|$)|sonarr|radarr|servarr|overseer|(^|[^[:alnum:]_-])torrent([^[:alnum:]_-]|$)|immich|paperless|nextcloud|ghcr\.io/weavers-engineering/isengard-(controller|agent)|ghcr\.io/weavers-engineering/isengard(:|@)'
+stale_pattern='isengard\.route\.public|expose\.host|isengard\.expose\.host|isd login|credentials\.toml|join-token --role|vallee\.casa|dirdmaster|jellyfin|qbittorrent|(^|[^[:alnum:]_-])plex([^[:alnum:]_-]|$)|sonarr|radarr|servarr|overseer|(^|[^[:alnum:]_-])torrent([^[:alnum:]_-]|$)|immich|paperless|nextcloud|docs\+AI|AI-ready|LLM host|skill library|skills tree|ghcr\.io/weavers-engineering/isengard-(controller|agent)|ghcr\.io/weavers-engineering/isengard(:|@)'
 
 check_forbidden() {
   local message="$1"

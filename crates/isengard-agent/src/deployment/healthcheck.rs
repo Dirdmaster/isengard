@@ -7,7 +7,7 @@
 //! composes those semantics on top of the existing primitive.
 //!
 //! See spec
-//! `docs/superpowers/specs/2026-05-04-phase-10a-10d-blue-green-core-design.md`
+//! Deployment healthcheck helpers.
 //! §Components → `healthcheck.rs`.
 
 use crate::proxy::healthcheck::HealthChecker;

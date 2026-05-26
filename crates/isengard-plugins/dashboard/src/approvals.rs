@@ -1,7 +1,7 @@
 //! REST endpoints for the pending-approval queue.
 //!
 //! See spec §"REST: dashboard plugin" of
-//! `docs/superpowers/specs/2026-05-06-phase-9e-9f-approval-flow-design.md`.
+//! Dashboard routes for pending approvals.
 //!
 //! Mounted under `/api/v1` by `lib.rs`. Routes:
 //!

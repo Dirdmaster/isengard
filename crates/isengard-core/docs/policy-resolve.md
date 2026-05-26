@@ -2,7 +2,7 @@ Pure policy resolver: walks layered scopes to produce a [`ResolvedPolicy`]
 with field-level provenance.
 
 See spec §"Resolver" of
-`docs/superpowers/specs/2026-05-06-phase-9a-9d-policy-foundation-design.md`.
+This module owns the policy merge and resolution rules.
 
 This module is intentionally storage-free. The caller (typically the
 updater plugin or a REST handler) loads `PolicyRow` values from

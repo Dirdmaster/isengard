@@ -3714,9 +3714,6 @@ dependencies = [
  "anyhow",
  "include_dir",
  "rmcp",
- "serde",
- "serde_json",
- "serde_yaml",
  "tokio",
  "tracing",
 ]
