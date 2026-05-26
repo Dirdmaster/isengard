@@ -100,9 +100,7 @@ Isengard is showcase-ready: the core operator path is intended to be demoable an
 - [`isd stack`](./docs/reference/cli/stack.md)
 - [`isd backup`](./docs/reference/cli/backup.md)
 - [`isd upgrade`](./docs/reference/cli/upgrade.md)
-- [Architecture](./docs/concepts/architecture.md)
 - [Stack manifest](./docs/reference/manifest/stack-toml.md)
-- [Install directory notes](./install/README.md)
 
 ## License
 
