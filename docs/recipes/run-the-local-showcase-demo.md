@@ -7,7 +7,7 @@ description: Start a local Isengard control plane, deploy whoami, and verify rou
 
 Use this recipe when you want a repeatable local path for screenshots, videos, or a first hands-on review. It starts a temporary controller and agent, deploys a routed `whoami` stack, and verifies the route through `127.0.0.1` with a Host header.
 
-This is a local demo, not production guidance.
+This is a local demo, not production guidance. Run it against a disposable Docker context, not a production host.
 
 ## Prerequisites
 
